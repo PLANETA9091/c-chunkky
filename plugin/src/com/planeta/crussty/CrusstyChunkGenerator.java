@@ -26,6 +26,12 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
 
     private final ThreadLocal<short[]> buf = ThreadLocal.withInitial(() -> new short[ARRAY_SIZE]);
 
+    /** We own the noise stage (native); vanilla keeps everything else. */
+    @Override
+    public boolean shouldGenerateNoise() {
+        return false;
+    }
+
     static long ctxFor(long seed, int minY, int height) {
         return CTX.computeIfAbsent(seed, s -> {
             long ctx = ChunkGenNative.newCtx(s, minY, height);

@@ -29,7 +29,13 @@ mkfifo run.in
 echo $! > fifo.pid
 
 # --- launch ---------------------------------------------------------------
-java -Xms512M -Xmx1536M -jar paper.jar nogui < run.in > run.out 2>&1 &
+# Native lib visibility for plugins doing System.loadLibrary("crussty_chunkgen").
+JAVA_LIB_PATH_ARGS=""
+NATIVE_SO="$ROOT/native/target/release/libcrussty_chunkgen.so"
+if [ -f "$NATIVE_SO" ]; then
+  JAVA_LIB_PATH_ARGS="-Djava.library.path=$ROOT/native/target/release"
+fi
+java -Xms512M -Xmx1536M $JAVA_LIB_PATH_ARGS -jar paper.jar nogui < run.in > run.out 2>&1 &
 echo $! > server.pid
 echo "paper started pid=$(cat server.pid) fifo_holder=$(cat fifo.pid)"
 

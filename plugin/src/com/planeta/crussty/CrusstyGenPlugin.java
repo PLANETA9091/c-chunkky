@@ -2,6 +2,7 @@ package com.planeta.crussty;
 
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.plugin.java.JavaPlugin;
 
 /**
@@ -14,6 +15,15 @@ import org.bukkit.plugin.java.JavaPlugin;
  * run on top, preserving parity with the vanilla reference dumps.
  */
 public final class CrusstyGenPlugin extends JavaPlugin {
+
+    private final ChunkGenerator generator = new CrusstyChunkGenerator();
+
+    /** bukkit.yml "generator: CrusstyGen" resolves here. */
+    @Override
+    public ChunkGenerator getDefaultWorldGenerator(String worldName, String id) {
+        getLogger().info("providing CrusstyChunkGenerator for world '" + worldName + "'");
+        return generator;
+    }
 
     @Override
     public void onEnable() {
