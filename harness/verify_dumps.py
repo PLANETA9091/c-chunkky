@@ -72,8 +72,9 @@ def main() -> int:
         air_ids = [i for i, s in enumerate(pal) if s == "minecraft:air"]
         if air_ids and all(i == air_ids[0] for i in idx):
             errs.append("chunk fully air")
-        # y-layout sanity: bedrock floor at y=-64, center column
-        bottom = idx[(0 - dump["miny"]) * 256 + 8 * 16 + 8]
+        # y-layout sanity: bedrock floor at y=-64 (offset plane 0), center column
+        # idx layout is (y-min_y)*256 + z*16 + x, so y=minY maps to plane 0.
+        bottom = idx[8 * 16 + 8]
         if pal[bottom] != "minecraft:bedrock":
             errs.append(f"y=-64 center is {pal[bottom]}, expected bedrock (y-layout off?)")
         if errs:

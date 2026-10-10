@@ -1,0 +1,80 @@
+datapack diff — reference/dumps/vanilla vs reference/dumps/datapack
+====================================================================
+method: harness/diff_dumps.py — for every chunk file present in BOTH dirs (64/64 matched),
+  each .crsf is decoded (palette -> block-state strings, 16x16x384 column) and compared
+  block-for-block (pal_a[idx_a[i]] vs pal_b[idx_b[i]]); plus per-column heightmap diff
+  (topmost non-air Y). Same seed 3257840388504953787 on both sides; the ONLY worldgen
+  difference is the crussty-custom data pack override
+  data/minecraft/worldgen/noise_settings/overworld.json: sea_level 63 -> 40.
+expectation: large visible diff — sea level drop of 23 blocks drains oceans/rivers
+  (vanilla 263,467 water blocks vs datapack 4,373 across the 64 chunks; mean topmost
+  non-air column Y 62.0 -> 48.0). A ~5% block diff across the FULL 384-high column is
+  the expected signature of a sea-level change (deep bedrock/deepslate/air shells are
+  identical); the 100%-of-columns heightmap change is the sensitive indicator.
+
+  chunk_-1_-1.crsf: diff 5264/98304 = 5.35%
+  chunk_-1_-2.crsf: diff 5164/98304 = 5.25%
+  chunk_-1_-3.crsf: diff 5350/98304 = 5.44%
+  chunk_-1_-4.crsf: diff 5576/98304 = 5.67%
+  chunk_-1_0.crsf: diff 4398/98304 = 4.47%
+  chunk_-1_1.crsf: diff 3107/98304 = 3.16%
+  chunk_-1_2.crsf: diff 4732/98304 = 4.81%
+  chunk_-1_3.crsf: diff 6600/98304 = 6.71%
+  chunk_-2_-1.crsf: diff 6644/98304 = 6.76%
+  chunk_-2_-2.crsf: diff 5202/98304 = 5.29%
+  chunk_-2_-3.crsf: diff 5505/98304 = 5.60%
+  chunk_-2_-4.crsf: diff 6993/98304 = 7.11%
+  chunk_-2_0.crsf: diff 6369/98304 = 6.48%
+  chunk_-2_1.crsf: diff 5594/98304 = 5.69%
+  chunk_-2_2.crsf: diff 6399/98304 = 6.51%
+  chunk_-2_3.crsf: diff 7334/98304 = 7.46%
+  chunk_-3_-1.crsf: diff 5937/98304 = 6.04%
+  chunk_-3_-2.crsf: diff 5389/98304 = 5.48%
+  chunk_-3_-3.crsf: diff 5747/98304 = 5.85%
+  chunk_-3_-4.crsf: diff 6103/98304 = 6.21%
+  chunk_-3_0.crsf: diff 6959/98304 = 7.08%
+  chunk_-3_1.crsf: diff 7106/98304 = 7.23%
+  chunk_-3_2.crsf: diff 5779/98304 = 5.88%
+  chunk_-3_3.crsf: diff 4275/98304 = 4.35%
+  chunk_-4_-1.crsf: diff 4966/98304 = 5.05%
+  chunk_-4_-2.crsf: diff 5241/98304 = 5.33%
+  chunk_-4_-3.crsf: diff 5638/98304 = 5.74%
+  chunk_-4_-4.crsf: diff 6964/98304 = 7.08%
+  chunk_-4_0.crsf: diff 5251/98304 = 5.34%
+  chunk_-4_1.crsf: diff 4729/98304 = 4.81%
+  chunk_-4_2.crsf: diff 4990/98304 = 5.08%
+  chunk_-4_3.crsf: diff 4931/98304 = 5.02%
+  chunk_0_-1.crsf: diff 4381/98304 = 4.46%
+  chunk_0_-2.crsf: diff 4679/98304 = 4.76%
+  chunk_0_-3.crsf: diff 4495/98304 = 4.57%
+  chunk_0_-4.crsf: diff 7089/98304 = 7.21%
+  chunk_0_0.crsf: diff 2926/98304 = 2.98%
+  chunk_0_1.crsf: diff 2640/98304 = 2.69%
+  chunk_0_2.crsf: diff 4024/98304 = 4.09%
+  chunk_0_3.crsf: diff 7719/98304 = 7.85%
+  chunk_1_-1.crsf: diff 3409/98304 = 3.47%
+  chunk_1_-2.crsf: diff 5252/98304 = 5.34%
+  chunk_1_-3.crsf: diff 4720/98304 = 4.80%
+  chunk_1_-4.crsf: diff 5659/98304 = 5.76%
+  chunk_1_0.crsf: diff 2586/98304 = 2.63%
+  chunk_1_1.crsf: diff 2685/98304 = 2.73%
+  chunk_1_2.crsf: diff 4260/98304 = 4.33%
+  chunk_1_3.crsf: diff 6910/98304 = 7.03%
+  chunk_2_-1.crsf: diff 2927/98304 = 2.98%
+  chunk_2_-2.crsf: diff 5389/98304 = 5.48%
+  chunk_2_-3.crsf: diff 5673/98304 = 5.77%
+  chunk_2_-4.crsf: diff 5369/98304 = 5.46%
+  chunk_2_0.crsf: diff 2842/98304 = 2.89%
+  chunk_2_1.crsf: diff 3805/98304 = 3.87%
+  chunk_2_2.crsf: diff 4481/98304 = 4.56%
+  chunk_2_3.crsf: diff 5095/98304 = 5.18%
+  chunk_3_-1.crsf: diff 4741/98304 = 4.82%
+  chunk_3_-2.crsf: diff 5742/98304 = 5.84%
+  chunk_3_-3.crsf: diff 5289/98304 = 5.38%
+  chunk_3_-4.crsf: diff 5491/98304 = 5.59%
+  chunk_3_0.crsf: diff 5061/98304 = 5.15%
+  chunk_3_1.crsf: diff 5697/98304 = 5.80%
+  chunk_3_2.crsf: diff 4796/98304 = 4.88%
+  chunk_3_3.crsf: diff 5937/98304 = 6.04%
+OVERALL: 332005/6291456 blocks differ = 5.277% across 64 chunks
+HEIGHTMAP: 16384/16384 columns changed; mean |dh| = 14.01

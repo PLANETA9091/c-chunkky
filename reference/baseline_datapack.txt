@@ -1,0 +1,12 @@
+baseline (datapack) — Paper server + crussty-custom data pack (sea_level 63->40), region 8x8 chunks (cx,cz in [-4..3])
+seed=3257840388504953787  min_y=-64 height=384  sea_level=40 (via data/minecraft/worldgen/noise_settings/overworld.json override)
+method: single server invocation; world "datapack" freshly created at boot with the pack
+  enabled (pack_format 81, accepted by Paper 1.21.8 without warnings); wall-clock from
+  'forceload add -64 -64 63 63' until crusstatus reports 64/64 chunks of the region loaded
+  (coarse; includes settle/poll granularity of 2s); wall_ms=14988; ms/chunk=234
+dump: crusstydumpregion of the same region (reference/dumps/datapack/, 64 files) — not part of baseline
+note: world was brand new (0/64 region chunks loaded before forceload, spawn chunks lie outside
+  the region), so this is a pure fresh-generation number. The vanilla baseline (200 ms/chunk) had
+  pre-existing on-disk chunks in the region lowering its average — treat cross-comparison as
+  approximate; same-box sequential runs of identical fresh worlds are the comparable setup.
+date: 2026-10-10T08:04:Z
