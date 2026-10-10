@@ -1,0 +1,9 @@
+target/
+*.so
+*.jar
+!probe/paper-api.jar
+server/
+run/
+logs/
+*.log
+workdir/
