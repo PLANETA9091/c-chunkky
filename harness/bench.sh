@@ -19,6 +19,9 @@ sed -i "s/^level-name=.*/level-name=$WORLD/" "$ROOT/server/server.properties"
 
 "$ROOT/harness/server_up.sh"
 
+# minimise spawn-chunk pregen overlap with the measured region (vanilla gamerule, 1.20.5+)
+rcon "gamerule spawnChunkRadius 0" || true
+
 DUMPDIR="$ROOT/reference/dumps/$TAG"
 mkdir -p "$DUMPDIR"
 T0=$(date +%s%3N)
