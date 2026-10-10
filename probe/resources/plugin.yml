@@ -1,0 +1,16 @@
+name: CrusstyProbe
+version: 1.0.0
+main: com.planeta.crussty.probe.ProbePlugin
+api-version: '1.21'
+description: Vanilla chunk reference dumper for c-faster (.crsf format)
+authors: [planeta]
+commands:
+  crusstydump:
+    description: Dump one fully-loaded chunk to a .crsf file
+    usage: /<command> <cx> <cz> <outfile> [world]
+  crusstydumpregion:
+    description: Dump all loaded chunks in a chunk region
+    usage: /<command> <cx1> <cz1> <cx2> <cz2> <outdir> <prefix> [world]
+  crusstatus:
+    description: Report loaded chunk count + test region summary
+    usage: /<command>

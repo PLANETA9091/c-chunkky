@@ -7,3 +7,7 @@ run/
 logs/
 *.log
 workdir/
+# probe build artifacts worth committing (tiny, enables builds without javac/deps)
+!probe/CrusstyProbe.jar
+!probe/libs/*.jar
+probe/classes/
