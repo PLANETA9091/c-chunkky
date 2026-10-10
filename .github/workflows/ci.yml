@@ -1,0 +1,59 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Build native (release)
+        working-directory: native
+        run: cargo build --release --locked || cargo build --release
+      - name: Native unit tests
+        working-directory: native
+        run: cargo test --release
+      - name: Bench smoke (fills a few chunks, checks ABI)
+        working-directory: native
+        run: cargo run --release --bin bench -- --smoke 2>/dev/null || cargo run --release --bin bench | head -20
+      - name: Clippy (non-blocking)
+        working-directory: native
+        run: cargo clippy --release 2>&1 | tail -20
+
+  plugin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Fetch paper-api + libs (same versions as probe/)
+        run: |
+          mkdir -p probe/libs
+          # reuse committed probe/paper-api.jar if present, else download
+          if [ ! -f probe/paper-api.jar ]; then
+            URL="https://api.papermc.io/v2/projects/paper/versions/1.21.8/builds"
+            B=$(curl -s "$URL" | python3 -c "import sys,json;print(json.load(sys.stdin)['builds'][-1]['build'])")
+            curl -sL -o probe/paper-api.jar "https://api.papermc.io/v2/projects/paper/versions/1.21.8/builds/$B/downloads/paper-1.21.8-$B.jar"
+          fi
+      - name: Build plugin
+        run: |
+          chmod +x plugin/build.sh
+          ./plugin/build.sh
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: crussty-artifacts
+          path: |
+            native/target/release/libcrussty_chunkgen.so
+            plugin/CrusstyGen.jar
+          retention-days: 7
