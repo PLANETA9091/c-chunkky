@@ -1,0 +1,21 @@
+[package]
+name = "crussty_chunkgen"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "crussty_chunkgen"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni-sys = "0.4.1"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+opt-level = 3
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
