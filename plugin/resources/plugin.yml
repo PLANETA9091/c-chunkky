@@ -1,0 +1,15 @@
+name: CrusstyGen
+version: 0.1.0
+main: com.planeta.crussty.CrusstyGenPlugin
+api-version: '1.21'
+description: Native noise-stage chunk generator (vanilla-exact, 1ms target)
+author: crussty-agent
+commands:
+  crusgenstats:
+    description: Native noise-stage generation stats (mean/p50/p99/max)
+    usage: /crusgenstats
+    permission: crussty.genstats
+permissions:
+  crussty.genstats:
+    description: Allows viewing generation stats
+    default: op
