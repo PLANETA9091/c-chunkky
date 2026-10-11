@@ -157,7 +157,7 @@ fn cmd_eval(field: &str, file: &str, seed: i64) {
         let x: i32 = it.next().unwrap().parse().unwrap();
         let y: i32 = it.next().unwrap().parse().unwrap();
         let z: i32 = it.next().unwrap().parse().unwrap();
-        let v = env.eval(&compiled, root, Pt { x, y, z }, Mode::Direct, &interp);
+        let v = env.eval(&compiled, root, Pt { x, y, z }, Mode::Direct, &interp, None);
         writeln!(out, "{} {} {} {:016x}", x, y, z, v.to_bits()).unwrap();
     }
 }
@@ -184,7 +184,7 @@ fn cmd_walk(file: &str, seed: i64) {
         let y: i32 = it.next().unwrap().parse().unwrap();
         let z: i32 = it.next().unwrap().parse().unwrap();
         let pt = Pt { x, y, z };
-        let v = env.eval(&compiled, root, pt, Mode::Direct, &interp);
+        let v = env.eval(&compiled, root, pt, Mode::Direct, &interp, None);
         writeln!(out, "POINT {x} {y} {z} {:016x}", v.to_bits()).unwrap();
         walk_node(&env, &compiled, root, pt, "fd", &mut out, &interp);
     }
@@ -199,7 +199,7 @@ fn walk_node(
     out: &mut dyn std::io::Write,
     interp: &InterpState,
 ) {
-    let v = env.eval(c, idx, pt, Mode::Direct, interp);
+    let v = env.eval(c, idx, pt, Mode::Direct, interp, None);
     let bits = v.to_bits();
     match &c.arena[idx as usize] {
         WKind::Cache2d { child } => {

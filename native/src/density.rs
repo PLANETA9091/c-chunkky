@@ -13,6 +13,7 @@
 use crate::noise::NormalNoise;
 use crate::rng::{XoroshiroRandomSource, XoroshiroPositionalRandomFactory};
 use crate::worldgen::{DfNode, NoiseSource, SplineValue, WorldGen};
+use std::cell::Cell;
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -42,6 +43,67 @@ pub enum Mode {
     /// Cell fill (fillingCell=true, vanilla CacheAllInCell): interpolated
     /// markers return lerp3 of the 8 corners at in-cell fractions.
     CellFill,
+}
+
+impl Mode {
+    #[inline]
+    pub fn bits(self) -> u64 {
+        match self {
+            Mode::Direct => 0,
+            Mode::Slice => 1,
+            Mode::Block => 2,
+            Mode::CellFill => 3,
+        }
+    }
+}
+
+/// Per-point memoization context: turns the compiled arena tree into an
+/// evaluated DAG. Every node computes AT MOST ONCE per (serial, mode).
+/// Sound because every density node is a pure function of (pt, mode, interp).
+/// The serial is bumped by the driver once per new evaluation context
+/// (one corner point / one block / one prelim probe).
+pub struct MemoCtx {
+    stamp: Box<[Cell<u64>]>,
+    value: Box<[Cell<f64>]>,
+    serial: Cell<u64>,
+}
+
+impl MemoCtx {
+    pub fn new(n: usize) -> MemoCtx {
+        MemoCtx {
+            stamp: vec![Cell::new(0); n].into_boxed_slice(),
+            value: vec![Cell::new(0.0); n].into_boxed_slice(),
+            serial: Cell::new(0),
+        }
+    }
+
+    /// Begin a new evaluation context (one point / block).
+    #[inline]
+    pub fn next_serial(&self) {
+        self.serial.set(self.serial.get() + 1);
+    }
+
+    #[inline]
+    fn key(&self, idx: usize, mode: Mode) -> u64 {
+        self.serial.get().wrapping_mul(8) + mode.bits() + 1
+    }
+
+    #[inline]
+    fn hit(&self, idx: usize, mode: Mode) -> Option<f64> {
+        let i = idx as usize;
+        if self.stamp[i].get() == self.key(idx, mode) {
+            Some(self.value[i].get())
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn store(&self, idx: usize, mode: Mode, v: f64) {
+        let i = idx as usize;
+        self.stamp[i].set(self.key(idx, mode));
+        self.value[i].set(v);
+    }
 }
 
 /// Instantiated noise objects for one RandomState (one seed).
@@ -196,6 +258,173 @@ pub struct Compiled {
 // compile
 // ---------------------------------------------------------------------------
 
+/// FNV-1a 64 over a byte iterator.
+#[inline]
+fn fnv64(init: u64, bytes: &[u8]) -> u64 {
+    let mut h = init;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+#[inline]
+fn fnv64_u64(init: u64, v: u64) -> u64 {
+    fnv64(init, &v.to_le_bytes())
+}
+
+/// Structural hash for hash-consing. Children are interned BEFORE the parent,
+/// so their arena indices are canonical identifiers — hashing them gives a
+/// Merkle-style subtree hash.
+fn hash_wkind(k: &WKind) -> u64 {
+    use WKind as W;
+    let base: u64 = 0xcbf29ce484222325;
+    match k {
+        W::Const(v) => fnv64_u64(fnv64_u64(base, 0), v.to_bits()),
+        W::Noise { noise_id, xz_scale, y_scale } => {
+            let h = fnv64_u64(base, 1);
+            let h = fnv64_u64(h, *noise_id as u64);
+            let h = fnv64_u64(h, xz_scale.to_bits());
+            fnv64_u64(h, y_scale.to_bits())
+        }
+        W::ShiftedNoise { noise_id, xz_scale, y_scale, sx, sy, sz } => {
+            let h = fnv64_u64(base, 2);
+            let h = fnv64_u64(h, *noise_id as u64);
+            let h = fnv64_u64(h, xz_scale.to_bits());
+            let h = fnv64_u64(h, y_scale.to_bits());
+            let h = fnv64_u64(h, *sx as u64);
+            let h = fnv64_u64(h, *sy as u64);
+            fnv64_u64(h, *sz as u64)
+        }
+        W::ShiftA { noise_id } => fnv64_u64(fnv64_u64(base, 3), *noise_id as u64),
+        W::ShiftB { noise_id } => fnv64_u64(fnv64_u64(base, 4), *noise_id as u64),
+        W::OldBlendedNoise { instance } => fnv64_u64(fnv64_u64(base, 5), *instance as u64),
+        W::Clamp { input, min, max } => {
+            let h = fnv64_u64(fnv64_u64(base, 6), *input as u64);
+            let h = fnv64_u64(h, min.to_bits());
+            fnv64_u64(h, max.to_bits())
+        }
+        W::Mapped { kind, input } => {
+            let h = fnv64_u64(fnv64_u64(base, 7), *input as u64);
+            fnv64_u64(h, *kind as u64)
+        }
+        W::Ap2 { kind, a, b } => {
+            let h = fnv64_u64(fnv64_u64(base, 8), *a as u64);
+            let h = fnv64_u64(h, *b as u64);
+            fnv64_u64(h, *kind as u64)
+        }
+        W::RangeChoice { input, min_inclusive, max_exclusive, when_in_range, when_out_of_range } => {
+            let h = fnv64_u64(fnv64_u64(base, 9), *input as u64);
+            let h = fnv64_u64(h, min_inclusive.to_bits());
+            let h = fnv64_u64(h, max_exclusive.to_bits());
+            let h = fnv64_u64(h, *when_in_range as u64);
+            fnv64_u64(h, *when_out_of_range as u64)
+        }
+        W::YClampedGradient { from_y, to_y, from_value, to_value } => {
+            let h = fnv64_u64(fnv64_u64(base, 10), *from_y as u64);
+            let h = fnv64_u64(h, *to_y as u64);
+            let h = fnv64_u64(h, from_value.to_bits());
+            fnv64_u64(h, to_value.to_bits())
+        }
+        W::Spline { coordinate, points } => {
+            let mut h = fnv64_u64(fnv64_u64(base, 11), *coordinate as u64);
+            h = fnv64_u64(h, points.len() as u64);
+            for (a, v, b) in points {
+                let h0 = fnv64_u64(h, (*a).to_bits() as u64);
+                let h1 = match v {
+                    SplineValueW::Const(c) => fnv64_u64(h0, 0)
+                        .wrapping_add(fnv64_u64(0, (*c).to_bits() as u64)),
+                    SplineValueW::Node(n) => fnv64_u64(h0, 1).wrapping_add(fnv64_u64(0, *n as u64)),
+                };
+                h = fnv64_u64(h1, (*b).to_bits() as u64)
+            }
+            h
+        }
+        W::WeirdScaledSampler { noise_id, mapper_type2, input } => {
+            let h = fnv64_u64(fnv64_u64(base, 12), *noise_id as u64);
+            let h = fnv64_u64(h, *mapper_type2 as u64);
+            fnv64_u64(h, *input as u64)
+        }
+        // excluded from interning by push()
+        W::Interpolated { child, slot } => {
+            let h = fnv64_u64(fnv64_u64(base, 13), *child as u64);
+            fnv64_u64(h, *slot as u64)
+        }
+        W::Cache2d { child } => fnv64_u64(fnv64_u64(base, 14), *child as u64),
+        W::CacheOnce { child } => fnv64_u64(fnv64_u64(base, 15), *child as u64),
+        W::FlatCache { child } => fnv64_u64(fnv64_u64(base, 16), *child as u64),
+        W::CacheAllInCell { child } => fnv64_u64(fnv64_u64(base, 17), *child as u64),
+        W::MulOrAdd { is_add, input, argument } => {
+            let h = fnv64_u64(fnv64_u64(base, 18), *is_add as u64);
+            let h = fnv64_u64(h, *input as u64);
+            fnv64_u64(h, argument.to_bits())
+        }
+        W::EndIslands => fnv64_u64(base, 19),
+    }
+}
+
+/// Exact structural equality (guards hash collisions; bit-exactness mandate).
+fn wkind_eq(a: &WKind, b: &WKind) -> bool {
+    use WKind as W;
+    match (a, b) {
+        (W::Const(x), W::Const(y)) => x.to_bits() == y.to_bits(),
+        (W::Noise { noise_id: a1, xz_scale: a2, y_scale: a3 }, W::Noise { noise_id: b1, xz_scale: b2, y_scale: b3 }) => {
+            a1 == b1 && a2.to_bits() == b2.to_bits() && a3.to_bits() == b3.to_bits()
+        }
+        (W::ShiftedNoise { noise_id: a1, xz_scale: a2, y_scale: a3, sx: a4, sy: a5, sz: a6 }, W::ShiftedNoise { noise_id: b1, xz_scale: b2, y_scale: b3, sx: b4, sy: b5, sz: b6 }) => {
+            a1 == b1 && a2.to_bits() == b2.to_bits() && a3.to_bits() == b3.to_bits() && a4 == b4 && a5 == b5 && a6 == b6
+        }
+        (W::ShiftA { noise_id: a1 }, W::ShiftA { noise_id: b1 }) => a1 == b1,
+        (W::ShiftB { noise_id: a1 }, W::ShiftB { noise_id: b1 }) => a1 == b1,
+        (W::OldBlendedNoise { instance: a1 }, W::OldBlendedNoise { instance: b1 }) => a1 == b1,
+        (W::Clamp { input: a1, min: a2, max: a3 }, W::Clamp { input: b1, min: b2, max: b3 }) => {
+            a1 == b1 && a2.to_bits() == b2.to_bits() && a3.to_bits() == b3.to_bits()
+        }
+        (W::Mapped { kind: a1, input: a2 }, W::Mapped { kind: b1, input: b2 }) => {
+            a1 == b1 && a2 == b2
+        }
+        (W::Ap2 { kind: a1, a: a2, b: a3 }, W::Ap2 { kind: b1, a: b2, b: b3 }) => {
+            a1 == b1 && a2 == b2 && a3 == b3
+        }
+        (W::RangeChoice { input: a1, min_inclusive: a2, max_exclusive: a3, when_in_range: a4, when_out_of_range: a5 }, W::RangeChoice { input: b1, min_inclusive: b2, max_exclusive: b3, when_in_range: b4, when_out_of_range: b5 }) => {
+            a1 == b1 && a2.to_bits() == b2.to_bits() && a3.to_bits() == b3.to_bits() && a4 == b4 && a5 == b5
+        }
+        (W::YClampedGradient { from_y: a1, to_y: a2, from_value: a3, to_value: a4 }, W::YClampedGradient { from_y: b1, to_y: b2, from_value: b3, to_value: b4 }) => {
+            a1 == b1 && a2 == b2 && a3.to_bits() == b3.to_bits() && a4.to_bits() == b4.to_bits()
+        }
+        (W::Spline { coordinate: a1, points: a2 }, W::Spline { coordinate: b1, points: b2 }) => {
+            if a1 != b1 || a2.len() != b2.len() {
+                return false;
+            }
+            a2.iter().zip(b2.iter()).all(|((a, va, b), (c, vb, d))| {
+                a.to_bits() == c.to_bits()
+                    && b.to_bits() == d.to_bits()
+                    && match (va, vb) {
+                        (SplineValueW::Const(x), SplineValueW::Const(y)) => x.to_bits() == y.to_bits(),
+                        (SplineValueW::Node(x), SplineValueW::Node(y)) => x == y,
+                        _ => false,
+                    }
+            })
+        }
+        (W::WeirdScaledSampler { noise_id: a1, mapper_type2: a2, input: a3 }, W::WeirdScaledSampler { noise_id: b1, mapper_type2: b2, input: b3 }) => {
+            a1 == b1 && a2 == b2 && a3 == b3
+        }
+        (W::Interpolated { child: a1, slot: a2 }, W::Interpolated { child: b1, slot: b2 }) => {
+            a1 == b1 && a2 == b2
+        }
+        (W::Cache2d { child: a1 }, W::Cache2d { child: b1 })
+        | (W::CacheOnce { child: a1 }, W::CacheOnce { child: b1 })
+        | (W::FlatCache { child: a1 }, W::FlatCache { child: b1 })
+        | (W::CacheAllInCell { child: a1 }, W::CacheAllInCell { child: b1 }) => a1 == b1,
+        (W::MulOrAdd { is_add: a1, input: a2, argument: a3 }, W::MulOrAdd { is_add: b1, input: b2, argument: b3 }) => {
+            a1 == b1 && a2 == b2 && a3.to_bits() == b3.to_bits()
+        }
+        (W::EndIslands, W::EndIslands) => true,
+        _ => false,
+    }
+}
+
 struct Compiler<'a> {
     wg: &'a WorldGen,
     arena: Vec<WKind>,
@@ -205,6 +434,11 @@ struct Compiler<'a> {
     interp_children: Vec<u32>,
     blended_params: Vec<(f64, f64, f64, f64, f64)>,
     blended_index: HashMap<(u64, u64, u64, u64, u64), u32>,
+    /// Structural hash-consing (CSE): subtree hash -> arena index. All nodes
+    /// are pure functions of (pt, mode, interp), so merging structurally
+    /// identical subtrees is value-identical. Interpolated markers are
+    /// EXCLUDED (vanilla allocates one interpolator per marker).
+    intern: HashMap<u64, u32>,
 }
 
 impl<'a> Compiler<'a> {
@@ -218,12 +452,26 @@ impl<'a> Compiler<'a> {
             interp_children: Vec::new(),
             blended_params: Vec::new(),
             blended_index: HashMap::new(),
+            intern: HashMap::new(),
         }
     }
 
     fn push(&mut self, k: WKind) -> u32 {
+        if matches!(k, WKind::Interpolated { .. }) {
+            // one interpolator per marker, never merged
+            self.arena.push(k);
+            return (self.arena.len() - 1) as u32;
+        }
+        let h = hash_wkind(&k);
+        if let Some(&i) = self.intern.get(&h) {
+            if wkind_eq(&self.arena[i as usize], &k) {
+                return i;
+            }
+        }
         self.arena.push(k);
-        (self.arena.len() - 1) as u32
+        let idx = (self.arena.len() - 1) as u32;
+        self.intern.insert(h, idx);
+        idx
     }
 
     fn noise_ref(&mut self, id: &str) -> u32 {
@@ -706,7 +954,35 @@ fn mth_clamp(v: f64, min: f64, max: f64) -> f64 {
 }
 
 impl Env {
-    pub fn eval(&self, c: &Compiled, idx: u32, pt: Pt, mode: Mode, interp: &InterpState) -> f64 {
+    pub fn eval(
+        &self,
+        c: &Compiled,
+        idx: u32,
+        pt: Pt,
+        mode: Mode,
+        interp: &InterpState,
+        mem: Option<&MemoCtx>,
+    ) -> f64 {
+        if let Some(m) = mem {
+            if let Some(v) = m.hit(idx as usize, mode) {
+                return v;
+            }
+            let v = self.eval_uncached(c, idx, pt, mode, interp, mem);
+            m.store(idx as usize, mode, v);
+            return v;
+        }
+        self.eval_uncached(c, idx, pt, mode, interp, mem)
+    }
+
+    fn eval_uncached(
+        &self,
+        c: &Compiled,
+        idx: u32,
+        pt: Pt,
+        mode: Mode,
+        interp: &InterpState,
+        mem: Option<&MemoCtx>,
+    ) -> f64 {
         let node = &c.arena[idx as usize];
         match node {
             WKind::Const(v) => *v,
@@ -715,9 +991,9 @@ impl Env {
                 self.normal(id).get_value(pt.x as f64 * xz_scale, pt.y as f64 * y_scale, pt.z as f64 * xz_scale)
             }
             WKind::ShiftedNoise { noise_id, xz_scale, y_scale, sx, sy, sz } => {
-                let dx = pt.x as f64 * xz_scale + self.eval(c, *sx, pt, mode, interp);
-                let dy = pt.y as f64 * y_scale + self.eval(c, *sy, pt, mode, interp);
-                let dz = pt.z as f64 * xz_scale + self.eval(c, *sz, pt, mode, interp);
+                let dx = pt.x as f64 * xz_scale + self.eval(c, *sx, pt, mode, interp, mem);
+                let dy = pt.y as f64 * y_scale + self.eval(c, *sy, pt, mode, interp, mem);
+                let dz = pt.z as f64 * xz_scale + self.eval(c, *sz, pt, mode, interp, mem);
                 let id: &str = &c.noise_ids[*noise_id as usize];
                 self.normal(id).get_value(dx, dy, dz)
             }
@@ -734,9 +1010,9 @@ impl Env {
             WKind::OldBlendedNoise { instance } => {
                 c.blended[*instance as usize].compute(pt.x, pt.y, pt.z)
             }
-            WKind::Clamp { input, min, max } => mth_clamp(self.eval(c, *input, pt, mode, interp), *min, *max),
+            WKind::Clamp { input, min, max } => mth_clamp(self.eval(c, *input, pt, mode, interp, mem), *min, *max),
             WKind::Mapped { kind, input } => {
-                let v = self.eval(c, *input, pt, mode, interp);
+                let v = self.eval(c, *input, pt, mode, interp, mem);
                 match kind {
                     MapKind::Abs => v.abs(),
                     MapKind::Square => v * v,
@@ -762,18 +1038,18 @@ impl Env {
                 }
             }
             WKind::Ap2 { kind, a, b } => {
-                let va = self.eval(c, *a, pt, mode, interp);
+                let va = self.eval(c, *a, pt, mode, interp, mem);
                 match kind {
-                    Ap2Kind::Add => va + self.eval(c, *b, pt, mode, interp),
+                    Ap2Kind::Add => va + self.eval(c, *b, pt, mode, interp, mem),
                     Ap2Kind::Mul => {
                         if va == 0.0 {
                             0.0
                         } else {
-                            va * self.eval(c, *b, pt, mode, interp)
+                            va * self.eval(c, *b, pt, mode, interp, mem)
                         }
                     }
                     Ap2Kind::Min => {
-                        let vb = self.eval(c, *b, pt, mode, interp);
+                        let vb = self.eval(c, *b, pt, mode, interp, mem);
                         if va < vb {
                             va
                         } else {
@@ -781,7 +1057,7 @@ impl Env {
                         }
                     }
                     Ap2Kind::Max => {
-                        let vb = self.eval(c, *b, pt, mode, interp);
+                        let vb = self.eval(c, *b, pt, mode, interp, mem);
                         if va > vb {
                             va
                         } else {
@@ -791,11 +1067,11 @@ impl Env {
                 }
             }
             WKind::RangeChoice { input, min_inclusive, max_exclusive, when_in_range, when_out_of_range } => {
-                let v = self.eval(c, *input, pt, mode, interp);
+                let v = self.eval(c, *input, pt, mode, interp, mem);
                 if v >= *min_inclusive && v < *max_exclusive {
-                    self.eval(c, *when_in_range, pt, mode, interp)
+                    self.eval(c, *when_in_range, pt, mode, interp, mem)
                 } else {
-                    self.eval(c, *when_out_of_range, pt, mode, interp)
+                    self.eval(c, *when_out_of_range, pt, mode, interp, mem)
                 }
             }
             WKind::YClampedGradient { from_y, to_y, from_value, to_value } => {
@@ -810,11 +1086,11 @@ impl Env {
                 }
             }
             WKind::Spline { coordinate, points } => {
-                let f = self.eval(c, *coordinate, pt, mode, interp) as f32;
-                spline_apply(self, c, points, f, pt, mode, interp) as f64
+                let f = self.eval(c, *coordinate, pt, mode, interp, mem) as f32;
+                spline_apply(self, c, points, f, pt, mode, interp, mem) as f64
             }
             WKind::WeirdScaledSampler { noise_id, mapper_type2, input } => {
-                let v = self.eval(c, *input, pt, mode, interp);
+                let v = self.eval(c, *input, pt, mode, interp, mem);
                 let d = if *mapper_type2 {
                     // getSphaghettiRarity2D
                     if v < -0.75 {
@@ -851,9 +1127,9 @@ impl Env {
             WKind::Cache2d { child }
             | WKind::CacheOnce { child }
             | WKind::FlatCache { child }
-            | WKind::CacheAllInCell { child } => self.eval(c, *child, pt, mode, interp),
+            | WKind::CacheAllInCell { child } => self.eval(c, *child, pt, mode, interp, mem),
             WKind::MulOrAdd { is_add, input, argument } => {
-                let v = self.eval(c, *input, pt, mode, interp);
+                let v = self.eval(c, *input, pt, mode, interp, mem);
                 if *is_add {
                     v + argument
                 } else if *argument == 0.0 {
@@ -864,7 +1140,7 @@ impl Env {
                 }
             }
             WKind::Interpolated { child, slot } => match mode {
-                Mode::Direct | Mode::Slice => self.eval(c, *child, pt, mode, interp),
+                Mode::Direct | Mode::Slice => self.eval(c, *child, pt, mode, interp, mem),
                 Mode::Block => interp.chain_value(*slot),
                 Mode::CellFill => interp.cellfill_value(*slot),
             },
@@ -886,6 +1162,7 @@ fn spline_apply(
     pt: Pt,
     mode: Mode,
     interp: &InterpState,
+    mem: Option<&MemoCtx>,
 ) -> f32 {
     // locations are sorted ascending in vanilla data; findIntervalStart:
     // first index i where f < locations[i], minus 1.
@@ -908,7 +1185,7 @@ fn spline_apply(
             SplineValueW::Node(node) => {
                 // Leaf coordinate: (float) density compute. Nested splines are
                 // DfNode::Spline -> WKind::Spline, handled by eval recursion.
-                let d = env.eval(c, *node, pt, mode, interp);
+                let d = env.eval(c, *node, pt, mode, interp, mem);
                 d as f32
             }
         }

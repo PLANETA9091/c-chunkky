@@ -12,7 +12,7 @@
 //   - postprocessing marks (shouldScheduleFluidUpdate) are skipped: they carry
 //     no block data, and the Bukkit noise path cannot express them.
 
-use crate::density::{Compiled, Env, InterpState, Mode, Pt, WKind};
+use crate::density::{Compiled, Env, InterpState, MemoCtx, Mode, Pt, WKind};
 
 // ---------------------------------------------------------------------------
 // frozen block ids (repo-root block_registry.txt; ore ids appended)
@@ -199,6 +199,10 @@ pub struct ChunkGen<'e> {
     /// preliminarySurfaceLevel cache (key: (x<<32)|z of quart-snapped column).
     prelim: std::collections::HashMap<i64, i32>,
     aquifer: AquiferState,
+    /// Per-point DAG memo (see MemoCtx). Every evaluation context (corner
+    /// point / block / probe) bumps the serial; shared subtrees then evaluate
+    /// once per point instead of once per reference.
+    memo: MemoCtx,
     /// Env-gated phase profiler (diagnostic only; zero cost when off).
     pub prof: Prof,
     /// Diagnostic stubs (CRUS_SKIP_*), NEVER set in production.
@@ -272,6 +276,7 @@ impl<'e> ChunkGen<'e> {
             cell_cache: vec![0.0; cell_width * cell_height * cell_width],
             prelim: std::collections::HashMap::new(),
             aquifer: AquiferState::new(env.wg.min_y, env.wg.height),
+            memo: MemoCtx::new(compiled.arena.len()),
             env,
             compiled,
             prof: Prof::from_env(),
@@ -283,7 +288,15 @@ impl<'e> ChunkGen<'e> {
 
     #[inline]
     fn eval(&self, idx: u32, pt: Pt, mode: Mode) -> f64 {
-        self.env.eval(&self.compiled, idx, pt, mode, &self.interp)
+        self.env
+            .eval(&self.compiled, idx, pt, mode, &self.interp, Some(&self.memo))
+    }
+
+    /// Begin a new memo context (one point/block) and evaluate.
+    #[inline]
+    fn eval_fresh(&self, idx: u32, pt: Pt, mode: Mode) -> f64 {
+        self.memo.next_serial();
+        self.eval(idx, pt, mode)
     }
 
     /// Per-interpolator-child slice-cost profiler (diagnostic).
@@ -318,7 +331,7 @@ impl<'e> ChunkGen<'e> {
             let t0 = std::time::Instant::now();
             let mut sink = 0f64;
             for &pt in &points {
-                sink += self.eval(child, pt, Mode::Slice);
+                sink += self.eval_fresh(child, pt, Mode::Slice);
             }
             let dt = t0.elapsed().as_nanos() as u64;
             total_ns += dt;
@@ -413,7 +426,11 @@ impl<'e> ChunkGen<'e> {
         let mut result = i32::MAX;
         let mut y = self.min_y + self.env.wg.height;
         while y >= self.min_y {
-            let d = self.eval(self.initial_density, Pt { x: bx, y, z: bz }, Mode::Direct);
+            let d = self.eval_fresh(
+                self.initial_density,
+                Pt { x: bx, y, z: bz },
+                Mode::Direct,
+            );
             if d > 0.390625 {
                 result = y;
                 break;
@@ -490,7 +507,7 @@ impl<'e> ChunkGen<'e> {
                                 self.cell_cache[idx] = if cellfill_skip {
                                     0.0
                                 } else {
-                                    self.eval(self.final_density, pt, Mode::CellFill)
+                                    self.eval_fresh(self.final_density, pt, Mode::CellFill)
                                 };
                                 idx += 1;
                                 iz += 1;
@@ -564,6 +581,10 @@ impl<'e> ChunkGen<'e> {
                 for (slot, &child) in self.interp_children.iter().enumerate() {
                     let v = if self.skip_slice {
                         0.0
+                    } else if slot == 0 {
+                        // bump memo context once per corner point; remaining
+                        // slots share it (cross-slot subexpression reuse)
+                        self.eval_fresh(child, pt, Mode::Slice)
                     } else {
                         self.eval(child, pt, Mode::Slice)
                     };
@@ -748,6 +769,7 @@ impl<'e> ChunkGen<'e> {
         first: FluidStatus,
         second: FluidStatus,
     ) -> f64 {
+        self.memo.next_serial(); // fresh pt context (block coords, barrier)
         let y = pt.y;
         let first_at = aquifer_at(first, y);
         let second_at = aquifer_at(second, y);
@@ -856,6 +878,7 @@ impl<'e> ChunkGen<'e> {
         let pt = Pt { x, y, z };
         let d: f64;
         let d1: f64;
+        self.memo.next_serial(); // fresh pt context (aquifer cell coords)
         let erosion = self.eval(self.erosion, pt, Mode::Direct);
         let depth = self.eval(self.depth, pt, Mode::Direct);
         // isDeepDarkRegion: erosion < (double)(float)-0.225 && depth > (double)(float)0.9
@@ -908,6 +931,7 @@ impl<'e> ChunkGen<'e> {
             y: i3,
             z: floor_div(z, 16),
         };
+        self.memo.next_serial(); // fresh pt context (spread grid coords)
         let d = self.eval(self.spread, pt, Mode::Direct) * 10.0;
         // Mth.quantize(d, 3) = floor(d / 3) * 3
         let i7 = (d / 3.0).floor() as i32 * 3;
@@ -923,6 +947,7 @@ impl<'e> ChunkGen<'e> {
                 y: floor_div(y, 40),
                 z: floor_div(z, 64),
             };
+            self.memo.next_serial(); // fresh pt context (lava grid coords)
             let d = self.eval(self.lava_noise, pt, Mode::Direct);
             if d.abs() > 0.3 {
                 kind = LAVA;
@@ -933,6 +958,7 @@ impl<'e> ChunkGen<'e> {
 
     /// Vanilla OreVeinifier.create closure.
     fn ore_vein(&self, pt: Pt) -> Option<u16> {
+        self.memo.next_serial(); // fresh pt context (block coords)
         let d = self.eval(self.vein_toggle, pt, Mode::Block);
         let y = pt.y;
         let (ore, raw, filler, ty_min_y, ty_max_y) = if d > 0.0 {
