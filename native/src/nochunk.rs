@@ -786,13 +786,21 @@ impl<'e> ChunkGen<'e> {
         let mut l2 = 0i64;
         let mut l3 = 0i64;
 
+        // Precomputed cell-index walk: same vanilla iteration order
+        // (i10 outer, i11 middle, i12 inner) and identical index() results,
+        // but index arithmetic is incremental instead of recomputed per cell.
+        let base_i = self.aquifer.index(gx, gy, gz);
+        let stride_z = self.aquifer.grid_size_x as usize; // 3
+        let stride_y = stride_z * self.aquifer.grid_size_z as usize; // 9
+        let mut idx10 = base_i;
         for i10 in 0..=1i32 {
+            let gxx = gx + i10;
+            let mut idx11 = idx10.wrapping_sub(stride_y); // i11 = -1
             for i11 in -1..=1i32 {
+                let gyy = gy + i11;
+                let mut index = idx11;
                 for i12 in 0..=1i32 {
-                    let gxx = gx + i10;
-                    let gyy = gy + i11;
                     let gzz = gz + i12;
-                    let index = self.aquifer.index(gxx, gyy, gzz);
                     let packed = if self.aquifer.loc_cache[index] != i64::MAX {
                         self.aquifer.loc_cache[index]
                     } else {
@@ -834,8 +842,11 @@ impl<'e> ChunkGen<'e> {
                         l3 = packed;
                         i9 = dist;
                     }
+                    index += stride_z;
                 }
+                idx11 += stride_y;
             }
+            idx10 += 1;
         }
 
         let aquifer_status = self.aquifer_status(l0);
