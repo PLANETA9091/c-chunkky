@@ -112,23 +112,25 @@ impl ImprovedNoise {
         y_cell: i32,
         z_cell: i32,
         dx: f64,
-        dy: f64,
+        weird_dy: f64,
         dz: f64,
+        dy: f64,
     ) -> f64 {
+        // Vanilla: gradDot uses (deltaX, weirdDeltaY, deltaZ); smoothstep uses (deltaX, deltaY, deltaZ)
         let p0 = self.p(x_cell);
         let p1 = self.p(x_cell + 1);
         let i0 = self.p(p0 + y_cell);
         let i1 = self.p(p0 + y_cell + 1);
         let j0 = self.p(p1 + y_cell);
         let j1 = self.p(p1 + y_cell + 1);
-        let v000 = grad_dot(self.p(i0 + z_cell) as usize, dx, dy, dz);
-        let v100 = grad_dot(self.p(j0 + z_cell) as usize, dx - 1.0, dy, dz);
-        let v010 = grad_dot(self.p(i1 + z_cell) as usize, dx, dy - 1.0, dz);
-        let v110 = grad_dot(self.p(j1 + z_cell) as usize, dx - 1.0, dy - 1.0, dz);
-        let v001 = grad_dot(self.p(i0 + z_cell + 1) as usize, dx, dy, dz - 1.0);
-        let v101 = grad_dot(self.p(j0 + z_cell + 1) as usize, dx - 1.0, dy, dz - 1.0);
-        let v011 = grad_dot(self.p(i1 + z_cell + 1) as usize, dx, dy - 1.0, dz - 1.0);
-        let v111 = grad_dot(self.p(j1 + z_cell + 1) as usize, dx - 1.0, dy - 1.0, dz - 1.0);
+        let v000 = grad_dot(self.p(i0 + z_cell) as usize, dx, weird_dy, dz);
+        let v100 = grad_dot(self.p(j0 + z_cell) as usize, dx - 1.0, weird_dy, dz);
+        let v010 = grad_dot(self.p(i1 + z_cell) as usize, dx, weird_dy - 1.0, dz);
+        let v110 = grad_dot(self.p(j1 + z_cell) as usize, dx - 1.0, weird_dy - 1.0, dz);
+        let v001 = grad_dot(self.p(i0 + z_cell + 1) as usize, dx, weird_dy, dz - 1.0);
+        let v101 = grad_dot(self.p(j0 + z_cell + 1) as usize, dx - 1.0, weird_dy, dz - 1.0);
+        let v011 = grad_dot(self.p(i1 + z_cell + 1) as usize, dx, weird_dy - 1.0, dz - 1.0);
+        let v111 = grad_dot(self.p(j1 + z_cell + 1) as usize, dx - 1.0, weird_dy - 1.0, dz - 1.0);
         let fx = smoothstep(dx);
         let fy = smoothstep(dy);
         let fz = smoothstep(dz);
@@ -149,6 +151,8 @@ impl ImprovedNoise {
     }
 
     /// noise(x, y, z, yScale, yMax) - full form with the y-quantization quirk
+    /// Vanilla: sampleAndLerp(floorX, floorY, floorZ, d3, d4 - d7, d5, d4) where
+    /// d7 = floor(min(dy, yMax) / yScale + 1.0E-7F) * yScale; gradDot sees d4-d7, smoothstep sees d4.
     #[inline]
     pub fn noise_5(&self, x: f64, y: f64, z: f64, y_scale: f64, y_max: f64) -> f64 {
         let x = x + self.xo;
@@ -160,12 +164,12 @@ impl ImprovedNoise {
         let dx = x - xi as f64;
         let dy = y - yi as f64;
         let dz = z - zi as f64;
-        let mut d26 = 0.0f64;
+        let mut d7 = 0.0f64;
         if y_scale != 0.0 {
-            let d28 = if y_max >= 0.0 && y_max < dy { y_max } else { dy };
-            d26 = (d28 / y_scale + 1.0000000116860974e-07).floor() * y_scale;
+            let d6 = if y_max >= 0.0 && y_max < dy { y_max } else { dy };
+            d7 = (d6 / y_scale + 1.0000000116860974e-07).floor() * y_scale;
         }
-        self.sample_and_lerp(xi, yi, zi, dx, dy, dz - d26)
+        self.sample_and_lerp(xi, yi, zi, dx, dy - d7, dz, dy)
     }
 
     /// noise(x, y, z, yScale=0, yMax=0)
@@ -252,7 +256,8 @@ impl PerlinNoise {
         noise_levels: Vec<Option<ImprovedNoise>>,
     ) -> Self {
         let k = amplitudes.len();
-        let lowest_freq_input_factor = 2.0f64.powi(-first_octave);
+        // Vanilla: i = -firstOctave; lowestFreqInputFactor = 2^(-i) = 2^firstOctave
+        let lowest_freq_input_factor = 2.0f64.powi(first_octave);
         let lowest_freq_value_factor =
             2.0f64.powi((k - 1) as i32) / (2.0f64.powi(k as i32) - 1.0);
         let mut max_value = 0.0;
@@ -299,8 +304,9 @@ impl PerlinNoise {
         d
     }
 
-    pub fn get_octave_noise(&self, i: usize) -> &Option<ImprovedNoise> {
-        &self.noise_levels[i]
+    /// Vanilla: getOctaveNoise(octave) = noiseLevels[noiseLevels.length - 1 - octave]
+    pub fn get_octave_noise(&self, i: usize) -> Option<&ImprovedNoise> {
+        self.noise_levels[self.noise_levels.len() - 1 - i].as_ref()
     }
 }
 
@@ -428,11 +434,11 @@ impl BlendedNoise {
         let d6 = self.y_multiplier * self.smear_scale_multiplier;
         let d7 = d6 / self.y_factor;
 
-        // main noise loop, octaves 0..8
+        // main noise loop, octaves 0..8 via getOctaveNoise (REVERSED: [7-i])
         let mut d10 = 0.0;
         let mut amp = 1.0;
         for i in 0..8usize {
-            if let Some(oct) = &self.main_noise.noise_levels[i] {
+            if let Some(oct) = self.main_noise.get_octave_noise(i) {
                 d10 += oct.noise(
                     wrap(d3 * amp),
                     wrap(d4 * amp),
@@ -456,12 +462,12 @@ impl BlendedNoise {
             let dz = wrap(d2 * amp);
             let dyy = d6 * amp;
             if !skip_min {
-                if let Some(oct) = &self.min_limit_noise.noise_levels[i] {
+                if let Some(oct) = self.min_limit_noise.get_octave_noise(i) {
                     d8 += oct.noise(dx, dy, dz, dyy, d1 * amp) / amp;
                 }
             }
             if !skip_max {
-                if let Some(oct) = &self.max_limit_noise.noise_levels[i] {
+                if let Some(oct) = self.max_limit_noise.get_octave_noise(i) {
                     d9 += oct.noise(dx, dy, dz, dyy, d1 * amp) / amp;
                 }
             }

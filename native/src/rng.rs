@@ -182,18 +182,18 @@ impl XoroshiroRandomSource {
         self.rng.next_long() as i32
     }
 
-    /// Vanilla: (float)(nextBits(24)) * 5.9604645E-8f  (computed in f32 then widened)
+    /// Vanilla: (float)(nextBits(24)) * 5.9604645E-8f; nextBits = nextLong() >>> 40 (LOGICAL shift)
     #[inline]
     pub fn next_f32(&mut self) -> f32 {
-        let bits = (self.rng.next_long() >> 40) as i32;
+        let bits = ((self.rng.next_long() as u64) >> 40) as i32;
         let f = (bits as f32) * 5.960464477539063e-8f32;
         f
     }
 
-    /// Vanilla quirk: nextBits(53) -> l2f (round to f32!) -> fmul by 2^-53 (f32) -> f2d
+    /// Vanilla quirk: nextBits(53) [nextLong() >>> 11, LOGICAL] -> l2f (round to f32!) -> fmul by 2^-53 (f32) -> f2d
     #[inline]
     pub fn next_f64(&mut self) -> f64 {
-        let bits = (self.rng.next_long() >> 11) as i64;
+        let bits = ((self.rng.next_long() as u64) >> 11) as i64;
         let f = (bits as f32) * 1.1102230246251565e-16f32;
         f as f64
     }
