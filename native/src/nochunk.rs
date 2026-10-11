@@ -565,9 +565,21 @@ impl<'e> ChunkGen<'e> {
         // joined inside the loop, before any of them can dangle.
         let mut pending: Option<std::thread::JoinHandle<Vec<f64>>> = None;
         let plane_len = self.interp_children.len() * (self.cell_count_xz + 1) * (self.cell_count_y + 1);
-        // Pipeline measured SLOWER on the 2-core dev box (spawn overhead +
-        // cache pressure); opt-in via CRUS_PIPELINE=1.
-        let pipeline = std::env::var("CRUS_PIPELINE").ok().as_deref() == Some("1");
+        // Pipeline: overlaps the next x-plane's corner evaluation (worker)
+        // with this plane's cell work. On 2 cores it LOSES (worker steals
+        // the only cell core, cache pressure); on 4+ cores it wins. Default:
+        // on when >= 4 logical cores; CRUS_NO_PIPELINE=1 forces off,
+        // CRUS_PIPELINE=1 forces on.
+        let pipeline = match (
+            std::env::var("CRUS_NO_PIPELINE").is_ok(),
+            std::env::var("CRUS_PIPELINE").ok().as_deref() == Some("1"),
+        ) {
+            (true, _) => false,
+            (false, true) => true,
+            (false, false) => std::thread::available_parallelism()
+                .map(|n| n.get() >= 4)
+                .unwrap_or(false),
+        };
         if pipeline && self.cell_count_xz > 0 && !self.skip_slice {
             let env_addr = self.env as *const Env as usize;
             let compiled_addr = &self.compiled as *const Compiled as usize;
