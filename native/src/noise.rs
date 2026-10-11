@@ -178,6 +178,55 @@ impl ImprovedNoise {
     pub fn noise(&self, x: f64, y: f64, z: f64) -> f64 {
         self.noise_5(x, y, z, 0.0, 0.0)
     }
+
+    /// 4-wide batch of noise(): lane-identical arithmetic (IEEE f64), the
+    /// permutation gathers stay scalar per lane. Bit-exact vs noise().
+    pub fn noise_batch(&self, x: &[f64; 4], y: &[f64; 4], z: &[f64; 4]) -> [f64; 4] {
+        self.noise_5_batch(x, y, z, 0.0, &[0.0; 4])
+    }
+
+    pub fn noise_5_batch(
+        &self,
+        xin: &[f64; 4],
+        yin: &[f64; 4],
+        zin: &[f64; 4],
+        y_scale: f64,
+        y_max: &[f64; 4],
+    ) -> [f64; 4] {
+        let mut xi = [0i32; 4];
+        let mut yi = [0i32; 4];
+        let mut zi = [0i32; 4];
+        let mut dx = [0f64; 4];
+        let mut dy = [0f64; 4];
+        let mut dz = [0f64; 4];
+        let mut d7 = [0f64; 4];
+        for l in 0..4 {
+            let x = xin[l] + self.xo;
+            let y = yin[l] + self.yo;
+            let z = zin[l] + self.zo;
+            let a = mth_floor(x);
+            let b = mth_floor(y);
+            let c = mth_floor(z);
+            xi[l] = a;
+            yi[l] = b;
+            zi[l] = c;
+            dx[l] = x - a as f64;
+            dy[l] = y - b as f64;
+            dz[l] = z - c as f64;
+            if y_scale != 0.0 {
+                let ym = y_max[l];
+                let d6 = if ym >= 0.0 && ym < dy[l] { ym } else { dy[l] };
+                d7[l] = (d6 / y_scale + 1.0000000116860974e-07).floor() * y_scale;
+            }
+        }
+        let mut out = [0f64; 4];
+        for l in 0..4 {
+            out[l] = self.sample_and_lerp(
+                xi[l], yi[l], zi[l], dx[l], dy[l] - d7[l], dz[l], dy[l],
+            );
+        }
+        out
+    }
 }
 
 // ---------------- PerlinNoise ----------------
@@ -309,6 +358,37 @@ impl PerlinNoise {
     pub fn get_octave_noise(&self, i: usize) -> Option<&ImprovedNoise> {
         self.noise_levels[self.noise_levels.len() - 1 - i].as_ref()
     }
+
+    /// 4-wide get_value: lane-identical octave loop (bit-exact vs get_value).
+    pub fn get_value_batch(
+        &self,
+        x: &[f64; 4],
+        y: &[f64; 4],
+        z: &[f64; 4],
+    ) -> [f64; 4] {
+        let mut d = [0f64; 4];
+        let mut input_factor = self.lowest_freq_input_factor;
+        let mut value_factor = self.lowest_freq_value_factor;
+        for i in 0..self.noise_levels.len() {
+            if let Some(nl) = &self.noise_levels[i] {
+                let mut wx = [0f64; 4];
+                let mut wy = [0f64; 4];
+                let mut wz = [0f64; 4];
+                for l in 0..4 {
+                    wx[l] = wrap(x[l] * input_factor);
+                    wy[l] = wrap(y[l] * input_factor);
+                    wz[l] = wrap(z[l] * input_factor);
+                }
+                let v = nl.noise_batch(&wx, &wy, &wz);
+                for l in 0..4 {
+                    d[l] += self.amplitudes[i] * v[l] * value_factor;
+                }
+            }
+            input_factor *= 2.0;
+            value_factor /= 2.0;
+        }
+        d
+    }
 }
 
 // ---------------- NormalNoise ----------------
@@ -355,6 +435,25 @@ impl NormalNoise {
                 y * 1.0181268882175227,
                 z * 1.0181268882175227,
             )) * self.value_factor
+    }
+
+    /// 4-wide get_value (bit-exact per lane).
+    pub fn get_value_batch(&self, x: &[f64; 4], y: &[f64; 4], z: &[f64; 4]) -> [f64; 4] {
+        let a = self.first.get_value_batch(x, y, z);
+        let mut x2 = [0f64; 4];
+        let mut y2 = [0f64; 4];
+        let mut z2 = [0f64; 4];
+        for l in 0..4 {
+            x2[l] = x[l] * 1.0181268882175227;
+            y2[l] = y[l] * 1.0181268882175227;
+            z2[l] = z[l] * 1.0181268882175227;
+        }
+        let b = self.second.get_value_batch(&x2, &y2, &z2);
+        let mut out = [0f64; 4];
+        for l in 0..4 {
+            out[l] = (a[l] + b[l]) * self.value_factor;
+        }
+        out
     }
 }
 
@@ -485,5 +584,118 @@ impl BlendedNoise {
             a + t * (b - a)
         };
         v / 128.0
+    }
+
+    /// 4-wide compute: lane-identical arithmetic; per-lane y inputs; the
+    /// skip_min/skip_max decision is per lane (skipped lanes keep their
+    /// accumulator at 0.0, matching vanilla's never-run loop). Bit-exact.
+    pub fn compute_batch(
+        &self,
+        bx: &[i32; 4],
+        by: &[i32; 4],
+        bz: &[i32; 4],
+    ) -> [f64; 4] {
+        let mut d0 = [0f64; 4];
+        let mut d1 = [0f64; 4];
+        let mut d2 = [0f64; 4];
+        for l in 0..4 {
+            d0[l] = bx[l] as f64 * self.xz_multiplier;
+            d1[l] = by[l] as f64 * self.y_multiplier;
+            d2[l] = bz[l] as f64 * self.xz_multiplier;
+        }
+        let mut d3 = [0f64; 4];
+        let mut d4 = [0f64; 4];
+        let mut d5 = [0f64; 4];
+        for l in 0..4 {
+            d3[l] = d0[l] / self.xz_factor;
+            d4[l] = d1[l] / self.y_factor;
+            d5[l] = d2[l] / self.xz_factor;
+        }
+        let d6 = self.y_multiplier * self.smear_scale_multiplier;
+        let d7 = d6 / self.y_factor;
+
+        // main noise loop, octaves 0..8 (REVERSED lookup [7-i])
+        let mut d10 = [0f64; 4];
+        let mut amp = 1.0f64;
+        for i in 0..8usize {
+            if let Some(oct) = self.main_noise.get_octave_noise(i) {
+                let mut wx = [0f64; 4];
+                let mut wy = [0f64; 4];
+                let mut wz = [0f64; 4];
+                let mut ymax = [0f64; 4];
+                for l in 0..4 {
+                    wx[l] = wrap(d3[l] * amp);
+                    wy[l] = wrap(d4[l] * amp);
+                    wz[l] = wrap(d5[l] * amp);
+                    ymax[l] = d4[l] * amp;
+                }
+                let v = oct.noise_5_batch(&wx, &wy, &wz, d7 * amp, &ymax);
+                for l in 0..4 {
+                    d10[l] += v[l] / amp;
+                }
+            }
+            amp /= 2.0;
+        }
+        let mut d11b = [0f64; 4];
+        let mut skip_min = [false; 4];
+        let mut skip_max = [false; 4];
+        for l in 0..4 {
+            d11b[l] = (d10[l] / 10.0 + 1.0) / 2.0;
+            skip_min[l] = d11b[l] >= 1.0;
+            skip_max[l] = d11b[l] <= 0.0;
+        }
+
+        let mut d8 = [0f64; 4];
+        let mut d9 = [0f64; 4];
+        let mut amp = 1.0f64;
+        for i in 0..16usize {
+            let mut dx = [0f64; 4];
+            let mut dy = [0f64; 4];
+            let mut dz = [0f64; 4];
+            let mut dyy = [0f64; 4];
+            let mut ymax = [0f64; 4];
+            for l in 0..4 {
+                dx[l] = wrap(d0[l] * amp);
+                dy[l] = wrap(d1[l] * amp);
+                dz[l] = wrap(d2[l] * amp);
+                dyy[l] = d6 * amp;
+                ymax[l] = d1[l] * amp;
+            }
+            if !skip_min.iter().all(|s| *s) {
+                if let Some(oct) = self.min_noise.get_octave_noise(i) {
+                    let v = oct.noise_5_batch(&dx, &dy, &dz, dyy[0], &ymax);
+                    for l in 0..4 {
+                        if !skip_min[l] {
+                            d8[l] += v[l] / amp;
+                        }
+                    }
+                }
+            }
+            if !skip_max.iter().all(|s| *s) {
+                if let Some(oct) = self.max_noise.get_octave_noise(i) {
+                    let v = oct.noise_5_batch(&dx, &dy, &dz, dyy[0], &ymax);
+                    for l in 0..4 {
+                        if !skip_max[l] {
+                            d9[l] += v[l] / amp;
+                        }
+                    }
+                }
+            }
+            amp /= 2.0;
+        }
+        let mut out = [0f64; 4];
+        for l in 0..4 {
+            let t = d11b[l];
+            let (a, b) = (d8[l] / 512.0, d9[l] / 512.0);
+            let v = if t < 0.0 {
+                a
+            } else if t > 1.0 {
+                b
+            } else {
+                a + t * (b - a)
+            };
+            out[l] = v / 128.0;
+        }
+        out
     }
 }

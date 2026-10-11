@@ -1584,13 +1584,33 @@ impl<'e> ChunkGen<'e> {
     ) {
         let interp = InterpState::new(compiled.interp_slots, cell_count_xz, cell_count_y);
         let cols = cell_count_y + 1;
+        let y_total = cell_count_y + 1;
+        let y_batch = y_total & !3; // groups of 4
         for i in 0..=cell_count_xz {
             let corner_z = (first_cell_z + i as i32) * cw;
-            for y in 0..=cell_count_y {
+            let mut y = 0usize;
+            while y < y_batch {
+                let pts = [
+                    Pt { x: corner_x, y: (y as i32 + cell_noise_min_y) * ch, z: corner_z },
+                    Pt { x: corner_x, y: (y as i32 + 1 + cell_noise_min_y) * ch, z: corner_z },
+                    Pt { x: corner_x, y: (y as i32 + 2 + cell_noise_min_y) * ch, z: corner_z },
+                    Pt { x: corner_x, y: (y as i32 + 3 + cell_noise_min_y) * ch, z: corner_z },
+                ];
+                for (slot, &child) in children.iter().enumerate() {
+                    // 4-wide batch: lane-identical arithmetic (bit-exact)
+                    let v = env.eval4(compiled, child, &pts, Mode::Slice, &interp);
+                    let base = slot * (cell_count_xz + 1) * cols + i * cols + y;
+                    out[base] = v[0];
+                    out[base + 1] = v[1];
+                    out[base + 2] = v[2];
+                    out[base + 3] = v[3];
+                }
+                y += 4;
+            }
+            for y in y_batch..y_total {
                 let corner_y = (y as i32 + cell_noise_min_y) * ch;
                 let pt = Pt { x: corner_x, y: corner_y, z: corner_z };
                 for (slot, &child) in children.iter().enumerate() {
-                    // mem=None: value-identical (memo is pure dedup)
                     let v = env.eval(compiled, child, pt, Mode::Slice, &interp, None);
                     out[slot * (cell_count_xz + 1) * cols + i * cols + y] = v;
                 }

@@ -974,7 +974,299 @@ fn lerp(t: f64, a: f64, b: f64) -> f64 {
     a + t * (b - a)
 }
 
-#[inline]
+// ---------------------------------------------------------------------------
+// 4-wide batch evaluation (Slice mode, uncached) — bit-exact per lane.
+// ---------------------------------------------------------------------------
+
+pub type V4 = [f64; 4];
+
+impl Env {
+    /// Evaluate `idx` at 4 points simultaneously (Mode::Slice semantics,
+    /// no memo — the fill_slice path). Lane arithmetic is identical to the
+    /// scalar eval, so results are bit-exact.
+    pub fn eval4(
+        &self,
+        c: &Compiled,
+        idx: u32,
+        pts: &[Pt; 4],
+        mode: Mode,
+        interp: &InterpState,
+    ) -> V4 {
+        self.eval4_uncached(c, idx, pts, mode, interp)
+    }
+
+    fn eval4_uncached(
+        &self,
+        c: &Compiled,
+        idx: u32,
+        pts: &[Pt; 4],
+        mode: Mode,
+        interp: &InterpState,
+    ) -> V4 {
+        let node = &c.arena[idx as usize];
+        match node {
+            WKind::Const(v) => [*v; 4],
+            WKind::Noise { noise_id, xz_scale, y_scale } => {
+                let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
+                let mut x = [0f64; 4];
+                let mut y = [0f64; 4];
+                let mut z = [0f64; 4];
+                for l in 0..4 {
+                    x[l] = pts[l].x as f64 * xz_scale;
+                    y[l] = pts[l].y as f64 * y_scale;
+                    z[l] = pts[l].z as f64 * xz_scale;
+                }
+                n.get_value_batch(&x, &y, &z)
+            }
+            WKind::ShiftedNoise { noise_id, xz_scale, y_scale, sx, sy, sz } => {
+                let sxa = self.eval4_uncached(c, *sx, pts, mode, interp);
+                let sya = self.eval4_uncached(c, *sy, pts, mode, interp);
+                let sza = self.eval4_uncached(c, *sz, pts, mode, interp);
+                let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
+                let mut x = [0f64; 4];
+                let mut y = [0f64; 4];
+                let mut z = [0f64; 4];
+                for l in 0..4 {
+                    x[l] = pts[l].x as f64 * xz_scale + sxa[l];
+                    y[l] = pts[l].y as f64 * y_scale + sya[l];
+                    z[l] = pts[l].z as f64 * xz_scale + sza[l];
+                }
+                n.get_value_batch(&x, &y, &z)
+            }
+            WKind::ShiftA { noise_id } => {
+                let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
+                let mut x = [0f64; 4];
+                let mut z = [0f64; 4];
+                for l in 0..4 {
+                    x[l] = pts[l].x as f64 * 0.25;
+                    z[l] = pts[l].z as f64 * 0.25;
+                }
+                let y = [0.0f64; 4];
+                let mut out = n.get_value_batch(&x, &y, &z);
+                for v in out.iter_mut() {
+                    *v *= 4.0;
+                }
+                out
+            }
+            WKind::ShiftB { noise_id } => {
+                let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
+                let mut x = [0f64; 4];
+                let mut z = [0f64; 4];
+                for l in 0..4 {
+                    x[l] = pts[l].z as f64 * 0.25;
+                    z[l] = pts[l].x as f64 * 0.25;
+                }
+                let y = [0.0f64; 4];
+                let mut out = n.get_value_batch(&x, &y, &z);
+                for v in out.iter_mut() {
+                    *v *= 4.0;
+                }
+                out
+            }
+            WKind::OldBlendedNoise { instance } => {
+                let mut bx = [0i32; 4];
+                let mut by = [0i32; 4];
+                let mut bz = [0i32; 4];
+                for l in 0..4 {
+                    bx[l] = pts[l].x;
+                    by[l] = pts[l].y;
+                    bz[l] = pts[l].z;
+                }
+                c.blended[*instance as usize].compute_batch(&bx, &by, &bz)
+            }
+            WKind::Clamp { input, min, max } => {
+                let v = self.eval4_uncached(c, *input, pts, mode, interp);
+                let mut out = [0f64; 4];
+                for l in 0..4 {
+                    out[l] = mth_clamp(v[l], *min, *max);
+                }
+                out
+            }
+            WKind::Mapped { kind, input } => {
+                let v = self.eval4_uncached(c, *input, pts, mode, interp);
+                let mut out = [0f64; 4];
+                match kind {
+                    MapKind::Abs => {
+                        for l in 0..4 { out[l] = v[l].abs(); }
+                    }
+                    MapKind::Square => {
+                        for l in 0..4 { out[l] = v[l] * v[l]; }
+                    }
+                    MapKind::Cube => {
+                        for l in 0..4 { out[l] = v[l] * v[l] * v[l]; }
+                    }
+                    MapKind::HalfNegative => {
+                        for l in 0..4 { out[l] = if v[l] > 0.0 { v[l] } else { v[l] * 0.5 }; }
+                    }
+                    MapKind::QuarterNegative => {
+                        for l in 0..4 { out[l] = if v[l] > 0.0 { v[l] } else { v[l] * 0.25 }; }
+                    }
+                    MapKind::Squeeze => {
+                        for l in 0..4 {
+                            let d = mth_clamp(v[l], -1.0, 1.0);
+                            out[l] = d / 2.0 - d * d * d / 24.0;
+                        }
+                    }
+                }
+                out
+            }
+            WKind::Ap2 { kind, a, b } => {
+                let va = self.eval4_uncached(c, *a, pts, mode, interp);
+                match kind {
+                    Ap2Kind::Add => {
+                        let vb = self.eval4_uncached(c, *b, pts, mode, interp);
+                        let mut out = [0f64; 4];
+                        for l in 0..4 { out[l] = va[l] + vb[l]; }
+                        out
+                    }
+                    Ap2Kind::Mul => {
+                        let mut out = [0f64; 4];
+                        // vanilla short-circuit per lane
+                        let mut need = [false; 4];
+                        for l in 0..4 {
+                            if va[l] == 0.0 {
+                                out[l] = 0.0;
+                            } else {
+                                need[l] = true;
+                            }
+                        }
+                        if need.iter().any(|n| *n) {
+                            let vb = self.eval4_uncached(c, *b, pts, mode, interp);
+                            for l in 0..4 {
+                                if need[l] {
+                                    out[l] = va[l] * vb[l];
+                                }
+                            }
+                        }
+                        out
+                    }
+                    Ap2Kind::Min => {
+                        let vb = self.eval4_uncached(c, *b, pts, mode, interp);
+                        let mut out = [0f64; 4];
+                        for l in 0..4 { out[l] = if va[l] < vb[l] { va[l] } else { vb[l] }; }
+                        out
+                    }
+                    Ap2Kind::Max => {
+                        let vb = self.eval4_uncached(c, *b, pts, mode, interp);
+                        let mut out = [0f64; 4];
+                        for l in 0..4 { out[l] = if va[l] > vb[l] { va[l] } else { vb[l] }; }
+                        out
+                    }
+                }
+            }
+            WKind::RangeChoice { input, min_inclusive, max_exclusive, when_in_range, when_out_of_range } => {
+                let v = self.eval4_uncached(c, *input, pts, mode, interp);
+                let mut in_mask = [false; 4];
+                let mut any_in = false;
+                let mut any_out = false;
+                for l in 0..4 {
+                    let m = v[l] >= *min_inclusive && v[l] < *max_exclusive;
+                    in_mask[l] = m;
+                    if m { any_in = true; } else { any_out = true; }
+                }
+                let vin = if any_in { self.eval4_uncached(c, *when_in_range, pts, mode, interp) } else { [0.0; 4] };
+                let vout = if any_out { self.eval4_uncached(c, *when_out_of_range, pts, mode, interp) } else { [0.0; 4] };
+                let mut out = [0f64; 4];
+                for l in 0..4 {
+                    out[l] = if in_mask[l] { vin[l] } else { vout[l] };
+                }
+                out
+            }
+            WKind::YClampedGradient { from_y, to_y, from_value, to_value } => {
+                let mut out = [0f64; 4];
+                for l in 0..4 {
+                    let t = (pts[l].y as f64 - *from_y as f64) / (*to_y as f64 - *from_y as f64);
+                    out[l] = if t < 0.0 {
+                        *from_value
+                    } else if t > 1.0 {
+                        *to_value
+                    } else {
+                        lerp(t, *from_value, *to_value)
+                    };
+                }
+                out
+            }
+            WKind::Spline { coordinate, points } => {
+                let f4 = self.eval4_uncached(c, *coordinate, pts, mode, interp);
+                let mut f = [0f32; 4];
+                for l in 0..4 {
+                    f[l] = f4[l] as f32;
+                }
+                let mut out = [0f64; 4];
+                for l in 0..4 {
+                    out[l] = spline_apply(self, c, points, f[l], pts[l], mode, interp, None) as f64;
+                }
+                out
+            }
+            WKind::WeirdScaledSampler { noise_id, mapper_type2, input } => {
+                let v = self.eval4_uncached(c, *input, pts, mode, interp);
+                let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
+                let mut d = [1.0f64; 4];
+                for l in 0..4 {
+                    d[l] = if *mapper_type2 {
+                        if v[l] < -0.75 { 0.5 }
+                        else if v[l] < -0.5 { 0.75 }
+                        else if v[l] < 0.5 { 1.0 }
+                        else if v[l] < 0.75 { 2.0 }
+                        else { 3.0 }
+                    } else {
+                        if v[l] < -0.5 { 0.75 }
+                        else if v[l] < 0.0 { 1.0 }
+                        else if v[l] < 0.5 { 1.5 }
+                        else { 2.0 }
+                    };
+                }
+                let mut x = [0f64; 4];
+                let mut y = [0f64; 4];
+                let mut z = [0f64; 4];
+                for l in 0..4 {
+                    x[l] = pts[l].x as f64 / d[l];
+                    y[l] = pts[l].y as f64 / d[l];
+                    z[l] = pts[l].z as f64 / d[l];
+                }
+                let nv = n.get_value_batch(&x, &y, &z);
+                let mut out = [0f64; 4];
+                for l in 0..4 {
+                    out[l] = d[l] * nv[l].abs();
+                }
+                out
+            }
+            WKind::Cache2d { child }
+            | WKind::CacheOnce { child }
+            | WKind::FlatCache { child }
+            | WKind::CacheAllInCell { child } => self.eval4_uncached(c, *child, pts, mode, interp),
+            WKind::MulOrAdd { is_add, input, argument } => {
+                let v = self.eval4_uncached(c, *input, pts, mode, interp);
+                let mut out = [0f64; 4];
+                for l in 0..4 {
+                    out[l] = if *is_add {
+                        v[l] + argument
+                    } else if *argument == 0.0 {
+                        0.0
+                    } else {
+                        v[l] * argument
+                    };
+                }
+                out
+            }
+            WKind::Interpolated { child, .. } => {
+                // Slice mode: direct child evaluation (same as scalar)
+                self.eval4_uncached(c, *child, pts, mode, interp)
+            }
+            WKind::EndIslands => [0.0; 4],
+            _ => {
+                // Unreachable on the overworld Slice path (CellFill-only
+                // markers); fall back to scalar lanes for safety.
+                let mut out = [0f64; 4];
+                for l in 0..4 {
+                    out[l] = self.eval_uncached(c, idx, pts[l], mode, interp, None);
+                }
+                out
+            }
+        }
+    }
+}
+
 fn mth_clamp(v: f64, min: f64, max: f64) -> f64 {
     if v < min {
         min
