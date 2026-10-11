@@ -936,6 +936,69 @@ impl<'e> ChunkGen<'e> {
         let gx = floor_div(x - 5, 16);
         let gy = floor_div(y + 1, 12);
         let gz = floor_div(z - 5, 16);
+
+        // Fast path (provably identical to the vanilla scan): when all 12
+        // candidate source cells share one FluidStatus, the distance/pressure
+        // machinery collapses — calculate_pressure returns 0.0 (|dlevel|==0),
+        // every flag needs a status difference — so the result is exactly
+        // (status.at(y), sched=false), plus the y==-54 water-above-lava mark
+        // that does not depend on the scan. Statuses are resolved per SOURCE
+        // POSITION (packed, rng-offset inside the cell) exactly like the
+        // scan/getAquiferStatus path — never from bare cell coords.
+        let stride_y = (self.aquifer.grid_size_z * self.aquifer.grid_size_x) as i64;
+        let stride_z = self.aquifer.grid_size_x as i64;
+        let base = self.aquifer.index(gx, gy, gz) as i64;
+        let mut first: FluidStatus = (0, 0);
+        let mut all_same = true;
+        for a in 0..2i64 {
+            for b in -1..=1i64 {
+                for c in 0..2i64 {
+                    let index = (base + a + b * stride_y + c * stride_z) as usize;
+                    // The source position always lands inside its own grid
+                    // cell (cell*dim + rng(dim-1)), so cache[index] IS the
+                    // status this cell would resolve to. Decode the packed
+                    // position only on a cache miss.
+                    let st = match self.aquifer.cache[index] {
+                        Some(st) => st,
+                        None => {
+                            let gxx = gx + a as i32;
+                            let gyy = gy + b as i32;
+                            let gzz = gz + c as i32;
+                            let packed = if self.aquifer.loc_cache[index] != i64::MAX {
+                                self.aquifer.loc_cache[index]
+                            } else {
+                                let mut rng = self.env.aquifer_random.clone().at(gxx, gyy, gzz);
+                                let p = block_pos_as_long(
+                                    gxx * 16 + rng.next_int_bound(10),
+                                    gyy * 12 + rng.next_int_bound(9),
+                                    gzz * 16 + rng.next_int_bound(10),
+                                );
+                                self.aquifer.loc_cache[index] = p;
+                                p
+                            };
+                            let v =
+                                self.compute_aquifer_fluid(pos_x(packed), pos_y(packed), pos_z(packed));
+                            self.aquifer.cache[index] = Some(v);
+                            v
+                        }
+                    };
+                    if !all_same {
+                        continue;
+                    }
+                    if first.1 == 0 {
+                        first = st;
+                    } else if st != first {
+                        all_same = false;
+                    }
+                }
+            }
+        }
+        if all_same {
+            let block = aquifer_at(first, y);
+            self.sched = block == WATER && aquifer_at(self.global_fluid(y - 1), y - 1) == LAVA;
+            return Some(block);
+        }
+
         let mut i6 = i64::MAX;
         let mut i7 = i64::MAX;
         let mut i8 = i64::MAX;
