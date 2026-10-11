@@ -529,11 +529,106 @@ impl<'e> ChunkGen<'e> {
             p.fill_slice_ns += t.elapsed().as_nanos() as u64;
         }
 
+        // Pipelined plane precompute: a worker thread evaluates the NEXT
+        // x-plane while the main thread processes the current cells. Values
+        // are pure functions of the corner points -> bit-exact. SAFETY: the
+        // worker only reads Env (lifetime 'e, outlives this call), Compiled
+        // and interp_children (never mutated during fill); the handle is
+        // joined inside the loop, before any of them can dangle.
+        let mut pending: Option<std::thread::JoinHandle<Vec<f64>>> = None;
+        let plane_len = self.interp_children.len() * (self.cell_count_xz + 1) * (self.cell_count_y + 1);
+        // Pipeline measured SLOWER on the 2-core dev box (spawn overhead +
+        // cache pressure); opt-in via CRUS_PIPELINE=1.
+        let pipeline = std::env::var("CRUS_PIPELINE").ok().as_deref() == Some("1");
+        if pipeline && self.cell_count_xz > 0 && !self.skip_slice {
+            let env_addr = self.env as *const Env as usize;
+            let compiled_addr = &self.compiled as *const Compiled as usize;
+            let children_addr = self.interp_children.as_ptr() as usize;
+            let n_children = self.interp_children.len();
+            let plane_x = (first_cell_x + 1) * cw;
+            let cell_count_xz = self.cell_count_xz;
+            let cell_count_y = self.cell_count_y;
+            let cell_noise_min_y = self.cell_noise_min_y;
+            pending = Some(std::thread::Builder::new()
+                .stack_size(1 << 21)
+                .spawn(move || {
+                    let mut buf = vec![0f64; plane_len];
+                    // SAFETY: see comment above; join happens before fill returns
+                    let env: &Env = unsafe { &*(env_addr as *const Env) };
+                    let compiled: &Compiled = unsafe { &*(compiled_addr as *const Compiled) };
+                    let children: &[u32] = unsafe { std::slice::from_raw_parts(children_addr as *const u32, n_children) };
+                    Self::eval_plane_into(
+                        env,
+                        compiled,
+                        children,
+                        plane_x,
+                        first_cell_z,
+                        cell_count_xz,
+                        cell_count_y,
+                        cell_noise_min_y,
+                        cw,
+                        ch,
+                        &mut buf,
+                    );
+                    buf
+                })
+                .expect("spawn plane worker"));
+        }
         for i2 in 0..self.cell_count_xz {
             // advanceCellX(i2): fill slice1 at x-plane first_cell_x+i2+1
             let t_fs = if prof { Some(std::time::Instant::now()) } else { None };
             let t0 = std::time::Instant::now();
-            self.fill_slice(first_cell_x + i2 as i32 + 1, first_cell_z, false);
+            if let Some(handle) = pending.take() {
+                let buf = handle.join().expect("plane worker panicked");
+                // scatter buf into slice1 ([slot][z][y])
+                let cols = self.cell_count_y + 1;
+                for slot in 0..self.interp_children.len() {
+                    let slot_id = slot as u16;
+                    for i in 0..=self.cell_count_xz {
+                        for y in 0..=self.cell_count_y {
+                            let v = buf[slot * (self.cell_count_xz + 1) * cols + i * cols + y];
+                            self.interp.slice1_set(slot_id, i, y, v);
+                        }
+                    }
+                }
+            } else if !self.skip_slice {
+                self.fill_slice(first_cell_x + i2 as i32 + 1, first_cell_z, false);
+            }
+            // spawn the plane after next for overlap with these cells
+            if pipeline && i2 + 2 <= self.cell_count_xz && !self.skip_slice {
+                let env_addr = self.env as *const Env as usize;
+                let compiled_addr = &self.compiled as *const Compiled as usize;
+                let children_addr = self.interp_children.as_ptr() as usize;
+                let n_children = self.interp_children.len();
+                let plane_x = (first_cell_x + i2 as i32 + 2) * cw;
+                let cell_count_xz = self.cell_count_xz;
+                let cell_count_y = self.cell_count_y;
+                let cell_noise_min_y = self.cell_noise_min_y;
+                pending = Some(std::thread::Builder::new()
+                    .stack_size(1 << 21)
+                    .spawn(move || {
+                        let mut buf = vec![0f64; plane_len];
+                        // SAFETY: see comment above; joined before fill returns
+                        let env: &Env = unsafe { &*(env_addr as *const Env) };
+                        let compiled: &Compiled = unsafe { &*(compiled_addr as *const Compiled) };
+                        let children: &[u32] = unsafe { std::slice::from_raw_parts(children_addr as *const u32, n_children) };
+                        Self::eval_plane_into(
+                            env,
+                            compiled,
+                            children,
+                            plane_x,
+                            first_cell_z,
+                            cell_count_xz,
+                            cell_count_y,
+                            cell_noise_min_y,
+                            cw,
+                            ch,
+                            &mut buf,
+                        );
+                        buf
+                    })
+                    .expect("spawn plane worker"));
+            }
             let dbg2 = dbg && i2 == 0;
             if dbg2 { eprintln!("slice1 plane_x={}: {:?}", (first_cell_x + 1) * cw, t0.elapsed()); }
             if let Some(t) = t_fs {
@@ -1278,5 +1373,39 @@ fn clamp_local(v: f64, min: f64, max: f64) -> f64 {
         max
     } else {
         v
+    }
+}
+
+impl<'e> ChunkGen<'e> {
+    /// Evaluate one corner plane into `out` laid out [slot][z][y].
+    /// Pure function of (env, compiled, plane corner x, z origin) — used by
+    /// the pipelined worker thread and by the main thread.
+    fn eval_plane_into(
+        env: &Env,
+        compiled: &Compiled,
+        children: &[u32],
+        corner_x: i32,
+        first_cell_z: i32,
+        cell_count_xz: usize,
+        cell_count_y: usize,
+        cell_noise_min_y: i32,
+        cw: i32,
+        ch: i32,
+        out: &mut [f64],
+    ) {
+        let interp = InterpState::new(compiled.interp_slots, cell_count_xz, cell_count_y);
+        let cols = cell_count_y + 1;
+        for i in 0..=cell_count_xz {
+            let corner_z = (first_cell_z + i as i32) * cw;
+            for y in 0..=cell_count_y {
+                let corner_y = (y as i32 + cell_noise_min_y) * ch;
+                let pt = Pt { x: corner_x, y: corner_y, z: corner_z };
+                for (slot, &child) in children.iter().enumerate() {
+                    // mem=None: value-identical (memo is pure dedup)
+                    let v = env.eval(compiled, child, pt, Mode::Slice, &interp, None);
+                    out[slot * (cell_count_xz + 1) * cols + i * cols + y] = v;
+                }
+            }
+        }
     }
 }
