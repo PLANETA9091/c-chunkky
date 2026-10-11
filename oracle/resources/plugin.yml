@@ -1,0 +1,6 @@
+name: CrusstyOracle
+version: 0.1.0
+main: com.planeta.crussty.oracle.OracleBlendCalc
+api-version: '1.21'
+description: Density oracle for native parity (evaluates vanilla RandomState)
+author: crussty-agent

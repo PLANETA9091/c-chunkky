@@ -1,0 +1,2 @@
+[CrusstyGen] native noise stage: chunks=312  mean=50681.0us  p50=50426.3us  p99=96593.5us  max=357499.7us
+

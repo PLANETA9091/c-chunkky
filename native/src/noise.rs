@@ -46,10 +46,10 @@ fn mth_floor(x: f64) -> i32 {
 // ---------------- ImprovedNoise ----------------
 #[derive(Clone)]
 pub struct ImprovedNoise {
-    xo: f64,
-    yo: f64,
-    zo: f64,
-    p: [u8; 256],
+    pub xo: f64,
+    pub yo: f64,
+    pub zo: f64,
+    pub p: [u8; 256],
 }
 
 impl ImprovedNoise {
@@ -360,14 +360,14 @@ impl NormalNoise {
 
 // ---------------- BlendedNoise (old_blended_noise) ----------------
 pub struct BlendedNoise {
-    min_limit_noise: PerlinNoise,
-    max_limit_noise: PerlinNoise,
-    main_noise: PerlinNoise,
-    xz_multiplier: f64, // 684.412 * xz_scale
-    y_multiplier: f64,  // 684.412 * y_scale
-    xz_factor: f64,
-    y_factor: f64,
-    smear_scale_multiplier: f64,
+    pub min_noise: PerlinNoise,
+    pub max_noise: PerlinNoise,
+    pub main_noise: PerlinNoise,
+    pub xz_multiplier: f64, // 684.412 * xz_scale
+    pub y_multiplier: f64,  // 684.412 * y_scale
+    pub xz_factor: f64,
+    pub y_factor: f64,
+    pub smear_scale_multiplier: f64,
     pub max_value: f64,
 }
 
@@ -412,8 +412,8 @@ impl BlendedNoise {
         }
         let max_value = v;
         BlendedNoise {
-            min_limit_noise,
-            max_limit_noise,
+            min_noise: min_limit_noise,
+            max_noise: max_limit_noise,
             main_noise,
             xz_multiplier,
             y_multiplier,
@@ -463,12 +463,12 @@ impl BlendedNoise {
             let dz = wrap(d2 * amp);
             let dyy = d6 * amp;
             if !skip_min {
-                if let Some(oct) = self.min_limit_noise.get_octave_noise(i) {
+                if let Some(oct) = self.min_noise.get_octave_noise(i) {
                     d8 += oct.noise_5(dx, dy, dz, dyy, d1 * amp) / amp;
                 }
             }
             if !skip_max {
-                if let Some(oct) = self.max_limit_noise.get_octave_noise(i) {
+                if let Some(oct) = self.max_noise.get_octave_noise(i) {
                     d9 += oct.noise_5(dx, dy, dz, dyy, d1 * amp) / amp;
                 }
             }

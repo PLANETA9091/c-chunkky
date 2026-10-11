@@ -77,7 +77,7 @@ bash harness/server_up.sh
 T0=$(date +%s%N)
 rcon "forceload add -64 -64 63 63" >/dev/null
 for i in $(seq 1 900); do
-  LOADED=$(rcon "crusstatus" | grep -o "region\[-4\.\.3,-4\.\.3\]=[0-9]*/64" | tail -1 || true)
+  LOADED=$(rcon "crusstatus" | grep -m1 "vanilla:.*region\[-4\.\.3,-4\.\.3\]=[0-9]*/64" | grep -o "region\[-4\.\.3,-4\.\.3\]=[0-9]*/64" | head -1 || true)
   if [ "$LOADED" = "region[-4..3,-4..3]=64/64" ]; then break; fi
   sleep 2
 done

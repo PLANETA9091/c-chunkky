@@ -10,7 +10,7 @@
 //   2. eval: exact per-node arithmetic. f64 everywhere except splines, which
 //      are pure f32 (vanilla CubicSpline.Multipoint.apply works in float).
 
-use crate::noise::{BlendedNoise, NormalNoise};
+use crate::noise::NormalNoise;
 use crate::rng::{XoroshiroRandomSource, XoroshiroPositionalRandomFactory};
 use crate::worldgen::{DfNode, NoiseSource, SplineValue, WorldGen};
 use std::collections::HashMap;
@@ -48,8 +48,6 @@ pub enum Mode {
 pub struct NoiseInstances {
     /// NormalNoise per noise-params id ("minecraft:offset", ...).
     pub noises: HashMap<String, NormalNoise>,
-    /// old_blended_noise ("minecraft:terrain" reseed).
-    pub terrain: BlendedNoise,
 }
 
 /// Everything needed to evaluate density for one seed.
@@ -108,8 +106,10 @@ pub enum WKind {
     ShiftB {
         noise_id: u32,
     },
-    /// Baked params live in `NoiseInstances::terrain`.
-    OldBlendedNoise,
+    /// Index into `Compiled::blended` (per-node params, terrain-seeded).
+    OldBlendedNoise {
+        instance: u32,
+    },
     Clamp {
         input: u32,
         min: f64,
@@ -152,6 +152,27 @@ pub enum WKind {
         child: u32,
         slot: u16,
     },
+    /// Pure memoization wrappers, kept for structural walk parity (values
+    /// identical with or without the cache).
+    Cache2d {
+        child: u32,
+    },
+    CacheOnce {
+        child: u32,
+    },
+    FlatCache {
+        child: u32,
+    },
+    CacheAllInCell {
+        child: u32,
+    },
+    /// Vanilla constant-fold of Ap2(ADD/MUL) with a Constant operand:
+    /// argument1 = Constant(argument), argument2 = input.
+    MulOrAdd {
+        is_add: bool,
+        input: u32,
+        argument: f64,
+    },
     EndIslands,
 }
 
@@ -159,6 +180,9 @@ pub struct Compiled {
     pub arena: Vec<WKind>,
     /// Noise id strings by compiled noise index.
     pub noise_ids: Vec<String>,
+    /// Per-params BlendedNoise instances (vanilla withNewRandom re-seeds each
+    /// from the same "minecraft:terrain" factory hash).
+    pub blended: Vec<crate::noise::BlendedNoise>,
     /// Wired router roots by field name ("final_density", "barrier", ...).
     pub router: HashMap<String, u32>,
     /// Number of Interpolated slots (== InterpState size).
@@ -178,6 +202,8 @@ struct Compiler<'a> {
     noise_id_index: HashMap<String, u32>,
     interp_slots: u16,
     interp_children: Vec<u32>,
+    blended_params: Vec<(f64, f64, f64, f64, f64)>,
+    blended_index: HashMap<(u64, u64, u64, u64, u64), u32>,
 }
 
 impl<'a> Compiler<'a> {
@@ -189,6 +215,8 @@ impl<'a> Compiler<'a> {
             noise_id_index: HashMap::new(),
             interp_slots: 0,
             interp_children: Vec::new(),
+            blended_params: Vec::new(),
+            blended_index: HashMap::new(),
         }
     }
 
@@ -297,16 +325,51 @@ impl<'a> Compiler<'a> {
                 self.interp_children.push(c);
                 self.push(WKind::Interpolated { child: c, slot })
             }
-            // Pure memoization caches: values identical without them.
-            DfNode::FlatCache { argument }
-            | DfNode::Cache2d { argument }
-            | DfNode::CacheOnce { argument }
-            | DfNode::CacheAllInCell { argument } => self.compile(*argument),
+            // Pure memoization wrappers: kept for walk parity, pass-through eval.
+            DfNode::FlatCache { argument } => {
+                let c = self.compile(*argument);
+                self.push(WKind::FlatCache { child: c })
+            }
+            DfNode::Cache2d { argument } => {
+                let c = self.compile(*argument);
+                self.push(WKind::Cache2d { child: c })
+            }
+            DfNode::CacheOnce { argument } => {
+                let c = self.compile(*argument);
+                self.push(WKind::CacheOnce { child: c })
+            }
+            DfNode::CacheAllInCell { argument } => {
+                let c = self.compile(*argument);
+                self.push(WKind::CacheAllInCell { child: c })
+            }
             DfNode::CellScale { argument, .. } => {
                 // Not present in 1.21.8 assets; treat as identity (documented).
                 self.compile(*argument)
             }
-            DfNode::OldBlendedNoise { .. } => self.push(WKind::OldBlendedNoise),
+            DfNode::OldBlendedNoise { xz_scale, y_scale, xz_factor, y_factor, smear_scale_multiplier } => {
+                let key = (
+                    xz_scale.to_bits(),
+                    y_scale.to_bits(),
+                    xz_factor.to_bits(),
+                    y_factor.to_bits(),
+                    smear_scale_multiplier.to_bits(),
+                );
+                let instance = if let Some(i) = self.blended_index.get(&key) {
+                    *i
+                } else {
+                    let i = self.blended_params.len() as u32;
+                    self.blended_params.push((
+                        *xz_scale,
+                        *y_scale,
+                        *xz_factor,
+                        *y_factor,
+                        *smear_scale_multiplier,
+                    ));
+                    self.blended_index.insert(key, i);
+                    i
+                };
+                self.push(WKind::OldBlendedNoise { instance })
+            }
             DfNode::Spline { coordinate, points } => {
                 let coord = self.compile(*coordinate);
                 let pts = points
@@ -355,6 +418,19 @@ impl<'a> Compiler<'a> {
             [a, b] => {
                 let a = self.compile(*a);
                 let b = self.compile(*b);
+                // vanilla TwoArgumentSimpleFunction.create constant fold:
+                // (op Const X) or (op X Const) -> MulOrAdd(input=the other,
+                // argument=const), argument1()=Const
+                let (a_kind, a_val) = self.as_const(a);
+                let (b_kind, b_val) = self.as_const(b);
+                if matches!(kind, Ap2Kind::Add | Ap2Kind::Mul) && (a_kind || b_kind) {
+                    let (input, argument) = if a_kind { (b, a_val) } else { (a, b_val) };
+                    return self.push(WKind::MulOrAdd {
+                        is_add: kind == Ap2Kind::Add,
+                        input,
+                        argument,
+                    });
+                }
                 self.push(WKind::Ap2 { kind, a, b })
             }
             many => {
@@ -365,6 +441,13 @@ impl<'a> Compiler<'a> {
                 }
                 acc
             }
+        }
+    }
+
+    fn as_const(&self, idx: u32) -> (bool, f64) {
+        match &self.arena[idx as usize] {
+            WKind::Const(v) => (true, *v),
+            _ => (false, 0.0),
         }
     }
 
@@ -396,13 +479,6 @@ impl Env {
         // oreRandom = random.fromHashOf("minecraft:ore").forkPositional()
         let mut ore = root_factory.from_hash_of("minecraft:ore");
         let ore_random = ore.fork_positional();
-        // BlendedNoise.withNewRandom(random.fromHashOf("minecraft:terrain"))
-        let blended = find_blended_params(&wg);
-        let mut terrain_src = root_factory.from_hash_of("minecraft:terrain");
-        let terrain = BlendedNoise::create(
-            &mut terrain_src,
-            blended.0, blended.1, blended.2, blended.3, blended.4,
-        );
         // Noise instances: Noises.instantiate -> NormalNoise.create(
         //   random.fromHashOf(key.location()), params) — deterministic per id.
         let mut used: Vec<String> = Vec::new();
@@ -419,7 +495,7 @@ impl Env {
         }
         Env {
             wg,
-            noise: NoiseInstances { noises, terrain },
+            noise: NoiseInstances { noises },
             aquifer_random,
             ore_random,
         }
@@ -437,9 +513,16 @@ impl Env {
             let root = c.compile(idx);
             router.insert(k.clone(), root);
         }
+        // BlendedNoise per unique params (each re-seeded from "minecraft:terrain")
+        let mut blended = Vec::with_capacity(c.blended_params.len());
+        for (xz, y, xzf, yf, smear) in &c.blended_params {
+            let mut src = root_terrain_factory(&self.wg, seed_unused());
+            blended.push(crate::noise::BlendedNoise::create(&mut src, *xz, *y, *xzf, *yf, *smear));
+        }
         Compiled {
             arena: c.arena,
             noise_ids: c.noise_ids,
+            blended,
             router,
             interp_slots: c.interp_slots,
             interp_children: c.interp_children,
@@ -452,13 +535,16 @@ impl Env {
     }
 }
 
-fn find_blended_params(wg: &WorldGen) -> (f64, f64, f64, f64, f64) {
-    for node in &wg.df_arena {
-        if let DfNode::OldBlendedNoise { xz_scale, y_scale, xz_factor, y_factor, smear_scale_multiplier } = node {
-            return (*xz_scale, *y_scale, *xz_factor, *y_factor, *smear_scale_multiplier);
-        }
-    }
-    (1.0, 1.0, 80.0, 160.0, 4.0)
+fn seed_unused() -> i64 {
+    0
+}
+
+/// The "minecraft:terrain" XoroshiroRandomSource for the given worldgen seed:
+/// root = Xoroshiro(seed).forkPositional(); terrain = root.fromHashOf("minecraft:terrain").
+fn root_terrain_factory(_wg: &WorldGen, seed: i64) -> crate::rng::XoroshiroRandomSource {
+    let mut root = crate::rng::XoroshiroRandomSource::new(seed);
+    let root_factory = root.fork_positional();
+    root_factory.from_hash_of("minecraft:terrain")
 }
 
 fn collect_noise_refs(wg: &WorldGen, out: &mut Vec<String>) {
@@ -652,7 +738,9 @@ impl Env {
                 // ShiftNoise.compute(z, x, 0)
                 self.normal(id).get_value(pt.z as f64 * 0.25, pt.x as f64 * 0.25, 0.0) * 4.0
             }
-            WKind::OldBlendedNoise => self.noise.terrain.compute(pt.x, pt.y, pt.z),
+            WKind::OldBlendedNoise { instance } => {
+                c.blended[*instance as usize].compute(pt.x, pt.y, pt.z)
+            }
             WKind::Clamp { input, min, max } => mth_clamp(self.eval(c, *input, pt, mode, interp), *min, *max),
             WKind::Mapped { kind, input } => {
                 let v = self.eval(c, *input, pt, mode, interp);
@@ -767,6 +855,21 @@ impl Env {
                 );
                 d * n.abs()
             }
+            WKind::Cache2d { child }
+            | WKind::CacheOnce { child }
+            | WKind::FlatCache { child }
+            | WKind::CacheAllInCell { child } => self.eval(c, *child, pt, mode, interp),
+            WKind::MulOrAdd { is_add, input, argument } => {
+                let v = self.eval(c, *input, pt, mode, interp);
+                if *is_add {
+                    v + argument
+                } else if *argument == 0.0 {
+                    // vanilla Ap2 MUL short-circuit on the constant side
+                    0.0
+                } else {
+                    v * argument
+                }
+            }
             WKind::Interpolated { child, slot } => match mode {
                 Mode::Direct | Mode::Slice => self.eval(c, *child, pt, mode, interp),
                 Mode::Block => interp.chain_value(*slot),
@@ -848,5 +951,48 @@ fn spline_apply(
         let l0 = f6 + f3 * (f7 - f6); // Mth.lerp(f3, f6, f7) in f32
         let l1 = f8 + f3 * (f9 - f8); // Mth.lerp(f3, f8, f9) in f32
         l0 + f3 * (1.0f32 - f3) * l1
+    }
+}
+
+impl WKind {
+    /// Java class simple name for walk-parity output.
+    pub fn java_kind(&self) -> &'static str {
+        match self {
+            WKind::Const(_) => "Constant",
+            WKind::Noise { .. } => "Noise",
+            WKind::ShiftedNoise { .. } => "ShiftedNoise",
+            WKind::ShiftA { .. } => "ShiftA",
+            WKind::ShiftB { .. } => "ShiftB",
+            WKind::OldBlendedNoise { .. } => "BlendedNoise",
+            WKind::Clamp { .. } => "Clamp",
+            WKind::Mapped { kind, .. } => match kind {
+                MapKind::Abs => "Mapped",
+                MapKind::Square => "Mapped",
+                MapKind::Cube => "Mapped",
+                MapKind::HalfNegative => "Mapped",
+                MapKind::QuarterNegative => "Mapped",
+                MapKind::Squeeze => "Mapped",
+            },
+            WKind::Ap2 { .. } => "Ap2",
+            WKind::MulOrAdd { .. } => "MulOrAdd",
+            WKind::RangeChoice { .. } => "RangeChoice",
+            WKind::YClampedGradient { .. } => "YClampedGradient",
+            WKind::Spline { .. } => "Spline",
+            WKind::WeirdScaledSampler { .. } => "WeirdScaledSampler",
+            WKind::Interpolated { .. } => "NoiseInterpolator",
+            WKind::Cache2d { .. } => "Cache2D",
+            WKind::CacheOnce { .. } => "CacheOnce",
+            WKind::FlatCache { .. } => "FlatCache",
+            WKind::CacheAllInCell { .. } => "CacheAllInCell",
+            WKind::EndIslands => "EndIslandDensityFunction",
+        }
+    }
+
+    /// Single child index for PureTransformer-shaped nodes.
+    pub fn child_of(&self) -> Option<u32> {
+        match self {
+            WKind::Clamp { input, .. } | WKind::Mapped { input, .. } => Some(*input),
+            _ => None,
+        }
     }
 }
