@@ -12,7 +12,7 @@
 //   - postprocessing marks (shouldScheduleFluidUpdate) are skipped: they carry
 //     no block data, and the Bukkit noise path cannot express them.
 
-use crate::density::{Compiled, Env, InterpState, MemoCtx, Mode, Pt, WKind};
+use crate::density::{compile_cellfill, CellOp, Compiled, Env, InterpState, MemoCtx, Mode, Pt, WKind};
 
 // ---------------------------------------------------------------------------
 // frozen block ids (repo-root block_registry.txt; ore ids appended)
@@ -205,6 +205,9 @@ pub struct ChunkGen<'e> {
     cell_cache: Vec<f64>, // 4*8*4 = 128
     /// CellFill fast path: slot of the final_density interpolated root.
     final_density_slot: Option<u16>,
+    /// Compiled CellFill program (None -> interpreter fallback).
+    cellfill_prog: Option<Vec<CellOp>>,
+    cellfill_stack: Vec<f64>,
     /// preliminarySurfaceLevel cache (key: (x<<32)|z of quart-snapped column).
     prelim: std::collections::HashMap<i64, i32>,
     /// Cross-chunk corner-plane cache: the last fill's final x-plane equals
@@ -296,6 +299,8 @@ impl<'e> ChunkGen<'e> {
                 WKind::Interpolated { slot, .. } => Some(*slot),
                 _ => None,
             },
+            cellfill_prog: compile_cellfill(&compiled.arena, compiled.router["final_density"]),
+            cellfill_stack: Vec::with_capacity(16),
             initial_density: router("initial_density_without_jaggedness"),
             barrier: router("barrier"),
             floodedness: router("fluid_level_floodedness"),
@@ -485,8 +490,6 @@ impl<'e> ChunkGen<'e> {
         let prof = p.enabled;
         let dbg = std::env::var("CRUS_DBG_SLICE").is_ok();
         let mut dbg_last_mt: Option<std::time::Duration> = None;
-        let dbg_rows_ns = std::cell::Cell::new(0u64);
-        let dbg_z_ns = std::cell::Cell::new(0u64);
         out.fill(AIR);
         let min_block_x = cx * 16;
         let min_block_z = cz * 16;
@@ -573,19 +576,25 @@ impl<'e> ChunkGen<'e> {
                                     self.cell_cache[idx] = 0.0;
                                     idx += 1;
                                 }
-                            } else if let Some(slot) = slot_fast {
-                                // rows are fixed for (iy, ix); only lerp(dz, ..) varies
-                                let t_rows = if dbg { Some(std::time::Instant::now()) } else { None };
-                                let (row1, row2) = self.interp.cellfill_rows(slot, dx, dy);
-                                if let Some(t) = t_rows { dbg_rows_ns.set(dbg_rows_ns.get() + t.elapsed().as_nanos() as u64); }
-                                let t_z = if dbg { Some(std::time::Instant::now()) } else { None };
+                            } else if self.cellfill_prog.is_some() {
+                                // compiled straight-line program: bit-exact
+                                // replay of the interpreter in CellFill mode.
+                                let prog = self.cellfill_prog.as_ref().unwrap();
+                                let block_y = cell_start_block_y + iy;
                                 let mut dz = 0.0f64;
                                 for _ in 0..cw_i {
-                                    self.cell_cache[idx] = InterpState::cellfill_row_z(row1, row2, dz);
+                                    self.cell_cache[idx] = run_cellfill(
+                                        prog,
+                                        &self.interp,
+                                        dx,
+                                        dy,
+                                        dz,
+                                        block_y,
+                                        &mut self.cellfill_stack,
+                                    );
                                     idx += 1;
                                     dz += dx_step;
                                 }
-                                if let Some(t) = t_z { dbg_z_ns.set(dbg_z_ns.get() + t.elapsed().as_nanos() as u64); }
                             } else {
                                 let mut dz = 0.0f64;
                                 let mut iz = 0i32;
@@ -675,9 +684,6 @@ impl<'e> ChunkGen<'e> {
             self.interp.copy_slice0_into(&mut self.plane_cache);
             self.plane_cache_x = plane_x;
             self.plane_cache_z = first_cell_z;
-        }
-        if dbg {
-            eprintln!("DBG rows_total={}us z_total={}us", dbg_rows_ns.get() / 1000, dbg_z_ns.get() / 1000);
         }
         self.prof = p;
     }
@@ -1157,5 +1163,120 @@ impl<'e> ChunkGen<'e> {
 
     pub fn eval_child_pub(&self, child: u32, pt: Pt) -> f64 {
         self.eval_fresh(child, pt, Mode::Slice)
+    }
+}
+
+/// Execute a compiled CellFill program. Stack machine in exact post-order;
+/// expressions mirror Env::eval (Mode::CellFill) bit-for-bit.
+#[inline]
+fn run_cellfill(
+    prog: &[CellOp],
+    interp: &InterpState,
+    dx: f64,
+    dy: f64,
+    dz: f64,
+    block_y: i32,
+    stack: &mut Vec<f64>,
+) -> f64 {
+    stack.clear();
+    for op in prog {
+        match op {
+            CellOp::PushConst(v) => stack.push(*v),
+            CellOp::Lerp3 { slot } => stack.push(interp.cellfill_value_at(*slot, dx, dy, dz)),
+            CellOp::YGrad { from_y, to_y, from_value, to_value } => {
+                let t = (block_y as f64 - *from_y as f64) / (*to_y as f64 - *from_y as f64);
+                stack.push(if t < 0.0 {
+                    *from_value
+                } else if t > 1.0 {
+                    *to_value
+                } else {
+                    let _ = block_y;
+                    lerp_local(t, *from_value, *to_value)
+                });
+            }
+            CellOp::Add => {
+                let b = stack.pop().unwrap();
+                let a = stack.pop().unwrap();
+                stack.push(a + b);
+            }
+            CellOp::Mul => {
+                let b = stack.pop().unwrap();
+                let a = stack.pop().unwrap();
+                // vanilla Ap2.Mul short-circuit on zero argument1
+                stack.push(if a == 0.0 { 0.0 } else { a * b });
+            }
+            CellOp::Min => {
+                let b = stack.pop().unwrap();
+                let a = stack.pop().unwrap();
+                stack.push(if a < b { a } else { b });
+            }
+            CellOp::Max => {
+                let b = stack.pop().unwrap();
+                let a = stack.pop().unwrap();
+                stack.push(if a > b { a } else { b });
+            }
+            CellOp::Abs => {
+                let a = stack.pop().unwrap();
+                stack.push(a.abs());
+            }
+            CellOp::Square => {
+                let a = stack.pop().unwrap();
+                stack.push(a * a);
+            }
+            CellOp::Cube => {
+                let a = stack.pop().unwrap();
+                stack.push(a * a * a);
+            }
+            CellOp::HalfNeg => {
+                let a = stack.pop().unwrap();
+                stack.push(if a > 0.0 { a } else { a * 0.5 });
+            }
+            CellOp::QuarterNeg => {
+                let a = stack.pop().unwrap();
+                stack.push(if a > 0.0 { a } else { a * 0.25 });
+            }
+            CellOp::Squeeze => {
+                let a = stack.pop().unwrap();
+                let d = clamp_local(a, -1.0, 1.0);
+                stack.push(d / 2.0 - d * d * d / 24.0);
+            }
+            CellOp::Clamp { min, max } => {
+                let a = stack.pop().unwrap();
+                stack.push(clamp_local(a, *min, *max));
+            }
+            CellOp::RangeChoice { min_inclusive, max_exclusive } => {
+                let out = stack.pop().unwrap();
+                let inr = stack.pop().unwrap();
+                let v = stack.pop().unwrap();
+                stack.push(if v >= *min_inclusive && v < *max_exclusive { inr } else { out });
+            }
+            CellOp::MulOrAdd { is_add, argument } => {
+                let a = stack.pop().unwrap();
+                stack.push(if *is_add {
+                    a + *argument
+                } else if *argument == 0.0 {
+                    0.0
+                } else {
+                    a * *argument
+                });
+            }
+        }
+    }
+    stack[0]
+}
+
+#[inline]
+fn lerp_local(t: f64, a: f64, b: f64) -> f64 {
+    a + t * (b - a)
+}
+
+#[inline]
+fn clamp_local(v: f64, min: f64, max: f64) -> f64 {
+    if v < min {
+        min
+    } else if v > max {
+        max
+    } else {
+        v
     }
 }

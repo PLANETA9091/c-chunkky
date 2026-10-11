@@ -1296,3 +1296,129 @@ impl InterpState {
         dst.extend_from_slice(&self.slice0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// compiled CellFill program (straight-line replay of the density tree for
+// the CacheAllInCell hot path)
+// ---------------------------------------------------------------------------
+
+/// One operation of the CellFill program (post-order = exact vanilla
+/// evaluation order). Only PURE nodes are compilable; anything that samples
+/// noise per block aborts compilation and the driver falls back to the
+/// interpreter. Values are bit-identical to Env::eval in Mode::CellFill.
+#[derive(Debug, Clone)]
+pub enum CellOp {
+    PushConst(f64),
+    /// lerp3 of corners[slot] at the in-cell fractions (vanilla
+    /// NoiseInterpolator.compute with fillingCell=true).
+    Lerp3 { slot: u16 },
+    /// YClampedGradient at the current block y.
+    YGrad { from_y: i32, to_y: i32, from_value: f64, to_value: f64 },
+    Add,
+    Mul,
+    Min,
+    Max,
+    Abs,
+    Square,
+    Cube,
+    HalfNeg,
+    QuarterNeg,
+    Squeeze,
+    Clamp { min: f64, max: f64 },
+    RangeChoice { min_inclusive: f64, max_exclusive: f64 },
+    MulOrAdd { is_add: bool, argument: f64 },
+}
+
+/// Compile the CellFill program for `root`, or None if the tree contains
+/// nodes that require per-block noise sampling (raw noises, splines with
+/// node values, weird samplers, end islands).
+pub fn compile_cellfill(arena: &[WKind], root: u32) -> Option<Vec<CellOp>> {
+    let mut prog = Vec::new();
+    let mut stack = vec![(root, false)];
+    while let Some((idx, expanded)) = stack.pop() {
+        if expanded {
+            // emit the parent op after its children
+            match &arena[idx as usize] {
+                WKind::Const(v) => prog.push(CellOp::PushConst(*v)),
+                WKind::Clamp { min, max, .. } => prog.push(CellOp::Clamp { min: *min, max: *max }),
+                WKind::Mapped { kind, .. } => prog.push(match kind {
+                    MapKind::Abs => CellOp::Abs,
+                    MapKind::Square => CellOp::Square,
+                    MapKind::Cube => CellOp::Cube,
+                    MapKind::HalfNegative => CellOp::HalfNeg,
+                    MapKind::QuarterNegative => CellOp::QuarterNeg,
+                    MapKind::Squeeze => CellOp::Squeeze,
+                }),
+                WKind::Ap2 { kind, .. } => prog.push(match kind {
+                    Ap2Kind::Add => CellOp::Add,
+                    Ap2Kind::Mul => CellOp::Mul,
+                    Ap2Kind::Min => CellOp::Min,
+                    Ap2Kind::Max => CellOp::Max,
+                }),
+                WKind::RangeChoice { min_inclusive, max_exclusive, .. } => prog.push(CellOp::RangeChoice {
+                    min_inclusive: *min_inclusive,
+                    max_exclusive: *max_exclusive,
+                }),
+                WKind::YClampedGradient { from_y, to_y, from_value, to_value } => {
+                    prog.push(CellOp::YGrad {
+                        from_y: *from_y,
+                        to_y: *to_y,
+                        from_value: *from_value,
+                        to_value: *to_value,
+                    })
+                }
+                WKind::Interpolated { slot, .. } => prog.push(CellOp::Lerp3 { slot: *slot }),
+                WKind::MulOrAdd { is_add, argument, .. } => {
+                    prog.push(CellOp::MulOrAdd { is_add: *is_add, argument: *argument })
+                }
+                // pass-through wrappers: child already emitted, emit nothing
+                WKind::Cache2d { .. } | WKind::CacheOnce { .. } | WKind::FlatCache { .. }
+                | WKind::CacheAllInCell { .. } => {}
+                // per-block noise sampling / unsupported: abort
+                _ => return None,
+            }
+            continue;
+        }
+        let node = &arena[idx as usize];
+        match node {
+            WKind::Const(_) | WKind::Interpolated { .. } | WKind::YClampedGradient { .. } => {
+                stack.push((idx, true));
+            }
+            WKind::Clamp { input, .. }
+            | WKind::Mapped { input, .. }
+            | WKind::MulOrAdd { input, .. }
+            | WKind::Cache2d { child: input }
+            | WKind::CacheOnce { child: input }
+            | WKind::FlatCache { child: input }
+            | WKind::CacheAllInCell { child: input } => {
+                stack.push((idx, true));
+                stack.push((*input, false));
+            }
+            WKind::Ap2 { a, b, .. } => {
+                stack.push((idx, true));
+                stack.push((*b, false));
+                stack.push((*a, false));
+            }
+            WKind::RangeChoice { input, when_in_range, when_out_of_range, .. } => {
+                stack.push((idx, true));
+                stack.push((*when_out_of_range, false));
+                stack.push((*when_in_range, false));
+                stack.push((*input, false));
+            }
+            // unsupported in the compiled program
+            _ => return None,
+        }
+    }
+    Some(prog)
+}
+
+impl InterpState {
+    /// cellfill_value with explicit fractions (no cell_frac dependency).
+    #[inline]
+    pub fn cellfill_value_at(&self, slot: u16, dx: f64, dy: f64, dz: f64) -> f64 {
+        let n = self.corners[slot as usize];
+        let row1 = lerp(dy, lerp(dx, n[0], n[1]), lerp(dx, n[2], n[3]));
+        let row2 = lerp(dy, lerp(dx, n[4], n[5]), lerp(dx, n[6], n[7]));
+        lerp(dz, row1, row2)
+    }
+}
