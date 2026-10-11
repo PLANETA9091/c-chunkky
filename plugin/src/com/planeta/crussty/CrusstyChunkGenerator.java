@@ -315,12 +315,15 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         try {
             Object ref = weakChunkField.get(chunkData);
             if (!(ref instanceof WeakReference<?> wr)) {
+                GenStats.BRIDGE_NO_CHUNK.incrementAndGet();
                 return; // unlinked path
             }
             Object chunk = wr.get();
             if (chunk == null) {
+                GenStats.BRIDGE_NO_CHUNK.incrementAndGet();
                 return;
             }
+            GenStats.MARKS_SEEN.addAndGet(count);
             for (int i = 0; i < count; i++) {
                 long p = marks[i];
                 int x = (int) (p >> 38);
@@ -329,7 +332,9 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 Object bp = blockPosCtor.newInstance(x, y, z);
                 markMethod.invoke(chunk, bp);
             }
+            GenStats.MARKS_LANDED.addAndGet(count);
         } catch (Throwable t) {
+            GenStats.BRIDGE_ERROR.incrementAndGet();
             bridgeBroken = true;
             LOG.warning("fluid-update marking failed, disabling bridge: " + t);
         }
