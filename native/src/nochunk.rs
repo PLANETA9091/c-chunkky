@@ -216,6 +216,12 @@ pub struct ChunkGen<'e> {
     /// Compiled CellFill program (None -> interpreter fallback).
     cellfill_prog: Option<Vec<CellOp>>,
     cellfill_stack: Vec<f64>,
+    /// Per-(dx,dy) hoisted trilinear rows: per slot [row1, row2] so the
+    /// per-block cost is a single z-lerp per Lerp3 slot (bit-exact: the
+    /// hoisted x/y lerps are the same ops with the same inputs).
+    cellfill_rows: Vec<f64>,
+    /// Slot ids actually referenced by the cellfill program (hoist these only).
+    cellfill_slots: Vec<u16>,
     /// preliminarySurfaceLevel cache (key: (x<<32)|z of quart-snapped column).
     prelim: std::collections::HashMap<i64, i32>,
     /// Cross-chunk corner-plane cache: the last fill's final x-plane equals
@@ -310,6 +316,18 @@ impl<'e> ChunkGen<'e> {
             },
             cellfill_prog: compile_cellfill(&compiled.arena, compiled.router["final_density"]),
             cellfill_stack: Vec::with_capacity(16),
+            cellfill_rows: vec![0.0; compiled.interp_slots as usize * 2],
+            cellfill_slots: {
+                let mut seen = std::collections::BTreeSet::new();
+                if let Some(prog) = &compile_cellfill(&compiled.arena, compiled.router["final_density"]) {
+                    for op in prog {
+                        if let CellOp::Lerp3 { slot } = op {
+                            seen.insert(*slot);
+                        }
+                    }
+                }
+                seen.into_iter().collect()
+            },
             initial_density: router("initial_density_without_jaggedness"),
             barrier: router("barrier"),
             floodedness: router("fluid_level_floodedness"),
@@ -684,18 +702,37 @@ impl<'e> ChunkGen<'e> {
                             } else if self.cellfill_prog.is_some() {
                                 // compiled straight-line program: bit-exact
                                 // replay of the interpreter in CellFill mode.
+                                // Row hoisting: dx/dy are constant across the
+                                // 4 z-blocks, so each slot's first two trilinear
+                                // stages (lerp_dx + lerp_dy) are computed once
+                                // per row; per block only the z-lerp remains.
                                 let prog = self.cellfill_prog.as_ref().unwrap();
                                 let block_y = cell_start_block_y + iy;
-                                let mut dz = 0.0f64;
-                                for _ in 0..cw_i {
-                                    self.cell_cache[idx] = run_cellfill(
-                                        prog,
-                                        &self.interp,
-                                        dx,
+                                let rows = &mut self.cellfill_rows;
+                                for &s in &self.cellfill_slots {
+                                    let n = self.interp.corners_pub(s);
+                                    rows[s as usize * 2] = lerp_local(
                                         dy,
+                                        lerp_local(dx, n[0], n[1]),
+                                        lerp_local(dx, n[2], n[3]),
+                                    );
+                                    rows[s as usize * 2 + 1] = lerp_local(
+                                        dy,
+                                        lerp_local(dx, n[4], n[5]),
+                                        lerp_local(dx, n[6], n[7]),
+                                    );
+                                }
+                                let mut dz = 0.0f64;
+                                let mut stack = [0.0f64; 16];
+                                let mut sp = 0usize;
+                                for _ in 0..cw_i {
+                                    self.cell_cache[idx] = run_cellfill_rows(
+                                        prog,
+                                        &self.cellfill_rows,
                                         dz,
                                         block_y,
-                                        &mut self.cellfill_stack,
+                                        &mut stack,
+                                        &mut sp,
                                     );
                                     idx += 1;
                                     dz += dx_step;
@@ -1307,101 +1344,147 @@ impl<'e> ChunkGen<'e> {
 /// Pass B: per-block value. Lerp3 leaves consume the precomputed rows and
 /// apply only lerp(dz, row1, row2) — identical arithmetic to the interpreter.
 #[inline]
-fn run_cellfill(
+
+
+/// CellFill op replay with per-(dx,dy) hoisted trilinear rows: Lerp3 reduces
+/// to a single z-lerp per slot. Bit-exact vs the interpreter replay (same op
+/// order, same lerp formula, same inputs). Fixed-array stack: the program's
+/// max depth is <= 16 (validated by construction: 17-op straight-line tree).
+fn run_cellfill_rows(
     prog: &[CellOp],
-    interp: &InterpState,
-    dx: f64,
-    dy: f64,
+    rows: &[f64],
     dz: f64,
     block_y: i32,
-    stack: &mut Vec<f64>,
+    stack: &mut [f64; 16],
+    sp: &mut usize,
 ) -> f64 {
-    stack.clear();
+    *sp = 0;
     for op in prog {
         match op {
-            CellOp::PushConst(v) => stack.push(*v),
-            CellOp::Lerp3 { slot } => stack.push(interp.cellfill_value_at(*slot, dx, dy, dz)),
+            CellOp::PushConst(v) => {
+                stack[*sp] = *v;
+                *sp += 1;
+            }
+            CellOp::Lerp3 { slot } => {
+                let r1 = rows[*slot as usize * 2];
+                let r2 = rows[*slot as usize * 2 + 1];
+                stack[*sp] = lerp_local(dz, r1, r2);
+                *sp += 1;
+            }
             CellOp::YGrad { from_y, to_y, from_value, to_value } => {
                 let t = (block_y as f64 - *from_y as f64) / (*to_y as f64 - *from_y as f64);
-                stack.push(if t < 0.0 {
+                stack[*sp] = if t < 0.0 {
                     *from_value
                 } else if t > 1.0 {
                     *to_value
                 } else {
-                    let _ = block_y;
                     lerp_local(t, *from_value, *to_value)
-                });
+                };
+                *sp += 1;
             }
             CellOp::Add => {
-                let b = stack.pop().unwrap();
-                let a = stack.pop().unwrap();
-                stack.push(a + b);
+                *sp -= 1;
+                let b = stack[*sp];
+                *sp -= 1;
+                let a = stack[*sp];
+                stack[*sp] = a + b;
+                *sp += 1;
             }
             CellOp::Mul => {
-                let b = stack.pop().unwrap();
-                let a = stack.pop().unwrap();
+                *sp -= 1;
+                let b = stack[*sp];
+                *sp -= 1;
+                let a = stack[*sp];
                 // vanilla Ap2.Mul short-circuit on zero argument1
-                stack.push(if a == 0.0 { 0.0 } else { a * b });
+                stack[*sp] = if a == 0.0 { 0.0 } else { a * b };
+                *sp += 1;
             }
             CellOp::Min => {
-                let b = stack.pop().unwrap();
-                let a = stack.pop().unwrap();
-                stack.push(if a < b { a } else { b });
+                *sp -= 1;
+                let b = stack[*sp];
+                *sp -= 1;
+                let a = stack[*sp];
+                stack[*sp] = if a < b { a } else { b };
+                *sp += 1;
             }
             CellOp::Max => {
-                let b = stack.pop().unwrap();
-                let a = stack.pop().unwrap();
-                stack.push(if a > b { a } else { b });
+                *sp -= 1;
+                let b = stack[*sp];
+                *sp -= 1;
+                let a = stack[*sp];
+                stack[*sp] = if a > b { a } else { b };
+                *sp += 1;
             }
             CellOp::Abs => {
-                let a = stack.pop().unwrap();
-                stack.push(a.abs());
+                *sp -= 1;
+                let a = stack[*sp];
+                stack[*sp] = a.abs();
+                *sp += 1;
             }
             CellOp::Square => {
-                let a = stack.pop().unwrap();
-                stack.push(a * a);
+                *sp -= 1;
+                let a = stack[*sp];
+                stack[*sp] = a * a;
+                *sp += 1;
             }
             CellOp::Cube => {
-                let a = stack.pop().unwrap();
-                stack.push(a * a * a);
+                *sp -= 1;
+                let a = stack[*sp];
+                stack[*sp] = a * a * a;
+                *sp += 1;
             }
             CellOp::HalfNeg => {
-                let a = stack.pop().unwrap();
-                stack.push(if a > 0.0 { a } else { a * 0.5 });
+                *sp -= 1;
+                let a = stack[*sp];
+                stack[*sp] = if a > 0.0 { a } else { a * 0.5 };
+                *sp += 1;
             }
             CellOp::QuarterNeg => {
-                let a = stack.pop().unwrap();
-                stack.push(if a > 0.0 { a } else { a * 0.25 });
+                *sp -= 1;
+                let a = stack[*sp];
+                stack[*sp] = if a > 0.0 { a } else { a * 0.25 };
+                *sp += 1;
             }
             CellOp::Squeeze => {
-                let a = stack.pop().unwrap();
+                *sp -= 1;
+                let a = stack[*sp];
                 let d = clamp_local(a, -1.0, 1.0);
-                stack.push(d / 2.0 - d * d * d / 24.0);
+                stack[*sp] = d / 2.0 - d * d * d / 24.0;
+                *sp += 1;
             }
             CellOp::Clamp { min, max } => {
-                let a = stack.pop().unwrap();
-                stack.push(clamp_local(a, *min, *max));
+                *sp -= 1;
+                let a = stack[*sp];
+                stack[*sp] = clamp_local(a, *min, *max);
+                *sp += 1;
             }
             CellOp::RangeChoice { min_inclusive, max_exclusive } => {
-                let out = stack.pop().unwrap();
-                let inr = stack.pop().unwrap();
-                let v = stack.pop().unwrap();
-                stack.push(if v >= *min_inclusive && v < *max_exclusive { inr } else { out });
+                *sp -= 1;
+                let out = stack[*sp];
+                *sp -= 1;
+                let inr = stack[*sp];
+                *sp -= 1;
+                let v = stack[*sp];
+                stack[*sp] = if v >= *min_inclusive && v < *max_exclusive { inr } else { out };
+                *sp += 1;
             }
             CellOp::MulOrAdd { is_add, argument } => {
-                let a = stack.pop().unwrap();
-                stack.push(if *is_add {
+                *sp -= 1;
+                let a = stack[*sp];
+                stack[*sp] = if *is_add {
                     a + *argument
                 } else if *argument == 0.0 {
                     0.0
                 } else {
                     a * *argument
-                });
+                };
+                *sp += 1;
             }
         }
     }
     stack[0]
 }
+
 
 #[inline]
 fn lerp_local(t: f64, a: f64, b: f64) -> f64 {

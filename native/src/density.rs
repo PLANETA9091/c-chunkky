@@ -1445,4 +1445,10 @@ impl InterpState {
     pub fn corners_pub(&self, slot: u16) -> &[f64; 8] {
         &self.corners[slot as usize]
     }
+
+    /// Number of interpolated slots (cellfill row-hoisting scratch sizing).
+    #[inline]
+    pub fn slot_count(&self) -> usize {
+        self.corners.len()
+    }
 }
