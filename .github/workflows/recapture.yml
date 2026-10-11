@@ -30,6 +30,11 @@ jobs:
           chmod +x harness/bootstrap_server.sh
           bash harness/bootstrap_server.sh 60
 
+      - name: Deploy probe plugin (crusstatus / crusstydumpregion commands)
+        run: |
+          mkdir -p server/plugins
+          cp probe/CrusstyProbe.jar server/plugins/
+
       - name: Capture vanilla reference (steady state)
         run: |
           set -o pipefail
