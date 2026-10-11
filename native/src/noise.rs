@@ -44,6 +44,7 @@ fn mth_floor(x: f64) -> i32 {
 }
 
 // ---------------- ImprovedNoise ----------------
+#[derive(Clone)]
 pub struct ImprovedNoise {
     xo: f64,
     yo: f64,
@@ -439,7 +440,7 @@ impl BlendedNoise {
         let mut amp = 1.0;
         for i in 0..8usize {
             if let Some(oct) = self.main_noise.get_octave_noise(i) {
-                d10 += oct.noise(
+                d10 += oct.noise_5(
                     wrap(d3 * amp),
                     wrap(d4 * amp),
                     wrap(d5 * amp),
@@ -463,12 +464,12 @@ impl BlendedNoise {
             let dyy = d6 * amp;
             if !skip_min {
                 if let Some(oct) = self.min_limit_noise.get_octave_noise(i) {
-                    d8 += oct.noise(dx, dy, dz, dyy, d1 * amp) / amp;
+                    d8 += oct.noise_5(dx, dy, dz, dyy, d1 * amp) / amp;
                 }
             }
             if !skip_max {
                 if let Some(oct) = self.max_limit_noise.get_octave_noise(i) {
-                    d9 += oct.noise(dx, dy, dz, dyy, d1 * amp) / amp;
+                    d9 += oct.noise_5(dx, dy, dz, dyy, d1 * amp) / amp;
                 }
             }
             amp /= 2.0;

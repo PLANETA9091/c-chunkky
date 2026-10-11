@@ -941,3 +941,14 @@ mod tests {
         }
     }
 }
+
+/// Stable key for inline noise params (registry has no id for them).
+pub fn format_inline_key(p: &NoiseParams) -> String {
+    let mut s = format!("o{}", p.first_octave);
+    for a in &p.amplitudes {
+        s.push(':');
+        // exact f64 bits so the key round-trips losslessly
+        s.push_str(&format!("{:016x}", a.to_bits()));
+    }
+    s
+}

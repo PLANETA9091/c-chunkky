@@ -8,7 +8,13 @@
 //   nochunk     — NoiseChunk-equivalent chunk fill (cells, aquifer, deepslate)
 
 pub mod json;
+pub mod rng;
+pub mod md5;
+pub mod noise;
 pub mod worldgen;
+pub mod density;
+pub mod nochunk;
+pub mod ffi;
 
 include!(concat!(env!("OUT_DIR"), "/assets_manifest.rs"));
 

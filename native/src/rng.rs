@@ -100,6 +100,7 @@ impl LegacyPositionalRandomFactory {
 }
 
 // ---------------- Xoroshiro ----------------
+#[derive(Clone)]
 pub struct Xoroshiro128PlusPlus {
     lo: i64,
     hi: i64,
