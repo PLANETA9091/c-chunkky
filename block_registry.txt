@@ -16,3 +16,7 @@
 15 minecraft:powder_snow
 16 minecraft:ice
 17 minecraft:lava
+18 minecraft:copper_ore
+19 minecraft:raw_copper_block
+20 minecraft:deepslate_iron_ore
+21 minecraft:raw_iron_block

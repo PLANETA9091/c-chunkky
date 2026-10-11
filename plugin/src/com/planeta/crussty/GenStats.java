@@ -12,7 +12,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class GenStats {
 
-    /** native block id -> Material (block_registry.txt order, ids 0..17). */
+    /** native block id -> Material (block_registry.txt order, ids 0..21). */
     static final Material[] MATERIALS = {
             Material.AIR,            // 0
             Material.STONE,          // 1
@@ -32,6 +32,10 @@ public final class GenStats {
             Material.POWDER_SNOW,    // 15
             Material.ICE,            // 16
             Material.LAVA,           // 17
+            Material.COPPER_ORE,     // 18
+            Material.RAW_COPPER_BLOCK, // 19
+            Material.DEEPSLATE_IRON_ORE, // 20
+            Material.RAW_IRON_BLOCK, // 21
     };
 
     private static final int RING = 4096;

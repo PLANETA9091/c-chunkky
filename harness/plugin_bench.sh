@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 WORLD="${1:?usage: plugin_bench.sh <world> [diff_against_dir]}"
 REF_DIR="${2:-reference/dumps/$WORLD}"
-OUT_DIR="reference/dumps_plugin/$WORLD"
+OUT_DIR="$ROOT/reference/dumps_plugin/$WORLD"
 SRV="server"
 HOST=127.0.0.1
 PORT=25575
@@ -24,15 +24,26 @@ SEED=3257840388504953787
 
 SO="native/target/release/libcrussty_chunkgen.so"
 JAR="plugin/CrusstyGen.jar"
+PROBE_JAR="probe/CrusstyProbe.jar"
 [ -f "$SRV/paper.jar" ] || { echo "no server/paper.jar" >&2; exit 1; }
 [ -f "$SO" ] || { echo "no $SO — build native first (cargo build --release in native/)" >&2; exit 1; }
 [ -f "$JAR" ] || { echo "no $JAR — run plugin/build.sh" >&2; exit 1; }
 
-rcon() { python3 harness/rcon.py "$HOST" "$PORT" "$PASS" "$1"; }
+rcon() {
+  local tries=0
+  while [ "$tries" -lt 30 ]; do
+    if python3 harness/rcon.py "$HOST" "$PORT" "$PASS" "$1"; then return 0; fi
+    tries=$((tries + 1))
+    sleep 2
+  done
+  echo "rcon: giving up after retries: $1" >&2
+  return 3
+}
 
 # --- deploy -----------------------------------------------------------------
 mkdir -p "$SRV/plugins"
 cp "$JAR" "$SRV/plugins/CrusstyGen.jar"
+[ -f "$PROBE_JAR" ] && cp "$PROBE_JAR" "$SRV/plugins/CrusstyProbe.jar"
 {
   echo "# deployed.md5 $(date -u +%Y-%m-%dT%H:%M:%SZ) (plugin_bench)"
   md5sum "$SRV/paper.jar" "$SRV/plugins/CrusstyGen.jar" "$SO"
@@ -49,8 +60,9 @@ open("server/bukkit.yml", "w").write(content)
 print("server/bukkit.yml written:")
 print(content)
 PY
-# world + seed
-sed -i "s/^level-name=.*/level-name=$WORLD/; s/^level-seed=.*/level-seed=$SEED/" "$SRV/server.properties"
+# world + seed (+ nether off: saves boot/pregen time, judge is overworld-only)
+sed -i "s/^level-name=.*/level-name=$WORLD/; s/^level-seed=.*/level-seed=$SEED/; s/^allow-nether=.*/allow-nether=false/" "$SRV/server.properties"
+grep -qE "^allow-nether=false" "$SRV/server.properties" || echo "allow-nether=false" >> "$SRV/server.properties"
 grep -E "^(level-name|level-seed)=" "$SRV/server.properties"
 
 if [ "${CRUS_FRESH:-0}" = "1" ]; then

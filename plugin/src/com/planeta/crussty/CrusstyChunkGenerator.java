@@ -32,6 +32,38 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         return false;
     }
 
+    /** Vanilla surface rules (deepslate, biome surface, bedrock floor) run on top of our blocks. */
+    @Override
+    public boolean shouldGenerateSurface() {
+        return true;
+    }
+
+    @Override
+    public boolean shouldGenerateBedrock() {
+        return true;
+    }
+
+    /** Vanilla carvers (caves/ravines) cut into our blocks. */
+    @Override
+    public boolean shouldGenerateCaves() {
+        return true;
+    }
+
+    @Override
+    public boolean shouldGenerateDecorations() {
+        return true;
+    }
+
+    @Override
+    public boolean shouldGenerateStructures() {
+        return true;
+    }
+
+    @Override
+    public boolean shouldGenerateMobs() {
+        return true;
+    }
+
     static long ctxFor(long seed, int minY, int height) {
         return CTX.computeIfAbsent(seed, s -> {
             long ctx = ChunkGenNative.newCtx(s, minY, height);

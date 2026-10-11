@@ -2,6 +2,7 @@ name: CrusstyGen
 version: 0.1.0
 main: com.planeta.crussty.CrusstyGenPlugin
 api-version: '1.21'
+load: STARTUP
 description: Native noise-stage chunk generator (vanilla-exact, 1ms target)
 author: crussty-agent
 commands:
