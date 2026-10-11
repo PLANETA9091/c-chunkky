@@ -149,8 +149,15 @@ impl AquiferState {
     fn begin_chunk(&mut self, cx: i32, cz: i32) {
         self.min_grid_x = cx - 1;
         self.min_grid_z = cz - 1;
+        // Vanilla allocates fresh caches per NoiseChunk (per chunk); our
+        // generator persists across fills and the grid origin re-bases every
+        // chunk, so BOTH caches must be reset or stale cells alias into the
+        // new chunk's slots (correctness bug: wrong fluid statuses).
         for v in self.loc_cache.iter_mut() {
             *v = i64::MAX;
+        }
+        for v in self.cache.iter_mut() {
+            *v = None;
         }
     }
 
