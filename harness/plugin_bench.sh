@@ -93,6 +93,11 @@ T1=$(date +%s%N)
 WALL_MS=$(( (T1 - T0) / 1000000 ))
 echo "=== pregen wall: ${WALL_MS}ms (includes settle granularity) ==="
 
+# settle: match bench.sh (reference capture) — in-world fluid ticks (bubble
+# column growth, spring spreads) need equal wall time on both sides or the
+# judge compares a mid-tick world against a settled reference.
+sleep 5
+
 echo "=== crusgenstats ==="
 rcon "crusgenstats" | tee "reference/plugin_stats_$WORLD.txt" || true
 

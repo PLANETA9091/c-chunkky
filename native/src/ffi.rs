@@ -21,11 +21,15 @@ struct Ctx {
 static SESSIONS: Mutex<Option<HashMap<i64, Ctx>>> = Mutex::new(None);
 static NEXT_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
-/// Create a generator context for (seed, minY, height). Returns the ctx id
-/// (non-zero) or 0 on failure.
-pub fn ctx_new(seed: i64, _min_y: i32, _height: i32) -> i64 {
+/// Create a generator context for (seed, minY, height, seaLevel). Returns the
+/// ctx id (non-zero) or 0 on failure.
+pub fn ctx_new(seed: i64, _min_y: i32, _height: i32, sea_level: i32) -> i64 {
     let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let env: &'static DEnv = Box::leak(Box::new(DEnv::new(seed)));
+    let mut env: Box<DEnv> = Box::new(DEnv::new(seed));
+    // The plugin resolves the datapack-aware sea level (NoiseGeneratorSettings
+    // from the server registry); override the bundled-vanilla default.
+    env.wg.sea_level = sea_level as i64;
+    let env: &'static DEnv = Box::leak(env);
     let gen = ChunkGen::new(env);
     let mut map = SESSIONS.lock().unwrap();
     map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen });
@@ -57,7 +61,7 @@ pub extern "C" fn crussty_chunkgen_abi_version() -> u32 {
 
 #[no_mangle]
 pub extern "C" fn crussty_chunkgen_ctx_new(seed: i64, min_y: i32, height: i32) -> i64 {
-    ctx_new(seed, min_y, height)
+    ctx_new(seed, min_y, height, 63)
 }
 
 #[no_mangle]
@@ -102,8 +106,9 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_newCtx(
     seed: jni_sys::jlong,
     min_y: jni_sys::jint,
     height: jni_sys::jint,
+    sea_level: jni_sys::jint,
 ) -> jni_sys::jlong {
-    ctx_new(seed as i64, min_y as i32, height as i32)
+    ctx_new(seed as i64, min_y as i32, height as i32, sea_level as i32)
 }
 
 #[no_mangle]
@@ -126,8 +131,38 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fill(
     cz: jni_sys::jint,
     out: jni_sys::jshortArray,
 ) {
+    fill_jni(env, ctx, cx, cz, out, std::ptr::null_mut());
+}
+
+/// fillMarked(long ctx, int cx, int cz, short[] out, long[] marks) -> int.
+/// Same as fill, additionally writes the packed BlockPos list of aquifer
+/// fluid-update marks (vanilla shouldScheduleFluidUpdate positions, written
+/// block has a fluid state) into `marks`; returns the count.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fillMarked(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jni_sys::jlong,
+    cx: jni_sys::jint,
+    cz: jni_sys::jint,
+    out: jni_sys::jshortArray,
+    marks: jni_sys::jlongArray,
+) -> jni_sys::jint {
+    fill_jni(env, ctx, cx, cz, out, marks)
+}
+
+/// Shared fill path. If `marks` is non-null it receives the packed fluid
+/// update positions; returns the mark count (0 when marks is null).
+unsafe fn fill_jni(
+    env: *mut jni_sys::JNIEnv,
+    ctx: jni_sys::jlong,
+    cx: jni_sys::jint,
+    cz: jni_sys::jint,
+    out: jni_sys::jshortArray,
+    marks: jni_sys::jlongArray,
+) -> jni_sys::jint {
     if out.is_null() {
-        return;
+        return 0;
     }
     // jni-sys: JNIEnv = *const JNINativeInterface_ (C "JNIEnv"), and the macro
     // jni_to_union rewrites the table into a union of per-version views
@@ -137,7 +172,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fill(
     let len = ((*tbl).v1_1.GetArrayLength)(env, out as jni_sys::jarray) as usize;
     if len != OUT_LEN {
         // contract mismatch: refuse (plugin passes short[98304])
-        return;
+        return 0;
     }
     let ptr = ((*tbl).v1_2.GetPrimitiveArrayCritical)(
         env,
@@ -145,7 +180,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fill(
         std::ptr::null_mut(),
     ) as *mut u16;
     if ptr.is_null() {
-        return;
+        return 0;
     }
     let slice = std::slice::from_raw_parts_mut(ptr, OUT_LEN);
     let arr: &mut [u16; OUT_LEN] = slice.try_into().unwrap();
@@ -156,4 +191,33 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fill(
         ptr as *mut core::ffi::c_void,
         0,
     );
+    if marks.is_null() {
+        return 0;
+    }
+    let mlen = ((*tbl).v1_1.GetArrayLength)(env, marks as jni_sys::jarray) as usize;
+    let count = {
+        let map = SESSIONS.lock().unwrap();
+        let map = map.as_ref().expect("sessions map");
+        let c = map.get(&ctx as &i64).expect("ctx id");
+        let m = c.gen.marks();
+        let n = m.len().min(mlen);
+        let mptr = ((*tbl).v1_1.GetLongArrayElements)(
+            env,
+            marks as jni_sys::jlongArray,
+            std::ptr::null_mut(),
+        );
+        if !mptr.is_null() {
+            std::ptr::copy_nonoverlapping(m.as_ptr() as *const u64, mptr as *mut u64, n);
+            ((*tbl).v1_1.ReleaseLongArrayElements)(
+                env,
+                marks as jni_sys::jlongArray,
+                mptr,
+                0,
+            );
+            n as i32
+        } else {
+            0
+        }
+    };
+    count
 }

@@ -174,7 +174,15 @@ impl AquiferState {
 // chunk generator
 // ---------------------------------------------------------------------------
 
+/// Cap on per-chunk fluid-update marks (vanilla has no cap; observed counts
+/// are well under 10k/chunk — overflow just skips extra marks).
+const MARK_CAP: usize = 65535;
+
 pub struct ChunkGen<'e> {
+    /// vanilla shouldScheduleFluidUpdate for the last aquifer eval.
+    sched: bool,
+    /// packed BlockPos list of fluid-update marks for the current chunk.
+    marks: Vec<i64>,
     pub env: &'e Env,
     pub compiled: Compiled,
     /// child arena index per Interpolated slot (slice-fill evaluation).
@@ -279,6 +287,8 @@ impl<'e> ChunkGen<'e> {
         let sea_level = env.wg.sea_level as i32;
         let interp = InterpState::new(compiled.interp_slots, cell_count_xz, cell_count_y);
         ChunkGen {
+            sched: false,
+            marks: Vec::with_capacity(1024),
             interp_children,
             cell_width,
             cell_height,
@@ -498,6 +508,7 @@ impl<'e> ChunkGen<'e> {
         let ch = self.cell_height as i32;
         let t_bc = if prof { Some(std::time::Instant::now()) } else { None };
         self.aquifer.begin_chunk(cx, cz);
+        self.marks.clear();
         if let Some(t) = t_bc {
             p.select_ns += t.elapsed().as_nanos() as u64; // reuse select bucket as "misc"
         }
@@ -835,7 +846,15 @@ impl<'e> ChunkGen<'e> {
         }
         // rule 1: aquifer (or disabled aquifer)
         let mut state: Option<u16> = if self.aquifers_enabled {
-            self.aquifer_compute_substance(pt, substance)
+            let r = self.aquifer_compute_substance(pt, substance);
+            if r.is_some() && self.sched {
+                let b = r.unwrap();
+                // vanilla doFill: mark when flag && written block has fluid state
+                if (b == WATER || b == LAVA) && self.marks.len() < MARK_CAP {
+                    self.marks.push(block_pos_as_long(x, y, z));
+                }
+            }
+            r
         } else if substance > 0.0 {
             None
         } else {
@@ -861,16 +880,19 @@ impl<'e> ChunkGen<'e> {
     }
 
     /// Vanilla NoiseBasedAquifer.computeSubstance.
+    /// Also sets self.sched = vanilla shouldScheduleFluidUpdate (per block).
     fn aquifer_compute_substance(&mut self, pt: Pt, substance: f64) -> Option<u16> {
         let x = pt.x;
         let y = pt.y;
         let z = pt.z;
         if substance > 0.0 {
+            self.sched = false;
             return None;
         }
         let global = self.global_fluid(y);
         let g_at = aquifer_at(global, y);
         if g_at == LAVA {
+            self.sched = false;
             return Some(LAVA);
         }
 
@@ -953,14 +975,22 @@ impl<'e> ChunkGen<'e> {
         let d = similarity(i6, i7);
         let block = aquifer_at(aquifer_status, y);
         if d <= 0.0 {
+            // vanilla: flag = (d >= FLOWING) && nearest != 2nd-nearest status
+            self.sched = if d >= FLOWING_UPDATE_SIMILARITY {
+                self.aquifer_status(l1) != aquifer_status
+            } else {
+                false
+            };
             return Some(block);
         }
         if block == WATER {
             let below = aquifer_at(self.global_fluid(y - 1), y - 1);
             if below == LAVA {
+                self.sched = true;
                 return Some(block);
             }
         }
+        self.sched = false;
         let status1 = self.aquifer_status(l1);
         let mut barrier_cache = f64::NAN;
         let d1 = d * self.calculate_pressure(pt, &mut barrier_cache, aquifer_status, status1);
@@ -982,8 +1012,17 @@ impl<'e> ChunkGen<'e> {
                 return None;
             }
         }
-        let _ = FLOWING_UPDATE_SIMILARITY; // postprocessing only
-        let _ = l3;
+        // vanilla postprocessing (fluid update) flag — exact branch structure
+        let flag = aquifer_status != status1;
+        let flag1 = d3 >= FLOWING_UPDATE_SIMILARITY && status1 != status2;
+        let flag2 = d2 >= FLOWING_UPDATE_SIMILARITY && aquifer_status != status2;
+        self.sched = if !flag && !flag1 && !flag2 {
+            d2 >= FLOWING_UPDATE_SIMILARITY
+                && similarity(i6, i9) >= FLOWING_UPDATE_SIMILARITY
+                && self.aquifer_status(l3) != aquifer_status
+        } else {
+            true
+        };
         Some(block)
     }
 
@@ -1255,6 +1294,11 @@ impl<'e> ChunkGen<'e> {
         &self.interp_children
     }
 
+    /// Fluid-update marks (packed BlockPos) collected during the last fill.
+    pub fn marks(&self) -> &[i64] {
+        &self.marks
+    }
+
     pub fn eval_child_pub(&self, child: u32, pt: Pt) -> f64 {
         self.eval_fresh(child, pt, Mode::Slice)
     }
@@ -1406,5 +1450,62 @@ impl<'e> ChunkGen<'e> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod marks_tests {
+    use super::*;
+
+    /// Fill the judged region and check the fluid-update marks: the region
+    /// carries marks (deep lava/water interfaces), every mark decodes into
+    /// its chunk bounds, packs round-trip (vanilla BlockPos.asLong layout)
+    /// and sits on a fluid block in the output.
+    #[test]
+    fn fill_collects_valid_marks() {
+        let seed: i64 = 3257840388504953787;
+        let env: &'static Env = Box::leak(Box::new(Env::new(seed)));
+        let mut gen = ChunkGen::new(env);
+        let mut out = [0u16; OUT_LEN];
+        let mut total = 0usize;
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                gen.fill(cx, cz, &mut out);
+                let marks = gen.marks().to_vec();
+                total += marks.len();
+                for &p in marks.iter() {
+                    let x = pos_x(p);
+                    let y = pos_y(p);
+                    let z = pos_z(p);
+                    assert!(x >= cx * 16 && x < cx * 16 + 16, "mark x {x} out of chunk");
+                    assert!(z >= cz * 16 && z < cz * 16 + 16, "mark z {z} out of chunk");
+                    assert!(y >= -64 && y < 320, "mark y {y} out of range");
+                    assert_eq!(block_pos_as_long(x, y, z), p, "packing round-trip");
+                    let lx = (x - cx * 16) as usize;
+                    let lz = (z - cz * 16) as usize;
+                    let b = out[((y + 64) as usize * 256 + lz * 16 + lx) as usize];
+                    assert!(b == WATER || b == LAVA, "mark on non-fluid block {b}");
+                }
+            }
+        }
+        assert!(total > 0, "region should carry fluid-update marks");
+    }
+
+    /// Fill must reset marks between chunks (no cross-chunk bleed).
+    #[test]
+    fn marks_reset_per_chunk() {
+        let seed: i64 = 3257840388504953787;
+        let env: &'static Env = Box::leak(Box::new(Env::new(seed)));
+        let mut gen = ChunkGen::new(env);
+        let mut out = [0u16; OUT_LEN];
+        gen.fill(0, 0, &mut out);
+        let n0 = gen.marks().len();
+        gen.fill(1, 0, &mut out);
+        let n1 = gen.marks().len();
+        for &p in gen.marks().iter() {
+            let x = pos_x(p);
+            assert!(x >= 16 && x < 32, "stale mark from previous chunk: x={x}");
+        }
+        let _ = (n0, n1);
     }
 }
