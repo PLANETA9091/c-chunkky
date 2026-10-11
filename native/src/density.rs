@@ -52,6 +52,7 @@ pub struct NoiseInstances {
 
 /// Everything needed to evaluate density for one seed.
 pub struct Env {
+    pub seed: i64,
     pub wg: WorldGen,
     pub noise: NoiseInstances,
     pub aquifer_random: XoroshiroPositionalRandomFactory,
@@ -418,19 +419,10 @@ impl<'a> Compiler<'a> {
             [a, b] => {
                 let a = self.compile(*a);
                 let b = self.compile(*b);
-                // vanilla TwoArgumentSimpleFunction.create constant fold:
-                // (op Const X) or (op X Const) -> MulOrAdd(input=the other,
-                // argument=const), argument1()=Const
-                let (a_kind, a_val) = self.as_const(a);
-                let (b_kind, b_val) = self.as_const(b);
-                if matches!(kind, Ap2Kind::Add | Ap2Kind::Mul) && (a_kind || b_kind) {
-                    let (input, argument) = if a_kind { (b, a_val) } else { (a, b_val) };
-                    return self.push(WKind::MulOrAdd {
-                        is_add: kind == Ap2Kind::Add,
-                        input,
-                        argument,
-                    });
-                }
+                // NOTE: vanilla does NOT fold JSON-parsed trees — inline JSON
+                // numbers arrive as HolderHolder(Constant), so the
+                // `instanceof Constant` fold in TwoArgumentSimpleFunction.create
+                // never fires (verified: zero MulOrAdd in the live tree walk).
                 self.push(WKind::Ap2 { kind, a, b })
             }
             many => {
@@ -494,6 +486,7 @@ impl Env {
             noises.insert(id, NormalNoise::create(&mut src, params.first_octave, params.amplitudes));
         }
         Env {
+            seed,
             wg,
             noise: NoiseInstances { noises },
             aquifer_random,
@@ -516,7 +509,7 @@ impl Env {
         // BlendedNoise per unique params (each re-seeded from "minecraft:terrain")
         let mut blended = Vec::with_capacity(c.blended_params.len());
         for (xz, y, xzf, yf, smear) in &c.blended_params {
-            let mut src = root_terrain_factory(&self.wg, seed_unused());
+            let mut src = root_terrain_factory(&self.wg, self.seed);
             blended.push(crate::noise::BlendedNoise::create(&mut src, *xz, *y, *xzf, *yf, *smear));
         }
         Compiled {
