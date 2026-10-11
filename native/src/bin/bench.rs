@@ -31,6 +31,34 @@ fn main() {
             let gen = ChunkGen::new(&env);
             gen.profile_slice_children(cx, cz);
         }
+
+        "probe" => {
+            let env = Env::new(0);
+            let gen = ChunkGen::new(&env);
+            // 1) time fill()
+            let mut out = [0u16; OUT_LEN];
+            let mut g2 = ChunkGen::new(&env);
+            let t0 = std::time::Instant::now();
+            g2.fill(0, 0, &mut out);
+            println!("fill(0,0) = {:?}", t0.elapsed());
+            // 2) time slot0-style evals over the same 1225 corner points
+            let t0 = std::time::Instant::now();
+            let gen2 = ChunkGen::new(&env);
+            gen2.profile_slice_children(0, 0);
+            println!("slicecost total = {:?}", t0.elapsed());
+            // 3) time 1225 evals of child[0] manually
+            use crussty_chunkgen::density::Mode;
+            let g3 = ChunkGen::new(&env);
+            let mut pts: Vec<Pt> = Vec::new();
+            for i in 0..=4i32 { for j in 0..=4i32 { for y in 0..=48i32 {
+                pts.push(Pt { x: i*4, y: (y - 8)*8, z: j*4 });
+            }}}
+            let child = g3.interp_children_pub()[0];
+            let t0 = std::time::Instant::now();
+            let mut sink = 0f64;
+            for &pt in &pts { sink += g3.eval_child_pub(child, pt); }
+            println!("manual 1225 evals of child0 = {:?} sink={:e}", t0.elapsed(), sink);
+        }
         "eval" | "router" | "root" => {
             // usage: bench <cmd> <field> <points.tsv> [seed]
             let field: String = args.get(2).cloned().unwrap_or_else(|| "final_density".to_string());
@@ -68,7 +96,15 @@ fn cmd_fill(cx: i32, cz: i32) {
     let t0 = std::time::Instant::now();
     gen.fill(cx, cz, &mut out);
     let dt = t0.elapsed();
-    println!("fill cx={cx} cz={cz} took {:?}", dt);
+    // FNV-1a over raw output bytes (byte-level change detector)
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in out.iter() {
+        h ^= (b & 0xff) as u64;
+        h = h.wrapping_mul(0x100000001b3);
+        h ^= (b >> 8) as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    println!("fill cx={cx} cz={cz} took {:?} out_hash={h:016x}", dt);
 
     // per-block-id histogram
     let mut hist: std::collections::BTreeMap<u16, usize> = Default::default();
@@ -100,6 +136,7 @@ fn cmd_perf(n: usize) {
     for i in 0..8 {
         gen.fill(i as i32, 0, &mut out);
     }
+    gen.prof.reset_phases();
     let mut times = Vec::with_capacity(n);
     let t_all = std::time::Instant::now();
     for i in 0..n {
@@ -125,10 +162,11 @@ fn cmd_perf(n: usize) {
     if pr.enabled {
         let k = n as f64;
         println!(
-            "prof: fill_slice={:.3}ms cellfill={:.3}ms material={:.3}ms (mean/chunk) subst+={} subst-={}",
+            "prof: fill_slice={:.3}ms cellfill={:.3}ms material={:.3}ms select={:.3}ms (mean/chunk) subst+={} subst-={}",
             pr.fill_slice_ns as f64 / k / 1e6,
             pr.cellfill_ns as f64 / k / 1e6,
             pr.material_ns as f64 / k / 1e6,
+            pr.select_ns as f64 / k / 1e6,
             pr.blocks_subst_pos / n as u64,
             pr.blocks_subst_neg / n as u64
         );

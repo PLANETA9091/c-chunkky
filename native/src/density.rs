@@ -919,6 +919,22 @@ impl InterpState {
         lerp(dz, row1, row2)
     }
 
+    /// Hoisted lerp3 inner rows: rows depend only on (dx, dy), so the driver
+    /// computes them once per (iy, ix) and calls cellfill_row_z per iz.
+    /// Values are bit-identical to cellfill_value (same expressions).
+    #[inline]
+    pub fn cellfill_rows(&self, slot: u16, dx: f64, dy: f64) -> (f64, f64) {
+        let n = self.corners[slot as usize];
+        let row1 = lerp(dy, lerp(dx, n[0], n[1]), lerp(dx, n[2], n[3]));
+        let row2 = lerp(dy, lerp(dx, n[4], n[5]), lerp(dx, n[6], n[7]));
+        (row1, row2)
+    }
+
+    #[inline]
+    pub fn cellfill_row_z(row1: f64, row2: f64, dz: f64) -> f64 {
+        lerp(dz, row1, row2)
+    }
+
     #[inline]
     pub fn swap_slices(&mut self) {
         std::mem::swap(&mut self.slice0, &mut self.slice1);

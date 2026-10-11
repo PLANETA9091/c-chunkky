@@ -196,6 +196,8 @@ pub struct ChunkGen<'e> {
     // reusable per-instance state
     interp: InterpState,
     cell_cache: Vec<f64>, // 4*8*4 = 128
+    /// CellFill fast path: slot of the final_density interpolated root.
+    final_density_slot: Option<u16>,
     /// preliminarySurfaceLevel cache (key: (x<<32)|z of quart-snapped column).
     prelim: std::collections::HashMap<i64, i32>,
     aquifer: AquiferState,
@@ -217,6 +219,7 @@ pub struct Prof {
     pub fill_slice_ns: u64,
     pub cellfill_ns: u64,
     pub material_ns: u64,
+    pub select_ns: u64,
     pub blocks_subst_pos: u64,
     pub blocks_subst_neg: u64,
 }
@@ -227,6 +230,16 @@ impl Prof {
             enabled: std::env::var("CRUS_PROFILE").ok().as_deref() == Some("1"),
             ..Default::default()
         }
+    }
+
+    /// Zero the phase counters (bench does this after warmup).
+    pub fn reset_phases(&mut self) {
+        self.fill_slice_ns = 0;
+        self.cellfill_ns = 0;
+        self.material_ns = 0;
+        self.select_ns = 0;
+        self.blocks_subst_pos = 0;
+        self.blocks_subst_neg = 0;
     }
 }
 
@@ -262,6 +275,12 @@ impl<'e> ChunkGen<'e> {
             ore_veins_enabled: env.wg.ore_veins_enabled
                 && std::env::var("CRUS_NO_VEIN").is_err(),
             final_density: router("final_density"),
+            // fast path: vanilla wraps final_density in an interpolated marker;
+            // CellFill then reduces to a pure lerp3 of corner values.
+            final_density_slot: match &compiled.arena[compiled.router["final_density"] as usize] {
+                WKind::Interpolated { slot, .. } => Some(*slot),
+                _ => None,
+            },
             initial_density: router("initial_density_without_jaggedness"),
             barrier: router("barrier"),
             floodedness: router("fluid_level_floodedness"),
@@ -443,13 +462,13 @@ impl<'e> ChunkGen<'e> {
 
     /// Vanilla NoiseBasedChunkGenerator.doFill.
     pub fn fill(&mut self, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
+        // Prof counters ACCUMULATE across fills (bench resets after warmup).
         let mut p = self.prof;
-        p.fill_slice_ns = 0;
-        p.cellfill_ns = 0;
-        p.material_ns = 0;
-        p.blocks_subst_pos = 0;
-        p.blocks_subst_neg = 0;
         let prof = p.enabled;
+        let dbg = std::env::var("CRUS_DBG_SLICE").is_ok();
+        let mut dbg_last_mt: Option<std::time::Duration> = None;
+        let dbg_rows_ns = std::cell::Cell::new(0u64);
+        let dbg_z_ns = std::cell::Cell::new(0u64);
         out.fill(AIR);
         let min_block_x = cx * 16;
         let min_block_z = cz * 16;
@@ -457,11 +476,18 @@ impl<'e> ChunkGen<'e> {
         let first_cell_z = floor_div(min_block_z, self.cell_width as i32);
         let cw = self.cell_width as i32;
         let ch = self.cell_height as i32;
+        let t_bc = if prof { Some(std::time::Instant::now()) } else { None };
         self.aquifer.begin_chunk(cx, cz);
+        if let Some(t) = t_bc {
+            p.select_ns += t.elapsed().as_nanos() as u64; // reuse select bucket as "misc"
+        }
 
         // initializeForFirstCellX: fill slice0 at x-plane first_cell_x
         let t_fs0 = if prof { Some(std::time::Instant::now()) } else { None };
+        let dbg = std::env::var("CRUS_DBG_SLICE").is_ok();
+        let t0 = std::time::Instant::now();
         self.fill_slice(first_cell_x, first_cell_z, true);
+        if dbg { eprintln!("slice0 plane_x={}: {:?}", first_cell_x * cw, t0.elapsed()); }
         if let Some(t) = t_fs0 {
             p.fill_slice_ns += t.elapsed().as_nanos() as u64;
         }
@@ -469,7 +495,10 @@ impl<'e> ChunkGen<'e> {
         for i2 in 0..self.cell_count_xz {
             // advanceCellX(i2): fill slice1 at x-plane first_cell_x+i2+1
             let t_fs = if prof { Some(std::time::Instant::now()) } else { None };
+            let t0 = std::time::Instant::now();
             self.fill_slice(first_cell_x + i2 as i32 + 1, first_cell_z, false);
+            let dbg2 = dbg && i2 == 0;
+            if dbg2 { eprintln!("slice1 plane_x={}: {:?}", (first_cell_x + 1) * cw, t0.elapsed()); }
             if let Some(t) = t_fs {
                 p.fill_slice_ns += t.elapsed().as_nanos() as u64;
             }
@@ -480,37 +509,76 @@ impl<'e> ChunkGen<'e> {
 
                 for i5 in (0..self.cell_count_y).rev() {
                     // selectCellYZ(i5, i3)
+                    let t_sel = if prof { Some(std::time::Instant::now()) } else { None };
                     self.interp.select_cell_yz(i5, i3);
+                    if let Some(t) = t_sel {
+                        p.select_ns += t.elapsed().as_nanos() as u64;
+                    }
                     let cell_start_block_y = (i5 as i32 + self.cell_noise_min_y) * ch;
 
                     // CacheAllInCell (vanilla Java-level wrap of final_density):
-                    // fill 128 in-cell values via lerp3 path (fillingCell=true)
-                    let t_cf = if prof { Some(std::time::Instant::now()) } else { None };
+                    // fill 128 in-cell values via lerp3 path (fillingCell=true).
+                    // Branchless per-block: loop variants hoisted out of the
+                    // inner z-loop; fractions via multiply (bit-identical:
+                    // /4 == *0.25 and /8 == *0.125 exactly in IEEE754).
+                    let t_cf = if prof || dbg { Some(std::time::Instant::now()) } else { None };
+                    let cw_i = cw;
+                    let dx_step = 1.0f64 / self.cell_width as f64; // exact: 0.25
+                    let dy_step = 1.0f64 / self.cell_height as f64; // exact: 0.125
+                    let slot_fast = self.final_density_slot;
+                    let skipping = self.skip_cellfill;
                     let mut idx = 0usize;
                     let mut iy = self.cell_height as i32 - 1;
                     while iy >= 0 {
+                        let dy = iy as f64 * dy_step;
                         let mut ix = 0i32;
-                        while ix < cw {
-                            let mut iz = 0i32;
-                            while iz < cw {
-                                self.interp.cell_frac = (
-                                    ix as f64 / self.cell_width as f64,
-                                    iy as f64 / self.cell_height as f64,
-                                    iz as f64 / self.cell_width as f64,
-                                );
-                                let pt = Pt {
-                                    x: cell_start_block_x + ix,
-                                    y: cell_start_block_y + iy,
-                                    z: cell_start_block_z + iz,
-                                };
-                                let cellfill_skip = self.skip_cellfill;
-                                self.cell_cache[idx] = if cellfill_skip {
-                                    0.0
-                                } else {
-                                    self.eval_fresh(self.final_density, pt, Mode::CellFill)
-                                };
-                                idx += 1;
-                                iz += 1;
+                        while ix < cw_i {
+                            let dx = ix as f64 * dx_step;
+                            if skipping {
+                                for _ in 0..cw_i {
+                                    self.cell_cache[idx] = 0.0;
+                                    idx += 1;
+                                }
+                            } else if let Some(slot) = slot_fast {
+                                // rows are fixed for (iy, ix); only lerp(dz, ..) varies
+                                let t_rows = if dbg { Some(std::time::Instant::now()) } else { None };
+                                let (row1, row2) = self.interp.cellfill_rows(slot, dx, dy);
+                                if let Some(t) = t_rows { dbg_rows_ns.set(dbg_rows_ns.get() + t.elapsed().as_nanos() as u64); }
+                                let t_z = if dbg { Some(std::time::Instant::now()) } else { None };
+                                let mut dz = 0.0f64;
+                                for _ in 0..cw_i {
+                                    self.cell_cache[idx] = InterpState::cellfill_row_z(row1, row2, dz);
+                                    idx += 1;
+                                    dz += dx_step;
+                                }
+                                if let Some(t) = t_z { dbg_z_ns.set(dbg_z_ns.get() + t.elapsed().as_nanos() as u64); }
+                            } else {
+                                let mut dz = 0.0f64;
+                                let mut iz = 0i32;
+                                for _ in 0..cw_i {
+                                    let pt = Pt {
+                                        x: cell_start_block_x + ix,
+                                        y: cell_start_block_y + iy,
+                                        z: cell_start_block_z + iz,
+                                    };
+                                    // nested interpolated markers (custom
+                                    // datapacks) read cell_frac in CellFill
+                                    self.interp.cell_frac = (dx, dy, dz);
+                                    // mem=None: value-identical (all nodes pure;
+                                    // vanilla recomputes diamonds as well) and
+                                    // skips memo stamp overhead in this hot path
+                                    self.cell_cache[idx] = self.env.eval(
+                                        &self.compiled,
+                                        self.final_density,
+                                        pt,
+                                        Mode::CellFill,
+                                        &self.interp,
+                                        None,
+                                    );
+                                    idx += 1;
+                                    iz += 1;
+                                    dz += dx_step;
+                                }
                             }
                             ix += 1;
                         }
@@ -518,6 +586,9 @@ impl<'e> ChunkGen<'e> {
                     }
                     if let Some(t) = t_cf {
                         p.cellfill_ns += t.elapsed().as_nanos() as u64;
+                    }
+                    if dbg {
+                        eprintln!("cell[{}, {}, {}] cf={:?} mt_prev={:?}", i2, i3, i5, t_cf.map(|t| t.elapsed()), dbg_last_mt);
                     }
 
                     let t_mt = if prof { Some(std::time::Instant::now()) } else { None };
@@ -563,6 +634,9 @@ impl<'e> ChunkGen<'e> {
             }
 
             self.interp.swap_slices();
+        }
+        if dbg {
+            eprintln!("DBG rows_total={}us z_total={}us", dbg_rows_ns.get() / 1000, dbg_z_ns.get() / 1000);
         }
         self.prof = p;
     }
@@ -958,6 +1032,13 @@ impl<'e> ChunkGen<'e> {
 
     /// Vanilla OreVeinifier.create closure.
     fn ore_vein(&self, pt: Pt) -> Option<u16> {
+        // Both vein tuples' y-ranges (copper [0,50], iron [-60,-8]) fail
+        // outside [-60, 50] REGARDLESS of toggle sign -> result is None
+        // either way; the toggle noise need not be sampled.
+        let y0 = pt.y;
+        if y0 > 50 || y0 < -60 {
+            return None;
+        }
         self.memo.next_serial(); // fresh pt context (block coords)
         let d = self.eval(self.vein_toggle, pt, Mode::Block);
         let y = pt.y;
@@ -1013,5 +1094,16 @@ fn aquifer_at(status: FluidStatus, y: i32) -> u16 {
         status.1
     } else {
         AIR
+    }
+}
+
+impl<'e> ChunkGen<'e> {
+    /// Diagnostic accessors for bench probes.
+    pub fn interp_children_pub(&self) -> &[u32] {
+        &self.interp_children
+    }
+
+    pub fn eval_child_pub(&self, child: u32, pt: Pt) -> f64 {
+        self.eval_fresh(child, pt, Mode::Slice)
     }
 }
