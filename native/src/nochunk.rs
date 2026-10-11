@@ -207,6 +207,12 @@ pub struct ChunkGen<'e> {
     final_density_slot: Option<u16>,
     /// preliminarySurfaceLevel cache (key: (x<<32)|z of quart-snapped column).
     prelim: std::collections::HashMap<i64, i32>,
+    /// Cross-chunk corner-plane cache: the last fill's final x-plane equals
+    /// the next fill's initial plane when cx increments by 1 (same cz row).
+    /// Values are deterministic per corner point -> reuse is value-identical.
+    plane_cache_x: i64,
+    plane_cache_z: i32,
+    plane_cache: Vec<f64>,
     aquifer: AquiferState,
     /// Per-point DAG memo (see MemoCtx). Every evaluation context (corner
     /// point / block / probe) bumps the serial; shared subtrees then evaluate
@@ -227,6 +233,7 @@ pub struct Prof {
     pub cellfill_ns: u64,
     pub material_ns: u64,
     pub select_ns: u64,
+    pub plane_hits: u64,
     pub blocks_subst_pos: u64,
     pub blocks_subst_neg: u64,
 }
@@ -245,6 +252,7 @@ impl Prof {
         self.cellfill_ns = 0;
         self.material_ns = 0;
         self.select_ns = 0;
+        self.plane_hits = 0;
         self.blocks_subst_pos = 0;
         self.blocks_subst_neg = 0;
     }
@@ -301,6 +309,9 @@ impl<'e> ChunkGen<'e> {
             interp,
             cell_cache: vec![0.0; cell_width * cell_height * cell_width],
             prelim: std::collections::HashMap::new(),
+            plane_cache_x: i64::MIN,
+            plane_cache_z: i32::MIN,
+            plane_cache: Vec::new(),
             aquifer: AquiferState::new(env.wg.min_y, env.wg.height),
             memo: MemoCtx::new(compiled.arena.len()),
             env,
@@ -493,8 +504,24 @@ impl<'e> ChunkGen<'e> {
         let t_fs0 = if prof { Some(std::time::Instant::now()) } else { None };
         let dbg = std::env::var("CRUS_DBG_SLICE").is_ok();
         let t0 = std::time::Instant::now();
-        self.fill_slice(first_cell_x, first_cell_z, true);
-        if dbg { eprintln!("slice0 plane_x={}: {:?}", first_cell_x * cw, t0.elapsed()); }
+        let plane_slots = self.interp_children.len() as usize;
+        let plane_len = plane_slots * (self.cell_count_xz + 1) * (self.cell_count_y + 1);
+        // plane_cache_x stores the plane's BLOCK-space corner x
+        let cache_hit = self.plane_cache_x == (first_cell_x * cw) as i64
+            && self.plane_cache_z == first_cell_z
+            && self.plane_cache.len() == plane_len;
+        if cache_hit {
+            p.plane_hits += 1;
+        }
+        if cache_hit {
+            // previous fill's final plane == this fill's initial plane
+            self.interp.copy_slice0_from(&self.plane_cache);
+        } else {
+            self.fill_slice(first_cell_x, first_cell_z, true);
+        }
+        if dbg {
+            eprintln!("slice0 plane_x={} hit={}: {:?}", first_cell_x * cw, cache_hit, t0.elapsed());
+        }
         if let Some(t) = t_fs0 {
             p.fill_slice_ns += t.elapsed().as_nanos() as u64;
         }
@@ -641,6 +668,13 @@ impl<'e> ChunkGen<'e> {
             }
 
             self.interp.swap_slices();
+        }
+        // save the final x-plane (slice0 after the last swap) for the next fill
+        {
+            let plane_x = ((first_cell_x + self.cell_count_xz as i32) * cw) as i64;
+            self.interp.copy_slice0_into(&mut self.plane_cache);
+            self.plane_cache_x = plane_x;
+            self.plane_cache_z = first_cell_z;
         }
         if dbg {
             eprintln!("DBG rows_total={}us z_total={}us", dbg_rows_ns.get() / 1000, dbg_z_ns.get() / 1000);

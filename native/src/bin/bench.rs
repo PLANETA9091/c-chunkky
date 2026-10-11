@@ -162,11 +162,12 @@ fn cmd_perf(n: usize) {
     if pr.enabled {
         let k = n as f64;
         println!(
-            "prof: fill_slice={:.3}ms cellfill={:.3}ms material={:.3}ms select={:.3}ms (mean/chunk) subst+={} subst-={}",
+            "prof: fill_slice={:.3}ms cellfill={:.3}ms material={:.3}ms select={:.3}ms plane_hits={} subst+={} subst-={}",
             pr.fill_slice_ns as f64 / k / 1e6,
             pr.cellfill_ns as f64 / k / 1e6,
             pr.material_ns as f64 / k / 1e6,
             pr.select_ns as f64 / k / 1e6,
+            pr.plane_hits / n as u64,
             pr.blocks_subst_pos / n as u64,
             pr.blocks_subst_neg / n as u64
         );
