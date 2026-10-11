@@ -42,8 +42,71 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private record WorldKey(long seed, int seaLevel) {
     }
 
-    private static final Map<WorldKey, Long> CTX2 = new ConcurrentHashMap<>();
+    private static final Map<WorldKey, CtxPool> POOLS = new ConcurrentHashMap<>();
     private static final Map<String, Integer> SEA_CACHE = new ConcurrentHashMap<>();
+    /** parallel contexts per world (matches Paper's chunk worker parallelism). */
+    private static final int POOL_SIZE = Math.max(2,
+            Runtime.getRuntime().availableProcessors());
+
+    /**
+     * Pool of independent native contexts for one world. Paper generates
+     * chunks on several worker threads; each worker acquires a free ctx so
+     * fills run in parallel (contexts share nothing mutable). Acquisition
+     * prefers a ctx whose lock is currently free, falling back to
+     * round-robin (which then blocks on that ctx's lock as before).
+     */
+    private static final class CtxPool {
+        private final long[] ctxs;
+        private final ReentrantLock[] locks;
+        private final java.util.concurrent.atomic.AtomicInteger rr =
+                new java.util.concurrent.atomic.AtomicInteger();
+
+        CtxPool(int n, long seed, int minY, int height, int sea) {
+            this.ctxs = new long[n];
+            this.locks = new ReentrantLock[n];
+            for (int i = 0; i < n; i++) {
+                long ctx = ChunkGenNative.newCtx(seed, minY, height, sea);
+                if (ctx == 0) {
+                    // free the ones already created
+                    for (int j = 0; j < i; j++) {
+                        ChunkGenNative.freeCtx(ctxs[j]);
+                    }
+                    throw new IllegalStateException(
+                            "crussty_chunkgen ctx_new failed for seed " + seed + " sea " + sea);
+                }
+                ctxs[i] = ctx;
+                locks[i] = new ReentrantLock();
+                synchronized (CTX) {
+                    CTX.add(ctx);
+                }
+            }
+        }
+
+        /** Returns [ctx, lock] — prefers an unlocked ctx. */
+        long acquire(ReentrantLock[] lockOut) {
+            // fast path: first free lock (scan from round-robin cursor)
+            int n = ctxs.length;
+            int start = Math.floorMod(rr.getAndIncrement(), n);
+            for (int k = 0; k < n; k++) {
+                int i = (start + k) % n;
+                if (locks[i].tryLock()) {
+                    lockOut[0] = locks[i];
+                    return ctxs[i];
+                }
+            }
+            // all busy: block on the round-robin one
+            int i = (start) % n;
+            locks[i].lock();
+            lockOut[0] = locks[i];
+            return ctxs[i];
+        }
+
+        void freeAll() {
+            for (long ctx : ctxs) {
+                ChunkGenNative.freeCtx(ctx);
+            }
+        }
+    }
 
     /** We own the noise stage (native); vanilla keeps everything else. */
     @Override
@@ -83,20 +146,10 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         return true;
     }
 
-    static long ctxFor(WorldInfo worldInfo, long seed, int minY, int height) {
+    static CtxPool poolFor(WorldInfo worldInfo, long seed, int minY, int height) {
         int sea = resolveSeaLevel(worldInfo);
         WorldKey key = new WorldKey(seed, sea);
-        return CTX2.computeIfAbsent(key, k -> {
-            long ctx = ChunkGenNative.newCtx(seed, minY, height, sea);
-            if (ctx == 0) {
-                throw new IllegalStateException(
-                        "crussty_chunkgen ctx_new failed for seed " + seed + " sea " + sea);
-            }
-            synchronized (CTX) {
-                CTX.add(ctx);
-            }
-            return ctx;
-        });
+        return POOLS.computeIfAbsent(key, k -> new CtxPool(POOL_SIZE, seed, minY, height, sea));
     }
 
     /**
@@ -144,26 +197,22 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         });
     }
 
-    static ReentrantLock lockFor(long ctx) {
-        return LOCKS.computeIfAbsent(ctx, k -> new ReentrantLock());
-    }
-
     @Override
     public void generateNoise(WorldInfo worldInfo, Random random, int chunkX, int chunkZ, ChunkData chunkData) {
         long t0 = System.nanoTime();
         long seed = worldInfo.getSeed();
         int minY = worldInfo.getMinHeight();
         int height = worldInfo.getMaxHeight() - worldInfo.getMinHeight();
-        long ctx = ctxFor(worldInfo, seed, minY, height);
+        CtxPool pool = poolFor(worldInfo, seed, minY, height);
+        ReentrantLock[] lockBox = new ReentrantLock[1];
+        long ctx = pool.acquire(lockBox);
         short[] out = buf.get();
         long[] marks = MARK_BUF.get();
         int nMarks;
-        ReentrantLock lock = lockFor(ctx);
-        lock.lock();
         try {
             nMarks = ChunkGenNative.fillMarked(ctx, chunkX, chunkZ, out, marks);
         } finally {
-            lock.unlock();
+            lockBox[0].unlock();
         }
         layout(chunkData, minY, height, out);
         markFluidUpdates(chunkData, marks, nMarks);
@@ -191,9 +240,10 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
 
     /** Called by the plugin on disable. */
     static void freeAll() {
-        for (Long ctx : CTX) {
-            ChunkGenNative.freeCtx(ctx);
+        for (CtxPool pool : POOLS.values()) {
+            pool.freeAll();
         }
+        POOLS.clear();
         CTX.clear();
         LOCKS.clear();
         SEA_CACHE.clear();
