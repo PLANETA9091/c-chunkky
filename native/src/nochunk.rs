@@ -278,7 +278,6 @@ impl<'e> ChunkGen<'e> {
         let cell_noise_min_y = floor_div(env.wg.min_y, cell_height as i32);
         let sea_level = env.wg.sea_level as i32;
         let interp = InterpState::new(compiled.interp_slots, cell_count_xz, cell_count_y);
-
         ChunkGen {
             interp_children,
             cell_width,
@@ -1261,8 +1260,8 @@ impl<'e> ChunkGen<'e> {
     }
 }
 
-/// Execute a compiled CellFill program. Stack machine in exact post-order;
-/// expressions mirror Env::eval (Mode::CellFill) bit-for-bit.
+/// Pass B: per-block value. Lerp3 leaves consume the precomputed rows and
+/// apply only lerp(dz, row1, row2) — identical arithmetic to the interpreter.
 #[inline]
 fn run_cellfill(
     prog: &[CellOp],

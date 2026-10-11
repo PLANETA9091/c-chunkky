@@ -1438,3 +1438,11 @@ impl InterpState {
         lerp(dz, row1, row2)
     }
 }
+
+impl InterpState {
+    /// Read-only corner access for the cellfill rows pass.
+    #[inline]
+    pub fn corners_pub(&self, slot: u16) -> &[f64; 8] {
+        &self.corners[slot as usize]
+    }
+}
