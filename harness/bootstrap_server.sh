@@ -17,14 +17,18 @@ mkdir -p "$SRV/plugins"
 
 # --- paper.jar (paperclip launcher; extracts mojmap jar on first boot) -------
 if [ ! -f "$SRV/paper.jar" ]; then
-  API="https://api.papermc.io/v2/projects/paper/versions/$VERSION/builds"
+  # PaperMC Fill v3 (v2 API is sunset, HTTP 410)
+  API="https://fill.papermc.io/v3/projects/paper/versions/$VERSION/builds"
   fetch() { # $1 = build id
-    curl -sfL -o "$SRV/paper.jar" "$API/$1/downloads/paper-$VERSION-$1.jar"
+    local url
+    url=$(curl -sf "$API/$1" | python3 -c \
+      "import sys,json;print(json.load(sys.stdin)['downloads']['server:default']['url'])" 2>/dev/null) \
+      && [ -n "$url" ] && curl -sfL -o "$SRV/paper.jar" "$url"
   }
-  echo "downloading Paper $VERSION build $BUILD ..."
+  echo "downloading Paper $VERSION build $BUILD (fill v3) ..."
   if ! fetch "$BUILD"; then
     echo "build $BUILD unavailable, falling back to latest"
-    BUILD=$(curl -sf "$API" | python3 -c "import sys,json;print(json.load(sys.stdin)['builds'][-1]['build'])")
+    BUILD=$(curl -sf "$API/latest" | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
     fetch "$BUILD"
   fi
   echo "paper build: $BUILD"

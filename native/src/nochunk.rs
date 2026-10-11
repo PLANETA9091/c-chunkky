@@ -12,7 +12,7 @@
 //   - postprocessing marks (shouldScheduleFluidUpdate) are skipped: they carry
 //     no block data, and the Bukkit noise path cannot express them.
 
-use crate::density::{Compiled, Env, InterpState, Mode, Pt};
+use crate::density::{Compiled, Env, InterpState, Mode, Pt, WKind};
 
 // ---------------------------------------------------------------------------
 // frozen block ids (repo-root block_registry.txt; ore ids appended)
@@ -199,6 +199,31 @@ pub struct ChunkGen<'e> {
     /// preliminarySurfaceLevel cache (key: (x<<32)|z of quart-snapped column).
     prelim: std::collections::HashMap<i64, i32>,
     aquifer: AquiferState,
+    /// Env-gated phase profiler (diagnostic only; zero cost when off).
+    pub prof: Prof,
+    /// Diagnostic stubs (CRUS_SKIP_*), NEVER set in production.
+    skip_cellfill: bool,
+    skip_material: bool,
+    skip_slice: bool,
+}
+
+#[derive(Default, Debug, Clone, Copy)]
+pub struct Prof {
+    pub enabled: bool,
+    pub fill_slice_ns: u64,
+    pub cellfill_ns: u64,
+    pub material_ns: u64,
+    pub blocks_subst_pos: u64,
+    pub blocks_subst_neg: u64,
+}
+
+impl Prof {
+    fn from_env() -> Prof {
+        Prof {
+            enabled: std::env::var("CRUS_PROFILE").ok().as_deref() == Some("1"),
+            ..Default::default()
+        }
+    }
 }
 
 impl<'e> ChunkGen<'e> {
@@ -228,8 +253,10 @@ impl<'e> ChunkGen<'e> {
             cell_noise_min_y,
             min_y: env.wg.min_y,
             sea_level,
-            aquifers_enabled: env.wg.aquifers_enabled,
-            ore_veins_enabled: env.wg.ore_veins_enabled,
+            aquifers_enabled: env.wg.aquifers_enabled
+                && std::env::var("CRUS_NO_AQUIFER").is_err(),
+            ore_veins_enabled: env.wg.ore_veins_enabled
+                && std::env::var("CRUS_NO_VEIN").is_err(),
             final_density: router("final_density"),
             initial_density: router("initial_density_without_jaggedness"),
             barrier: router("barrier"),
@@ -247,12 +274,132 @@ impl<'e> ChunkGen<'e> {
             aquifer: AquiferState::new(env.wg.min_y, env.wg.height),
             env,
             compiled,
+            prof: Prof::from_env(),
+            skip_cellfill: std::env::var("CRUS_SKIP_CELLFILL").is_ok(),
+            skip_material: std::env::var("CRUS_SKIP_MATERIAL").is_ok(),
+            skip_slice: std::env::var("CRUS_SKIP_SLICE").is_ok(),
         }
     }
 
     #[inline]
     fn eval(&self, idx: u32, pt: Pt, mode: Mode) -> f64 {
         self.env.eval(&self.compiled, idx, pt, mode, &self.interp)
+    }
+
+    /// Per-interpolator-child slice-cost profiler (diagnostic).
+    /// Evaluates every interp child over the exact fill_slice corner points
+    /// (5 x-planes x 5 z-corners x 49 y-corners = 1225) and prints timings
+    /// plus a node-kind histogram of each child subtree.
+    pub fn profile_slice_children(&self, cx: i32, cz: i32) {
+        use std::collections::BTreeMap;
+        let min_block_x = cx * 16;
+        let min_block_z = cz * 16;
+        let first_cell_x = floor_div(min_block_x, self.cell_width as i32);
+        let first_cell_z = floor_div(min_block_z, self.cell_width as i32);
+        let cw = self.cell_width as i32;
+        let ch = self.cell_height as i32;
+        let mut points: Vec<Pt> = Vec::with_capacity(
+            (self.cell_count_xz + 1)
+                * (self.cell_count_xz + 1)
+                * (self.cell_count_y + 1),
+        );
+        for i in 0..=self.cell_count_xz {
+            let corner_x = (first_cell_x + i as i32) * cw;
+            for j in 0..=self.cell_count_xz {
+                let corner_z = (first_cell_z + j as i32) * cw;
+                for y in 0..=self.cell_count_y {
+                    let corner_y = (y as i32 + self.cell_noise_min_y) * ch;
+                    points.push(Pt { x: corner_x, y: corner_y, z: corner_z });
+                }
+            }
+        }
+        let mut total_ns = 0u64;
+        for (slot, &child) in self.interp_children.iter().enumerate() {
+            let t0 = std::time::Instant::now();
+            let mut sink = 0f64;
+            for &pt in &points {
+                sink += self.eval(child, pt, Mode::Slice);
+            }
+            let dt = t0.elapsed().as_nanos() as u64;
+            total_ns += dt;
+            let hist = self.describe_child(child);
+            let brief: Vec<String> = hist
+                .iter()
+                .map(|(k, n)| format!("{k}x{n}"))
+                .collect();
+            println!(
+                "slot {:2} child {:4} total {:>8.2}ms per-pt {:>6.2}us sink {:e} [{}]",
+                slot,
+                child,
+                dt as f64 / 1e6,
+                dt as f64 / points.len() as f64 / 1e3,
+                sink,
+                brief.join(" ")
+            );
+        }
+        println!("SUM over {} slots: {:.2}ms", self.interp_children.len(), total_ns as f64 / 1e6);
+    }
+
+    /// Node-kind histogram of the subtree rooted at `root` (iterative DFS).
+    fn describe_child(&self, root: u32) -> std::collections::BTreeMap<&'static str, usize> {
+        use std::collections::BTreeMap;
+        let mut hist: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut stack = vec![root];
+        while let Some(i) = stack.pop() {
+            match &self.compiled.arena[i as usize] {
+                WKind::Const(_) => *hist.entry("const").or_default() += 1,
+                WKind::Noise { .. } => *hist.entry("noise").or_default() += 1,
+                WKind::ShiftedNoise { .. } => *hist.entry("shifted").or_default() += 1,
+                WKind::ShiftA { .. } => *hist.entry("shiftA").or_default() += 1,
+                WKind::ShiftB { .. } => *hist.entry("shiftB").or_default() += 1,
+                WKind::OldBlendedNoise { .. } => *hist.entry("BLENDED").or_default() += 1,
+                WKind::Clamp { input, .. } => {
+                    *hist.entry("clamp").or_default() += 1;
+                    stack.push(*input);
+                }
+                WKind::Mapped { input, .. } => {
+                    *hist.entry("map").or_default() += 1;
+                    stack.push(*input);
+                }
+                WKind::Ap2 { a, b, .. } => {
+                    *hist.entry("ap2").or_default() += 1;
+                    stack.push(*a);
+                    stack.push(*b);
+                }
+                WKind::RangeChoice { input, when_in_range, when_out_of_range, .. } => {
+                    *hist.entry("range").or_default() += 1;
+                    stack.push(*input);
+                    stack.push(*when_in_range);
+                    stack.push(*when_out_of_range);
+                }
+                WKind::YClampedGradient { .. } => *hist.entry("ygrad").or_default() += 1,
+                WKind::Spline { coordinate, .. } => {
+                    *hist.entry("spline").or_default() += 1;
+                    stack.push(*coordinate);
+                }
+                WKind::WeirdScaledSampler { input, .. } => {
+                    *hist.entry("weird").or_default() += 1;
+                    stack.push(*input);
+                }
+                WKind::Interpolated { child, .. } => {
+                    *hist.entry("INTERP").or_default() += 1;
+                    stack.push(*child);
+                }
+                WKind::Cache2d { child }
+                | WKind::CacheOnce { child }
+                | WKind::FlatCache { child }
+                | WKind::CacheAllInCell { child } => {
+                    *hist.entry("cache").or_default() += 1;
+                    stack.push(*child);
+                }
+                WKind::MulOrAdd { input, .. } => {
+                    *hist.entry("muloradd").or_default() += 1;
+                    stack.push(*input);
+                }
+                WKind::EndIslands => *hist.entry("endisl").or_default() += 1,
+            }
+        }
+        hist
     }
 
     /// Vanilla NoiseChunk.preliminarySurfaceLevel (quart-snapped, cached).
@@ -279,6 +426,13 @@ impl<'e> ChunkGen<'e> {
 
     /// Vanilla NoiseBasedChunkGenerator.doFill.
     pub fn fill(&mut self, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
+        let mut p = self.prof;
+        p.fill_slice_ns = 0;
+        p.cellfill_ns = 0;
+        p.material_ns = 0;
+        p.blocks_subst_pos = 0;
+        p.blocks_subst_neg = 0;
+        let prof = p.enabled;
         out.fill(AIR);
         let min_block_x = cx * 16;
         let min_block_z = cz * 16;
@@ -289,11 +443,19 @@ impl<'e> ChunkGen<'e> {
         self.aquifer.begin_chunk(cx, cz);
 
         // initializeForFirstCellX: fill slice0 at x-plane first_cell_x
+        let t_fs0 = if prof { Some(std::time::Instant::now()) } else { None };
         self.fill_slice(first_cell_x, first_cell_z, true);
+        if let Some(t) = t_fs0 {
+            p.fill_slice_ns += t.elapsed().as_nanos() as u64;
+        }
 
         for i2 in 0..self.cell_count_xz {
             // advanceCellX(i2): fill slice1 at x-plane first_cell_x+i2+1
+            let t_fs = if prof { Some(std::time::Instant::now()) } else { None };
             self.fill_slice(first_cell_x + i2 as i32 + 1, first_cell_z, false);
+            if let Some(t) = t_fs {
+                p.fill_slice_ns += t.elapsed().as_nanos() as u64;
+            }
             let cell_start_block_x = (first_cell_x + i2 as i32) * cw;
 
             for i3 in 0..self.cell_count_xz {
@@ -306,6 +468,7 @@ impl<'e> ChunkGen<'e> {
 
                     // CacheAllInCell (vanilla Java-level wrap of final_density):
                     // fill 128 in-cell values via lerp3 path (fillingCell=true)
+                    let t_cf = if prof { Some(std::time::Instant::now()) } else { None };
                     let mut idx = 0usize;
                     let mut iy = self.cell_height as i32 - 1;
                     while iy >= 0 {
@@ -323,8 +486,12 @@ impl<'e> ChunkGen<'e> {
                                     y: cell_start_block_y + iy,
                                     z: cell_start_block_z + iz,
                                 };
-                                self.cell_cache[idx] =
-                                    self.eval(self.final_density, pt, Mode::CellFill);
+                                let cellfill_skip = self.skip_cellfill;
+                                self.cell_cache[idx] = if cellfill_skip {
+                                    0.0
+                                } else {
+                                    self.eval(self.final_density, pt, Mode::CellFill)
+                                };
                                 idx += 1;
                                 iz += 1;
                             }
@@ -332,7 +499,11 @@ impl<'e> ChunkGen<'e> {
                         }
                         iy -= 1;
                     }
+                    if let Some(t) = t_cf {
+                        p.cellfill_ns += t.elapsed().as_nanos() as u64;
+                    }
 
+                    let t_mt = if prof { Some(std::time::Instant::now()) } else { None };
                     for i6 in (0..self.cell_height as i32).rev() {
                         let block_y = (self.cell_noise_min_y + i5 as i32) * ch + i6;
                         self.interp.update_for_y(i6 as f64 / self.cell_height as f64);
@@ -345,14 +516,19 @@ impl<'e> ChunkGen<'e> {
                                 self.interp.update_for_z(i12 as f64 / self.cell_width as f64);
                                 let block_z = cell_start_block_z + i12;
 
-                                let block = self.material_rule(
-                                    block_x,
-                                    block_y,
-                                    block_z,
-                                    i9,
-                                    i6,
-                                    i12,
-                                );
+                                let skip_material = self.skip_material;
+                                let block = if skip_material {
+                                    1u16
+                                } else {
+                                    self.material_rule(
+                                        block_x,
+                                        block_y,
+                                        block_z,
+                                        i9,
+                                        i6,
+                                        i12,
+                                    )
+                                };
                                 if block != AIR {
                                     let out_idx = ((block_y - self.min_y) * 256
                                         + (block_z - min_block_z) * 16
@@ -363,11 +539,15 @@ impl<'e> ChunkGen<'e> {
                             }
                         }
                     }
+                    if let Some(t) = t_mt {
+                        p.material_ns += t.elapsed().as_nanos() as u64;
+                    }
                 }
             }
 
             self.interp.swap_slices();
         }
+        self.prof = p;
     }
 
     /// Vanilla NoiseChunk.fillSlice: each interpolator's wrapped function is
@@ -382,7 +562,11 @@ impl<'e> ChunkGen<'e> {
                 let corner_y = (y as i32 + self.cell_noise_min_y) * ch;
                 let pt = Pt { x: corner_x, y: corner_y, z: corner_z };
                 for (slot, &child) in self.interp_children.iter().enumerate() {
-                    let v = self.eval(child, pt, Mode::Slice);
+                    let v = if self.skip_slice {
+                        0.0
+                    } else {
+                        self.eval(child, pt, Mode::Slice)
+                    };
                     let slot = slot as u16;
                     if is_first {
                         self.interp.slice0_set(slot, i as usize, y, v);
@@ -406,6 +590,13 @@ impl<'e> ChunkGen<'e> {
     fn material_rule(&mut self, x: i32, y: i32, z: i32, ix: i32, iy: i32, iz: i32) -> u16 {
         let pt = Pt { x, y, z };
         let substance = self.cell_cache_value(iy, ix, iz);
+        if self.prof.enabled {
+            if substance > 0.0 {
+                self.prof.blocks_subst_pos += 1;
+            } else {
+                self.prof.blocks_subst_neg += 1;
+            }
+        }
         // rule 1: aquifer (or disabled aquifer)
         let mut state: Option<u16> = if self.aquifers_enabled {
             self.aquifer_compute_substance(pt, substance)

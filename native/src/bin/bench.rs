@@ -24,6 +24,13 @@ fn main() {
             let n = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(64);
             cmd_perf(n);
         }
+        "slicecost" => {
+            let cx = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let cz = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let env = Env::new(0);
+            let gen = ChunkGen::new(&env);
+            gen.profile_slice_children(cx, cz);
+        }
         "eval" | "router" | "root" => {
             // usage: bench <cmd> <field> <points.tsv> [seed]
             let field: String = args.get(2).cloned().unwrap_or_else(|| "final_density".to_string());
@@ -114,6 +121,18 @@ fn cmd_perf(n: usize) {
         times[times.len() - 1],
         total
     );
+    let pr = &gen.prof;
+    if pr.enabled {
+        let k = n as f64;
+        println!(
+            "prof: fill_slice={:.3}ms cellfill={:.3}ms material={:.3}ms (mean/chunk) subst+={} subst-={}",
+            pr.fill_slice_ns as f64 / k / 1e6,
+            pr.cellfill_ns as f64 / k / 1e6,
+            pr.material_ns as f64 / k / 1e6,
+            pr.blocks_subst_pos / n as u64,
+            pr.blocks_subst_neg / n as u64
+        );
+    }
 }
 
 fn cmd_eval(field: &str, file: &str, seed: i64) {

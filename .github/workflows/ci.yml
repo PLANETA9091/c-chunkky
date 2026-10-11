@@ -39,11 +39,10 @@ jobs:
       - name: Fetch paper-api + libs (same versions as probe/)
         run: |
           mkdir -p probe/libs
-          # reuse committed probe/paper-api.jar if present, else download
+          # reuse committed probe/paper-api.jar if present, else download (Fill v3; v2 sunset)
           if [ ! -f probe/paper-api.jar ]; then
-            URL="https://api.papermc.io/v2/projects/paper/versions/1.21.8/builds"
-            B=$(curl -s "$URL" | python3 -c "import sys,json;print(json.load(sys.stdin)['builds'][-1]['build'])")
-            curl -sL -o probe/paper-api.jar "https://api.papermc.io/v2/projects/paper/versions/1.21.8/builds/$B/downloads/paper-1.21.8-$B.jar"
+            URL=$(curl -sf "https://fill.papermc.io/v3/projects/paper/versions/1.21.8/builds/latest" | python3 -c "import sys,json;print(json.load(sys.stdin)['downloads']['server:default']['url'])")
+            curl -sL -o probe/paper-api.jar "$URL"
           fi
       - name: Build plugin
         run: |
@@ -85,6 +84,7 @@ jobs:
           path: |
             server/versions
             server/libraries
+            server/paper.jar
           key: paper-1.21.8-b60
 
       - name: Build native (release)
