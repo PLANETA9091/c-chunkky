@@ -47,8 +47,11 @@ if [ "${N:-0}" != "64" ]; then
 fi
 
 WALL_MS=$((T1 - T0))
-# settle: let light/tick-level propagation finish before snapshotting
-sleep 5
+# settle: let fluid tick simulation reach steady state before snapshotting.
+# Bubble columns grow 1 block per 5 ticks (20-tick magma priming first) —
+# a ~19-block column needs ~6s of ticking after promotion; 15s covers the
+# whole region comfortably and is deterministic (steady state is unique).
+sleep 15
 
 echo "[bench] dumping region to $DUMPDIR"
 DUMP_OUT=$(rcon "crusstydumpregion -4 -4 3 3 $DUMPDIR chunk $WORLD")

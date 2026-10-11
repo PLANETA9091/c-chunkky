@@ -1,0 +1,56 @@
+name: recapture
+# One-shot reference recapture: pure vanilla (no generator) chunk dumps for
+# the judge, captured at fluid-tick steady state (bench.sh settles 15s).
+# Run via workflow_dispatch, download the artifact, commit into reference/dumps/.
+on:
+  workflow_dispatch:
+
+jobs:
+  recapture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache paper server
+        uses: actions/cache@v4
+        with:
+          path: |
+            server/versions
+            server/libraries
+            server/paper.jar
+          key: paper-1.21.8-b60
+
+      - name: Bootstrap server dir
+        run: |
+          chmod +x harness/bootstrap_server.sh
+          bash harness/bootstrap_server.sh 60
+
+      - name: Capture vanilla reference (steady state)
+        run: |
+          set -o pipefail
+          CRUS_FRESH=1 bash harness/bench.sh vanilla vanilla 2>&1 | tee recapture_vanilla.log
+
+      - name: Capture datapack reference (steady state)
+        run: |
+          set -o pipefail
+          mkdir -p server/datapack/datapacks
+          rm -rf server/datapack/datapacks/crussty-custom
+          cp -r probe/datapacks/crussty-custom server/datapack/datapacks/
+          CRUS_FRESH=1 bash harness/bench.sh datapack datapack 2>&1 | tee recapture_datapack.log
+
+      - name: Verify dumps
+        run: |
+          python3 harness/verify_dumps.py reference/dumps/vanilla 64
+          python3 harness/verify_dumps.py reference/dumps/datapack 64
+
+      - name: Upload reference dumps
+        uses: actions/upload-artifact@v4
+        with:
+          name: reference-dumps-steady
+          path: reference/dumps/
+          retention-days: 14
