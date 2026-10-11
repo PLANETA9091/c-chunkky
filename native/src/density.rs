@@ -108,8 +108,10 @@ impl MemoCtx {
 
 /// Instantiated noise objects for one RandomState (one seed).
 pub struct NoiseInstances {
-    /// NormalNoise per noise-params id ("minecraft:offset", ...).
-    pub noises: HashMap<String, NormalNoise>,
+    /// Flat list of instances (hot-path access by index).
+    pub list: Vec<NormalNoise>,
+    /// name -> index into `list`.
+    pub list_idx: HashMap<String, u32>,
 }
 
 /// Everything needed to evaluate density for one seed.
@@ -243,6 +245,8 @@ pub struct Compiled {
     pub arena: Vec<WKind>,
     /// Noise id strings by compiled noise index.
     pub noise_ids: Vec<String>,
+    /// Instance list index per compiled noise index (hot-path resolution).
+    pub noise_resolved: Vec<u32>,
     /// Per-params BlendedNoise instances (vanilla withNewRandom re-seeds each
     /// from the same "minecraft:terrain" factory hash).
     pub blended: Vec<crate::noise::BlendedNoise>,
@@ -725,18 +729,21 @@ impl Env {
         collect_noise_refs(&wg, &mut used);
         used.sort();
         used.dedup();
-        let mut noises = HashMap::new();
+        let mut list = Vec::new();
+        let mut list_idx = HashMap::new();
         for id in used {
             let params = wg.noise_params.get(&id).cloned().unwrap_or_else(|| {
                 panic!("noise params missing for {id}");
             });
             let mut src = root_factory.from_hash_of(&id);
-            noises.insert(id, NormalNoise::create(&mut src, params.first_octave, params.amplitudes));
+            let inst = NormalNoise::create(&mut src, params.first_octave, params.amplitudes);
+            list_idx.insert(id, list.len() as u32);
+            list.push(inst);
         }
         Env {
             seed,
             wg,
-            noise: NoiseInstances { noises },
+            noise: NoiseInstances { list, list_idx },
             aquifer_random,
             ore_random,
         }
@@ -760,9 +767,22 @@ impl Env {
             let mut src = root_terrain_factory(&self.wg, self.seed);
             blended.push(crate::noise::BlendedNoise::create(&mut src, *xz, *y, *xzf, *yf, *smear));
         }
+        // resolve compiled noise indices -> instance list indices ONCE
+        let noise_resolved = c
+            .noise_ids
+            .iter()
+            .map(|id| {
+                *self
+                    .noise
+                    .list_idx
+                    .get(id)
+                    .unwrap_or_else(|| panic!("noise instance missing: {id}"))
+            })
+            .collect();
         Compiled {
             arena: c.arena,
             noise_ids: c.noise_ids,
+            noise_resolved,
             blended,
             router,
             interp_slots: c.interp_slots,
@@ -770,10 +790,6 @@ impl Env {
         }
     }
 
-    #[inline]
-    fn normal(&self, id: &str) -> &NormalNoise {
-        self.noise.noises.get(id).unwrap_or_else(|| panic!("noise instance missing: {id}"))
-    }
 }
 
 fn seed_unused() -> i64 {
@@ -1003,25 +1019,25 @@ impl Env {
         match node {
             WKind::Const(v) => *v,
             WKind::Noise { noise_id, xz_scale, y_scale } => {
-                let id: &str = &c.noise_ids[*noise_id as usize];
-                self.normal(id).get_value(pt.x as f64 * xz_scale, pt.y as f64 * y_scale, pt.z as f64 * xz_scale)
+                let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
+                n.get_value(pt.x as f64 * xz_scale, pt.y as f64 * y_scale, pt.z as f64 * xz_scale)
             }
             WKind::ShiftedNoise { noise_id, xz_scale, y_scale, sx, sy, sz } => {
                 let dx = pt.x as f64 * xz_scale + self.eval(c, *sx, pt, mode, interp, mem);
                 let dy = pt.y as f64 * y_scale + self.eval(c, *sy, pt, mode, interp, mem);
                 let dz = pt.z as f64 * xz_scale + self.eval(c, *sz, pt, mode, interp, mem);
-                let id: &str = &c.noise_ids[*noise_id as usize];
-                self.normal(id).get_value(dx, dy, dz)
+                let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
+                n.get_value(dx, dy, dz)
             }
             WKind::ShiftA { noise_id } => {
-                let id: &str = &c.noise_ids[*noise_id as usize];
+                let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
                 // ShiftNoise.compute(x, 0, z): noise(x*0.25, 0, z*0.25) * 4
-                self.normal(id).get_value(pt.x as f64 * 0.25, 0.0, pt.z as f64 * 0.25) * 4.0
+                n.get_value(pt.x as f64 * 0.25, 0.0, pt.z as f64 * 0.25) * 4.0
             }
             WKind::ShiftB { noise_id } => {
-                let id: &str = &c.noise_ids[*noise_id as usize];
+                let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
                 // ShiftNoise.compute(z, x, 0)
-                self.normal(id).get_value(pt.z as f64 * 0.25, pt.x as f64 * 0.25, 0.0) * 4.0
+                n.get_value(pt.z as f64 * 0.25, pt.x as f64 * 0.25, 0.0) * 4.0
             }
             WKind::OldBlendedNoise { instance } => {
                 c.blended[*instance as usize].compute(pt.x, pt.y, pt.z)
@@ -1132,13 +1148,13 @@ impl Env {
                         2.0
                     }
                 };
-                let id: &str = &c.noise_ids[*noise_id as usize];
-                let n = self.normal(id).get_value(
+                let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
+                let v = n.get_value(
                     pt.x as f64 / d,
                     pt.y as f64 / d,
                     pt.z as f64 / d,
                 );
-                d * n.abs()
+                d * v.abs()
             }
             WKind::Cache2d { child }
             | WKind::CacheOnce { child }
