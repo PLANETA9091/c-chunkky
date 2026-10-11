@@ -70,6 +70,14 @@ if [ "${CRUS_FRESH:-0}" = "1" ]; then
   rm -rf "$SRV/$WORLD" "$SRV/${WORLD}_nether" "$SRV/${WORLD}_the_end"
 fi
 
+# --- datapack wiring (world datapacks; applies at world load, wiped with CRUS_FRESH)
+if [ "$WORLD" = "datapack" ]; then
+  mkdir -p "$SRV/$WORLD/datapacks"
+  rm -rf "$SRV/$WORLD/datapacks/crussty-custom"
+  cp -r "$ROOT/probe/datapacks/crussty-custom" "$SRV/$WORLD/datapacks/"
+  echo "datapack wired: $SRV/$WORLD/datapacks/crussty-custom"
+fi
+
 # --- boot -------------------------------------------------------------------
 bash harness/server_up.sh
 

@@ -11,3 +11,4 @@ workdir/
 !probe/CrusstyProbe.jar
 !probe/libs/*.jar
 probe/classes/
+reference/dumps_plugin/

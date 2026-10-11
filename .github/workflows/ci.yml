@@ -57,3 +57,86 @@ jobs:
             native/target/release/libcrussty_chunkgen.so
             plugin/CrusstyGen.jar
           retention-days: 7
+
+  # Full parity judge on a real Paper 1.21.8 server: native noise stage +
+  # vanilla rest, pregen 8x8 region, dump, block-for-block diff vs the
+  # reference dumps captured from pure vanilla. Two worlds: vanilla and
+  # the custom-datapack world (sea_level 63->40). Gate: block diff% must not
+  # exceed reference/judge_gate.txt thresholds (regression = fail).
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: native/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('native/Cargo.lock') }}
+      - name: Cache paper server (paperclip extraction)
+        uses: actions/cache@v4
+        with:
+          path: |
+            server/versions
+            server/libraries
+          key: paper-1.21.8-b60
+
+      - name: Build native (release)
+        working-directory: native
+        run: cargo build --release --locked || cargo build --release
+      - name: Build plugin
+        run: |
+          chmod +x plugin/build.sh
+          ./plugin/build.sh
+      - name: Bootstrap server dir (paper.jar + eula + props)
+        run: |
+          chmod +x harness/bootstrap_server.sh
+          bash harness/bootstrap_server.sh 60
+      - name: Sanity .so
+        run: file native/target/release/libcrussty_chunkgen.so
+
+      - name: Judge world=vanilla
+        run: |
+          set -o pipefail
+          CRUS_FRESH=1 bash harness/plugin_bench.sh vanilla 2>&1 | tee judge_vanilla.log || true
+          D=$(grep -oP 'OVERALL: \d+/\d+ blocks differ = \K[0-9.]+' judge_vanilla.log | tail -1)
+          echo "vanilla diff% = $D"
+          python3 harness/judge_gate.py "${D:-999}" "${CRUS_GATE_VANILLA:-35.0}" vanilla
+        env:
+          CRUS_GATE_VANILLA: 35.0
+
+      - name: Judge world=datapack
+        run: |
+          set -o pipefail
+          CRUS_FRESH=1 bash harness/plugin_bench.sh datapack 2>&1 | tee judge_datapack.log || true
+          D=$(grep -oP 'OVERALL: \d+/\d+ blocks differ = \K[0-9.]+' judge_datapack.log | tail -1)
+          echo "datapack diff% = $D"
+          python3 harness/judge_gate.py "${D:-999}" "${CRUS_GATE_DATAPACK:-35.0}" datapack
+        env:
+          CRUS_GATE_DATAPACK: 35.0
+
+      - name: Timing summary
+        if: always()
+        run: |
+          grep -h "native noise stage" judge_*.log reference/plugin_stats_*.txt 2>/dev/null || true
+
+      - name: Upload judge artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: judge-${{ github.run_id }}
+          path: |
+            judge_vanilla.log
+            judge_datapack.log
+            reference/plugin_stats_vanilla.txt
+            reference/plugin_stats_datapack.txt
+            reference/dumps_plugin/
+            server/run.out
+          retention-days: 14
+          if-no-files-found: warn
