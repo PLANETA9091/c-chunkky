@@ -120,6 +120,12 @@ type FluidStatus = (i32, u16);
 struct AquiferState {
     cache: Vec<Option<FluidStatus>>,
     loc_cache: Vec<i64>,
+    /// Per BASE-cell summary: all 12 neighborhood statuses equal + the shared
+    /// status. The 12-cell neighborhood depends only on the base cell
+    /// (gx, gy, gz), never on the block itself — so the all-same verdict and
+    /// the uniform status are pure functions of the base cell and can be
+    /// memoized. Reset per chunk together with the other caches.
+    summary: Vec<Option<(bool, FluidStatus)>>,
     min_grid_x: i32,
     min_grid_y: i32,
     min_grid_z: i32,
@@ -136,6 +142,7 @@ impl AquiferState {
         AquiferState {
             cache: vec![None; cells],
             loc_cache: vec![i64::MAX; cells],
+            summary: vec![None; cells],
             min_grid_x: 0,
             min_grid_y,
             min_grid_z: 0,
@@ -157,6 +164,9 @@ impl AquiferState {
             *v = i64::MAX;
         }
         for v in self.cache.iter_mut() {
+            *v = None;
+        }
+        for v in self.summary.iter_mut() {
             *v = None;
         }
     }
@@ -244,6 +254,8 @@ pub struct ChunkGen<'e> {
     skip_cellfill: bool,
     skip_material: bool,
     skip_slice: bool,
+    /// Perf-experiment switch (CRUS_NO_ORE), NEVER set in production.
+    no_ore: bool,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -256,6 +268,8 @@ pub struct Prof {
     pub plane_hits: u64,
     pub blocks_subst_pos: u64,
     pub blocks_subst_neg: u64,
+    pub blocks_ore_reached: u64,
+    pub blocks_aquifer_air: u64,
 }
 
 impl Prof {
@@ -271,6 +285,8 @@ impl Prof {
         self.fill_slice_ns = 0;
         self.cellfill_ns = 0;
         self.material_ns = 0;
+        self.blocks_ore_reached = 0;
+        self.blocks_aquifer_air = 0;
         self.select_ns = 0;
         self.plane_hits = 0;
         self.blocks_subst_pos = 0;
@@ -356,6 +372,7 @@ impl<'e> ChunkGen<'e> {
             skip_cellfill: std::env::var("CRUS_SKIP_CELLFILL").is_ok(),
             skip_material: std::env::var("CRUS_SKIP_MATERIAL").is_ok(),
             skip_slice: std::env::var("CRUS_SKIP_SLICE").is_ok(),
+            no_ore: std::env::var("CRUS_NO_ORE").is_ok(),
         }
     }
 
@@ -846,6 +863,13 @@ impl<'e> ChunkGen<'e> {
             self.plane_cache_x = plane_x;
             self.plane_cache_z = first_cell_z;
         }
+        // merge per-block counters (material_rule mutates self.prof directly;
+        // self.prof is the live accumulator — replace, do not add, or the
+        // totals compound across fills)
+        p.blocks_subst_pos = self.prof.blocks_subst_pos;
+        p.blocks_subst_neg = self.prof.blocks_subst_neg;
+        p.blocks_ore_reached = self.prof.blocks_ore_reached;
+        p.blocks_aquifer_air = self.prof.blocks_aquifer_air;
         self.prof = p;
     }
 
@@ -908,6 +932,9 @@ impl<'e> ChunkGen<'e> {
         // rule 1: aquifer (or disabled aquifer)
         let mut state: Option<u16> = if self.aquifers_enabled {
             let r = self.aquifer_compute_substance(pt, substance);
+            if self.prof.enabled && matches!(r, Some(b) if b == AIR) {
+                self.prof.blocks_aquifer_air += 1;
+            }
             if r.is_some() && self.sched {
                 let b = r.unwrap();
                 // vanilla doFill: mark when flag && written block has fluid state
@@ -922,8 +949,11 @@ impl<'e> ChunkGen<'e> {
             let g = self.global_fluid(y);
             Some(aquifer_at(g, y))
         };
-        // rule 2: ore veins
-        if state.is_none() && self.ore_veins_enabled {
+        // rule 2: ore veins (CRUS_NO_ORE is a perf-experiment switch only)
+        if state.is_none() && self.ore_veins_enabled && !self.no_ore {
+            if self.prof.enabled {
+                self.prof.blocks_ore_reached += 1;
+            }
             state = self.ore_vein(pt);
         }
         state.unwrap_or(STONE)
@@ -961,6 +991,25 @@ impl<'e> ChunkGen<'e> {
         let gy = floor_div(y + 1, 12);
         let gz = floor_div(z - 5, 16);
 
+        // Base-cell summary fast path: the 12-cell neighborhood (hence the
+        // all-same verdict and the uniform status) is a pure function of the
+        // base cell (gx, gy, gz). On a hit we skip the per-block scan
+        // entirely: result = status.at(y); sched is provably false unless
+        // the block is deep water above the lava layer (y <= -54 territory),
+        // in which case a targeted two-smallest-distance scan decides the
+        // vanilla d67 > 0.0 gate.
+        let base = self.aquifer.index(gx, gy, gz);
+        if let Some((true, s)) = self.aquifer.summary[base] {
+            let block = aquifer_at(s, y);
+            self.sched = block == WATER
+                && aquifer_at(self.global_fluid(y - 1), y - 1) == LAVA
+                && {
+                    let (i6, i7) = self.scan_two_smallest(x, y, z, gx, gy, gz);
+                    similarity(i6, i7) > 0.0
+                };
+            return Some(block);
+        }
+
         // Single-pass scan in the exact vanilla order (i10 outer, i11 middle,
         // i12 inner) that serves BOTH the uniform fast path and the full
         // border logic below. It tracks the four smallest squared distances
@@ -978,7 +1027,6 @@ impl<'e> ChunkGen<'e> {
         // unresolved (vanilla lazily resolves only the l0..l3 winners).
         let stride_z = self.aquifer.grid_size_x as usize;
         let stride_y = stride_z * self.aquifer.grid_size_z as usize;
-        let base = self.aquifer.index(gx, gy, gz);
         let mut first: FluidStatus = (0, 0);
         let mut all_same = true;
         let mut i6 = i64::MAX;
@@ -1067,6 +1115,8 @@ impl<'e> ChunkGen<'e> {
             }
             idx10 += 1;
         }
+        // Memoize the base-cell verdict (pure function of (gx, gy, gz)).
+        self.aquifer.summary[base] = Some((all_same, first));
         if all_same {
             let block = aquifer_at(first, y);
             // Vanilla: d <= 0.0 early-returns with sched = false (the
@@ -1131,6 +1181,74 @@ impl<'e> ChunkGen<'e> {
             true
         };
         Some(block)
+    }
+
+    /// Targeted scan: two smallest squared distances (i6, i7) to the 12
+    /// neighborhood source positions, identical order and tie semantics as
+    /// the full scan. Used only by the summary fast path when a deep
+    /// water-above-lava mark is possible — the vanilla d67 > 0.0 gate.
+    fn scan_two_smallest(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        gx: i32,
+        gy: i32,
+        gz: i32,
+    ) -> (i64, i64) {
+        let stride_z = self.aquifer.grid_size_x as usize;
+        let stride_y = stride_z * self.aquifer.grid_size_z as usize;
+        let mut idx10 = self.aquifer.index(gx, gy, gz);
+        let mut i6 = i64::MAX;
+        let mut i7 = i64::MAX;
+        let mut i8 = i64::MAX;
+        let mut i9 = i64::MAX;
+        for i10 in 0..=1i32 {
+            let gxx = gx + i10;
+            let mut idx11 = idx10.wrapping_sub(stride_y); // i11 = -1
+            for i11 in -1..=1i32 {
+                let gyy = gy + i11;
+                let mut index = idx11;
+                for i12 in 0..=1i32 {
+                    let gzz = gz + i12;
+                    let packed = if self.aquifer.loc_cache[index] != i64::MAX {
+                        self.aquifer.loc_cache[index]
+                    } else {
+                        let mut rng = self.env.aquifer_random.clone().at(gxx, gyy, gzz);
+                        let p = block_pos_as_long(
+                            gxx * 16 + rng.next_int_bound(10),
+                            gyy * 12 + rng.next_int_bound(9),
+                            gzz * 16 + rng.next_int_bound(10),
+                        );
+                        self.aquifer.loc_cache[index] = p;
+                        p
+                    };
+                    let dx = pos_x(packed) as i64 - x as i64;
+                    let dy = pos_y(packed) as i64 - y as i64;
+                    let dz = pos_z(packed) as i64 - z as i64;
+                    let dist = dx * dx + dy * dy + dz * dz;
+                    if i6 >= dist {
+                        i9 = i8;
+                        i8 = i7;
+                        i7 = i6;
+                        i6 = dist;
+                    } else if i7 >= dist {
+                        i9 = i8;
+                        i8 = i7;
+                        i7 = dist;
+                    } else if i8 >= dist {
+                        i9 = i8;
+                        i8 = dist;
+                    } else if i9 >= dist {
+                        i9 = dist;
+                    }
+                    index += stride_z;
+                }
+                idx11 += stride_y;
+            }
+            idx10 += 1;
+        }
+        (i6, i7)
     }
 
     /// Vanilla NoiseBasedAquifer.calculatePressure.
