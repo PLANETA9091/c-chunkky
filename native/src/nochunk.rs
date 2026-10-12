@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 use crate::density::{compile_cellfill, BatchMemo, CellOp, Compiled, Env, InterpState, MemoCtx, Mode, Pt, V4Memo, V8Memo, WKind};
 
 #[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::_mm256_loadu_pd;
+#[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::_mm256_setzero_pd;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::_mm256_setr_pd;
@@ -1654,10 +1656,24 @@ impl<'e> ChunkGen<'e> {
         // substances: all four must be <= 0 (ore path is per-block);
         // all four > 0 -> whole row takes the vanilla subst>0 early return
         // (aquifer None, sched=false) and ore runs per block below.
-        let s0 = self.cell_cache_value(iy, ix, 0);
-        let s1 = self.cell_cache_value(iy, ix, 1);
-        let s2 = self.cell_cache_value(iy, ix, 2);
-        let s3 = self.cell_cache_value(iy, ix, 3);
+        // The four z-values are contiguous in cell_cache: one vector load.
+        let cw = self.cell_width;
+        let base_i = (((self.cell_height as i32 - 1 - iy) as usize) * cw + ix as usize) * cw;
+        let (s0, s1, s2, s3) = if cw == 4 && cellfill_simd::avx2_ok() {
+            unsafe {
+                let v = _mm256_loadu_pd(self.cell_cache.as_ptr().add(base_i));
+                let mut a = [0f64; 4];
+                _mm256_storeu_pd(a.as_mut_ptr(), v);
+                (a[0], a[1], a[2], a[3])
+            }
+        } else {
+            (
+                self.cell_cache[base_i],
+                self.cell_cache[base_i + 1],
+                self.cell_cache[base_i + 2],
+                self.cell_cache[base_i + 3],
+            )
+        };
         if s0 > 0.0 && s1 > 0.0 && s2 > 0.0 && s3 > 0.0 {
             self.sched = false;
             for iz in 0..4i32 {
