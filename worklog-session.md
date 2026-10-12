@@ -212,3 +212,25 @@ Work Log:
 Stage Summary:
 - Awaiting the clean judge verdict (8d6971a): new code + new refs + deterministic order. Expect granite-family spill diffs to vanish; remaining = real diffs (pockets + kelp cascades).
 - Perf on CI pending with 4 fill threads.
+
+---
+Task ID: cont-9 (2026-10-13 night)
+Agent: Super Z (main)
+Task: SIMD-спурт до предела + возобновление судейского вердикта
+
+Work Log:
+- CI-археология: прогон 818ad9b падал на "unknown command: marks" (bisect-B бинтер без marks); реставр 8d6971a это чинил, но прогоны отменялись по concurrency. Перезапущен CI; позднее 4 параллельных integration-джобы душили друг друга (>1.5ч in_progress) — отменены все кроме последнего (ce8fba0).
+- ОРАКУЛ-ПАРИТЕТ МЕТОК ПОДТВЕРЖДЁН: vanilla NMS marked_true 2/1/8/0 (2,-2/2,-3/3,-2/3,-3) == наши bench marks ровно (2,-2: marks=2, позиции 47,24,-32 / 47,23,-32 бит-в-бит).
+- SIMD-фаза 1 (шум): noise_5_batch AVX2 __m256d (32 grad_dot + 3 smoothstep + 7 lerp3 векторно; перм-загрузки скалярно; строгий IEEE, БЕЗ FMA) + бит-в-бит юнит-тесты vs скаляр. Микро: 31.8 -> 18.5 нс/сэмпл (1.72x).
+- SIMD-фаза 2 (slice): корень "eval4 не ускорял" — fill_slice звал СКАЛЯРНЫЙ eval+memo. Slot 0 (88% slice) переведён на eval4 + V4Memo ([f64;4] штампы per node per group — без него eval4 терял within-group DAG CSE: 6.17ms). slice 3.90 -> 2.15.
+- SIMD-фаза 3 (cellfill): 4-лейн AVX2 стек-машина (dz лейн-вектор, blend short-circuit) 3.25 -> 1.79; двухстрочный раннер (пар стеков A/B) 1.79 -> 1.42; векторизованный rows-хойстинг (dx=[0,.25,.5,.75] лейны, 8 вектор-опов/слот вместо 48 лерпов, rows8 [slot][k][ix]) 1.42 -> 1.03. ДВАЖДЫ ломало хэши (layout) — поймано out_hash, исправлено.
+- SIMD-фаза 4 (material): row4 fast path (uniform summary + все subst<=0 => константная строка) 2.82 -> 1.77; all-solid-row (subst>0 строкой + ore инлайн) -> 1.29.
+- СТРУКТУРНЫЙ ПРОПУСК: all-solid CELL gate — все 8 углов > 0 => выпуклость трилинейки => все 128 subst>0 => cellfill ячейки скипается целиком (beard пуст) -> 0.78ms.
+- eval8/AVX-512: const-generic eval_batch<N>, BatchMemo<const N>, noise_5_batch8 (AVX-512 opt-in: на SKX-классе 512-бит f64 МЕДЛЕННЕЕ 2xAVX2 — 25.5 vs 18.6 нс; даунклок), per-half skip в BlendedNoise, РАНТАЙМ-КАЛИБРОВКА pick_slice_lanes (CRUS_LANES; здесь 4: 6004 vs 7506ns).
+- Итог: wall 10.15 -> 4.47ms (2.26x), @2thr 3.98. Фазы: slice 2.16 (чистый шум, латентный пол perm-цепочек), material 1.4, cellfill 0.78, other 0.16.
+- Проверки после каждого шага: out_hash 6 чанков + fastdiff + 11/11 тестов. УРОК: fastdiff (seed 0) не ловит баги реального seed — гонять bench fill по реальным чанкам!
+
+Stage Summary:
+- Перф: 45 -> 10.15 -> 4.47ms single-thread (10x за проект).
+- Паритет: бит-в-бит на всех стадиях; метки = NMS-оракул; судейский вердикт ждём на ce8fba0.
+- Next: (1) CI-вердикт -> 100%?; (2) material mixed-строки; (3) select_cell_yz SIMD; (4) CRUS_LANES=8 на CI если калибровка выберет 8.
