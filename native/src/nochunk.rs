@@ -183,6 +183,9 @@ pub struct ChunkGen<'e> {
     sched: bool,
     /// packed BlockPos list of fluid-update marks for the current chunk.
     marks: Vec<i64>,
+    /// per-chunk structure beardifier (vanilla Beardifier contribution); the
+    /// plugin ships the real vanilla piece list per chunk via setBeard.
+    beard: crate::beard::Beard,
     pub env: &'e Env,
     pub compiled: Compiled,
     /// child arena index per Interpolated slot (slice-fill evaluation).
@@ -295,6 +298,7 @@ impl<'e> ChunkGen<'e> {
         ChunkGen {
             sched: false,
             marks: Vec::with_capacity(1024),
+            beard: crate::beard::Beard::default(),
             interp_children,
             cell_width,
             cell_height,
@@ -527,6 +531,9 @@ impl<'e> ChunkGen<'e> {
         let t_bc = if prof { Some(std::time::Instant::now()) } else { None };
         self.aquifer.begin_chunk(cx, cz);
         self.marks.clear();
+        // NOTE: the beard is NOT cleared here — the plugin ships a fresh list
+        // per chunk via the atomic fillBeard JNI call (set_beard + fill), so
+        // there is no stale-structure leak through the ctx pool.
         if let Some(t) = t_bc {
             p.select_ns += t.elapsed().as_nanos() as u64; // reuse select bucket as "misc"
         }
@@ -885,7 +892,12 @@ impl<'e> ChunkGen<'e> {
     #[inline]
     fn material_rule(&mut self, x: i32, y: i32, z: i32, ix: i32, iy: i32, iz: i32) -> u16 {
         let pt = Pt { x, y, z };
-        let substance = self.cell_cache_value(iy, ix, iz);
+        let mut substance = self.cell_cache_value(iy, ix, iz);
+        if !self.beard.is_empty() {
+            // vanilla: cacheAllInCell(add(finalDensity, beardifier)) — the
+            // cached value already includes the beard contribution.
+            substance += self.beard.contribution(x, y, z);
+        }
         if self.prof.enabled {
             if substance > 0.0 {
                 self.prof.blocks_subst_pos += 1;
@@ -949,68 +961,26 @@ impl<'e> ChunkGen<'e> {
         let gy = floor_div(y + 1, 12);
         let gz = floor_div(z - 5, 16);
 
-        // Fast path (provably identical to the vanilla scan): when all 12
-        // candidate source cells share one FluidStatus, the distance/pressure
-        // machinery collapses — calculate_pressure returns 0.0 (|dlevel|==0),
-        // every flag needs a status difference — so the result is exactly
-        // (status.at(y), sched=false), plus the y==-54 water-above-lava mark
-        // that does not depend on the scan. Statuses are resolved per SOURCE
-        // POSITION (packed, rng-offset inside the cell) exactly like the
-        // scan/getAquiferStatus path — never from bare cell coords.
-        let stride_y = (self.aquifer.grid_size_z * self.aquifer.grid_size_x) as i64;
-        let stride_z = self.aquifer.grid_size_x as i64;
-        let base = self.aquifer.index(gx, gy, gz) as i64;
+        // Single-pass scan in the exact vanilla order (i10 outer, i11 middle,
+        // i12 inner) that serves BOTH the uniform fast path and the full
+        // border logic below. It tracks the four smallest squared distances
+        // (i6..i9, l0..l3) with vanilla `>=` tie semantics AND the
+        // all-statuses-equal flag. When all 12 candidate cells share one
+        // FluidStatus, the pressure machinery provably collapses
+        // (calculate_pressure == 0.0, every flag needs a status difference):
+        //   result  = status.at(y)
+        //   sched   = d67 > 0.0 && water-above-lava   (vanilla d > 0 branch)
+        // and in the vanilla early-return branch (d67 <= 0.0) the uniform
+        // region makes !status.equals(status1) false, so sched = false there.
+        // Statuses are resolved per SOURCE POSITION (packed, rng-offset inside
+        // the cell) exactly like getAquiferStatus — never from bare cell
+        // coords; once all_same turns false the remaining statuses stay
+        // unresolved (vanilla lazily resolves only the l0..l3 winners).
+        let stride_z = self.aquifer.grid_size_x as usize;
+        let stride_y = stride_z * self.aquifer.grid_size_z as usize;
+        let base = self.aquifer.index(gx, gy, gz);
         let mut first: FluidStatus = (0, 0);
         let mut all_same = true;
-        for a in 0..2i64 {
-            for b in -1..=1i64 {
-                for c in 0..2i64 {
-                    let index = (base + a + b * stride_y + c * stride_z) as usize;
-                    // The source position always lands inside its own grid
-                    // cell (cell*dim + rng(dim-1)), so cache[index] IS the
-                    // status this cell would resolve to. Decode the packed
-                    // position only on a cache miss.
-                    let st = match self.aquifer.cache[index] {
-                        Some(st) => st,
-                        None => {
-                            let gxx = gx + a as i32;
-                            let gyy = gy + b as i32;
-                            let gzz = gz + c as i32;
-                            let packed = if self.aquifer.loc_cache[index] != i64::MAX {
-                                self.aquifer.loc_cache[index]
-                            } else {
-                                let mut rng = self.env.aquifer_random.clone().at(gxx, gyy, gzz);
-                                let p = block_pos_as_long(
-                                    gxx * 16 + rng.next_int_bound(10),
-                                    gyy * 12 + rng.next_int_bound(9),
-                                    gzz * 16 + rng.next_int_bound(10),
-                                );
-                                self.aquifer.loc_cache[index] = p;
-                                p
-                            };
-                            let v =
-                                self.compute_aquifer_fluid(pos_x(packed), pos_y(packed), pos_z(packed));
-                            self.aquifer.cache[index] = Some(v);
-                            v
-                        }
-                    };
-                    if !all_same {
-                        continue;
-                    }
-                    if first.1 == 0 {
-                        first = st;
-                    } else if st != first {
-                        all_same = false;
-                    }
-                }
-            }
-        }
-        if all_same {
-            let block = aquifer_at(first, y);
-            self.sched = block == WATER && aquifer_at(self.global_fluid(y - 1), y - 1) == LAVA;
-            return Some(block);
-        }
-
         let mut i6 = i64::MAX;
         let mut i7 = i64::MAX;
         let mut i8 = i64::MAX;
@@ -1019,14 +989,7 @@ impl<'e> ChunkGen<'e> {
         let mut l1 = 0i64;
         let mut l2 = 0i64;
         let mut l3 = 0i64;
-
-        // Precomputed cell-index walk: same vanilla iteration order
-        // (i10 outer, i11 middle, i12 inner) and identical index() results,
-        // but index arithmetic is incremental instead of recomputed per cell.
-        let base_i = self.aquifer.index(gx, gy, gz);
-        let stride_z = self.aquifer.grid_size_x as usize; // 3
-        let stride_y = stride_z * self.aquifer.grid_size_z as usize; // 9
-        let mut idx10 = base_i;
+        let mut idx10 = base;
         for i10 in 0..=1i32 {
             let gxx = gx + i10;
             let mut idx11 = idx10.wrapping_sub(stride_y); // i11 = -1
@@ -1076,11 +1039,43 @@ impl<'e> ChunkGen<'e> {
                         l3 = packed;
                         i9 = dist;
                     }
+                    if all_same {
+                        // The source position always lands inside its own
+                        // grid cell (cell*dim + rng(dim-1)), so cache[index]
+                        // IS the status this cell would resolve to.
+                        let st = match self.aquifer.cache[index] {
+                            Some(st) => st,
+                            None => {
+                                let v = self.compute_aquifer_fluid(
+                                    pos_x(packed),
+                                    pos_y(packed),
+                                    pos_z(packed),
+                                );
+                                self.aquifer.cache[index] = Some(v);
+                                v
+                            }
+                        };
+                        if first.1 == 0 {
+                            first = st;
+                        } else if st != first {
+                            all_same = false;
+                        }
+                    }
                     index += stride_z;
                 }
                 idx11 += stride_y;
             }
             idx10 += 1;
+        }
+        if all_same {
+            let block = aquifer_at(first, y);
+            // Vanilla: d <= 0.0 early-returns with sched = false (the
+            // !status.equals(status1) test is false for a uniform region);
+            // only the d > 0.0 path can reach the water-above-lava mark.
+            self.sched = similarity(i6, i7) > 0.0
+                && block == WATER
+                && aquifer_at(self.global_fluid(y - 1), y - 1) == LAVA;
+            return Some(block);
         }
 
         let aquifer_status = self.aquifer_status(l0);
@@ -1409,6 +1404,13 @@ impl<'e> ChunkGen<'e> {
     /// Fluid-update marks (packed BlockPos) collected during the last fill.
     pub fn marks(&self) -> &[i64] {
         &self.marks
+    }
+
+    /// Ship the per-chunk structure beardifier (vanilla Beardifier piece
+    /// list, collected by the plugin via the real vanilla collection loop).
+    /// Call BEFORE fill; fill() clears any previous list first.
+    pub fn set_beard(&mut self, data: &[i32]) {
+        self.beard = crate::beard::Beard::decode(data);
     }
 
     pub fn eval_child_pub(&self, child: u32, pt: Pt) -> f64 {
