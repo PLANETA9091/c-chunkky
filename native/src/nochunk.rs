@@ -825,14 +825,11 @@ impl<'e> ChunkGen<'e> {
                     let t_mt = if prof { Some(std::time::Instant::now()) } else { None };
                     for i6 in (0..self.cell_height as i32).rev() {
                         let block_y = (self.cell_noise_min_y + i5 as i32) * ch + i6;
-                        self.interp.update_for_y(i6 as f64 / self.cell_height as f64);
 
                         for i9 in 0..self.cell_width as i32 {
-                            self.interp.update_for_x(i9 as f64 / self.cell_width as f64);
                             let block_x = cell_start_block_x + i9;
 
                             for i12 in 0..self.cell_width as i32 {
-                                self.interp.update_for_z(i12 as f64 / self.cell_width as f64);
                                 let block_z = cell_start_block_z + i12;
 
                                 let skip_material = self.skip_material;
