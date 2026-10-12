@@ -256,6 +256,10 @@ pub struct ChunkGen<'e> {
     skip_slice: bool,
     /// Perf-experiment switch (CRUS_NO_ORE), NEVER set in production.
     no_ore: bool,
+    /// Parallel corner evaluation threads for fill_slice (CRUS_FILL_THREADS,
+    /// default 1 = serial). Corners are independent pure functions of
+    /// position; per-thread memo keeps results bit-identical.
+    slice_threads: usize,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -373,6 +377,12 @@ impl<'e> ChunkGen<'e> {
             skip_material: std::env::var("CRUS_SKIP_MATERIAL").is_ok(),
             skip_slice: std::env::var("CRUS_SKIP_SLICE").is_ok(),
             no_ore: std::env::var("CRUS_NO_ORE").is_ok(),
+            slice_threads: std::env::var("CRUS_FILL_THREADS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&n| n >= 1)
+                .unwrap_or(1)
+                .min(16),
         }
     }
 
@@ -879,6 +889,64 @@ impl<'e> ChunkGen<'e> {
         let corner_x = start_cell_x * self.cell_width as i32;
         let cw = self.cell_width as i32;
         let ch = self.cell_height as i32;
+        let nz = self.cell_count_xz as usize + 1;
+        let ny = self.cell_count_y as usize + 1;
+        let nslots = self.interp_children.len();
+        let total = nz * ny;
+        let nthr = self.slice_threads.min(total);
+        if nthr > 1 {
+            // Parallel corner evaluation: corners are pure functions of
+            // (x, y, z); Mode::Slice never touches mutable interp state and
+            // memo is a per-point stamp cache — per-thread MemoCtx instances
+            // keep results bit-identical while dropping the shared-serial
+            // serialization. Threads write disjoint result ranges; the main
+            // thread replays them into the slice buffers.
+            let env = self.env;
+            let compiled = &self.compiled;
+            let children = &self.interp_children;
+            let interp = &self.interp;
+            let cell_noise_min_y = self.cell_noise_min_y;
+            let mut results = vec![0.0f64; nslots * total];
+            let per = total.div_ceil(nthr);
+            let chunk_len = per * nslots;
+            let result_chunks: Vec<&mut [f64]> = results.chunks_mut(chunk_len).collect();
+            std::thread::scope(|s| {
+                for (t, out) in result_chunks.into_iter().enumerate() {
+                    let lo = t * per;
+                    if lo >= total {
+                        break;
+                    }
+                    s.spawn(move || {
+                        let mut memo = MemoCtx::new(compiled.arena.len());
+                        for p in lo..lo + out.len() / nslots {
+                            let i = p / ny;
+                            let y = p % ny;
+                            let corner_z = (first_cell_z + i as i32) * cw;
+                            let corner_y = (y as i32 + cell_noise_min_y) * ch;
+                            let pt = Pt { x: corner_x, y: corner_y, z: corner_z };
+                            memo.next_serial();
+                            for (slot, &child) in children.iter().enumerate() {
+                                let v = env.eval(compiled, child, pt, Mode::Slice, interp, Some(&memo));
+                                out[(p - lo) * nslots + slot] = v;
+                            }
+                        }
+                    });
+                }
+            });
+            for p in 0..total {
+                let i = p / ny;
+                let y = p % ny;
+                for slot in 0..nslots {
+                    let v = results[p * nslots + slot];
+                    if is_first {
+                        self.interp.slice0_set(slot as u16, i, y, v);
+                    } else {
+                        self.interp.slice1_set(slot as u16, i, y, v);
+                    }
+                }
+            }
+            return;
+        }
         for i in 0..=self.cell_count_xz {
             let corner_z = (first_cell_z + i as i32) * cw;
             for y in 0..=self.cell_count_y {
