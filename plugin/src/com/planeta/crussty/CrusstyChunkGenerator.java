@@ -208,9 +208,19 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         long ctx = pool.acquire(lockBox);
         short[] out = buf.get();
         long[] marks = MARK_BUF.get();
+        // Beardifier bridge (CRUS_BEARD=1 to enable): collectBeard performs a
+        // SYNCHRONOUS getChunk(STRUCTURE_STARTS, create=true) of up to 5x5
+        // neighbor chunks DURING the noise stage — a heavy re-entrancy into
+        // the Paper chunk system. It is off by default while its side
+        // effects on feature RNG/decoration are being bisected; beards only
+        // matter near structure terrain adaptation anyway.
+        int[] beard = java.util.Arrays.copyOf(BEARD_EMPTY, BEARD_EMPTY.length);
+        if (BEARD_ENABLED) {
+            beard = collectBeard(worldInfo, chunkX, chunkZ, chunkData);
+        }
         int nMarks;
         try {
-            nMarks = ChunkGenNative.fillMarked(ctx, chunkX, chunkZ, out, marks);
+            nMarks = ChunkGenNative.fillBeard(ctx, chunkX, chunkZ, out, marks, beard);
         } finally {
             lockBox[0].unlock();
         }
@@ -247,6 +257,239 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         CTX.clear();
         LOCKS.clear();
         SEA_CACHE.clear();
+    }
+
+    // ------------------------------------------------------------------
+    // Beardifier bridge: collect the vanilla structure terrain-adaptation
+    // piece/junction list for the chunk (the exact collection loop of
+    // Beardifier.forStructuresInChunk) and ship it to the native fillBeard.
+    // Vanilla adds this density to final_density inside the material rule;
+    // without it the aquifer places stone where vanilla places water/lava
+    // near structures (trial chambers etc.) and the fluid postprocessing
+    // diverges. Reflection only; the runtime is mojmap-named (Paper 1.21+).
+    // ------------------------------------------------------------------
+
+    private static volatile boolean beardBroken;
+    private static volatile boolean beardReady;
+    private static final Object BEARD_LOCK = new Object();
+    private static final ThreadLocal<int[]> BEARD_BUF = ThreadLocal.withInitial(() -> new int[256]);
+    private static final int[] BEARD_EMPTY = new int[1];
+    private static final boolean BEARD_ENABLED = System.getenv("CRUS_BEARD") != null;
+
+    // cached NMS handles
+    private static Class<?> cChunkPos, cStructureStart, cStructurePiece, cPoolPiece, cBoundingBox,
+            cJunction, cStructure, cChunkStatus;
+    private static Method mGetHandle, mGetChunkSource, mGetChunkAtIfLoaded, mGetChunkFull,
+            mGetAllRefs, mGetStartForStructure, mTerrainAdapt, mStartGetPieces, mStartIsValid,
+            mPieceGetBox, mPieceIsClose, mPoolGetElement, mElementProjection, mPoolGetDelta,
+            mBoxMinX, mBoxMinY, mBoxMinZ, mBoxMaxX, mBoxMaxY, mBoxMaxZ,
+            mJGetSX, mJGetGY, mJGetSZ, mGetJunctions;
+    private static Constructor<?> ctorChunkPos;
+
+    private static boolean initBeard() {
+        synchronized (BEARD_LOCK) {
+            if (beardReady || beardBroken) {
+                return beardReady;
+            }
+            try {
+                cChunkPos = Class.forName("net.minecraft.world.level.ChunkPos");
+                cStructureStart = Class.forName("net.minecraft.world.level.levelgen.structure.StructureStart");
+                cStructurePiece = Class.forName("net.minecraft.world.level.levelgen.structure.StructurePiece");
+                cPoolPiece = Class.forName("net.minecraft.world.level.levelgen.structure.PoolElementStructurePiece");
+                cBoundingBox = Class.forName("net.minecraft.world.level.levelgen.structure.BoundingBox");
+                cJunction = Class.forName("net.minecraft.world.level.levelgen.structure.pools.JigsawJunction");
+                cStructure = Class.forName("net.minecraft.world.level.levelgen.structure.Structure");
+                cChunkStatus = Class.forName("net.minecraft.world.level.chunk.status.ChunkStatus");
+                ctorChunkPos = cChunkPos.getConstructor(int.class, int.class);
+                mGetHandle = Class.forName("org.bukkit.craftbukkit.CraftWorld").getMethod("getHandle");
+                Class<?> levelClass = Class.forName("net.minecraft.server.level.ServerLevel");
+                mGetChunkSource = levelClass.getMethod("getChunkSource");
+                Class<?> chunkCacheClass = Class.forName("net.minecraft.server.level.ServerChunkCache");
+                mGetChunkAtIfLoaded = chunkCacheClass.getMethod("getChunkAtIfLoadedImmediately", int.class, int.class);
+                Class<?> accessClass = Class.forName("net.minecraft.world.level.chunk.ChunkAccess");
+                mGetAllRefs = accessClass.getMethod("getAllReferences");
+                mGetStartForStructure = accessClass.getMethod("getStartForStructure", cStructure);
+                mGetChunkFull = chunkCacheClass.getMethod("getChunk", int.class, int.class,
+                        cChunkStatus, boolean.class);
+                mTerrainAdapt = cStructure.getMethod("terrainAdaptation");
+                mStartGetPieces = cStructureStart.getMethod("getPieces");
+                mStartIsValid = cStructureStart.getMethod("isValid");
+                mPieceGetBox = cStructurePiece.getMethod("getBoundingBox");
+                mPieceIsClose = cStructurePiece.getMethod("isCloseToChunk", cChunkPos, int.class);
+                mPoolGetElement = cPoolPiece.getMethod("getElement");
+                mElementProjection = mPoolGetElement.getReturnType().getMethod("getProjection");
+                mPoolGetDelta = cPoolPiece.getMethod("getGroundLevelDelta");
+                mBoxMinX = cBoundingBox.getMethod("minX");
+                mBoxMinY = cBoundingBox.getMethod("minY");
+                mBoxMinZ = cBoundingBox.getMethod("minZ");
+                mBoxMaxX = cBoundingBox.getMethod("maxX");
+                mBoxMaxY = cBoundingBox.getMethod("maxY");
+                mBoxMaxZ = cBoundingBox.getMethod("maxZ");
+                mJGetSX = cJunction.getMethod("getSourceX");
+                mJGetGY = cJunction.getMethod("getSourceGroundY");
+                mJGetSZ = cJunction.getMethod("getSourceZ");
+                mGetJunctions = cPoolPiece.getMethod("getJunctions");
+                beardReady = true;
+                LOG.info("beardifier bridge ready (vanilla structure terrain adaptation)");
+            } catch (Throwable t) {
+                beardBroken = true;
+                LOG.warning("beardifier bridge unavailable (structure terrain adaptation off): " + t);
+            }
+            return beardReady;
+        }
+    }
+
+    /**
+     * Vanilla Beardifier.forStructuresInChunk collection: for every structure
+     * start REFERENCED by this chunk with terrainAdaptation != NONE, every
+     * piece close to the chunk (within 12 blocks) contributes; RIGID pool
+     * pieces contribute their box + junctions. Serialization matches the
+     * native Beard::decode contract. Iteration order (refs map + LongSet)
+     * follows the vanilla map iteration so the f64 summation matches.
+     */
+    private static int[] collectBeard(WorldInfo worldInfo, int chunkX, int chunkZ, ChunkData chunkData) {
+        if (beardBroken) {
+            return EMPTY_BEARD;
+        }
+        if (!beardReady && !initBeard()) {
+            return EMPTY_BEARD;
+        }
+        try {
+            World w = Bukkit.getWorld(worldInfo.getName());
+            if (w == null) {
+                return EMPTY_BEARD;
+            }
+            Object nmsWorld = mGetHandle.invoke(w);
+            Object chunkSource = mGetChunkSource.invoke(nmsWorld);
+            // the generating ProtoChunk (LINKED CraftChunkData) carries the refs
+            Object ref = weakChunkField.get(chunkData);
+            if (!(ref instanceof WeakReference<?> wr)) {
+                return EMPTY_BEARD;
+            }
+            Object proto = wr.get();
+            if (proto == null) {
+                return EMPTY_BEARD;
+            }
+            Object refsMap = mGetAllRefs.invoke(proto);
+            if (!(refsMap instanceof java.util.Map<?, ?> map) || map.isEmpty()) {
+                return EMPTY_BEARD;
+            }
+            Object chunkPos = ctorChunkPos.newInstance(chunkX, chunkZ);
+            Object startsStatus = cChunkStatus.getField("STRUCTURE_STARTS").get(null);
+            int[] buf = BEARD_BUF.get();
+            int p = 2; // [0]=pieces header, [1]=junctions header
+            int pieces = 0;
+            int junctions = 0;
+            for (java.util.Map.Entry<?, ?> e : map.entrySet()) {
+                Object structure = e.getKey();
+                Object adj = mTerrainAdapt.invoke(structure);
+                if (adj == null || adj.toString().equals("NONE")) {
+                    continue;
+                }
+                Object refsObj = e.getValue();
+                if (!(refsObj instanceof Iterable<?> refIt)) {
+                    continue;
+                }
+                for (Object refObj : refIt) {
+                    long refPos = (Long) refObj;
+                    int sx = (int) (refPos & 0xFFFFFFFFL);
+                    int sz = (int) (refPos >> 32);
+                    Object startChunk = mGetChunkAtIfLoaded.invoke(chunkSource, sx, sz);
+                    if (startChunk == null) {
+                        startChunk = mGetChunkFull.invoke(chunkSource, sx, sz, startsStatus, true);
+                    }
+                    if (startChunk == null) {
+                        continue;
+                    }
+                    Object start = mGetStartForStructure.invoke(startChunk, structure);
+                    if (start == null || !(boolean) mStartIsValid.invoke(start)) {
+                        continue;
+                    }
+                    Object piecesList = mStartGetPieces.invoke(start);
+                    if (!(piecesList instanceof java.util.List<?> pl)) {
+                        continue;
+                    }
+                    for (Object piece : pl) {
+                        if (!(boolean) mPieceIsClose.invoke(piece, chunkPos, 12)) {
+                            continue;
+                        }
+                        Object box = mPieceGetBox.invoke(piece);
+                        int groundDelta = 0;
+                        Object junctionsList = null;
+                        if (cPoolPiece.isInstance(piece)) {
+                            Object element = mPoolGetElement.invoke(piece);
+                            Object projection = mElementProjection.invoke(element);
+                            if (projection == null || !projection.toString().equals("RIGID")) {
+                                // non-rigid pool piece: only junctions contribute
+                                junctionsList = mGetJunctions.invoke(piece);
+                            } else {
+                                groundDelta = (int) mPoolGetDelta.invoke(piece);
+                            }
+                        }
+                        if (junctionsList == null && cPoolPiece.isInstance(piece)) {
+                            junctionsList = mGetJunctions.invoke(piece);
+                        }
+                        // emit piece
+                        if (p + 8 > buf.length) {
+                            buf = java.util.Arrays.copyOf(buf, buf.length * 2);
+                            BEARD_BUF.set(buf);
+                        }
+                        buf[p++] = (int) mBoxMinX.invoke(box);
+                        buf[p++] = (int) mBoxMinY.invoke(box);
+                        buf[p++] = (int) mBoxMinZ.invoke(box);
+                        buf[p++] = (int) mBoxMaxX.invoke(box);
+                        buf[p++] = (int) mBoxMaxY.invoke(box);
+                        buf[p++] = (int) mBoxMaxZ.invoke(box);
+                        buf[p++] = adjOrdinal(adj);
+                        buf[p++] = groundDelta;
+                        pieces++;
+                        // junctions of this piece (vanilla: source within 12 of chunk)
+                        if (junctionsList instanceof java.util.List<?> jl) {
+                            int minBlockX = chunkX * 16;
+                            int minBlockZ = chunkZ * 16;
+                            for (Object j : jl) {
+                                int jx = (int) mJGetSX.invoke(j);
+                                int jz = (int) mJGetSZ.invoke(j);
+                                if (jx > minBlockX - 12 && jz > minBlockZ - 12
+                                        && jx < minBlockX + 15 + 12 && jz < minBlockZ + 15 + 12) {
+                                    if (p + 3 > buf.length) {
+                                        buf = java.util.Arrays.copyOf(buf, buf.length * 2);
+                                        BEARD_BUF.set(buf);
+                                    }
+                                    buf[p++] = jx;
+                                    buf[p++] = (int) mJGetGY.invoke(j);
+                                    buf[p++] = jz;
+                                    junctions++;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (pieces == 0 && junctions == 0) {
+                return EMPTY_BEARD;
+            }
+            int[] out = new int[p];
+            out[0] = pieces;
+            out[1] = junctions;
+            System.arraycopy(buf, 2, out, 2, p - 2);
+            GenStats.BEARD_PIECES.addAndGet(pieces);
+            GenStats.BEARD_CHUNKS.incrementAndGet();
+            return out;
+        } catch (Throwable t) {
+            beardBroken = true;
+            LOG.warning("beard collection failed, disabling: " + t);
+            return EMPTY_BEARD;
+        }
+    }
+
+    private static final int[] EMPTY_BEARD = new int[]{0, 0};
+
+    private static int adjOrdinal(Object adj) {
+        if (adj instanceof Enum<?> en) {
+            return en.ordinal();
+        }
+        return 0;
     }
 
     // ------------------------------------------------------------------

@@ -234,8 +234,8 @@ pub struct PerlinNoise {
     pub first_octave: i32,
     pub amplitudes: Vec<f64>,
     pub noise_levels: Vec<Option<ImprovedNoise>>,
-    lowest_freq_input_factor: f64,
-    lowest_freq_value_factor: f64,
+    pub lowest_freq_input_factor: f64,
+    pub lowest_freq_value_factor: f64,
     pub max_value: f64,
 }
 
@@ -393,9 +393,9 @@ impl PerlinNoise {
 
 // ---------------- NormalNoise ----------------
 pub struct NormalNoise {
-    first: PerlinNoise,
-    second: PerlinNoise,
-    value_factor: f64,
+    pub first: PerlinNoise,
+    pub second: PerlinNoise,
+    pub value_factor: f64,
     pub max_value: f64,
 }
 

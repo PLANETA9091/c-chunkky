@@ -13,6 +13,7 @@ pub mod md5;
 pub mod noise;
 pub mod worldgen;
 pub mod density;
+pub mod beard;
 pub mod nochunk;
 pub mod ffi;
 
