@@ -37,6 +37,7 @@ fn main() {
             cnmy,
             cw,
             ch,
+            4,
             &mut buf,
         );
         // compare against interp.slice1

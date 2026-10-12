@@ -21,6 +21,15 @@ pub const GRADIENT: [[i32; 3]; 16] = [
     [0, -1, -1],
 ];
 
+/// Split &[f64; 8] into two zero-copy &[f64; 4] half views.
+#[inline]
+fn split8(a: &[f64; 8]) -> (&[f64; 4], &[f64; 4]) {
+    unsafe {
+        let p = a.as_ptr();
+        (&*(p as *const [f64; 4]), &*(p.add(4) as *const [f64; 4]))
+    }
+}
+
 #[inline]
 fn smoothstep(t: f64) -> f64 {
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
@@ -389,6 +398,156 @@ impl ImprovedNoise {
         _mm256_storeu_pd(out.as_mut_ptr(), res);
         out
     }
+
+    /// 8-wide batch: AVX-512 native when available, otherwise two 4-wide
+    /// AVX2 halves (lane-identical arithmetic in both — bit-exact vs noise_5).
+    pub fn noise_5_batch8(
+        &self,
+        xin: &[f64; 8],
+        yin: &[f64; 8],
+        zin: &[f64; 8],
+        y_scale: f64,
+        y_max: &[f64; 8],
+    ) -> [f64; 8] {
+        // AVX-512 is opt-in (CRUS_AVX512=1): on several x86 parts (SKX/CLX)
+        // 512-bit f64 downclocks and measured SLOWER than 2x AVX2; the
+        // 2x-256-bit path below is the safe default. Both are bit-exact.
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::env::var("CRUS_AVX512").as_deref() == Ok("1")
+                && std::arch::is_x86_feature_detected!("avx512f")
+            {
+                return unsafe { self.noise_5_batch_avx512(xin, yin, zin, y_scale, y_max) };
+            }
+        }
+        let mut out = [0f64; 8];
+        // zero-copy 4-wide half views (pointer math; halves never alias)
+        let (xa, xb) = split8(xin);
+        let (ya, yb) = split8(yin);
+        let (za, zb) = split8(zin);
+        let (ma, mb) = split8(y_max);
+        let va = self.noise_5_batch(xa, ya, za, y_scale, ma);
+        let vb = self.noise_5_batch(xb, yb, zb, y_scale, mb);
+        out[..4].copy_from_slice(&va);
+        out[4..].copy_from_slice(&vb);
+        out
+    }
+
+    /// AVX-512 core: same structure as the AVX2 core with 8 lanes in __m512d.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f")]
+    unsafe fn noise_5_batch_avx512(
+        &self,
+        xin: &[f64; 8],
+        yin: &[f64; 8],
+        zin: &[f64; 8],
+        y_scale: f64,
+        y_max: &[f64; 8],
+    ) -> [f64; 8] {
+        use std::arch::x86_64::*;
+        let mut xi = [0i32; 8];
+        let mut yi = [0i32; 8];
+        let mut zi = [0i32; 8];
+        let mut dx = [0f64; 8];
+        let mut dy = [0f64; 8];
+        let mut dz = [0f64; 8];
+        let mut d7 = [0f64; 8];
+        for l in 0..8 {
+            let x = xin[l] + self.xo;
+            let y = yin[l] + self.yo;
+            let z = zin[l] + self.zo;
+            let a = mth_floor(x);
+            let b = mth_floor(y);
+            let c = mth_floor(z);
+            xi[l] = a;
+            yi[l] = b;
+            zi[l] = c;
+            dx[l] = x - a as f64;
+            dy[l] = y - b as f64;
+            dz[l] = z - c as f64;
+            if y_scale != 0.0 {
+                let ym = y_max[l];
+                let d6 = if ym >= 0.0 && ym < dy[l] { ym } else { dy[l] };
+                d7[l] = (d6 / y_scale + 1.0000000116860974e-07).floor() * y_scale;
+            }
+        }
+
+        let dxv = _mm512_loadu_pd(dx.as_ptr());
+        let dyv = _mm512_loadu_pd(dy.as_ptr());
+        let dzv = _mm512_loadu_pd(dz.as_ptr());
+        let d7v = _mm512_loadu_pd(d7.as_ptr());
+        let wdyv = _mm512_sub_pd(dyv, d7v);
+        // smoothstep(dx): t*t*t*(t*(t*6.0-15.0)+10.0)
+        let smooth = |t: __m512d| -> __m512d {
+            let t2 = _mm512_mul_pd(t, t);
+            let t3 = _mm512_mul_pd(t2, t);
+            let a = _mm512_mul_pd(t, _mm512_set1_pd(6.0));
+            let b = _mm512_sub_pd(a, _mm512_set1_pd(15.0));
+            let c = _mm512_mul_pd(b, t);
+            let d = _mm512_add_pd(c, _mm512_set1_pd(10.0));
+            _mm512_mul_pd(t3, d)
+        };
+        let fx = smooth(dxv);
+        let fy = smooth(dyv);
+        let fz = smooth(dzv);
+
+        let mut grad = [[0u8; 8]; 8];
+        for l in 0..8 {
+            let p0 = self.p(xi[l]);
+            let p1 = self.p(xi[l] + 1);
+            let i0 = self.p(p0 + yi[l]);
+            let i1 = self.p(p0 + yi[l] + 1);
+            let j0 = self.p(p1 + yi[l]);
+            let j1 = self.p(p1 + yi[l] + 1);
+            let zc = zi[l];
+            let bases = [i0 + zc, j0 + zc, i1 + zc, j1 + zc];
+            for c in 0..8 {
+                let xbit = c & 1;
+                let ybit = (c >> 1) & 1;
+                let zbit = (c >> 2) & 1;
+                grad[l][c] = self.p(bases[ybit * 2 + xbit] + zbit as i32) as u8;
+            }
+        }
+
+        let one = _mm512_set1_pd(1.0);
+        let mut vc = [_mm512_setzero_pd(); 8];
+        for c in 0..8 {
+            let mut gxs = [0i32; 8];
+            let mut gys = [0i32; 8];
+            let mut gzs = [0i32; 8];
+            for l in 0..8 {
+                let gv = &GRADIENT[(grad[l][c] & 15) as usize];
+                gxs[l] = gv[0];
+                gys[l] = gv[1];
+                gzs[l] = gv[2];
+            }
+            let gx = _mm512_cvtepi32_pd(_mm256_loadu_si256(gxs.as_ptr() as *const __m256i));
+            let gy = _mm512_cvtepi32_pd(_mm256_loadu_si256(gys.as_ptr() as *const __m256i));
+            let gz = _mm512_cvtepi32_pd(_mm256_loadu_si256(gzs.as_ptr() as *const __m256i));
+            let xv = if c & 1 != 0 { _mm512_sub_pd(dxv, one) } else { dxv };
+            let yv = if c & 2 != 0 { _mm512_sub_pd(wdyv, one) } else { wdyv };
+            let zv = if c & 4 != 0 { _mm512_sub_pd(dzv, one) } else { dzv };
+            let t0 = _mm512_mul_pd(gx, xv);
+            let t1 = _mm512_mul_pd(gy, yv);
+            let t2 = _mm512_mul_pd(gz, zv);
+            vc[c] = _mm512_add_pd(_mm512_add_pd(t0, t1), t2);
+        }
+
+        // Mth.lerp3: a + t*(b-a)
+        let lp = |t: __m512d, a: __m512d, b: __m512d| -> __m512d {
+            _mm512_add_pd(a, _mm512_mul_pd(t, _mm512_sub_pd(b, a)))
+        };
+        let r0 = lp(fx, vc[0], vc[1]);
+        let r1 = lp(fx, vc[2], vc[3]);
+        let r01 = lp(fy, r0, r1);
+        let r2 = lp(fx, vc[4], vc[5]);
+        let r3 = lp(fx, vc[6], vc[7]);
+        let r23 = lp(fy, r2, r3);
+        let res = lp(fz, r01, r23);
+        let mut out = [0f64; 8];
+        _mm512_storeu_pd(out.as_mut_ptr(), res);
+        out
+    }
 }
 
 // ---------------- PerlinNoise ----------------
@@ -516,6 +675,37 @@ impl PerlinNoise {
         d
     }
 
+    /// 8-wide get_value: lane-identical octave loop (bit-exact vs get_value).
+    pub fn get_value_batch8(
+        &self,
+        x: &[f64; 8],
+        y: &[f64; 8],
+        z: &[f64; 8],
+    ) -> [f64; 8] {
+        let mut d = [0f64; 8];
+        let mut input_factor = self.lowest_freq_input_factor;
+        let mut value_factor = self.lowest_freq_value_factor;
+        for i in 0..self.noise_levels.len() {
+            if let Some(nl) = &self.noise_levels[i] {
+                let mut wx = [0f64; 8];
+                let mut wy = [0f64; 8];
+                let mut wz = [0f64; 8];
+                for l in 0..8 {
+                    wx[l] = wrap(x[l] * input_factor);
+                    wy[l] = wrap(y[l] * input_factor);
+                    wz[l] = wrap(z[l] * input_factor);
+                }
+                let v = nl.noise_5_batch8(&wx, &wy, &wz, 0.0, &[0.0; 8]);
+                for l in 0..8 {
+                    d[l] += self.amplitudes[i] * v[l] * value_factor;
+                }
+            }
+            input_factor *= 2.0;
+            value_factor /= 2.0;
+        }
+        d
+    }
+
     /// Vanilla: getOctaveNoise(octave) = noiseLevels[noiseLevels.length - 1 - octave]
     pub fn get_octave_noise(&self, i: usize) -> Option<&ImprovedNoise> {
         self.noise_levels[self.noise_levels.len() - 1 - i].as_ref()
@@ -613,6 +803,25 @@ impl NormalNoise {
         let b = self.second.get_value_batch(&x2, &y2, &z2);
         let mut out = [0f64; 4];
         for l in 0..4 {
+            out[l] = (a[l] + b[l]) * self.value_factor;
+        }
+        out
+    }
+
+    /// 8-wide get_value (bit-exact per lane).
+    pub fn get_value_batch8(&self, x: &[f64; 8], y: &[f64; 8], z: &[f64; 8]) -> [f64; 8] {
+        let a = self.first.get_value_batch8(x, y, z);
+        let mut x2 = [0f64; 8];
+        let mut y2 = [0f64; 8];
+        let mut z2 = [0f64; 8];
+        for l in 0..8 {
+            x2[l] = x[l] * 1.0181268882175227;
+            y2[l] = y[l] * 1.0181268882175227;
+            z2[l] = z[l] * 1.0181268882175227;
+        }
+        let b = self.second.get_value_batch8(&x2, &y2, &z2);
+        let mut out = [0f64; 8];
+        for l in 0..8 {
             out[l] = (a[l] + b[l]) * self.value_factor;
         }
         out
@@ -847,6 +1056,139 @@ impl BlendedNoise {
         }
         let mut out = [0f64; 4];
         for l in 0..4 {
+            let t = d11b[l];
+            let (a, b) = (d8[l] / 512.0, d9[l] / 512.0);
+            let v = if t < 0.0 {
+                a
+            } else if t > 1.0 {
+                b
+            } else {
+                a + t * (b - a)
+            };
+            out[l] = v / 128.0;
+        }
+        out
+    }
+
+    /// 8-wide compute (bit-exact per lane).
+    pub fn compute_batch8(
+        &self,
+        bx: &[i32; 8],
+        by: &[i32; 8],
+        bz: &[i32; 8],
+    ) -> [f64; 8] {
+        let mut d0 = [0f64; 8];
+        let mut d1 = [0f64; 8];
+        let mut d2 = [0f64; 8];
+        for l in 0..8 {
+            d0[l] = bx[l] as f64 * self.xz_multiplier;
+            d1[l] = by[l] as f64 * self.y_multiplier;
+            d2[l] = bz[l] as f64 * self.xz_multiplier;
+        }
+        let mut d3 = [0f64; 8];
+        let mut d4 = [0f64; 8];
+        let mut d5 = [0f64; 8];
+        for l in 0..8 {
+            d3[l] = d0[l] / self.xz_factor;
+            d4[l] = d1[l] / self.y_factor;
+            d5[l] = d2[l] / self.xz_factor;
+        }
+        let d6 = self.y_multiplier * self.smear_scale_multiplier;
+        let d7 = d6 / self.y_factor;
+
+        let mut d10 = [0f64; 8];
+        let mut amp = 1.0f64;
+        for i in 0..8usize {
+            if let Some(oct) = self.main_noise.get_octave_noise(i) {
+                let mut wx = [0f64; 8];
+                let mut wy = [0f64; 8];
+                let mut wz = [0f64; 8];
+                let mut ymax = [0f64; 8];
+                for l in 0..8 {
+                    wx[l] = wrap(d3[l] * amp);
+                    wy[l] = wrap(d4[l] * amp);
+                    wz[l] = wrap(d5[l] * amp);
+                    ymax[l] = d4[l] * amp;
+                }
+                let v = oct.noise_5_batch8(&wx, &wy, &wz, d7 * amp, &ymax);
+                for l in 0..8 {
+                    d10[l] += v[l] / amp;
+                }
+            }
+            amp /= 2.0;
+        }
+        let mut d11b = [0f64; 8];
+        let mut skip_min = [false; 8];
+        let mut skip_max = [false; 8];
+        for l in 0..8 {
+            d11b[l] = (d10[l] / 10.0 + 1.0) / 2.0;
+            skip_min[l] = d11b[l] >= 1.0;
+            skip_max[l] = d11b[l] <= 0.0;
+        }
+
+        let mut d8 = [0f64; 8];
+        let mut d9 = [0f64; 8];
+        let mut amp = 1.0f64;
+        for i in 0..16usize {
+            let mut dx = [0f64; 8];
+            let mut dy = [0f64; 8];
+            let mut dz = [0f64; 8];
+            let mut dyy = [0f64; 8];
+            let mut ymax = [0f64; 8];
+            for l in 0..8 {
+                dx[l] = wrap(d0[l] * amp);
+                dy[l] = wrap(d1[l] * amp);
+                dz[l] = wrap(d2[l] * amp);
+                dyy[l] = d6 * amp;
+                ymax[l] = d1[l] * amp;
+            }
+            // per-half skip: halves are independent 4-wide batches, and an
+            // all-skipped half keeps its accumulator at 0.0 exactly like the
+            // never-run vanilla loop (mirrors compute_batch's group skip).
+            if !skip_min.iter().take(4).all(|s| *s) {
+                if let Some(oct) = self.min_noise.get_octave_noise(i) {
+                    let va = oct.noise_5_batch(split8(&dx).0, split8(&dy).0, split8(&dz).0, dyy[0], split8(&ymax).0);
+                    for l in 0..4 {
+                        if !skip_min[l] {
+                            d8[l] += va[l] / amp;
+                        }
+                    }
+                }
+            }
+            if !skip_min.iter().skip(4).all(|s| *s) {
+                if let Some(oct) = self.min_noise.get_octave_noise(i) {
+                    let vb = oct.noise_5_batch(split8(&dx).1, split8(&dy).1, split8(&dz).1, dyy[0], split8(&ymax).1);
+                    for l in 4..8 {
+                        if !skip_min[l] {
+                            d8[l] += vb[l - 4] / amp;
+                        }
+                    }
+                }
+            }
+            if !skip_max.iter().take(4).all(|s| *s) {
+                if let Some(oct) = self.max_noise.get_octave_noise(i) {
+                    let va = oct.noise_5_batch(split8(&dx).0, split8(&dy).0, split8(&dz).0, dyy[0], split8(&ymax).0);
+                    for l in 0..4 {
+                        if !skip_max[l] {
+                            d9[l] += va[l] / amp;
+                        }
+                    }
+                }
+            }
+            if !skip_max.iter().skip(4).all(|s| *s) {
+                if let Some(oct) = self.max_noise.get_octave_noise(i) {
+                    let vb = oct.noise_5_batch(split8(&dx).1, split8(&dy).1, split8(&dz).1, dyy[0], split8(&ymax).1);
+                    for l in 4..8 {
+                        if !skip_max[l] {
+                            d9[l] += vb[l - 4] / amp;
+                        }
+                    }
+                }
+            }
+            amp /= 2.0;
+        }
+        let mut out = [0f64; 8];
+        for l in 0..8 {
             let t = d11b[l];
             let (a, b) = (d8[l] / 512.0, d9[l] / 512.0);
             let v = if t < 0.0 {

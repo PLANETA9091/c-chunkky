@@ -985,17 +985,17 @@ pub type V4 = [f64; 4];
 /// one eval4 call (one point group). Shared DAG references (splines, ap2
 /// chains) evaluate once per group instead of once per reference — pure
 /// functions, so stamping cannot change values, only cost.
-pub struct V4Memo {
+pub struct BatchMemo<const N: usize> {
     stamp: Box<[Cell<u64>]>,
-    value: Box<[Cell<[f64; 4]>]>,
+    value: Box<[Cell<[f64; N]>]>,
     serial: Cell<u64>,
 }
 
-impl V4Memo {
-    pub fn new(n: usize) -> V4Memo {
-        V4Memo {
+impl<const N: usize> BatchMemo<N> {
+    pub fn new(n: usize) -> BatchMemo<N> {
+        BatchMemo {
             stamp: vec![Cell::new(0); n].into_boxed_slice(),
-            value: vec![Cell::new([0.0; 4]); n].into_boxed_slice(),
+            value: vec![Cell::new([0.0; N]); n].into_boxed_slice(),
             serial: Cell::new(0),
         }
     }
@@ -1011,11 +1011,137 @@ impl V4Memo {
     }
 }
 
+pub type V4Memo = BatchMemo<4>;
+pub type V8Memo = BatchMemo<8>;
+
+/// [f64; N] -> [f64; 4] view for the 4-wide noise kernels (callers guarantee
+/// N == 4 via the const-folded dispatch branch).
+#[inline]
+fn arr4(a: &[f64], b: &[f64], c: &[f64]) -> ([f64; 4], [f64; 4], [f64; 4]) {
+    let mut x = [0.0f64; 4];
+    let mut y = [0.0f64; 4];
+    let mut z = [0.0f64; 4];
+    x.copy_from_slice(a);
+    y.copy_from_slice(b);
+    z.copy_from_slice(c);
+    (x, y, z)
+}
+
+/// [f64; N] -> [f64; 8] view for the 8-wide noise kernels (callers guarantee
+/// N == 8 via the const-folded dispatch branch).
+#[inline]
+fn arr8(a: &[f64], b: &[f64], c: &[f64]) -> ([f64; 8], [f64; 8], [f64; 8]) {
+    let mut x = [0.0f64; 8];
+    let mut y = [0.0f64; 8];
+    let mut z = [0.0f64; 8];
+    x.copy_from_slice(a);
+    y.copy_from_slice(b);
+    z.copy_from_slice(c);
+    (x, y, z)
+}
+
+/// [i32; N] -> ([i32; 4]; ...) view.
+#[inline]
+fn arri4(a: &[i32], b: &[i32], c: &[i32]) -> ([i32; 4], [i32; 4], [i32; 4]) {
+    let mut x = [0i32; 4];
+    let mut y = [0i32; 4];
+    let mut z = [0i32; 4];
+    x.copy_from_slice(a);
+    y.copy_from_slice(b);
+    z.copy_from_slice(c);
+    (x, y, z)
+}
+
+/// [i32; N] -> ([i32; 8]; ...) view.
+#[inline]
+fn arri8(a: &[i32], b: &[i32], c: &[i32]) -> ([i32; 8], [i32; 8], [i32; 8]) {
+    let mut x = [0i32; 8];
+    let mut y = [0i32; 8];
+    let mut z = [0i32; 8];
+    x.copy_from_slice(a);
+    y.copy_from_slice(b);
+    z.copy_from_slice(c);
+    (x, y, z)
+}
+
+/// Identity view &[f64; N] -> &[f64; M]: only used inside const-folded
+/// branches where N == M is guaranteed (dead branch is never executed).
+#[inline]
+fn narrow_ref<T, const N: usize, const M: usize>(a: &[T; N]) -> &[T; M] {
+    debug_assert_eq!(N, M);
+    unsafe { &*(a as *const [T; N] as *const [T; M]) }
+}
+
+/// Noise-node dispatch: route [f64; N] arrays into the 4-wide or 8-wide
+/// batch kernels (bit-exact per lane in both). N is a const-generic known at
+/// monomorphization time, so the dead branch is compiled out (the runtime
+/// len checks in copy_from_slice never fire).
+#[inline]
+fn noise_batch_n<const N: usize>(
+    n: &crate::noise::NormalNoise,
+    x: &[f64; N],
+    y: &[f64; N],
+    z: &[f64; N],
+) -> [f64; N] {
+    // try_into on &[f64; N] is an identity cast when N matches the target —
+    // zero copies at monomorphization.
+    let mut out = [0.0f64; N];
+    if N == 8 {
+        let v = n.get_value_batch8(narrow_ref(x), narrow_ref(y), narrow_ref(z));
+        out.copy_from_slice(&v);
+    } else {
+        let v = n.get_value_batch(narrow_ref(x), narrow_ref(y), narrow_ref(z));
+        out.copy_from_slice(&v);
+    }
+    out
+}
+
+#[inline]
+fn blended_batch_n<const N: usize>(
+    blended: &[crate::noise::BlendedNoise],
+    instance: usize,
+    bx: &[i32; N],
+    by: &[i32; N],
+    bz: &[i32; N],
+) -> [f64; N] {
+    let mut out = [0.0f64; N];
+    if N == 8 {
+        let v = blended[instance].compute_batch8(
+            narrow_ref(bx),
+            narrow_ref(by),
+            narrow_ref(bz),
+        );
+        out.copy_from_slice(&v);
+    } else {
+        let v = blended[instance].compute_batch(
+            narrow_ref(bx),
+            narrow_ref(by),
+            narrow_ref(bz),
+        );
+        out.copy_from_slice(&v);
+    }
+    out
+}
+
 impl Env {
-    /// Evaluate `idx` at 4 points simultaneously (Mode::Slice semantics).
+    /// Evaluate `idx` at N points simultaneously (Mode::Slice semantics).
     /// Lane arithmetic is identical to the scalar eval, so results are
     /// bit-exact. Each call gets a fresh memo serial: shared subtrees are
     /// computed once per call (per point group).
+    pub fn eval_batch<const N: usize>(
+        &self,
+        c: &Compiled,
+        idx: u32,
+        pts: &[Pt; N],
+        mode: Mode,
+        interp: &InterpState,
+        memo: &BatchMemo<N>,
+    ) -> [f64; N] {
+        memo.next_serial();
+        self.eval_batch_uncached(c, idx, pts, mode, interp, memo)
+    }
+
+    /// 4-lane convenience wrapper (legacy API).
     pub fn eval4(
         &self,
         c: &Compiled,
@@ -1025,80 +1151,99 @@ impl Env {
         interp: &InterpState,
         memo: &V4Memo,
     ) -> V4 {
-        memo.next_serial();
-        self.eval4_uncached(c, idx, pts, mode, interp, memo)
+        self.eval_batch(c, idx, pts, mode, interp, memo)
     }
 
-    fn eval4_uncached(
+    /// 8-lane convenience wrapper.
+    pub fn eval8(
         &self,
         c: &Compiled,
         idx: u32,
-        pts: &[Pt; 4],
+        pts: &[Pt; 8],
         mode: Mode,
         interp: &InterpState,
-        memo: &V4Memo,
-    ) -> V4 {
+        memo: &V8Memo,
+    ) -> [f64; 8] {
+        self.eval_batch(c, idx, pts, mode, interp, memo)
+    }
+
+    fn eval_batch_uncached<const N: usize>(
+        &self,
+        c: &Compiled,
+        idx: u32,
+        pts: &[Pt; N],
+        mode: Mode,
+        interp: &InterpState,
+        memo: &BatchMemo<N>,
+    ) -> [f64; N] {
         let i = idx as usize;
         if memo.stamp[i].get() == memo.key() {
             return memo.value[i].get();
         }
-        let v = self.eval4_recurse(c, idx, pts, mode, interp, memo);
+        let v = self.eval_batch_recurse(c, idx, pts, mode, interp, memo);
         memo.stamp[i].set(memo.key());
         memo.value[i].set(v);
         v
     }
 
-    fn eval4_recurse(
+    fn eval_batch_recurse<const N: usize>(
         &self,
         c: &Compiled,
         idx: u32,
-        pts: &[Pt; 4],
+        pts: &[Pt; N],
         mode: Mode,
         interp: &InterpState,
-        memo: &V4Memo,
-    ) -> V4 {
+        memo: &BatchMemo<N>,
+    ) -> [f64; N] {
         let node = &c.arena[idx as usize];
         match node {
-            WKind::Const(v) => [*v; 4],
+            WKind::Const(v) => [*v; N],
             WKind::Noise { noise_id, xz_scale, y_scale } => {
                 let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
-                let mut x = [0f64; 4];
-                let mut y = [0f64; 4];
-                let mut z = [0f64; 4];
-                for l in 0..4 {
+                let mut x = [0f64; N];
+                let mut y = [0f64; N];
+                let mut z = [0f64; N];
+                for l in 0..N {
                     x[l] = pts[l].x as f64 * xz_scale;
                     y[l] = pts[l].y as f64 * y_scale;
                     z[l] = pts[l].z as f64 * xz_scale;
                 }
-                n.get_value_batch(&x, &y, &z)
+                let v = noise_batch_n(n, &x, &y, &z);
+                let mut out = [0f64; N];
+                out.copy_from_slice(&v);
+                out
             }
             WKind::ShiftedNoise { noise_id, xz_scale, y_scale, sx, sy, sz } => {
-                let sxa = self.eval4_uncached(c, *sx, pts, mode, interp, memo);
-                let sya = self.eval4_uncached(c, *sy, pts, mode, interp, memo);
-                let sza = self.eval4_uncached(c, *sz, pts, mode, interp, memo);
+                let sxa = self.eval_batch_uncached(c, *sx, pts, mode, interp, memo);
+                let sya = self.eval_batch_uncached(c, *sy, pts, mode, interp, memo);
+                let sza = self.eval_batch_uncached(c, *sz, pts, mode, interp, memo);
                 let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
-                let mut x = [0f64; 4];
-                let mut y = [0f64; 4];
-                let mut z = [0f64; 4];
-                for l in 0..4 {
+                let mut x = [0f64; N];
+                let mut y = [0f64; N];
+                let mut z = [0f64; N];
+                for l in 0..N {
                     x[l] = pts[l].x as f64 * xz_scale + sxa[l];
                     y[l] = pts[l].y as f64 * y_scale + sya[l];
                     z[l] = pts[l].z as f64 * xz_scale + sza[l];
                 }
-                n.get_value_batch(&x, &y, &z)
+                let v = noise_batch_n(n, &x, &y, &z);
+                let mut out = [0f64; N];
+                out.copy_from_slice(&v);
+                out
             }
             WKind::ShiftA { noise_id } => {
                 let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
-                let mut x = [0f64; 4];
-                let mut z = [0f64; 4];
-                for l in 0..4 {
+                let mut x = [0f64; N];
+                let mut z = [0f64; N];
+                for l in 0..N {
                     x[l] = pts[l].x as f64 * 0.25;
                     z[l] = pts[l].z as f64 * 0.25;
                 }
-                let y = [0.0f64; 4];
-                let mut out = n.get_value_batch(&x, &y, &z);
-                for v in out.iter_mut() {
-                    *v *= 4.0;
+                let y = [0.0f64; N];
+                let vb = noise_batch_n(n, &x, &y, &z);
+                let mut out = [0f64; N];
+                for l in 0..N {
+                    out[l] = vb[l] * 4.0;
                 }
                 out
             }
@@ -1107,59 +1252,63 @@ impl Env {
                 // vanilla ShiftNoise.compute(z, x, 0): x_arg = z*0.25,
                 // y_arg = x*0.25, z_arg = 0 (matches the scalar arm — the
                 // x/z SWAP reading was wrong and diverged from eval!)
-                let mut x = [0f64; 4];
-                let mut y = [0f64; 4];
-                for l in 0..4 {
+                let mut x = [0f64; N];
+                let mut y = [0f64; N];
+                for l in 0..N {
                     x[l] = pts[l].z as f64 * 0.25;
                     y[l] = pts[l].x as f64 * 0.25;
                 }
-                let z = [0.0f64; 4];
-                let mut out = n.get_value_batch(&x, &y, &z);
-                for v in out.iter_mut() {
-                    *v *= 4.0;
+                let z = [0.0f64; N];
+                let vb = noise_batch_n(n, &x, &y, &z);
+                let mut out = [0f64; N];
+                for l in 0..N {
+                    out[l] = vb[l] * 4.0;
                 }
                 out
             }
             WKind::OldBlendedNoise { instance } => {
-                let mut bx = [0i32; 4];
-                let mut by = [0i32; 4];
-                let mut bz = [0i32; 4];
-                for l in 0..4 {
+                let mut bx = [0i32; N];
+                let mut by = [0i32; N];
+                let mut bz = [0i32; N];
+                for l in 0..N {
                     bx[l] = pts[l].x;
                     by[l] = pts[l].y;
                     bz[l] = pts[l].z;
                 }
-                c.blended[*instance as usize].compute_batch(&bx, &by, &bz)
+                let v = blended_batch_n(&c.blended, *instance as usize, &bx, &by, &bz);
+                let mut out = [0f64; N];
+                out.copy_from_slice(&v);
+                out
             }
             WKind::Clamp { input, min, max } => {
-                let v = self.eval4_uncached(c, *input, pts, mode, interp, memo);
-                let mut out = [0f64; 4];
-                for l in 0..4 {
+                let v = self.eval_batch_uncached(c, *input, pts, mode, interp, memo);
+                let mut out = [0f64; N];
+                for l in 0..N {
                     out[l] = mth_clamp(v[l], *min, *max);
                 }
                 out
             }
             WKind::Mapped { kind, input } => {
-                let v = self.eval4_uncached(c, *input, pts, mode, interp, memo);
-                let mut out = [0f64; 4];
+                let v = self.eval_batch_uncached(c, *input, pts, mode, interp, memo);
+                let mut out = [0f64; N];
                 match kind {
                     MapKind::Abs => {
-                        for l in 0..4 { out[l] = v[l].abs(); }
+                        for l in 0..N { out[l] = v[l].abs(); }
                     }
                     MapKind::Square => {
-                        for l in 0..4 { out[l] = v[l] * v[l]; }
+                        for l in 0..N { out[l] = v[l] * v[l]; }
                     }
                     MapKind::Cube => {
-                        for l in 0..4 { out[l] = v[l] * v[l] * v[l]; }
+                        for l in 0..N { out[l] = v[l] * v[l] * v[l]; }
                     }
                     MapKind::HalfNegative => {
-                        for l in 0..4 { out[l] = if v[l] > 0.0 { v[l] } else { v[l] * 0.5 }; }
+                        for l in 0..N { out[l] = if v[l] > 0.0 { v[l] } else { v[l] * 0.5 }; }
                     }
                     MapKind::QuarterNegative => {
-                        for l in 0..4 { out[l] = if v[l] > 0.0 { v[l] } else { v[l] * 0.25 }; }
+                        for l in 0..N { out[l] = if v[l] > 0.0 { v[l] } else { v[l] * 0.25 }; }
                     }
                     MapKind::Squeeze => {
-                        for l in 0..4 {
+                        for l in 0..N {
                             let d = mth_clamp(v[l], -1.0, 1.0);
                             out[l] = d / 2.0 - d * d * d / 24.0;
                         }
@@ -1168,19 +1317,19 @@ impl Env {
                 out
             }
             WKind::Ap2 { kind, a, b } => {
-                let va = self.eval4_uncached(c, *a, pts, mode, interp, memo);
+                let va = self.eval_batch_uncached(c, *a, pts, mode, interp, memo);
                 match kind {
                     Ap2Kind::Add => {
-                        let vb = self.eval4_uncached(c, *b, pts, mode, interp, memo);
-                        let mut out = [0f64; 4];
-                        for l in 0..4 { out[l] = va[l] + vb[l]; }
+                        let vb = self.eval_batch_uncached(c, *b, pts, mode, interp, memo);
+                        let mut out = [0f64; N];
+                        for l in 0..N { out[l] = va[l] + vb[l]; }
                         out
                     }
                     Ap2Kind::Mul => {
-                        let mut out = [0f64; 4];
+                        let mut out = [0f64; N];
                         // vanilla short-circuit per lane
-                        let mut need = [false; 4];
-                        for l in 0..4 {
+                        let mut need = [false; N];
+                        for l in 0..N {
                             if va[l] == 0.0 {
                                 out[l] = 0.0;
                             } else {
@@ -1188,8 +1337,8 @@ impl Env {
                             }
                         }
                         if need.iter().any(|n| *n) {
-                            let vb = self.eval4_uncached(c, *b, pts, mode, interp, memo);
-                            for l in 0..4 {
+                            let vb = self.eval_batch_uncached(c, *b, pts, mode, interp, memo);
+                            for l in 0..N {
                                 if need[l] {
                                     out[l] = va[l] * vb[l];
                                 }
@@ -1198,40 +1347,40 @@ impl Env {
                         out
                     }
                     Ap2Kind::Min => {
-                        let vb = self.eval4_uncached(c, *b, pts, mode, interp, memo);
-                        let mut out = [0f64; 4];
-                        for l in 0..4 { out[l] = if va[l] < vb[l] { va[l] } else { vb[l] }; }
+                        let vb = self.eval_batch_uncached(c, *b, pts, mode, interp, memo);
+                        let mut out = [0f64; N];
+                        for l in 0..N { out[l] = if va[l] < vb[l] { va[l] } else { vb[l] }; }
                         out
                     }
                     Ap2Kind::Max => {
-                        let vb = self.eval4_uncached(c, *b, pts, mode, interp, memo);
-                        let mut out = [0f64; 4];
-                        for l in 0..4 { out[l] = if va[l] > vb[l] { va[l] } else { vb[l] }; }
+                        let vb = self.eval_batch_uncached(c, *b, pts, mode, interp, memo);
+                        let mut out = [0f64; N];
+                        for l in 0..N { out[l] = if va[l] > vb[l] { va[l] } else { vb[l] }; }
                         out
                     }
                 }
             }
             WKind::RangeChoice { input, min_inclusive, max_exclusive, when_in_range, when_out_of_range } => {
-                let v = self.eval4_uncached(c, *input, pts, mode, interp, memo);
-                let mut in_mask = [false; 4];
+                let v = self.eval_batch_uncached(c, *input, pts, mode, interp, memo);
+                let mut in_mask = [false; N];
                 let mut any_in = false;
                 let mut any_out = false;
-                for l in 0..4 {
+                for l in 0..N {
                     let m = v[l] >= *min_inclusive && v[l] < *max_exclusive;
                     in_mask[l] = m;
                     if m { any_in = true; } else { any_out = true; }
                 }
-                let vin = if any_in { self.eval4_uncached(c, *when_in_range, pts, mode, interp, memo) } else { [0.0; 4] };
-                let vout = if any_out { self.eval4_uncached(c, *when_out_of_range, pts, mode, interp, memo) } else { [0.0; 4] };
-                let mut out = [0f64; 4];
-                for l in 0..4 {
+                let vin = if any_in { self.eval_batch_uncached(c, *when_in_range, pts, mode, interp, memo) } else { [0.0; N] };
+                let vout = if any_out { self.eval_batch_uncached(c, *when_out_of_range, pts, mode, interp, memo) } else { [0.0; N] };
+                let mut out = [0f64; N];
+                for l in 0..N {
                     out[l] = if in_mask[l] { vin[l] } else { vout[l] };
                 }
                 out
             }
             WKind::YClampedGradient { from_y, to_y, from_value, to_value } => {
-                let mut out = [0f64; 4];
-                for l in 0..4 {
+                let mut out = [0f64; N];
+                for l in 0..N {
                     let t = (pts[l].y as f64 - *from_y as f64) / (*to_y as f64 - *from_y as f64);
                     out[l] = if t < 0.0 {
                         *from_value
@@ -1244,22 +1393,22 @@ impl Env {
                 out
             }
             WKind::Spline { coordinate, points } => {
-                let f4 = self.eval4_uncached(c, *coordinate, pts, mode, interp, memo);
-                let mut f = [0f32; 4];
-                for l in 0..4 {
+                let f4 = self.eval_batch_uncached(c, *coordinate, pts, mode, interp, memo);
+                let mut f = [0f32; N];
+                for l in 0..N {
                     f[l] = f4[l] as f32;
                 }
-                let mut out = [0f64; 4];
-                for l in 0..4 {
+                let mut out = [0f64; N];
+                for l in 0..N {
                     out[l] = spline_apply(self, c, points, f[l], pts[l], mode, interp, None) as f64;
                 }
                 out
             }
             WKind::WeirdScaledSampler { noise_id, mapper_type2, input } => {
-                let v = self.eval4_uncached(c, *input, pts, mode, interp, memo);
+                let v = self.eval_batch_uncached(c, *input, pts, mode, interp, memo);
                 let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
-                let mut d = [1.0f64; 4];
-                for l in 0..4 {
+                let mut d = [1.0f64; N];
+                for l in 0..N {
                     d[l] = if *mapper_type2 {
                         if v[l] < -0.75 { 0.5 }
                         else if v[l] < -0.5 { 0.75 }
@@ -1273,17 +1422,17 @@ impl Env {
                         else { 2.0 }
                     };
                 }
-                let mut x = [0f64; 4];
-                let mut y = [0f64; 4];
-                let mut z = [0f64; 4];
-                for l in 0..4 {
+                let mut x = [0f64; N];
+                let mut y = [0f64; N];
+                let mut z = [0f64; N];
+                for l in 0..N {
                     x[l] = pts[l].x as f64 / d[l];
                     y[l] = pts[l].y as f64 / d[l];
                     z[l] = pts[l].z as f64 / d[l];
                 }
-                let nv = n.get_value_batch(&x, &y, &z);
-                let mut out = [0f64; 4];
-                for l in 0..4 {
+                let nv = noise_batch_n(n, &x, &y, &z);
+                let mut out = [0f64; N];
+                for l in 0..N {
                     out[l] = d[l] * nv[l].abs();
                 }
                 out
@@ -1291,11 +1440,11 @@ impl Env {
             WKind::Cache2d { child }
             | WKind::CacheOnce { child }
             | WKind::FlatCache { child }
-            | WKind::CacheAllInCell { child } => self.eval4_uncached(c, *child, pts, mode, interp, memo),
+            | WKind::CacheAllInCell { child } => self.eval_batch_uncached(c, *child, pts, mode, interp, memo),
             WKind::MulOrAdd { is_add, input, argument } => {
-                let v = self.eval4_uncached(c, *input, pts, mode, interp, memo);
-                let mut out = [0f64; 4];
-                for l in 0..4 {
+                let v = self.eval_batch_uncached(c, *input, pts, mode, interp, memo);
+                let mut out = [0f64; N];
+                for l in 0..N {
                     out[l] = if *is_add {
                         v[l] + argument
                     } else if *argument == 0.0 {
@@ -1308,14 +1457,14 @@ impl Env {
             }
             WKind::Interpolated { child, .. } => {
                 // Slice mode: direct child evaluation (same as scalar)
-                self.eval4_uncached(c, *child, pts, mode, interp, memo)
+                self.eval_batch_uncached(c, *child, pts, mode, interp, memo)
             }
-            WKind::EndIslands => [0.0; 4],
+            WKind::EndIslands => [0.0; N],
             _ => {
                 // Unreachable on the overworld Slice path (CellFill-only
                 // markers); fall back to scalar lanes for safety.
-                let mut out = [0f64; 4];
-                for l in 0..4 {
+                let mut out = [0f64; N];
+                for l in 0..N {
                     out[l] = self.eval_uncached(c, idx, pts[l], mode, interp, None);
                 }
                 out
@@ -1846,6 +1995,28 @@ mod eval4_parity_tests {
                         s.to_bits(),
                         b[l].to_bits(),
                         "eval4 diverged from eval at {:?} child {child}",
+                        pts[l]
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        // eval8 parity vs scalar (8-lane const-generic path)
+        let memo8 = V8Memo::new(compiled.arena.len());
+        for chunk in points.chunks(8) {
+            let mut pts = [chunk[0]; 8];
+            for (k, pt) in chunk.iter().enumerate() {
+                pts[k] = *pt;
+            }
+            let n = chunk.len();
+            for &child in &children {
+                let b = env.eval8(compiled, child, &pts, Mode::Slice, &interp, &memo8);
+                for l in 0..n {
+                    let sc = env.eval(compiled, child, pts[l], Mode::Slice, &interp, None);
+                    assert_eq!(
+                        sc.to_bits(),
+                        b[l].to_bits(),
+                        "eval8 diverged from eval at {:?} child {child} lane {l}",
                         pts[l]
                     );
                     checked += 1;

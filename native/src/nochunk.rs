@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 //   - postprocessing marks (shouldScheduleFluidUpdate) are skipped: they carry
 //     no block data, and the Bukkit noise path cannot express them.
 
-use crate::density::{compile_cellfill, CellOp, Compiled, Env, InterpState, MemoCtx, Mode, Pt, V4Memo, WKind};
+use crate::density::{compile_cellfill, BatchMemo, CellOp, Compiled, Env, InterpState, MemoCtx, Mode, Pt, V4Memo, V8Memo, WKind};
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::_mm256_setzero_pd;
@@ -299,6 +299,8 @@ pub struct ChunkGen<'e> {
     /// default 1 = serial). Corners are independent pure functions of
     /// position; per-thread memo keeps results bit-identical.
     slice_threads: usize,
+    /// calibrated batch width for slice corner evaluation (4 or 8)
+    slice_lanes: usize,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -340,6 +342,7 @@ impl Prof {
 impl<'e> ChunkGen<'e> {
     pub fn new(env: &'e Env) -> ChunkGen<'e> {
         let compiled = std::sync::Arc::new(env.compile());
+        let slice_lanes = Self::pick_slice_lanes(env, &compiled);
         let interp_children = compiled.interp_children.clone();
         let router = |name: &str| -> u32 {
             *compiled
@@ -422,7 +425,73 @@ impl<'e> ChunkGen<'e> {
                 .filter(|&n| n >= 1)
                 .unwrap_or(1)
                 .min(16),
+            slice_lanes,
         }
+    }
+
+    /// One-time micro-calibration of the slice batch width: 4-wide AVX2
+    /// lanes vs 8-wide (2x AVX2 halves / AVX-512). The winner differs per
+    /// CPU (512-bit downclocking on SKX/CLX makes 8 slower there); the
+    /// calibration costs a few ms once per process and is bit-neutral
+    /// (all widths are lane-identical to the scalar eval).
+    fn pick_slice_lanes(env: &Env, compiled: &Compiled) -> usize {
+        if std::env::var("CRUS_LANES").ok().and_then(|v| v.parse::<usize>().ok()) == Some(8) {
+            return 8;
+        }
+        if std::env::var("CRUS_LANES").ok().and_then(|v| v.parse::<usize>().ok()) == Some(4) {
+            return 4;
+        }
+        let child0 = match compiled.interp_children.first() {
+            Some(&c) => c,
+            None => return 4,
+        };
+        let interp = InterpState::new(compiled.interp_slots, 4, 48);
+        let mut pts: Vec<Pt> = Vec::with_capacity(245);
+        for i in 0..5i32 {
+            for y in 0..49i32 {
+                pts.push(Pt { x: 48, y: (y - 8) * 8, z: -32 + i * 4 });
+            }
+        }
+        let mut sink = 0u64;
+        let time = |g: usize, sink: &mut u64| -> f64 {
+            let t0 = std::time::Instant::now();
+            let reps = 12;
+            for _ in 0..reps {
+                if g == 8 {
+                    let mut memo = BatchMemo::<8>::new(compiled.arena.len());
+                    for c in pts.chunks(8) {
+                        let mut p8 = [c[0]; 8];
+                        for (k, pt) in c.iter().enumerate() {
+                            p8[k] = *pt;
+                        }
+                        let v = env.eval_batch::<8>(compiled, child0, &p8, Mode::Slice, &interp, &memo);
+                        for x in v {
+                            *sink ^= x.to_bits();
+                        }
+                    }
+                } else {
+                    let mut memo = BatchMemo::<4>::new(compiled.arena.len());
+                    for c in pts.chunks(4) {
+                        let p4 = [c[0], c[(1).min(c.len() - 1)], c[(2).min(c.len() - 1)], c[(3).min(c.len() - 1)]];
+                        let v = env.eval_batch::<4>(compiled, child0, &p4, Mode::Slice, &interp, &memo);
+                        for x in v {
+                            *sink ^= x.to_bits();
+                        }
+                    }
+                }
+            }
+            t0.elapsed().as_nanos() as f64
+        };
+        // warm both, then time both
+        let _ = time(4, &mut sink);
+        let _ = time(8, &mut sink);
+        let d4 = time(4, &mut sink);
+        let d8 = time(8, &mut sink);
+        let pick = if d8 < d4 * 0.97 { 8 } else { 4 };
+        if std::env::var("CRUS_DEBUG_LANES").is_ok() {
+            eprintln!("[crussty] slice lanes calibration: 4={d4:.0}ns 8={d8:.0}ns -> {pick} (sink={sink})");
+        }
+        pick
     }
 
     #[inline]
@@ -641,6 +710,7 @@ impl<'e> ChunkGen<'e> {
             skip_slice: self.skip_slice,
             no_ore: self.no_ore,
             slice_threads: self.slice_threads,
+            slice_lanes: self.slice_lanes,
         }
     }
 
@@ -667,6 +737,7 @@ impl<'e> ChunkGen<'e> {
         let plane_slots = self.interp_children.len();
         let plane_len = plane_slots * (ccx + 1) * (ccy + 1);
         let nthr = self.slice_threads.min(self.cell_count_xz);
+        let lanes = self.slice_lanes;
 
         // plane 0: cross-chunk cache or fresh evaluation
         let cache_hit = self.plane_cache_x == (first_cell_x * cw) as i64
@@ -705,6 +776,7 @@ impl<'e> ChunkGen<'e> {
                             cnmy,
                             cw,
                             ch,
+                            lanes,
                             &mut buf,
                         );
                         buf
@@ -851,6 +923,7 @@ impl<'e> ChunkGen<'e> {
         let t0 = std::time::Instant::now();
         let plane_slots = self.interp_children.len() as usize;
         let plane_len = plane_slots * (self.cell_count_xz + 1) * (self.cell_count_y + 1);
+        let lanes = self.slice_lanes;
         // plane_cache_x stores the plane's BLOCK-space corner x
         let cache_hit = self.plane_cache_x == (first_cell_x * cw) as i64
             && self.plane_cache_z == first_cell_z
@@ -922,6 +995,7 @@ impl<'e> ChunkGen<'e> {
                         cell_noise_min_y,
                         cw,
                         ch,
+                        lanes,
                         &mut buf,
                     );
                     buf
@@ -977,6 +1051,7 @@ impl<'e> ChunkGen<'e> {
                             cell_noise_min_y,
                             cw,
                             ch,
+                            lanes,
                             &mut buf,
                         );
                         buf
@@ -1241,6 +1316,45 @@ impl<'e> ChunkGen<'e> {
         self.prof = *p;
     }
 
+    /// Slot-0 corner evaluation in groups of G (tail-padded duplicates).
+    /// Generic over the batch width so the machine-preferred lane count
+    /// (calibrated at startup) applies without code duplication.
+    fn slice_slot0<const G: usize>(
+        env: &Env,
+        compiled: &Compiled,
+        child0: u32,
+        interp: &InterpState,
+        corner_x: i32,
+        first_cell_z: i32,
+        cw: i32,
+        ch: i32,
+        ny: usize,
+        cell_noise_min_y: i32,
+        lo: usize,
+        hi: usize,
+        out: &mut [f64],
+    ) {
+        let mut memo = BatchMemo::<G>::new(compiled.arena.len());
+        let mut pts = [Pt { x: 0, y: 0, z: 0 }; G];
+        let mut p = lo;
+        while p < hi {
+            let n = (hi - p).min(G);
+            for k in 0..G {
+                let pp = p + (n - 1).min(k);
+                let i = pp / ny;
+                let y = pp % ny;
+                pts[k] = Pt {
+                    x: corner_x,
+                    y: (y as i32 + cell_noise_min_y) * ch,
+                    z: (first_cell_z + i as i32) * cw,
+                };
+            }
+            let v = env.eval_batch::<G>(compiled, child0, &pts, Mode::Slice, interp, &memo);
+            out[p - lo..p - lo + n].copy_from_slice(&v[..n]);
+            p += G;
+        }
+    }
+
     /// Vanilla NoiseChunk.fillSlice: each interpolator's wrapped function is
     /// evaluated at the (x, y, z) corner (Mode::Slice — child direct).
     pub fn fill_slice(&mut self, start_cell_x: i32, first_cell_z: i32, is_first: bool) {
@@ -1283,6 +1397,7 @@ impl<'e> ChunkGen<'e> {
             let interp = &self.interp;
             let cell_noise_min_y = self.cell_noise_min_y;
             let child0 = self.interp_children[0];
+            let lanes = self.slice_lanes;
             let mut slot0 = vec![0f64; total];
             let mut results = vec![0.0f64; nslots * total];
             let per = total.div_ceil(nthr);
@@ -1298,25 +1413,16 @@ impl<'e> ChunkGen<'e> {
                     let hi = (lo + per).min(total);
                     s.spawn(move || {
                         let mut memo = MemoCtx::new(compiled.arena.len());
-                        let memo4 = V4Memo::new(compiled.arena.len());
-                        // slot 0 in groups of 4 corners (tail-padded duplicates)
-                        let mut pts = [Pt { x: 0, y: 0, z: 0 }; 4];
-                        let mut p = lo;
-                        while p < hi {
-                            let n = (hi - p).min(4);
-                            for k in 0..4 {
-                                let pp = p + (n - 1).min(k);
-                                let i = pp / ny;
-                                let y = pp % ny;
-                                pts[k] = Pt {
-                                    x: corner_x,
-                                    y: (y as i32 + cell_noise_min_y) * ch,
-                                    z: (first_cell_z + i as i32) * cw,
-                                };
-                            }
-                            let v = env.eval4(compiled, child0, &pts, Mode::Slice, interp, &memo4);
-                            slot0_out[p - lo..p - lo + n].copy_from_slice(&v[..n]);
-                            p += 4;
+                        // slot 0 in groups of G corners (tail-padded duplicates)
+                        match lanes {
+                            8 => Self::slice_slot0::<8>(
+                                env, compiled, child0, interp, corner_x, first_cell_z,
+                                cw, ch, ny, cell_noise_min_y, lo, hi, slot0_out,
+                            ),
+                            _ => Self::slice_slot0::<4>(
+                                env, compiled, child0, interp, corner_x, first_cell_z,
+                                cw, ch, ny, cell_noise_min_y, lo, hi, slot0_out,
+                            ),
                         }
                         for p in lo..hi {
                             let i = p / ny;
@@ -1354,7 +1460,7 @@ impl<'e> ChunkGen<'e> {
             }
             return;
         }
-        // Serial: slot 0 via eval4 groups, slots 1-7 scalar with memo.
+        // Serial: slot 0 via batch groups, slots 1-7 scalar with memo.
         let mut slot0 = vec![0f64; total];
         {
             let env = self.env;
@@ -1362,24 +1468,16 @@ impl<'e> ChunkGen<'e> {
             let interp = &self.interp;
             let child0 = self.interp_children[0];
             let cell_noise_min_y = self.cell_noise_min_y;
-            let memo4 = V4Memo::new(compiled.arena.len());
-            let mut pts = [Pt { x: 0, y: 0, z: 0 }; 4];
-            let mut p = 0;
-            while p < total {
-                let n = (total - p).min(4);
-                for k in 0..4 {
-                    let pp = p + (n - 1).min(k);
-                    let i = pp / ny;
-                    let y = pp % ny;
-                    pts[k] = Pt {
-                        x: corner_x,
-                        y: (y as i32 + cell_noise_min_y) * ch,
-                        z: (first_cell_z + i as i32) * cw,
-                    };
-                }
-                let v = env.eval4(compiled, child0, &pts, Mode::Slice, interp, &memo4);
-                slot0[p..p + n].copy_from_slice(&v[..n]);
-                p += 4;
+            let lanes = self.slice_lanes;
+            match lanes {
+                8 => Self::slice_slot0::<8>(
+                    env, compiled, child0, interp, corner_x, first_cell_z,
+                    cw, ch, ny, cell_noise_min_y, 0, total, &mut slot0,
+                ),
+                _ => Self::slice_slot0::<4>(
+                    env, compiled, child0, interp, corner_x, first_cell_z,
+                    cw, ch, ny, cell_noise_min_y, 0, total, &mut slot0,
+                ),
             }
         }
         for i in 0..=self.cell_count_xz {
@@ -2318,39 +2416,67 @@ impl<'e> ChunkGen<'e> {
         cell_noise_min_y: i32,
         cw: i32,
         ch: i32,
+        lanes: usize,
         out: &mut [f64],
     ) {
         let interp = InterpState::new(compiled.interp_slots, cell_count_xz, cell_count_y);
-        let memo4 = V4Memo::new(compiled.arena.len());
         let cols = cell_count_y + 1;
         let y_total = cell_count_y + 1;
-        let y_batch = y_total & !3; // groups of 4
+        match lanes {
+            8 => Self::eval_plane_batched::<8>(
+                env, compiled, children, corner_x, first_cell_z, cell_count_xz,
+                cell_noise_min_y, cw, ch, cols, y_total, &interp, out,
+            ),
+            _ => Self::eval_plane_batched::<4>(
+                env, compiled, children, corner_x, first_cell_z, cell_count_xz,
+                cell_noise_min_y, cw, ch, cols, y_total, &interp, out,
+            ),
+        }
+    }
+
+    /// Per-plane corner evaluation in groups of G y-corners (all slots).
+    fn eval_plane_batched<const G: usize>(
+        env: &Env,
+        compiled: &Compiled,
+        children: &[u32],
+        corner_x: i32,
+        first_cell_z: i32,
+        cell_count_xz: usize,
+        cell_noise_min_y: i32,
+        cw: i32,
+        ch: i32,
+        cols: usize,
+        y_total: usize,
+        interp: &InterpState,
+        out: &mut [f64],
+    ) {
+        let memo = BatchMemo::<G>::new(compiled.arena.len());
+        let y_batch = y_total & !(G - 1); // groups of G
         for i in 0..=cell_count_xz {
             let corner_z = (first_cell_z + i as i32) * cw;
             let mut y = 0usize;
             while y < y_batch {
-                let pts = [
-                    Pt { x: corner_x, y: (y as i32 + cell_noise_min_y) * ch, z: corner_z },
-                    Pt { x: corner_x, y: (y as i32 + 1 + cell_noise_min_y) * ch, z: corner_z },
-                    Pt { x: corner_x, y: (y as i32 + 2 + cell_noise_min_y) * ch, z: corner_z },
-                    Pt { x: corner_x, y: (y as i32 + 3 + cell_noise_min_y) * ch, z: corner_z },
-                ];
-                for (slot, &child) in children.iter().enumerate() {
-                    // 4-wide batch: lane-identical arithmetic (bit-exact)
-                    let v = env.eval4(compiled, child, &pts, Mode::Slice, &interp, &memo4);
-                    let base = slot * (cell_count_xz + 1) * cols + i * cols + y;
-                    out[base] = v[0];
-                    out[base + 1] = v[1];
-                    out[base + 2] = v[2];
-                    out[base + 3] = v[3];
+                let mut pts = [Pt { x: 0, y: 0, z: 0 }; G];
+                for (k, pt) in pts.iter_mut().enumerate() {
+                    *pt = Pt {
+                        x: corner_x,
+                        y: (y + k) as i32 * ch + cell_noise_min_y * ch,
+                        z: corner_z,
+                    };
                 }
-                y += 4;
+                for (slot, &child) in children.iter().enumerate() {
+                    // G-wide batch: lane-identical arithmetic (bit-exact)
+                    let v = env.eval_batch::<G>(compiled, child, &pts, Mode::Slice, interp, &memo);
+                    let base = slot * (cell_count_xz + 1) * cols + i * cols + y;
+                    out[base..base + G].copy_from_slice(&v);
+                }
+                y += G;
             }
             for y in y_batch..y_total {
                 let corner_y = (y as i32 + cell_noise_min_y) * ch;
                 let pt = Pt { x: corner_x, y: corner_y, z: corner_z };
                 for (slot, &child) in children.iter().enumerate() {
-                    let v = env.eval(compiled, child, pt, Mode::Slice, &interp, None);
+                    let v = env.eval(compiled, child, pt, Mode::Slice, interp, None);
                     out[slot * (cell_count_xz + 1) * cols + i * cols + y] = v;
                 }
             }
