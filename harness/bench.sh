@@ -25,12 +25,29 @@ rcon "gamerule spawnChunkRadius 0" || true
 DUMPDIR="$ROOT/reference/dumps/$TAG"
 mkdir -p "$DUMPDIR"
 T0=$(date +%s%3N)
-echo "[bench] $(date -u +%T) forceload start (t0=$T0)"
-rcon "forceload add -64 -64 63 63" || true
+echo "[bench] $(date -u +%T) sequential forceload start (t0=$T0)"
+# Sequential per-chunk forceload (cx asc, cz asc): identical to
+# plugin_bench.sh. Ore/blob features write into the 3x3 WorldGenRegion, so
+# the final block at contested boundary positions depends on the chunk
+# DECORATION ORDER — both sides must decorate in the same order for a
+# deterministic judge comparison.
+EXPECT=0
+for fcz in $(seq -4 3); do
+  for fcx in $(seq -4 3); do
+    EXPECT=$((EXPECT + 1))
+    rcon "forceload add $((fcx * 16)) $((fcz * 16)) $((fcx * 16 + 15)) $((fcz * 16 + 15))" >/dev/null || true
+    for i in $(seq 1 150); do
+      ST=$(rcon crusstatus 2>/dev/null || echo "")
+      N=$(printf '%s\n' "$ST" | grep "^$WORLD:" | sed 's/.*region\[-4\.\.3,-4\.\.3\]=\([0-9]*\)\/64.*/\1/' || true)
+      if [ "${N:-0}" -ge "$EXPECT" ]; then break; fi
+      sleep 1
+    done
+  done
+done
 
-# --- poll crusstatus until region complete ---------------------------------
+# --- final poll: region complete --------------------------------------------
 N=""
-for i in $(seq 1 900); do
+for i in $(seq 1 300); do
   ST=$(rcon crusstatus 2>/dev/null || echo "")
   N=$(printf '%s\n' "$ST" | grep "^$WORLD:" | sed 's/.*region\[-4\.\.3,-4\.\.3\]=\([0-9]*\)\/64.*/\1/' || true)
   if [ "${N:-0}" = "64" ]; then

@@ -82,21 +82,32 @@ fi
 bash harness/server_up.sh
 
 # --- pregen + measure -------------------------------------------------------
+# Sequential per-chunk forceload (cx asc, cz asc): ore/blob features write into
+# the 3x3 WorldGenRegion, so the final block at contested boundary positions
+# depends on the chunk DECORATION ORDER. The reference capture (bench.sh) uses
+# the identical loop — both worlds decorate in the same order, making the
+# spill zones deterministic for the judge.
 T0=$(date +%s%N)
-rcon "forceload add -64 -64 63 63" >/dev/null
-for i in $(seq 1 900); do
-  LOADED=$(rcon "crusstatus" | grep -m1 "vanilla:.*region\[-4\.\.3,-4\.\.3\]=[0-9]*/64" | grep -o "region\[-4\.\.3,-4\.\.3\]=[0-9]*/64" | head -1 || true)
-  if [ "$LOADED" = "region[-4..3,-4..3]=64/64" ]; then break; fi
-  sleep 2
+EXPECT=0
+for cz in $(seq -4 3); do
+  for cx in $(seq -4 3); do
+    EXPECT=$((EXPECT + 1))
+    rcon "forceload add $((cx * 16)) $((cz * 16)) $((cx * 16 + 15)) $((cz * 16 + 15))" >/dev/null || true
+    for i in $(seq 1 150); do
+      LOADED=$(rcon "crusstatus" | grep -m1 -o "region\[-4\.\.3,-4\.\.3\]=[0-9]*" | grep -o "[0-9]*" | head -1 || true)
+      if [ "${LOADED:-0}" -ge "$EXPECT" ]; then break; fi
+      sleep 1
+    done
+  done
 done
 T1=$(date +%s%N)
 WALL_MS=$(( (T1 - T0) / 1000000 ))
-echo "=== pregen wall: ${WALL_MS}ms (includes settle granularity) ==="
+echo "=== pregen wall: ${WALL_MS}ms (sequential forceload, incl. poll granularity) ==="
 
-# settle: match bench.sh (reference capture) — in-world fluid ticks (bubble
+# settle: match bench.sh (reference capture, 15s) — in-world fluid ticks (bubble
 # column growth, spring spreads) need equal wall time on both sides or the
 # judge compares a mid-tick world against a settled reference.
-sleep 5
+sleep 15
 
 echo "=== crusgenstats ==="
 rcon "crusgenstats" | tee "reference/plugin_stats_$WORLD.txt" || true
