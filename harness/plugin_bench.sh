@@ -92,15 +92,29 @@ bash harness/server_up.sh
 # spill zones deterministic for the judge.
 T0=$(date +%s%N)
 EXPECT=0
+STALL=0
 for cz in $(seq -4 3); do
   for cx in $(seq -4 3); do
     EXPECT=$((EXPECT + 1))
     rcon "forceload add $((cx * 16)) $((cz * 16)) $((cx * 16 + 15)) $((cz * 16 + 15))" >/dev/null || true
-    for i in $(seq 1 150); do
+    for i in $(seq 1 45); do
       LOADED=$(rcon "crusstatus" | grep -m1 -o "region\[-4\.\.3,-4\.\.3\]=[0-9]*" | grep -o "[0-9]*" | head -1 || true)
-      if [ "${LOADED:-0}" -ge "$EXPECT" ]; then break; fi
+      if [ "${LOADED:-0}" -ge "$EXPECT" ]; then STALL=0; break; fi
+      if [ "$((i % 15))" -eq 0 ]; then
+        echo "[pregen stall] chunk $cx $cz: wait ${i}s, loaded=${LOADED:-?}/$EXPECT (server alive check below)"
+        tail -n 6 "$SRV/run.out" 2>/dev/null || true
+      fi
       sleep 1
     done
+    if [ "${LOADED:-0}" -lt "$EXPECT" ]; then
+      STALL=$((STALL + 1))
+      echo "[pregen STALL] chunk $cx $cz did not load in 45s (loaded=${LOADED:-?}/$EXPECT, stalls=$STALL)"
+      if [ "$STALL" -ge 3 ]; then
+        echo "=== FATAL: server not loading chunks — last 80 lines of run.out ==="
+        tail -n 80 "$SRV/run.out" 2>/dev/null || true
+        exit 9
+      fi
+    fi
   done
 done
 T1=$(date +%s%N)
