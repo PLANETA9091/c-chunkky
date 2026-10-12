@@ -269,6 +269,7 @@ pub struct ChunkGen<'e> {
     /// per-block cost is a single z-lerp per Lerp3 slot (bit-exact: the
     /// hoisted x/y lerps are the same ops with the same inputs).
     cellfill_rows: Vec<f64>,
+    cellfill_rows8: Vec<f64>,
     /// Slot ids actually referenced by the cellfill program (hoist these only).
     cellfill_slots: Vec<u16>,
     /// preliminarySurfaceLevel cache (key: (x<<32)|z of quart-snapped column).
@@ -383,6 +384,7 @@ impl<'e> ChunkGen<'e> {
             cellfill_prog: compile_cellfill(&compiled.arena, compiled.router["final_density"]),
             cellfill_stack: Vec::with_capacity(16),
             cellfill_rows: vec![0.0; compiled.interp_slots as usize * 4],
+            cellfill_rows8: vec![0.0; compiled.interp_slots as usize * 16],
             cellfill_slots: {
                 let mut seen = std::collections::BTreeSet::new();
                 if let Some(prog) = &compile_cellfill(&compiled.arena, compiled.router["final_density"]) {
@@ -694,6 +696,7 @@ impl<'e> ChunkGen<'e> {
             cellfill_prog: self.cellfill_prog.clone(),
             cellfill_stack: Vec::with_capacity(16),
             cellfill_rows: vec![0.0; self.cellfill_rows.len()],
+            cellfill_rows8: vec![0.0; self.cellfill_rows8.len()],
             cellfill_slots: self.cellfill_slots.clone(),
             prelim: std::sync::Arc::clone(&self.prelim),
             plane_cache_x: i64::MIN,
@@ -1160,30 +1163,34 @@ impl<'e> ChunkGen<'e> {
                             let idx_base = idx;
                             let mut a_buf = [0f64; 16];
                             let mut b_buf = [0f64; 16];
+                            // Vectorized rows hoisting: cell corners are fixed
+                            // per (iy-pair, iz-cell) while dx takes the four
+                            // fractions [0, .25, .5, .75] — exactly the dz lane
+                            // layout. Per slot: 8 vector ops produce the four
+                            // rows8 planes over all four ix lanes at once
+                            // (rows8 layout [slot][ix][k], k = r1a/r2a/r1b/r2b).
+                            unsafe {
+                                cellfill_simd::hoist_rows_2row(
+                                    &self.interp,
+                                    &self.cellfill_slots,
+                                    &mut self.cellfill_rows8,
+                                    dy_a,
+                                    dy_b,
+                                    dx_step,
+                                );
+                            }
                             let mut ix = 0i32;
                             while ix < cw_i {
-                                let dx = ix as f64 * dx_step;
-                                {
-                                    let interp = &self.interp;
-                                    let slots = &self.cellfill_slots;
-                                    let rows = &mut self.cellfill_rows;
-                                    for &s in slots {
-                                        let n = interp.corners_pub(s);
-                                        rows[s as usize * 4] = lerp_local(dy_a, lerp_local(dx, n[0], n[1]), lerp_local(dx, n[2], n[3]));
-                                        rows[s as usize * 4 + 1] = lerp_local(dy_a, lerp_local(dx, n[4], n[5]), lerp_local(dx, n[6], n[7]));
-                                        rows[s as usize * 4 + 2] = lerp_local(dy_b, lerp_local(dx, n[0], n[1]), lerp_local(dx, n[2], n[3]));
-                                        rows[s as usize * 4 + 3] = lerp_local(dy_b, lerp_local(dx, n[4], n[5]), lerp_local(dx, n[6], n[7]));
-                                    }
-                                }
                                 let (dzv, mut vstack_a, mut vstack_b, mut vsp) =
                                     cellfill_simd::make_2row_state(dx_step);
                                 let (res_a, res_b) = unsafe {
                                     cellfill_simd::run_cellfill_2rows(
                                         prog,
-                                        &self.cellfill_rows,
+                                        &self.cellfill_rows8,
                                         block_y_a,
                                         block_y_b,
                                         dzv,
+                                        &ix,
                                         &mut vstack_a,
                                         &mut vstack_b,
                                         &mut vsp,
@@ -1596,12 +1603,26 @@ impl<'e> ChunkGen<'e> {
         if !self.beard.is_empty() || self.skip_material || !self.aquifers_enabled {
             return false;
         }
-        // substances: all four must be <= 0 (ore path is per-block)
-        if self.cell_cache_value(iy, ix, 0) > 0.0
-            || self.cell_cache_value(iy, ix, 1) > 0.0
-            || self.cell_cache_value(iy, ix, 2) > 0.0
-            || self.cell_cache_value(iy, ix, 3) > 0.0
-        {
+        // substances: all four must be <= 0 (ore path is per-block);
+        // all four > 0 -> whole row takes the vanilla subst>0 early return
+        // (aquifer None, sched=false) and ore runs per block below.
+        let s0 = self.cell_cache_value(iy, ix, 0);
+        let s1 = self.cell_cache_value(iy, ix, 1);
+        let s2 = self.cell_cache_value(iy, ix, 2);
+        let s3 = self.cell_cache_value(iy, ix, 3);
+        if s0 > 0.0 && s1 > 0.0 && s2 > 0.0 && s3 > 0.0 {
+            self.sched = false;
+            for iz in 0..4i32 {
+                let block_z = block_z0 + iz;
+                let block = self.ore_row_block(block_x, block_y, block_z);
+                if block != AIR {
+                    let out_idx = base_out + (iz * 16) as usize;
+                    out[out_idx] = block;
+                }
+            }
+            return true;
+        }
+        if s0 > 0.0 || s1 > 0.0 || s2 > 0.0 || s3 > 0.0 {
             return false;
         }
         let global = self.global_fluid(block_y);
@@ -1654,6 +1675,21 @@ impl<'e> ChunkGen<'e> {
             out[base_out + (iz * 16) as usize] = block;
         }
         true
+    }
+
+    /// Rule-2 ore path for an all-solid row (aquifer returned None for every
+    /// block via the subst>0 early return).
+    #[inline]
+    fn ore_row_block(&mut self, x: i32, y: i32, z: i32) -> u16 {
+        if self.ore_veins_enabled && !self.no_ore {
+            if self.prof.enabled {
+                self.prof.blocks_ore_reached += 1;
+            }
+            if let Some(b) = self.ore_vein(Pt { x, y, z }) {
+                return b;
+            }
+        }
+        STONE
     }
 
     /// Material rule per block (vanilla MaterialRuleList).
@@ -2804,6 +2840,7 @@ mod cellfill_simd {
         block_y_a: i32,
         block_y_b: i32,
         dzv: __m256d,
+        ixp: &i32,
         stack_a: &mut [__m256d; 16],
         stack_b: &mut [__m256d; 16],
         sp: &mut usize,
@@ -2820,14 +2857,16 @@ mod cellfill_simd {
                     *sp += 1;
                 }
                 CellOp::Lerp3 { slot } => {
-                    let base = *slot as usize * 4;
+                    // rows8 layout [slot][k][ix] (k = r1a/r2a/r1b/r2b planes,
+                    // ix = lane): r1a[ix] etc. are strided reads at +ix.
+                    let base = *slot as usize * 16 + *ixp as usize;
                     let (r1a, r2a) = (
                         _mm256_set1_pd(rows8[base]),
-                        _mm256_set1_pd(rows8[base + 1]),
+                        _mm256_set1_pd(rows8[base + 4]),
                     );
                     let (r1b, r2b) = (
-                        _mm256_set1_pd(rows8[base + 2]),
-                        _mm256_set1_pd(rows8[base + 3]),
+                        _mm256_set1_pd(rows8[base + 8]),
+                        _mm256_set1_pd(rows8[base + 12]),
                     );
                     // a + t*(b-a)
                     stack_a[*sp] = _mm256_add_pd(r1a, _mm256_mul_pd(dzv, _mm256_sub_pd(r2a, r1a)));
@@ -3024,6 +3063,49 @@ mod cellfill_simd {
             }
         }
         (stack_a[0], stack_b[0])
+    }
+
+    /// Rows hoisting for the 2-row path, vectorized over the four ix lanes:
+    /// per slot, 8 vector ops replace 4ix x 12 scalar lerps. rows8 layout
+    /// [slot][ix][k] with k = (r1a, r2a, r1b, r2b). Bit-exact: same IEEE
+    /// lerp sequences per (slot, ix).
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn hoist_rows_2row(
+        interp: &crate::density::InterpState,
+        slots: &[u16],
+        rows8: &mut [f64],
+        dy_a: f64,
+        dy_b: f64,
+        dx_step: f64,
+    ) {
+        let dxv = _mm256_setr_pd(0.0, dx_step, dx_step + dx_step, dx_step + dx_step + dx_step);
+        let dya = _mm256_set1_pd(dy_a);
+        let dyb = _mm256_set1_pd(dy_b);
+        for &s in slots {
+            let n = interp.corners_pub(s);
+            let n0 = _mm256_set1_pd(n[0]);
+            let n1 = _mm256_set1_pd(n[1]);
+            let n2 = _mm256_set1_pd(n[2]);
+            let n3 = _mm256_set1_pd(n[3]);
+            let n4 = _mm256_set1_pd(n[4]);
+            let n5 = _mm256_set1_pd(n[5]);
+            let n6 = _mm256_set1_pd(n[6]);
+            let n7 = _mm256_set1_pd(n[7]);
+            // x-level (shared by rows A and B): lerp(dx, na, nb)
+            let x01 = _mm256_add_pd(n0, _mm256_mul_pd(dxv, _mm256_sub_pd(n1, n0)));
+            let x23 = _mm256_add_pd(n2, _mm256_mul_pd(dxv, _mm256_sub_pd(n3, n2)));
+            let x45 = _mm256_add_pd(n4, _mm256_mul_pd(dxv, _mm256_sub_pd(n5, n4)));
+            let x67 = _mm256_add_pd(n6, _mm256_mul_pd(dxv, _mm256_sub_pd(n7, n6)));
+            let base = s as usize * 16;
+            let r1a = _mm256_add_pd(x01, _mm256_mul_pd(dya, _mm256_sub_pd(x23, x01)));
+            _mm256_storeu_pd(rows8.as_mut_ptr().add(base), r1a);
+            let r2a = _mm256_add_pd(x45, _mm256_mul_pd(dya, _mm256_sub_pd(x67, x45)));
+            _mm256_storeu_pd(rows8.as_mut_ptr().add(base + 4), r2a);
+            let r1b = _mm256_add_pd(x01, _mm256_mul_pd(dyb, _mm256_sub_pd(x23, x01)));
+            _mm256_storeu_pd(rows8.as_mut_ptr().add(base + 8), r1b);
+            let r2b = _mm256_add_pd(x45, _mm256_mul_pd(dyb, _mm256_sub_pd(x67, x45)));
+            _mm256_storeu_pd(rows8.as_mut_ptr().add(base + 12), r2b);
+        }
     }
 
     /// dz vector [0, s, 2s, 3s] (same fractions for both rows) + two stacks.
