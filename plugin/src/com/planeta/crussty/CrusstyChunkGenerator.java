@@ -208,7 +208,16 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         long ctx = pool.acquire(lockBox);
         short[] out = buf.get();
         long[] marks = MARK_BUF.get();
-        int[] beard = collectBeard(worldInfo, chunkX, chunkZ, chunkData);
+        // Beardifier bridge (CRUS_BEARD=1 to enable): collectBeard performs a
+        // SYNCHRONOUS getChunk(STRUCTURE_STARTS, create=true) of up to 5x5
+        // neighbor chunks DURING the noise stage — a heavy re-entrancy into
+        // the Paper chunk system. It is off by default while its side
+        // effects on feature RNG/decoration are being bisected; beards only
+        // matter near structure terrain adaptation anyway.
+        int[] beard = java.util.Arrays.copyOf(BEARD_EMPTY, BEARD_EMPTY.length);
+        if (BEARD_ENABLED) {
+            beard = collectBeard(worldInfo, chunkX, chunkZ, chunkData);
+        }
         int nMarks;
         try {
             nMarks = ChunkGenNative.fillBeard(ctx, chunkX, chunkZ, out, marks, beard);
@@ -264,6 +273,8 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static volatile boolean beardReady;
     private static final Object BEARD_LOCK = new Object();
     private static final ThreadLocal<int[]> BEARD_BUF = ThreadLocal.withInitial(() -> new int[256]);
+    private static final int[] BEARD_EMPTY = new int[1];
+    private static final boolean BEARD_ENABLED = System.getenv("CRUS_BEARD") != null;
 
     // cached NMS handles
     private static Class<?> cChunkPos, cStructureStart, cStructurePiece, cPoolPiece, cBoundingBox,
