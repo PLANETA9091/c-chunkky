@@ -382,7 +382,7 @@ impl<'e> ChunkGen<'e> {
             },
             cellfill_prog: compile_cellfill(&compiled.arena, compiled.router["final_density"]),
             cellfill_stack: Vec::with_capacity(16),
-            cellfill_rows: vec![0.0; compiled.interp_slots as usize * 2],
+            cellfill_rows: vec![0.0; compiled.interp_slots as usize * 4],
             cellfill_slots: {
                 let mut seen = std::collections::BTreeSet::new();
                 if let Some(prog) = &compile_cellfill(&compiled.arena, compiled.router["final_density"]) {
@@ -1141,6 +1141,66 @@ impl<'e> ChunkGen<'e> {
                     let mut idx = 0usize;
                     let mut iy = self.cell_height as i32 - 1;
                     while iy >= 0 {
+                        // try the 2-row path: iy (row A) + iy-1 (row B)
+                        if !skipping
+                            && self.cellfill_prog.is_some()
+                            && cw_i == 4
+                            && iy >= 1
+                            && cellfill_simd::avx2_ok()
+                        {
+                            // cell_cache layout is [iy][ix][iz]: row A (iy) must
+                            // be fully written before row B (iy-1) — buffer each
+                            // row separately, then place both blocks in order.
+                            let prog = self.cellfill_prog.as_ref().unwrap();
+                            let dy_a = iy as f64 * dy_step;
+                            let iy_b = iy - 1;
+                            let dy_b = iy_b as f64 * dy_step;
+                            let block_y_a = cell_start_block_y + iy;
+                            let block_y_b = cell_start_block_y + iy_b;
+                            let idx_base = idx;
+                            let mut a_buf = [0f64; 16];
+                            let mut b_buf = [0f64; 16];
+                            let mut ix = 0i32;
+                            while ix < cw_i {
+                                let dx = ix as f64 * dx_step;
+                                {
+                                    let interp = &self.interp;
+                                    let slots = &self.cellfill_slots;
+                                    let rows = &mut self.cellfill_rows;
+                                    for &s in slots {
+                                        let n = interp.corners_pub(s);
+                                        rows[s as usize * 4] = lerp_local(dy_a, lerp_local(dx, n[0], n[1]), lerp_local(dx, n[2], n[3]));
+                                        rows[s as usize * 4 + 1] = lerp_local(dy_a, lerp_local(dx, n[4], n[5]), lerp_local(dx, n[6], n[7]));
+                                        rows[s as usize * 4 + 2] = lerp_local(dy_b, lerp_local(dx, n[0], n[1]), lerp_local(dx, n[2], n[3]));
+                                        rows[s as usize * 4 + 3] = lerp_local(dy_b, lerp_local(dx, n[4], n[5]), lerp_local(dx, n[6], n[7]));
+                                    }
+                                }
+                                let (dzv, mut vstack_a, mut vstack_b, mut vsp) =
+                                    cellfill_simd::make_2row_state(dx_step);
+                                let (res_a, res_b) = unsafe {
+                                    cellfill_simd::run_cellfill_2rows(
+                                        prog,
+                                        &self.cellfill_rows,
+                                        block_y_a,
+                                        block_y_b,
+                                        dzv,
+                                        &mut vstack_a,
+                                        &mut vstack_b,
+                                        &mut vsp,
+                                    )
+                                };
+                                unsafe {
+                                    _mm256_storeu_pd(a_buf.as_mut_ptr().add((ix * 4) as usize), res_a);
+                                    _mm256_storeu_pd(b_buf.as_mut_ptr().add((ix * 4) as usize), res_b);
+                                }
+                                ix += 1;
+                            }
+                            self.cell_cache[idx_base..idx_base + 16].copy_from_slice(&a_buf);
+                            self.cell_cache[idx_base + 16..idx_base + 32].copy_from_slice(&b_buf);
+                            idx += 32;
+                            iy -= 2;
+                            continue;
+                        }
                         let dy = iy as f64 * dy_step;
                         let mut ix = 0i32;
                         while ix < cw_i {
@@ -2730,5 +2790,251 @@ mod cellfill_simd {
             }
         }
         stack[0]
+    }
+
+    /// Two-row runner: TWO 4-wide stacks (A = block_y_a row, B = block_y_b
+    /// row) driven by ONE op dispatch loop — halves the interpreter dispatch
+    /// while keeping every op the exact per-lane IEEE sequence of the scalar
+    /// runner. rows8[slot] = [r1a, r2a, r1b, r2b].
+    #[target_feature(enable = "avx2")]
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn run_cellfill_2rows(
+        prog: &[CellOp],
+        rows8: &[f64],
+        block_y_a: i32,
+        block_y_b: i32,
+        dzv: __m256d,
+        stack_a: &mut [__m256d; 16],
+        stack_b: &mut [__m256d; 16],
+        sp: &mut usize,
+    ) -> (__m256d, __m256d) {
+        let zero = _mm256_setzero_pd();
+        let sign_abs = _mm256_set1_pd(-0.0);
+        *sp = 0;
+        for op in prog {
+            match op {
+                CellOp::PushConst(v) => {
+                    let c = _mm256_set1_pd(*v);
+                    stack_a[*sp] = c;
+                    stack_b[*sp] = c;
+                    *sp += 1;
+                }
+                CellOp::Lerp3 { slot } => {
+                    let base = *slot as usize * 4;
+                    let (r1a, r2a) = (
+                        _mm256_set1_pd(rows8[base]),
+                        _mm256_set1_pd(rows8[base + 1]),
+                    );
+                    let (r1b, r2b) = (
+                        _mm256_set1_pd(rows8[base + 2]),
+                        _mm256_set1_pd(rows8[base + 3]),
+                    );
+                    // a + t*(b-a)
+                    stack_a[*sp] = _mm256_add_pd(r1a, _mm256_mul_pd(dzv, _mm256_sub_pd(r2a, r1a)));
+                    stack_b[*sp] = _mm256_add_pd(r1b, _mm256_mul_pd(dzv, _mm256_sub_pd(r2b, r1b)));
+                    *sp += 1;
+                }
+                CellOp::YGrad { from_y, to_y, from_value, to_value } => {
+                    let grad = |by: i32| -> f64 {
+                        let t = (by as f64 - *from_y as f64) / (*to_y as f64 - *from_y as f64);
+                        if t < 0.0 {
+                            *from_value
+                        } else if t > 1.0 {
+                            *to_value
+                        } else {
+                            *from_value + t * (*to_value - *from_value)
+                        }
+                    };
+                    stack_a[*sp] = _mm256_set1_pd(grad(block_y_a));
+                    stack_b[*sp] = _mm256_set1_pd(grad(block_y_b));
+                    *sp += 1;
+                }
+                CellOp::Add => {
+                    *sp -= 1;
+                    let ba = stack_a[*sp];
+                    let bb = stack_b[*sp];
+                    *sp -= 1;
+                    let aa = stack_a[*sp];
+                    let ab = stack_b[*sp];
+                    stack_a[*sp] = _mm256_add_pd(aa, ba);
+                    stack_b[*sp] = _mm256_add_pd(ab, bb);
+                    *sp += 1;
+                }
+                CellOp::Mul => {
+                    *sp -= 1;
+                    let ba = stack_a[*sp];
+                    let bb = stack_b[*sp];
+                    *sp -= 1;
+                    let aa = stack_a[*sp];
+                    let ab = stack_b[*sp];
+                    let ma = _mm256_cmp_pd(aa, zero, _CMP_EQ_OQ);
+                    let mb = _mm256_cmp_pd(ab, zero, _CMP_EQ_OQ);
+                    stack_a[*sp] = _mm256_blendv_pd(_mm256_mul_pd(aa, ba), zero, ma);
+                    stack_b[*sp] = _mm256_blendv_pd(_mm256_mul_pd(ab, bb), zero, mb);
+                    *sp += 1;
+                }
+                CellOp::Min => {
+                    *sp -= 1;
+                    let ba = stack_a[*sp];
+                    let bb = stack_b[*sp];
+                    *sp -= 1;
+                    let aa = stack_a[*sp];
+                    let ab = stack_b[*sp];
+                    stack_a[*sp] = _mm256_blendv_pd(ba, aa, _mm256_cmp_pd(aa, ba, _CMP_LT_OQ));
+                    stack_b[*sp] = _mm256_blendv_pd(bb, ab, _mm256_cmp_pd(ab, bb, _CMP_LT_OQ));
+                    *sp += 1;
+                }
+                CellOp::Max => {
+                    *sp -= 1;
+                    let ba = stack_a[*sp];
+                    let bb = stack_b[*sp];
+                    *sp -= 1;
+                    let aa = stack_a[*sp];
+                    let ab = stack_b[*sp];
+                    stack_a[*sp] = _mm256_blendv_pd(ba, aa, _mm256_cmp_pd(aa, ba, _CMP_GT_OQ));
+                    stack_b[*sp] = _mm256_blendv_pd(bb, ab, _mm256_cmp_pd(ab, bb, _CMP_GT_OQ));
+                    *sp += 1;
+                }
+                CellOp::Abs => {
+                    *sp -= 1;
+                    let aa = stack_a[*sp];
+                    let ab = stack_b[*sp];
+                    stack_a[*sp] = _mm256_andnot_pd(sign_abs, aa);
+                    stack_b[*sp] = _mm256_andnot_pd(sign_abs, ab);
+                    *sp += 1;
+                }
+                CellOp::Square => {
+                    *sp -= 1;
+                    let aa = stack_a[*sp];
+                    let ab = stack_b[*sp];
+                    stack_a[*sp] = _mm256_mul_pd(aa, aa);
+                    stack_b[*sp] = _mm256_mul_pd(ab, ab);
+                    *sp += 1;
+                }
+                CellOp::Cube => {
+                    *sp -= 1;
+                    let aa = stack_a[*sp];
+                    let ab = stack_b[*sp];
+                    let a2a = _mm256_mul_pd(aa, aa);
+                    let a2b = _mm256_mul_pd(ab, ab);
+                    stack_a[*sp] = _mm256_mul_pd(a2a, aa);
+                    stack_b[*sp] = _mm256_mul_pd(a2b, ab);
+                    *sp += 1;
+                }
+                CellOp::HalfNeg => {
+                    *sp -= 1;
+                    let aa = stack_a[*sp];
+                    let ab = stack_b[*sp];
+                    stack_a[*sp] = _mm256_blendv_pd(
+                        _mm256_mul_pd(aa, _mm256_set1_pd(0.5)),
+                        aa,
+                        _mm256_cmp_pd(aa, zero, _CMP_GT_OQ),
+                    );
+                    stack_b[*sp] = _mm256_blendv_pd(
+                        _mm256_mul_pd(ab, _mm256_set1_pd(0.5)),
+                        ab,
+                        _mm256_cmp_pd(ab, zero, _CMP_GT_OQ),
+                    );
+                    *sp += 1;
+                }
+                CellOp::QuarterNeg => {
+                    *sp -= 1;
+                    let aa = stack_a[*sp];
+                    let ab = stack_b[*sp];
+                    stack_a[*sp] = _mm256_blendv_pd(
+                        _mm256_mul_pd(aa, _mm256_set1_pd(0.25)),
+                        aa,
+                        _mm256_cmp_pd(aa, zero, _CMP_GT_OQ),
+                    );
+                    stack_b[*sp] = _mm256_blendv_pd(
+                        _mm256_mul_pd(ab, _mm256_set1_pd(0.25)),
+                        ab,
+                        _mm256_cmp_pd(ab, zero, _CMP_GT_OQ),
+                    );
+                    *sp += 1;
+                }
+                CellOp::Squeeze => {
+                    *sp -= 1;
+                    let aa = stack_a[*sp];
+                    let ab = stack_b[*sp];
+                    let da = _mm256_min_pd(_mm256_max_pd(aa, _mm256_set1_pd(-1.0)), _mm256_set1_pd(1.0));
+                    let db = _mm256_min_pd(_mm256_max_pd(ab, _mm256_set1_pd(-1.0)), _mm256_set1_pd(1.0));
+                    let d3a = _mm256_mul_pd(_mm256_mul_pd(da, da), da);
+                    let d3b = _mm256_mul_pd(_mm256_mul_pd(db, db), db);
+                    stack_a[*sp] = _mm256_sub_pd(
+                        _mm256_div_pd(da, _mm256_set1_pd(2.0)),
+                        _mm256_div_pd(d3a, _mm256_set1_pd(24.0)),
+                    );
+                    stack_b[*sp] = _mm256_sub_pd(
+                        _mm256_div_pd(db, _mm256_set1_pd(2.0)),
+                        _mm256_div_pd(d3b, _mm256_set1_pd(24.0)),
+                    );
+                    *sp += 1;
+                }
+                CellOp::Clamp { min, max } => {
+                    *sp -= 1;
+                    let aa = stack_a[*sp];
+                    let ab = stack_b[*sp];
+                    let (miv, mav) = (_mm256_set1_pd(*min), _mm256_set1_pd(*max));
+                    stack_a[*sp] = _mm256_min_pd(_mm256_max_pd(aa, miv), mav);
+                    stack_b[*sp] = _mm256_min_pd(_mm256_max_pd(ab, miv), mav);
+                    *sp += 1;
+                }
+                CellOp::RangeChoice { min_inclusive, max_exclusive } => {
+                    *sp -= 1;
+                    let outa = stack_a[*sp];
+                    let outb = stack_b[*sp];
+                    *sp -= 1;
+                    let inra = stack_a[*sp];
+                    let inrb = stack_b[*sp];
+                    *sp -= 1;
+                    let va = stack_a[*sp];
+                    let vb = stack_b[*sp];
+                    let (miv, mav) = (_mm256_set1_pd(*min_inclusive), _mm256_set1_pd(*max_exclusive));
+                    stack_a[*sp] = _mm256_blendv_pd(
+                        outa,
+                        inra,
+                        _mm256_and_pd(_mm256_cmp_pd(va, miv, _CMP_GE_OQ), _mm256_cmp_pd(va, mav, _CMP_LT_OQ)),
+                    );
+                    stack_b[*sp] = _mm256_blendv_pd(
+                        outb,
+                        inrb,
+                        _mm256_and_pd(_mm256_cmp_pd(vb, miv, _CMP_GE_OQ), _mm256_cmp_pd(vb, mav, _CMP_LT_OQ)),
+                    );
+                    *sp += 1;
+                }
+                CellOp::MulOrAdd { is_add, argument } => {
+                    *sp -= 1;
+                    let aa = stack_a[*sp];
+                    let ab = stack_b[*sp];
+                    if *is_add {
+                        let c = _mm256_set1_pd(*argument);
+                        stack_a[*sp] = _mm256_add_pd(aa, c);
+                        stack_b[*sp] = _mm256_add_pd(ab, c);
+                    } else if *argument == 0.0 {
+                        stack_a[*sp] = zero;
+                        stack_b[*sp] = zero;
+                    } else {
+                        let c = _mm256_set1_pd(*argument);
+                        stack_a[*sp] = _mm256_mul_pd(aa, c);
+                        stack_b[*sp] = _mm256_mul_pd(ab, c);
+                    };
+                    *sp += 1;
+                }
+            }
+        }
+        (stack_a[0], stack_b[0])
+    }
+
+    /// dz vector [0, s, 2s, 3s] (same fractions for both rows) + two stacks.
+    pub fn make_2row_state(dx_step: f64) -> (__m256d, [__m256d; 16], [__m256d; 16], usize) {
+        unsafe {
+            (
+                _mm256_setr_pd(0.0, dx_step, dx_step + dx_step, dx_step + dx_step + dx_step),
+                [_mm256_setzero_pd(); 16],
+                [_mm256_setzero_pd(); 16],
+                0,
+            )
+        }
     }
 }
