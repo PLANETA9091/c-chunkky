@@ -79,6 +79,9 @@ if [ "$WORLD" = "datapack" ]; then
 fi
 
 # --- boot -------------------------------------------------------------------
+# Parallel fill threads for the native .so (slice corners + cell strips):
+# corners/strips are pure functions of position; results bit-identical.
+export CRUS_FILL_THREADS="${CRUS_FILL_THREADS:-4}"
 bash harness/server_up.sh
 
 # --- pregen + measure -------------------------------------------------------
