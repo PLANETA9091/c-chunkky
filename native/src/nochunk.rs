@@ -9,6 +9,7 @@
 //     pass-through (pure functions; vanilla memoization never changes values),
 //     except final_density's CacheAllInCell which is materialized (cell_cache)
 //     because vanilla wraps it in Java code, not JSON.
+use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 //   - postprocessing marks (shouldScheduleFluidUpdate) are skipped: they carry
 //     no block data, and the Bukkit noise path cannot express them.
 
@@ -117,20 +118,45 @@ const fn similarity_i(a: i64, b: i64) -> f64 {
 /// (fluid_level, fluid_type) — vanilla Aquifer.FluidStatus.
 type FluidStatus = (i32, u16);
 
+/// Shared-nothing values, shared storage: every entry is a pure function of
+/// the grid cell (positions are rng constants per cell, statuses are pure
+/// position functions), so parallel cell threads can share these caches via
+/// Relaxed atomics — concurrent writers store identical bytes (benign race),
+/// and begin_chunk resets them single-threaded before the threads spawn.
 struct AquiferState {
-    cache: Vec<Option<FluidStatus>>,
-    loc_cache: Vec<i64>,
+    cache: Vec<AtomicU64>,
+    loc_cache: Vec<AtomicI64>,
     /// Per BASE-cell summary: all 12 neighborhood statuses equal + the shared
     /// status. The 12-cell neighborhood depends only on the base cell
     /// (gx, gy, gz), never on the block itself — so the all-same verdict and
     /// the uniform status are pure functions of the base cell and can be
     /// memoized. Reset per chunk together with the other caches.
-    summary: Vec<Option<(bool, FluidStatus)>>,
-    min_grid_x: i32,
+    summary: Vec<AtomicU64>,
+    min_grid_x: AtomicI32,
     min_grid_y: i32,
-    min_grid_z: i32,
+    min_grid_z: AtomicI32,
     grid_size_x: i32,
     grid_size_z: i32,
+}
+
+#[inline]
+fn pack_status(s: FluidStatus) -> u64 {
+    ((s.0 as i64 as u64) << 20) | ((s.1 as u64) & 0xF_FFFF)
+}
+
+#[inline]
+fn unpack_status(v: u64) -> FluidStatus {
+    ((v >> 20) as i64 as i32, (v & 0xF_FFFF) as u16)
+}
+
+#[inline]
+fn pack_summary(all_same: bool, s: FluidStatus) -> u64 {
+    1 | ((all_same as u64) << 1) | (pack_status(s) << 2)
+}
+
+#[inline]
+fn unpack_summary(v: u64) -> (bool, FluidStatus) {
+    ((v >> 1) & 1 == 1, unpack_status(v >> 2))
 }
 
 impl AquiferState {
@@ -140,42 +166,45 @@ impl AquiferState {
         let gy_span = max_gy - min_grid_y + 1;
         let cells = (3 * gy_span * 3) as usize;
         AquiferState {
-            cache: vec![None; cells],
-            loc_cache: vec![i64::MAX; cells],
-            summary: vec![None; cells],
-            min_grid_x: 0,
+            cache: (0..cells).map(|_| AtomicU64::new(0)).collect(),
+            loc_cache: (0..cells).map(|_| AtomicI64::new(i64::MAX)).collect(),
+            summary: (0..cells).map(|_| AtomicU64::new(0)).collect(),
+            min_grid_x: AtomicI32::new(0),
             min_grid_y,
-            min_grid_z: 0,
+            min_grid_z: AtomicI32::new(0),
             grid_size_x: 3,
             grid_size_z: 3,
         }
     }
 
     /// Per-chunk grid origin (vanilla: chunk pos of this NoiseChunk).
+    /// &self: the Arc-shared state is mutated only here (single-threaded,
+    /// before the cell threads spawn) and through Relaxed atomics inside the
+    /// parallel phase.
     #[inline]
-    fn begin_chunk(&mut self, cx: i32, cz: i32) {
-        self.min_grid_x = cx - 1;
-        self.min_grid_z = cz - 1;
+    fn begin_chunk(&self, cx: i32, cz: i32) {
+        self.min_grid_x.store(cx - 1, Ordering::Relaxed);
+        self.min_grid_z.store(cz - 1, Ordering::Relaxed);
         // Vanilla allocates fresh caches per NoiseChunk (per chunk); our
         // generator persists across fills and the grid origin re-bases every
         // chunk, so BOTH caches must be reset or stale cells alias into the
         // new chunk's slots (correctness bug: wrong fluid statuses).
-        for v in self.loc_cache.iter_mut() {
-            *v = i64::MAX;
+        for v in self.loc_cache.iter() {
+            v.store(i64::MAX, Ordering::Relaxed);
         }
-        for v in self.cache.iter_mut() {
-            *v = None;
+        for v in self.cache.iter() {
+            v.store(0, Ordering::Relaxed);
         }
-        for v in self.summary.iter_mut() {
-            *v = None;
+        for v in self.summary.iter() {
+            v.store(0, Ordering::Relaxed);
         }
     }
 
     #[inline]
     fn index(&self, gx: i32, gy: i32, gz: i32) -> usize {
-        let i = (gx - self.min_grid_x) as usize;
+        let i = (gx - self.min_grid_x.load(Ordering::Relaxed)) as usize;
         let i1 = (gy - self.min_grid_y) as usize;
-        let i2 = (gz - self.min_grid_z) as usize;
+        let i2 = (gz - self.min_grid_z.load(Ordering::Relaxed)) as usize;
         (i1 * self.grid_size_z as usize + i2) * self.grid_size_x as usize + i
     }
 }
@@ -197,7 +226,7 @@ pub struct ChunkGen<'e> {
     /// plugin ships the real vanilla piece list per chunk via setBeard.
     beard: crate::beard::Beard,
     pub env: &'e Env,
-    pub compiled: Compiled,
+    pub compiled: std::sync::Arc<Compiled>,
     /// child arena index per Interpolated slot (slice-fill evaluation).
     interp_children: Vec<u32>,
     cell_width: usize,    // 4
@@ -236,14 +265,17 @@ pub struct ChunkGen<'e> {
     /// Slot ids actually referenced by the cellfill program (hoist these only).
     cellfill_slots: Vec<u16>,
     /// preliminarySurfaceLevel cache (key: (x<<32)|z of quart-snapped column).
-    prelim: std::collections::HashMap<i64, i32>,
+    /// Shared across parallel cell threads: values are pure functions of the
+    /// column, so concurrent resolves are identical; the lock is held only
+    /// for the lookup/insert, never across the (expensive) compute.
+    prelim: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<i64, i32>>>,
     /// Cross-chunk corner-plane cache: the last fill's final x-plane equals
     /// the next fill's initial plane when cx increments by 1 (same cz row).
     /// Values are deterministic per corner point -> reuse is value-identical.
     plane_cache_x: i64,
     plane_cache_z: i32,
     plane_cache: Vec<f64>,
-    aquifer: AquiferState,
+    aquifer: std::sync::Arc<AquiferState>,
     /// Per-point DAG memo (see MemoCtx). Every evaluation context (corner
     /// point / block / probe) bumps the serial; shared subtrees then evaluate
     /// once per point instead of once per reference.
@@ -300,7 +332,7 @@ impl Prof {
 
 impl<'e> ChunkGen<'e> {
     pub fn new(env: &'e Env) -> ChunkGen<'e> {
-        let compiled = env.compile();
+        let compiled = std::sync::Arc::new(env.compile());
         let interp_children = compiled.interp_children.clone();
         let router = |name: &str| -> u32 {
             *compiled
@@ -364,11 +396,11 @@ impl<'e> ChunkGen<'e> {
             vein_gap: router("vein_gap"),
             interp,
             cell_cache: vec![0.0; cell_width * cell_height * cell_width],
-            prelim: std::collections::HashMap::new(),
+            prelim: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             plane_cache_x: i64::MIN,
             plane_cache_z: i32::MIN,
             plane_cache: Vec::new(),
-            aquifer: AquiferState::new(env.wg.min_y, env.wg.height),
+            aquifer: std::sync::Arc::new(AquiferState::new(env.wg.min_y, env.wg.height)),
             memo: MemoCtx::new(compiled.arena.len()),
             env,
             compiled,
@@ -520,8 +552,11 @@ impl<'e> ChunkGen<'e> {
         let bx = (x >> 2) << 2;
         let bz = (z >> 2) << 2;
         let key = ((bx as i64) << 32) | (bz as i64 & 0xFFFF_FFFF);
-        if let Some(v) = self.prelim.get(&key) {
-            return *v;
+        {
+            let map = self.prelim.lock().unwrap();
+            if let Some(v) = map.get(&key) {
+                return *v;
+            }
         }
         let mut result = i32::MAX;
         let mut y = self.min_y + self.env.wg.height;
@@ -537,8 +572,235 @@ impl<'e> ChunkGen<'e> {
             }
             y -= self.cell_height as i32;
         }
-        self.prelim.insert(key, result);
+        self.prelim.lock().unwrap().insert(key, result);
         result
+    }
+
+    /// Fresh per-thread generator clone for the parallel cell path.
+    ///
+    /// Shares (immutable or synchronized): env, compiled (Arc), prelim
+    /// (Arc<Mutex>). Everything mutable is FRESH, not copied: memo, aquifer
+    /// caches, marks, cell scratch. The beard is deep-copied (per-chunk data,
+    /// already set by the plugin before fill). Prof counters start zeroed
+    /// (only the enabled flag carries over) so the post-join merge is a
+    /// plain sum of per-thread deltas.
+    fn thread_clone(&self, cx: i32, cz: i32) -> ChunkGen<'e> {
+        ChunkGen {
+            sched: false,
+            marks: Vec::with_capacity(1024),
+            beard: self.beard.clone(),
+            env: self.env,
+            compiled: std::sync::Arc::clone(&self.compiled),
+            interp_children: self.interp_children.clone(),
+            cell_width: self.cell_width,
+            cell_height: self.cell_height,
+            cell_count_xz: self.cell_count_xz,
+            cell_count_y: self.cell_count_y,
+            cell_noise_min_y: self.cell_noise_min_y,
+            min_y: self.min_y,
+            sea_level: self.sea_level,
+            aquifers_enabled: self.aquifers_enabled,
+            ore_veins_enabled: self.ore_veins_enabled,
+            final_density: self.final_density,
+            initial_density: self.initial_density,
+            barrier: self.barrier,
+            floodedness: self.floodedness,
+            spread: self.spread,
+            lava_noise: self.lava_noise,
+            erosion: self.erosion,
+            depth: self.depth,
+            vein_toggle: self.vein_toggle,
+            vein_ridged: self.vein_ridged,
+            vein_gap: self.vein_gap,
+            interp: self.interp.clone(),
+            cell_cache: vec![0.0; self.cell_cache.len()],
+            final_density_slot: self.final_density_slot,
+            cellfill_prog: self.cellfill_prog.clone(),
+            cellfill_stack: Vec::with_capacity(16),
+            cellfill_rows: vec![0.0; self.cellfill_rows.len()],
+            cellfill_slots: self.cellfill_slots.clone(),
+            prelim: std::sync::Arc::clone(&self.prelim),
+            plane_cache_x: i64::MIN,
+            plane_cache_z: i32::MIN,
+            plane_cache: Vec::new(),
+            aquifer: std::sync::Arc::clone(&self.aquifer),
+            memo: MemoCtx::new(self.compiled.arena.len()),
+            prof: Prof {
+                enabled: self.prof.enabled,
+                ..Default::default()
+            },
+            skip_cellfill: self.skip_cellfill,
+            skip_material: self.skip_material,
+            skip_slice: self.skip_slice,
+            no_ore: self.no_ore,
+            slice_threads: self.slice_threads,
+        }
+    }
+
+    /// Load the strip's corner planes into the interp state (slice0 = plane
+    /// at x-strip i2, slice1 = plane at i2+1; layout [slot][z][y]).
+    fn load_planes(&mut self, p0: &[f64], p1: &[f64]) {
+        self.interp.slice0.copy_from_slice(p0);
+        self.interp.slice1.copy_from_slice(p1);
+    }
+
+    /// Parallel fill: all corner planes up front (workers over planes), then
+    /// x-strips distributed over per-thread generator clones. Marks, prof
+    /// counters and out buffers are merged after the join.
+    fn fill_parallel(&mut self, cx: i32, cz: i32, out: &mut [u16; OUT_LEN], p: &mut Prof) {
+        let min_block_x = cx * 16;
+        let min_block_z = cz * 16;
+        let first_cell_x = floor_div(min_block_x, self.cell_width as i32);
+        let first_cell_z = floor_div(min_block_z, self.cell_width as i32);
+        let cw = self.cell_width as i32;
+        let ch = self.cell_height as i32;
+        let ccx = self.cell_count_xz;
+        let ccy = self.cell_count_y;
+        let cnmy = self.cell_noise_min_y;
+        let plane_slots = self.interp_children.len();
+        let plane_len = plane_slots * (ccx + 1) * (ccy + 1);
+        let nthr = self.slice_threads.min(self.cell_count_xz);
+
+        // plane 0: cross-chunk cache or fresh evaluation
+        let cache_hit = self.plane_cache_x == (first_cell_x * cw) as i64
+            && self.plane_cache_z == first_cell_z
+            && self.plane_cache.len() == plane_len;
+        let mut planes: Vec<Vec<f64>> = Vec::with_capacity(ccx + 1);
+        if cache_hit {
+            p.plane_hits += 1;
+            planes.push(self.plane_cache.clone());
+        } else {
+            self.fill_slice(first_cell_x, first_cell_z, true);
+            planes.push(self.interp.slice0.clone());
+        }
+
+        // planes 1..=ccx in parallel (each plane = 5*49 corner points)
+        {
+            let env = self.env;
+            let compiled = std::sync::Arc::clone(&self.compiled);
+            let children = self.interp_children.clone();
+            std::thread::scope(|s| {
+                let mut handles = Vec::new();
+                for k in 1..=ccx {
+                    let compiled = std::sync::Arc::clone(&compiled);
+                    let children = children.clone();
+                    let plane_x = (first_cell_x + k as i32) * cw;
+                    handles.push(s.spawn(move || {
+                        let mut buf = vec![0f64; plane_len];
+                        Self::eval_plane_into(
+                            env,
+                            &compiled,
+                            &children,
+                            plane_x,
+                            first_cell_z,
+                            ccx,
+                            ccy,
+                            cnmy,
+                            cw,
+                            ch,
+                            &mut buf,
+                        );
+                        buf
+                    }));
+                }
+                for h in handles {
+                    planes.push(h.join().expect("plane worker panicked"));
+                }
+            });
+        }
+
+        // distribute x-strips over per-thread clones
+        let strips_per = (ccx + nthr - 1) / nthr;
+        let mut gens: Vec<ChunkGen<'e>> = (1..nthr).map(|_| self.thread_clone(cx, cz)).collect();
+        let mut outs: Vec<Box<[u16; OUT_LEN]>> =
+            (1..nthr).map(|_| Box::new([0u16; OUT_LEN])).collect();
+        let planes_ref = &planes;
+        // main thread's own strip buffer (kept out of the threaded split)
+        let mut out0 = Box::new([0u16; OUT_LEN]);
+        std::thread::scope(|s| {
+            let outs_split: Vec<&mut Box<[u16; OUT_LEN]>> = outs.iter_mut().collect();
+            for (t, (g, out_t)) in gens
+                .iter_mut()
+                .zip(outs_split.into_iter())
+                .enumerate()
+            {
+                let t = t + 1;
+                let strips: Vec<i32> = (0..ccx)
+                    .filter(|&k| k / strips_per == t)
+                    .map(|k| k as i32)
+                    .collect();
+                s.spawn(move || {
+                    let prof_en = g.prof.enabled;
+                    // local Prof copy: process_strip takes a separate &mut Prof
+                    // (cannot alias &mut g with &mut g.prof in one call)
+                    let mut tp = g.prof;
+                    for k in strips {
+                        g.load_planes(&planes_ref[k as usize], &planes_ref[k as usize + 1]);
+                        g.process_strip(
+                            k,
+                            first_cell_x,
+                            first_cell_z,
+                            min_block_x,
+                            min_block_z,
+                            prof_en,
+                            false,
+                            out_t,
+                            &mut tp,
+                        );
+                    }
+                    g.prof = tp;
+                });
+            }
+            // main thread: strip group 0
+            for k in 0..ccx {
+                if k / strips_per != 0 {
+                    continue;
+                }
+                self.load_planes(&planes_ref[k], &planes_ref[k + 1]);
+                let prof_en = self.prof.enabled;
+                self.process_strip(
+                    k as i32,
+                    first_cell_x,
+                    first_cell_z,
+                    min_block_x,
+                    min_block_z,
+                    prof_en,
+                    false,
+                    &mut out0,
+                    p,
+                );
+            }
+        });
+
+        // merge outs (disjoint positions; AIR=0 so OR is exact)
+        for (o, b) in out.iter_mut().zip(out0.iter()) {
+            *o |= *b;
+        }
+        for t in 0..outs.len() {
+            for (o, b) in out.iter_mut().zip(outs[t].iter()) {
+                *o |= *b;
+            }
+        }
+        // merge marks + prof deltas from clones
+        for t in 1..nthr {
+            let g = &mut gens[t - 1];
+            if self.marks.len() + g.marks.len() <= MARK_CAP {
+                self.marks.extend(g.marks.drain(..));
+            }
+            p.fill_slice_ns += g.prof.fill_slice_ns;
+            p.cellfill_ns += g.prof.cellfill_ns;
+            p.material_ns += g.prof.material_ns;
+            p.select_ns += g.prof.select_ns;
+            p.blocks_subst_pos += g.prof.blocks_subst_pos;
+            p.blocks_subst_neg += g.prof.blocks_subst_neg;
+            p.blocks_ore_reached += g.prof.blocks_ore_reached;
+            p.blocks_aquifer_air += g.prof.blocks_aquifer_air;
+        }
+        // save the final plane for the next fill's plane-0 cache
+        self.plane_cache.clear();
+        self.plane_cache.extend_from_slice(&planes[ccx]);
+        self.plane_cache_x = ((first_cell_x + ccx as i32) * cw) as i64;
+        self.plane_cache_z = first_cell_z;
     }
 
     /// Vanilla NoiseBasedChunkGenerator.doFill.
@@ -547,7 +809,6 @@ impl<'e> ChunkGen<'e> {
         let mut p = self.prof;
         let prof = p.enabled;
         let dbg = std::env::var("CRUS_DBG_SLICE").is_ok();
-        let mut dbg_last_mt: Option<std::time::Duration> = None;
         out.fill(AIR);
         let min_block_x = cx * 16;
         let min_block_z = cz * 16;
@@ -563,6 +824,18 @@ impl<'e> ChunkGen<'e> {
         // there is no stale-structure leak through the ctx pool.
         if let Some(t) = t_bc {
             p.select_ns += t.elapsed().as_nanos() as u64; // reuse select bucket as "misc"
+        }
+
+        // Parallel cell path (CRUS_FILL_THREADS > 1): evaluate every corner
+        // plane up front (workers over planes), then process x-strips on
+        // per-thread generator clones. Bit-identical: cells are pure
+        // functions of the corner planes; per-thread aquifer/memo/marks state
+        // is fresh or shared-immutable; out writes are disjoint per strip.
+        if self.slice_threads > 1 && self.cell_count_xz > 0 && !self.skip_slice && !self.skip_cellfill
+        {
+            self.fill_parallel(cx, cz, out, &mut p);
+            self.prof = p;
+            return;
         }
 
         // initializeForFirstCellX: fill slice0 at x-plane first_cell_x
@@ -616,7 +889,7 @@ impl<'e> ChunkGen<'e> {
         };
         if pipeline && self.cell_count_xz > 0 && !self.skip_slice {
             let env_addr = self.env as *const Env as usize;
-            let compiled_addr = &self.compiled as *const Compiled as usize;
+            let compiled_addr = std::sync::Arc::as_ptr(&self.compiled) as usize;
             let children_addr = self.interp_children.as_ptr() as usize;
             let n_children = self.interp_children.len();
             let plane_x = (first_cell_x + 1) * cw;
@@ -671,7 +944,7 @@ impl<'e> ChunkGen<'e> {
             // spawn the plane after next for overlap with these cells
             if pipeline && i2 + 2 <= self.cell_count_xz && !self.skip_slice {
                 let env_addr = self.env as *const Env as usize;
-                let compiled_addr = &self.compiled as *const Compiled as usize;
+                let compiled_addr = std::sync::Arc::as_ptr(&self.compiled) as usize;
                 let children_addr = self.interp_children.as_ptr() as usize;
                 let n_children = self.interp_children.len();
                 let plane_x = (first_cell_x + i2 as i32 + 2) * cw;
@@ -708,9 +981,59 @@ impl<'e> ChunkGen<'e> {
             if let Some(t) = t_fs {
                 p.fill_slice_ns += t.elapsed().as_nanos() as u64;
             }
-            let cell_start_block_x = (first_cell_x + i2 as i32) * cw;
+            self.process_strip(
+                i2 as i32,
+                first_cell_x,
+                first_cell_z,
+                min_block_x,
+                min_block_z,
+                prof,
+                dbg,
+                out,
+                &mut p,
+            );
 
-            for i3 in 0..self.cell_count_xz {
+            self.interp.swap_slices();
+        }
+        // save the final x-plane (slice0 after the last swap) for the next fill
+        {
+            let plane_x = ((first_cell_x + self.cell_count_xz as i32) * cw) as i64;
+            self.interp.copy_slice0_into(&mut self.plane_cache);
+            self.plane_cache_x = plane_x;
+            self.plane_cache_z = first_cell_z;
+        }
+        // merge per-block counters (material_rule mutates self.prof directly;
+        // self.prof is the live accumulator — replace, do not add, or the
+        // totals compound across fills)
+        p.blocks_subst_pos = self.prof.blocks_subst_pos;
+        p.blocks_subst_neg = self.prof.blocks_subst_neg;
+        p.blocks_ore_reached = self.prof.blocks_ore_reached;
+        p.blocks_aquifer_air = self.prof.blocks_aquifer_air;
+        self.prof = p;
+    }
+
+    /// One x-strip of cells (vanilla: the i2 loop body from cellStartBlockX
+    /// through the material walk). The caller guarantees interp.slice0 ==
+    /// plane(i2) and interp.slice1 == plane(i2+1). Shared verbatim by the
+    /// serial path and the parallel cell threads (bit-identical by
+    /// construction).
+    fn process_strip(
+        &mut self,
+        i2: i32,
+        first_cell_x: i32,
+        first_cell_z: i32,
+        min_block_x: i32,
+        min_block_z: i32,
+        prof: bool,
+        dbg: bool,
+        out: &mut [u16; OUT_LEN],
+        p: &mut Prof,
+    ) {
+        let cw = self.cell_width as i32;
+        let ch = self.cell_height as i32;
+        let cell_start_block_x = (first_cell_x + i2) * cw;
+
+        for i3 in 0..self.cell_count_xz {
                 let cell_start_block_z = (first_cell_z + i3 as i32) * cw;
 
                 for i5 in (0..self.cell_count_y).rev() {
@@ -819,7 +1142,7 @@ impl<'e> ChunkGen<'e> {
                         p.cellfill_ns += t.elapsed().as_nanos() as u64;
                     }
                     if dbg {
-                        eprintln!("cell[{}, {}, {}] cf={:?} mt_prev={:?}", i2, i3, i5, t_cf.map(|t| t.elapsed()), dbg_last_mt);
+                        eprintln!("cell[{}, {}, {}] cf={:?}", i2, i3, i5, t_cf.map(|t| t.elapsed()));
                     }
 
                     let t_mt = if prof { Some(std::time::Instant::now()) } else { None };
@@ -860,29 +1183,18 @@ impl<'e> ChunkGen<'e> {
                     }
                 }
             }
-
-            self.interp.swap_slices();
-        }
-        // save the final x-plane (slice0 after the last swap) for the next fill
-        {
-            let plane_x = ((first_cell_x + self.cell_count_xz as i32) * cw) as i64;
-            self.interp.copy_slice0_into(&mut self.plane_cache);
-            self.plane_cache_x = plane_x;
-            self.plane_cache_z = first_cell_z;
-        }
         // merge per-block counters (material_rule mutates self.prof directly;
-        // self.prof is the live accumulator — replace, do not add, or the
-        // totals compound across fills)
+        // p carries running totals — replace per strip keeps them cumulative)
         p.blocks_subst_pos = self.prof.blocks_subst_pos;
         p.blocks_subst_neg = self.prof.blocks_subst_neg;
         p.blocks_ore_reached = self.prof.blocks_ore_reached;
         p.blocks_aquifer_air = self.prof.blocks_aquifer_air;
-        self.prof = p;
+        self.prof = *p;
     }
 
     /// Vanilla NoiseChunk.fillSlice: each interpolator's wrapped function is
     /// evaluated at the (x, y, z) corner (Mode::Slice — child direct).
-    fn fill_slice(&mut self, start_cell_x: i32, first_cell_z: i32, is_first: bool) {
+    pub fn fill_slice(&mut self, start_cell_x: i32, first_cell_z: i32, is_first: bool) {
         let corner_x = start_cell_x * self.cell_width as i32;
         let cw = self.cell_width as i32;
         let ch = self.cell_height as i32;
@@ -1064,7 +1376,10 @@ impl<'e> ChunkGen<'e> {
         // in which case a targeted two-smallest-distance scan decides the
         // vanilla d67 > 0.0 gate.
         let base = self.aquifer.index(gx, gy, gz);
-        if let Some((true, s)) = self.aquifer.summary[base] {
+        let sv = self.aquifer.summary[base].load(Ordering::Relaxed);
+        if sv != 0 {
+            let (same, s) = unpack_summary(sv);
+            if same {
             let block = aquifer_at(s, y);
             self.sched = block == WATER
                 && aquifer_at(self.global_fluid(y - 1), y - 1) == LAVA
@@ -1073,6 +1388,7 @@ impl<'e> ChunkGen<'e> {
                     similarity(i6, i7) > 0.0
                 };
             return Some(block);
+            }
         }
 
         // Single-pass scan in the exact vanilla order (i10 outer, i11 middle,
@@ -1111,17 +1427,20 @@ impl<'e> ChunkGen<'e> {
                 let mut index = idx11;
                 for i12 in 0..=1i32 {
                     let gzz = gz + i12;
-                    let packed = if self.aquifer.loc_cache[index] != i64::MAX {
-                        self.aquifer.loc_cache[index]
-                    } else {
+                    let packed = {
+                        let l = self.aquifer.loc_cache[index].load(Ordering::Relaxed);
+                        if l != i64::MAX {
+                            l
+                        } else {
                         let mut rng = self.env.aquifer_random.clone().at(gxx, gyy, gzz);
                         let p = block_pos_as_long(
                             gxx * 16 + rng.next_int_bound(10),
                             gyy * 12 + rng.next_int_bound(9),
                             gzz * 16 + rng.next_int_bound(10),
                         );
-                        self.aquifer.loc_cache[index] = p;
-                        p
+                            self.aquifer.loc_cache[index].store(p, Ordering::Relaxed);
+                            p
+                        }
                     };
                     let dx = pos_x(packed) as i64 - x as i64;
                     let dy = pos_y(packed) as i64 - y as i64;
@@ -1156,15 +1475,17 @@ impl<'e> ChunkGen<'e> {
                         // The source position always lands inside its own
                         // grid cell (cell*dim + rng(dim-1)), so cache[index]
                         // IS the status this cell would resolve to.
-                        let st = match self.aquifer.cache[index] {
-                            Some(st) => st,
-                            None => {
+                        let st = {
+                            let packed_v = self.aquifer.cache[index].load(Ordering::Relaxed);
+                            if packed_v != 0 {
+                                unpack_status(packed_v)
+                            } else {
                                 let v = self.compute_aquifer_fluid(
                                     pos_x(packed),
                                     pos_y(packed),
                                     pos_z(packed),
                                 );
-                                self.aquifer.cache[index] = Some(v);
+                                self.aquifer.cache[index].store(pack_status(v), Ordering::Relaxed);
                                 v
                             }
                         };
@@ -1181,7 +1502,7 @@ impl<'e> ChunkGen<'e> {
             idx10 += 1;
         }
         // Memoize the base-cell verdict (pure function of (gx, gy, gz)).
-        self.aquifer.summary[base] = Some((all_same, first));
+        self.aquifer.summary[base].store(pack_summary(all_same, first), Ordering::Relaxed);
         if all_same {
             let block = aquifer_at(first, y);
             // Vanilla: d <= 0.0 early-returns with sched = false (the
@@ -1276,17 +1597,20 @@ impl<'e> ChunkGen<'e> {
                 let mut index = idx11;
                 for i12 in 0..=1i32 {
                     let gzz = gz + i12;
-                    let packed = if self.aquifer.loc_cache[index] != i64::MAX {
-                        self.aquifer.loc_cache[index]
-                    } else {
+                    let packed = {
+                        let l = self.aquifer.loc_cache[index].load(Ordering::Relaxed);
+                        if l != i64::MAX {
+                            l
+                        } else {
                         let mut rng = self.env.aquifer_random.clone().at(gxx, gyy, gzz);
                         let p = block_pos_as_long(
                             gxx * 16 + rng.next_int_bound(10),
                             gyy * 12 + rng.next_int_bound(9),
                             gzz * 16 + rng.next_int_bound(10),
                         );
-                        self.aquifer.loc_cache[index] = p;
-                        p
+                            self.aquifer.loc_cache[index].store(p, Ordering::Relaxed);
+                            p
+                        }
                     };
                     let dx = pos_x(packed) as i64 - x as i64;
                     let dy = pos_y(packed) as i64 - y as i64;
@@ -1376,11 +1700,12 @@ impl<'e> ChunkGen<'e> {
         let index = self
             .aquifer
             .index(floor_div(x, 16), floor_div(y, 12), floor_div(z, 16));
-        if let Some(v) = self.aquifer.cache[index] {
-            return v;
+        let packed_v = self.aquifer.cache[index].load(Ordering::Relaxed);
+        if packed_v != 0 {
+            return unpack_status(packed_v);
         }
         let v = self.compute_aquifer_fluid(x, y, z);
-        self.aquifer.cache[index] = Some(v);
+        self.aquifer.cache[index].store(pack_status(v), Ordering::Relaxed);
         v
     }
 
@@ -1580,6 +1905,13 @@ fn aquifer_at(status: FluidStatus, y: i32) -> u16 {
 
 impl<'e> ChunkGen<'e> {
     /// Diagnostic accessors for bench probes.
+    pub fn cell_width_pub(&self) -> usize { self.cell_width }
+    pub fn cell_height_pub(&self) -> usize { self.cell_height }
+    pub fn cell_count_xz_pub(&self) -> usize { self.cell_count_xz }
+    pub fn cell_count_y_pub(&self) -> usize { self.cell_count_y }
+    pub fn cell_noise_min_y_pub(&self) -> i32 { self.cell_noise_min_y }
+    pub fn slice1_pub(&self) -> &[f64] { &self.interp.slice1 }
+    pub fn compiled_pub(&self) -> &std::sync::Arc<Compiled> { &self.compiled }
     pub fn interp_children_pub(&self) -> &[u32] {
         &self.interp_children
     }
@@ -1766,7 +2098,7 @@ impl<'e> ChunkGen<'e> {
     /// Evaluate one corner plane into `out` laid out [slot][z][y].
     /// Pure function of (env, compiled, plane corner x, z origin) — used by
     /// the pipelined worker thread and by the main thread.
-    fn eval_plane_into(
+    pub fn eval_plane_into(
         env: &Env,
         compiled: &Compiled,
         children: &[u32],
