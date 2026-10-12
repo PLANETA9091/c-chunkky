@@ -3,7 +3,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 SRV_JAR="../server/versions/1.21.8/paper-1.21.8.jar:../probe/paper-api.jar"
-LIBS="$(ls ../probe/libs/*.jar libs/*.jar 2>/dev/null | tr '\n' ':')"
+# Paper's bundled Mojang libraries (datafixerupper etc.) live in
+# server/libraries after paperclip extraction — needed for BuiltInRegistries.
+# NOTE: only com/mojang jars — net/kyori jars from libraries shadow the
+# probe/libs adventure jars and break javac resolution.
+LIBS="$(ls ../probe/libs/*.jar 2>/dev/null | tr '\n' ':')$(find ../server/libraries/com/mojang ../server/libraries/it -name '*.jar' 2>/dev/null | tr '\n' ':')"
 JAVAC="${JAVAC:-$(command -v javac)}"
 [ -n "$JAVAC" ] || { echo "no javac" >&2; exit 1; }
 JARBIN="$(dirname "$JAVAC")/jar"

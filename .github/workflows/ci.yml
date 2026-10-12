@@ -101,6 +101,18 @@ jobs:
       - name: Sanity .so
         run: file native/target/release/libcrussty_chunkgen.so
 
+      - name: Vanilla aquifer marks oracle (flag parity diagnostic)
+        run: |
+          ORACLE_CHUNKLIST="2:-2,2:-3,3:-2,3:-3" bash harness/oracle_marks.sh 2>&1 | tee oracle_marks.log || true
+          # native marks for the same chunks + xref vs vanilla flags
+          ./native/target/release/bench marks 2 -2 > native_marks_2_-2.tsv
+          ./native/target/release/bench marks 2 -3 > native_marks_2_-3.tsv
+          ./native/target/release/bench marks 3 -2 > native_marks_3_-2.tsv
+          ./native/target/release/bench marks 3 -3 > native_marks_3_-3.tsv
+          python3 scripts/oracle_marks_xref.py oracle_marks_out \
+            native_marks_2_-2.tsv native_marks_2_-3.tsv native_marks_3_-2.tsv native_marks_3_-3.tsv \
+            | tee oracle_xref.log || true
+
       - name: Judge world=vanilla
         run: |
           set -o pipefail
@@ -134,6 +146,10 @@ jobs:
           path: |
             judge_vanilla.log
             judge_datapack.log
+            oracle_marks.log
+            oracle_xref.log
+            oracle_marks_out/
+            native_marks_*.tsv
             reference/plugin_stats_vanilla.txt
             reference/plugin_stats_datapack.txt
             reference/dumps_plugin/

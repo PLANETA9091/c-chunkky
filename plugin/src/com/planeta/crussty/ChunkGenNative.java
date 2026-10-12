@@ -27,6 +27,16 @@ public final class ChunkGenNative {
 
     public static native int fillMarked(long ctx, int chunkX, int chunkZ, short[] out, long[] marks);
 
+    /**
+     * fillBeard(ctx, cx, cz, short[] out, long[] marks, int[] beard) -> int.
+     * Atomic set_beard + fillMarked: `beard` is the plugin-serialized vanilla
+     * Beardifier list for THIS chunk:
+     * [nPieces, (minX,minY,minZ,maxX,maxY,maxZ,adj,delta)*, nJunctions, (x,y,z)*].
+     * Pass [0,0] for no structures (must never be null — the ctx pool reuses
+     * generators and a stale beard would leak into the next chunk).
+     */
+    public static native int fillBeard(long ctx, int chunkX, int chunkZ, short[] out, long[] marks, int[] beard);
+
     private ChunkGenNative() {
     }
 }
