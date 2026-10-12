@@ -195,3 +195,20 @@ Stage Summary:
 - Perf: mean fill 14.9 -> 9.6ms (2-core dev, 2 threads); phases: slice 3.9 (2.35 @2thr), cellfill 2.7, material 2.3.
 - Judge: regression 441 -> 5903 under bisect; verdicts pending (6aec118 beard-gate, 85a1382 ShiftB fix + parallel cells).
 - 100%-goal plan: fix the blob/pocket residuals, then thread-scale on CI (4 cores) -> ~3ms/chunk, then SIMD/VM for the rest.
+
+---
+Task ID: cont-8 (2026-10-12 night 4)
+Agent: Super Z (main)
+Task: judge nondeterminism root cause + deterministic protocol
+
+Work Log:
+- Bisect results: beard bridge EXONERATED (CRUS_BEARD off = 5896 vs 5903); ShiftB fix neutral (+27); dead-chain removal neutral; blocks+marks bit-identical old-vs-new across 9 chunks (bench marks cmd: old==new 8/2/22/31).
+- ROOT CAUSE of the 441 -> ~5900 judge regression: DECORATION SPILL NONDETERMINISM. Ore/blob features write into the 3x3 WorldGenRegion; the final block at contested boundary positions depends on the chunk DECORATION ORDER. Diffs cluster at chunk edges (z=12..15 in chunk_1_-3). The old 50ms/chunk generation accidentally matched vanilla's promotion order (441 = lucky); the fast parallel generation scrambled it (~5900). NOT a code bug — an judge-infrastructure nondeterminism.
+- The phantom seed-0 diff (-4,1): stale-binary artifact (SIGPIPE from `| rg | head` killed cargo mid-build; ran an old binary). Fresh e2d7213 build is bit-identical to e6fe197 at seed 0 too. LESSON: never trust builds piped through head.
+- FIX (judge protocol): sequential per-chunk forceload (cx asc, cz asc) in BOTH bench.sh (reference capture) and plugin_bench.sh (judge) — both worlds now decorate in the SAME order; judge settle aligned to 15s (was 5s vs refs' 15s — a second mismatch source). Refs re-captured via recapture 38286817425 and committed.
+- Bisect-B revert (old native) was accidentally left on main and broke the marks-oracle step (old bench lacks the marks cmd) — restored native+plugin to e2d7213 (8d6971a).
+- CRUS_FILL_THREADS=4 exported in plugin_bench (parallel slice corners + cell strips).
+
+Stage Summary:
+- Awaiting the clean judge verdict (8d6971a): new code + new refs + deterministic order. Expect granite-family spill diffs to vanish; remaining = real diffs (pockets + kelp cascades).
+- Perf on CI pending with 4 fill threads.
