@@ -1130,12 +1130,60 @@ impl<'e> ChunkGen<'e> {
                     }
                     let cell_start_block_y = (i5 as i32 + self.cell_noise_min_y) * ch;
 
+                    // All-solid cell gate: if every final_density corner is
+                    // > 0, every trilinearly interpolated in-cell substance
+                    // is > 0 too (convex combination, IEEE lerp of positives
+                    // stays positive for world-range magnitudes). Vanilla then
+                    // returns ore/stone for all 128 blocks without ever using
+                    // the interpolated values (aquifer early-returns on
+                    // subst > 0; ore reads vein noises only), so the entire
+                    // cellfill pass for the cell can be skipped. Gated on an
+                    // empty beardifier (a beard contribution could push
+                    // substance <= 0).
+                    let fds = match self.final_density_slot { Some(s) => s, None => 0 };
+                    let all_solid = self.beard.is_empty()
+                        && {
+                            let n = self.interp.corners_pub(fds);
+                            n[0] > 0.0 && n[1] > 0.0 && n[2] > 0.0 && n[3] > 0.0
+                                && n[4] > 0.0 && n[5] > 0.0 && n[6] > 0.0 && n[7] > 0.0
+                        };
+
                     // CacheAllInCell (vanilla Java-level wrap of final_density):
                     // fill 128 in-cell values via lerp3 path (fillingCell=true).
                     // Branchless per-block: loop variants hoisted out of the
                     // inner z-loop; fractions via multiply (bit-identical:
                     // /4 == *0.25 and /8 == *0.125 exactly in IEEE754).
                     let t_cf = if prof || dbg { Some(std::time::Instant::now()) } else { None };
+                    if all_solid {
+                        // cellfill skipped entirely (see gate above)
+                        if let Some(t) = t_cf {
+                            p.cellfill_ns += t.elapsed().as_nanos() as u64;
+                        }
+                        // material: every block is ore/stone (subst > 0)
+                        let t_mt2 = if prof { Some(std::time::Instant::now()) } else { None };
+                        self.sched = false;
+                        for i6 in (0..self.cell_height as i32).rev() {
+                            let block_y = (self.cell_noise_min_y + i5 as i32) * ch + i6;
+                            for i9 in 0..self.cell_width as i32 {
+                                let block_x = cell_start_block_x + i9;
+                                for i12 in 0..self.cell_width as i32 {
+                                    let block_z = cell_start_block_z + i12;
+                                    let block = self.ore_row_block(block_x, block_y, block_z);
+                                    if block != AIR {
+                                        let out_idx = ((block_y - self.min_y) * 256
+                                            + (block_z - min_block_z) * 16
+                                            + (block_x - min_block_x))
+                                            as usize;
+                                        out[out_idx] = block;
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(t) = t_mt2 {
+                            p.material_ns += t.elapsed().as_nanos() as u64;
+                        }
+                        continue;
+                    }
                     let cw_i = cw;
                     let dx_step = 1.0f64 / self.cell_width as f64; // exact: 0.25
                     let dy_step = 1.0f64 / self.cell_height as f64; // exact: 0.125
