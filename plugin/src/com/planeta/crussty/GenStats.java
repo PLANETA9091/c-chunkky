@@ -47,9 +47,6 @@ public final class GenStats {
     static final AtomicLong MARKS_LANDED = new AtomicLong();
     static final AtomicLong BRIDGE_NO_CHUNK = new AtomicLong();
     static final AtomicLong BRIDGE_ERROR = new AtomicLong();
-    // beardifier (structure terrain adaptation) diagnostics
-    static final AtomicLong BEARD_PIECES = new AtomicLong();
-    static final AtomicLong BEARD_CHUNKS = new AtomicLong();
 
     private GenStats() {
     }
@@ -73,11 +70,10 @@ public final class GenStats {
         long p99 = copy[(int) Math.min(n - 1, (long) (n * 0.99))];
         double meanUs = (TOTAL.get() / Math.max(1, COUNT.get())) / 1000.0;
         return String.format(
-                "chunks=%d  mean=%.1fus  p50=%.1fus  p99=%.1fus  max=%.1fus  marks_seen=%d marks_landed=%d bridge_no_chunk=%d bridge_err=%d beard_chunks=%d beard_pieces=%d",
+                "chunks=%d  mean=%.1fus  p50=%.1fus  p99=%.1fus  max=%.1fus  marks_seen=%d marks_landed=%d bridge_no_chunk=%d bridge_err=%d",
                 COUNT.get(), meanUs,
                 p50 / 1000.0, p99 / 1000.0, copy[(int) (n - 1)] / 1000.0,
-                MARKS_SEEN.get(), MARKS_LANDED.get(), BRIDGE_NO_CHUNK.get(), BRIDGE_ERROR.get(),
-                BEARD_CHUNKS.get(), BEARD_PIECES.get());
+                MARKS_SEEN.get(), MARKS_LANDED.get(), BRIDGE_NO_CHUNK.get(), BRIDGE_ERROR.get());
     }
 
     static long count() {

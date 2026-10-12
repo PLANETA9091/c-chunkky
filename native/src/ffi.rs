@@ -151,51 +151,6 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fillMarked
     fill_jni(env, ctx, cx, cz, out, marks)
 }
 
-/// fillBeard(long ctx, int cx, int cz, short[] out, long[] marks, int[] beard) -> int.
-/// Atomic set_beard + fillMarked: `beard` is the plugin-serialized vanilla
-/// Beardifier piece/junction list for THIS chunk
-/// ([nPieces, (minX,minY,minZ,maxX,maxY,maxZ,adj,delta)*, nJunctions, (x,y,z)*]).
-#[no_mangle]
-pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fillBeard(
-    env: *mut jni_sys::JNIEnv,
-    _class: jni_sys::jclass,
-    ctx: jni_sys::jlong,
-    cx: jni_sys::jint,
-    cz: jni_sys::jint,
-    out: jni_sys::jshortArray,
-    marks: jni_sys::jlongArray,
-    beard: jni_sys::jintArray,
-) -> jni_sys::jint {
-    if !beard.is_null() {
-        let tbl = *env;
-        let blen = ((*tbl).v1_1.GetArrayLength)(env, beard as jni_sys::jarray) as usize;
-        if blen > 0 {
-            let bptr = ((*tbl).v1_1.GetIntArrayElements)(
-                env,
-                beard as jni_sys::jintArray,
-                std::ptr::null_mut(),
-            );
-            if !bptr.is_null() {
-                let data = std::slice::from_raw_parts(bptr, blen).to_vec();
-                ((*tbl).v1_1.ReleaseIntArrayElements)(
-                    env,
-                    beard as jni_sys::jintArray,
-                    bptr,
-                    0,
-                );
-                {
-                    let mut map = SESSIONS.lock().unwrap();
-                    let map = map.as_mut().expect("sessions map");
-                    if let Some(c) = map.get_mut(&ctx as &i64) {
-                        c.gen.set_beard(&data);
-                    }
-                }
-            }
-        }
-    }
-    fill_jni(env, ctx, cx, cz, out, marks)
-}
-
 /// Shared fill path. If `marks` is non-null it receives the packed fluid
 /// update positions; returns the mark count (0 when marks is null).
 unsafe fn fill_jni(

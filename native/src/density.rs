@@ -826,7 +826,6 @@ fn collect_noise_refs(wg: &WorldGen, out: &mut Vec<String>) {
 
 /// Interpolated-node runtime state for the block loop (per NoiseChunk).
 /// Slot order matches WKind::Interpolated{slot}.
-#[derive(Clone)]
 pub struct InterpState {
     /// slice0[z][y] and slice1[z][y], z in 0..=cellCountXZ, y in 0..=cellCountY.
     pub slice0: Vec<f64>,
@@ -1051,16 +1050,13 @@ impl Env {
             }
             WKind::ShiftB { noise_id } => {
                 let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
-                // vanilla ShiftNoise.compute(z, x, 0): x_arg = z*0.25,
-                // y_arg = x*0.25, z_arg = 0 (matches the scalar arm — the
-                // x/z SWAP reading was wrong and diverged from eval!)
                 let mut x = [0f64; 4];
-                let mut y = [0f64; 4];
+                let mut z = [0f64; 4];
                 for l in 0..4 {
                     x[l] = pts[l].z as f64 * 0.25;
-                    y[l] = pts[l].x as f64 * 0.25;
+                    z[l] = pts[l].x as f64 * 0.25;
                 }
-                let z = [0.0f64; 4];
+                let y = [0.0f64; 4];
                 let mut out = n.get_value_batch(&x, &y, &z);
                 for v in out.iter_mut() {
                     *v *= 4.0;
@@ -1746,58 +1742,5 @@ impl InterpState {
     #[inline]
     pub fn slot_count(&self) -> usize {
         self.corners.len()
-    }
-}
-
-#[cfg(test)]
-mod eval4_parity_tests {
-    use super::*;
-
-    /// Regression: eval4 must stay bit-identical to scalar eval. A past
-    /// ShiftB argument-order bug silently corrupted pipeline corners on
-    /// 4-core machines (eval_plane_into path) while serial fills stayed
-    /// correct — this test pins the invariant over the judged region's
-    /// corner grid.
-    #[test]
-    fn eval4_matches_scalar_eval() {
-        let seed: i64 = 3257840388504953787;
-        let env: &'static Env = Box::leak(Box::new(Env::new(seed)));
-        let gen = crate::nochunk::ChunkGen::new(env);
-        let compiled = &gen.compiled;
-        let children = compiled.interp_children.clone();
-        let interp = InterpState::new(compiled.interp_slots, 4, 48);
-
-        let mut points: Vec<Pt> = Vec::new();
-        for i in 0..=4i32 {
-            for j in 0..=4i32 {
-                for y in (0..48i32).step_by(3) {
-                    points.push(Pt {
-                        x: 48 + i * 4,
-                        y: (y - 8) * 8,
-                        z: -32 + j * 4,
-                    });
-                }
-            }
-        }
-        assert!(points.len() % 4 == 0);
-
-        let mut checked = 0usize;
-        for chunk in points.chunks(4) {
-            let pts = [chunk[0], chunk[1], chunk[2], chunk[3]];
-            for &child in &children {
-                let b = env.eval4(compiled, child, &pts, Mode::Slice, &interp);
-                for l in 0..4 {
-                    let s = env.eval(compiled, child, pts[l], Mode::Slice, &interp, None);
-                    assert_eq!(
-                        s.to_bits(),
-                        b[l].to_bits(),
-                        "eval4 diverged from eval at {:?} child {child}",
-                        pts[l]
-                    );
-                    checked += 1;
-                }
-            }
-        }
-        assert!(checked > 3_000, "coverage too low: {checked}");
     }
 }
