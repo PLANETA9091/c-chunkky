@@ -981,10 +981,41 @@ fn lerp(t: f64, a: f64, b: f64) -> f64 {
 
 pub type V4 = [f64; 4];
 
+/// 4-lane memo for eval4: stamps the [f64; 4] result of every node within
+/// one eval4 call (one point group). Shared DAG references (splines, ap2
+/// chains) evaluate once per group instead of once per reference — pure
+/// functions, so stamping cannot change values, only cost.
+pub struct V4Memo {
+    stamp: Box<[Cell<u64>]>,
+    value: Box<[Cell<[f64; 4]>]>,
+    serial: Cell<u64>,
+}
+
+impl V4Memo {
+    pub fn new(n: usize) -> V4Memo {
+        V4Memo {
+            stamp: vec![Cell::new(0); n].into_boxed_slice(),
+            value: vec![Cell::new([0.0; 4]); n].into_boxed_slice(),
+            serial: Cell::new(0),
+        }
+    }
+
+    #[inline]
+    pub fn next_serial(&self) {
+        self.serial.set(self.serial.get() + 1);
+    }
+
+    #[inline]
+    fn key(&self) -> u64 {
+        self.serial.get().wrapping_mul(8) + 1
+    }
+}
+
 impl Env {
-    /// Evaluate `idx` at 4 points simultaneously (Mode::Slice semantics,
-    /// no memo — the fill_slice path). Lane arithmetic is identical to the
-    /// scalar eval, so results are bit-exact.
+    /// Evaluate `idx` at 4 points simultaneously (Mode::Slice semantics).
+    /// Lane arithmetic is identical to the scalar eval, so results are
+    /// bit-exact. Each call gets a fresh memo serial: shared subtrees are
+    /// computed once per call (per point group).
     pub fn eval4(
         &self,
         c: &Compiled,
@@ -992,8 +1023,10 @@ impl Env {
         pts: &[Pt; 4],
         mode: Mode,
         interp: &InterpState,
+        memo: &V4Memo,
     ) -> V4 {
-        self.eval4_uncached(c, idx, pts, mode, interp)
+        memo.next_serial();
+        self.eval4_uncached(c, idx, pts, mode, interp, memo)
     }
 
     fn eval4_uncached(
@@ -1003,6 +1036,26 @@ impl Env {
         pts: &[Pt; 4],
         mode: Mode,
         interp: &InterpState,
+        memo: &V4Memo,
+    ) -> V4 {
+        let i = idx as usize;
+        if memo.stamp[i].get() == memo.key() {
+            return memo.value[i].get();
+        }
+        let v = self.eval4_recurse(c, idx, pts, mode, interp, memo);
+        memo.stamp[i].set(memo.key());
+        memo.value[i].set(v);
+        v
+    }
+
+    fn eval4_recurse(
+        &self,
+        c: &Compiled,
+        idx: u32,
+        pts: &[Pt; 4],
+        mode: Mode,
+        interp: &InterpState,
+        memo: &V4Memo,
     ) -> V4 {
         let node = &c.arena[idx as usize];
         match node {
@@ -1020,9 +1073,9 @@ impl Env {
                 n.get_value_batch(&x, &y, &z)
             }
             WKind::ShiftedNoise { noise_id, xz_scale, y_scale, sx, sy, sz } => {
-                let sxa = self.eval4_uncached(c, *sx, pts, mode, interp);
-                let sya = self.eval4_uncached(c, *sy, pts, mode, interp);
-                let sza = self.eval4_uncached(c, *sz, pts, mode, interp);
+                let sxa = self.eval4_uncached(c, *sx, pts, mode, interp, memo);
+                let sya = self.eval4_uncached(c, *sy, pts, mode, interp, memo);
+                let sza = self.eval4_uncached(c, *sz, pts, mode, interp, memo);
                 let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
                 let mut x = [0f64; 4];
                 let mut y = [0f64; 4];
@@ -1079,7 +1132,7 @@ impl Env {
                 c.blended[*instance as usize].compute_batch(&bx, &by, &bz)
             }
             WKind::Clamp { input, min, max } => {
-                let v = self.eval4_uncached(c, *input, pts, mode, interp);
+                let v = self.eval4_uncached(c, *input, pts, mode, interp, memo);
                 let mut out = [0f64; 4];
                 for l in 0..4 {
                     out[l] = mth_clamp(v[l], *min, *max);
@@ -1087,7 +1140,7 @@ impl Env {
                 out
             }
             WKind::Mapped { kind, input } => {
-                let v = self.eval4_uncached(c, *input, pts, mode, interp);
+                let v = self.eval4_uncached(c, *input, pts, mode, interp, memo);
                 let mut out = [0f64; 4];
                 match kind {
                     MapKind::Abs => {
@@ -1115,10 +1168,10 @@ impl Env {
                 out
             }
             WKind::Ap2 { kind, a, b } => {
-                let va = self.eval4_uncached(c, *a, pts, mode, interp);
+                let va = self.eval4_uncached(c, *a, pts, mode, interp, memo);
                 match kind {
                     Ap2Kind::Add => {
-                        let vb = self.eval4_uncached(c, *b, pts, mode, interp);
+                        let vb = self.eval4_uncached(c, *b, pts, mode, interp, memo);
                         let mut out = [0f64; 4];
                         for l in 0..4 { out[l] = va[l] + vb[l]; }
                         out
@@ -1135,7 +1188,7 @@ impl Env {
                             }
                         }
                         if need.iter().any(|n| *n) {
-                            let vb = self.eval4_uncached(c, *b, pts, mode, interp);
+                            let vb = self.eval4_uncached(c, *b, pts, mode, interp, memo);
                             for l in 0..4 {
                                 if need[l] {
                                     out[l] = va[l] * vb[l];
@@ -1145,13 +1198,13 @@ impl Env {
                         out
                     }
                     Ap2Kind::Min => {
-                        let vb = self.eval4_uncached(c, *b, pts, mode, interp);
+                        let vb = self.eval4_uncached(c, *b, pts, mode, interp, memo);
                         let mut out = [0f64; 4];
                         for l in 0..4 { out[l] = if va[l] < vb[l] { va[l] } else { vb[l] }; }
                         out
                     }
                     Ap2Kind::Max => {
-                        let vb = self.eval4_uncached(c, *b, pts, mode, interp);
+                        let vb = self.eval4_uncached(c, *b, pts, mode, interp, memo);
                         let mut out = [0f64; 4];
                         for l in 0..4 { out[l] = if va[l] > vb[l] { va[l] } else { vb[l] }; }
                         out
@@ -1159,7 +1212,7 @@ impl Env {
                 }
             }
             WKind::RangeChoice { input, min_inclusive, max_exclusive, when_in_range, when_out_of_range } => {
-                let v = self.eval4_uncached(c, *input, pts, mode, interp);
+                let v = self.eval4_uncached(c, *input, pts, mode, interp, memo);
                 let mut in_mask = [false; 4];
                 let mut any_in = false;
                 let mut any_out = false;
@@ -1168,8 +1221,8 @@ impl Env {
                     in_mask[l] = m;
                     if m { any_in = true; } else { any_out = true; }
                 }
-                let vin = if any_in { self.eval4_uncached(c, *when_in_range, pts, mode, interp) } else { [0.0; 4] };
-                let vout = if any_out { self.eval4_uncached(c, *when_out_of_range, pts, mode, interp) } else { [0.0; 4] };
+                let vin = if any_in { self.eval4_uncached(c, *when_in_range, pts, mode, interp, memo) } else { [0.0; 4] };
+                let vout = if any_out { self.eval4_uncached(c, *when_out_of_range, pts, mode, interp, memo) } else { [0.0; 4] };
                 let mut out = [0f64; 4];
                 for l in 0..4 {
                     out[l] = if in_mask[l] { vin[l] } else { vout[l] };
@@ -1191,7 +1244,7 @@ impl Env {
                 out
             }
             WKind::Spline { coordinate, points } => {
-                let f4 = self.eval4_uncached(c, *coordinate, pts, mode, interp);
+                let f4 = self.eval4_uncached(c, *coordinate, pts, mode, interp, memo);
                 let mut f = [0f32; 4];
                 for l in 0..4 {
                     f[l] = f4[l] as f32;
@@ -1203,7 +1256,7 @@ impl Env {
                 out
             }
             WKind::WeirdScaledSampler { noise_id, mapper_type2, input } => {
-                let v = self.eval4_uncached(c, *input, pts, mode, interp);
+                let v = self.eval4_uncached(c, *input, pts, mode, interp, memo);
                 let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
                 let mut d = [1.0f64; 4];
                 for l in 0..4 {
@@ -1238,9 +1291,9 @@ impl Env {
             WKind::Cache2d { child }
             | WKind::CacheOnce { child }
             | WKind::FlatCache { child }
-            | WKind::CacheAllInCell { child } => self.eval4_uncached(c, *child, pts, mode, interp),
+            | WKind::CacheAllInCell { child } => self.eval4_uncached(c, *child, pts, mode, interp, memo),
             WKind::MulOrAdd { is_add, input, argument } => {
-                let v = self.eval4_uncached(c, *input, pts, mode, interp);
+                let v = self.eval4_uncached(c, *input, pts, mode, interp, memo);
                 let mut out = [0f64; 4];
                 for l in 0..4 {
                     out[l] = if *is_add {
@@ -1255,7 +1308,7 @@ impl Env {
             }
             WKind::Interpolated { child, .. } => {
                 // Slice mode: direct child evaluation (same as scalar)
-                self.eval4_uncached(c, *child, pts, mode, interp)
+                self.eval4_uncached(c, *child, pts, mode, interp, memo)
             }
             WKind::EndIslands => [0.0; 4],
             _ => {
@@ -1782,10 +1835,11 @@ mod eval4_parity_tests {
         assert!(points.len() % 4 == 0);
 
         let mut checked = 0usize;
+        let memo = V4Memo::new(compiled.arena.len());
         for chunk in points.chunks(4) {
             let pts = [chunk[0], chunk[1], chunk[2], chunk[3]];
             for &child in &children {
-                let b = env.eval4(compiled, child, &pts, Mode::Slice, &interp);
+                let b = env.eval4(compiled, child, &pts, Mode::Slice, &interp, &memo);
                 for l in 0..4 {
                     let s = env.eval(compiled, child, pts[l], Mode::Slice, &interp, None);
                     assert_eq!(

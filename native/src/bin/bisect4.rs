@@ -42,6 +42,7 @@ fn main() {
     let child = children[0];
 
     // BFS from the root; report the first (shallowest) diverging node.
+    let memo4 = crussty_chunkgen::density::V4Memo::new(compiled.arena.len());
     let mut frontier = vec![(child, 0u32)];
     let mut seen = BTreeSet::new();
     let mut found = 0;
@@ -50,10 +51,10 @@ fn main() {
             continue;
         }
         let scalar = env.eval(compiled, idx, pt, Mode::Slice, &interp, None);
-        let batch = env.eval4(compiled, idx, &pts, Mode::Slice, &interp);
+        let batch = env.eval4(compiled, idx, &pts, Mode::Slice, &interp, &memo4);
         if let WKind::Spline { coordinate, points } = &compiled.arena[idx as usize] {
             let f_scalar = env.eval(compiled, *coordinate, pt, Mode::Slice, &interp, None) as f32;
-            let f4 = env.eval4(compiled, *coordinate, &pts, Mode::Slice, &interp);
+            let f4 = env.eval4(compiled, *coordinate, &pts, Mode::Slice, &interp, &memo4);
             println!(
                 "spline idx={idx} depth={depth}: f_scalar={f_scalar:e} f_batch={:e} bits_eq={} npoints={}",
                 f4[0] as f32, f_scalar.to_bits() == (f4[0] as f32).to_bits(), points.len()

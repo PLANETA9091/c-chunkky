@@ -16,9 +16,10 @@ fn main() {
     let sxv = env.eval(compiled, *sx, pt, Mode::Slice, &interp, None);
     let syv = env.eval(compiled, *sy, pt, Mode::Slice, &interp, None);
     let szv = env.eval(compiled, *sz, pt, Mode::Slice, &interp, None);
-    let sxa = env.eval4(compiled, *sx, &pts, Mode::Slice, &interp);
-    let sya = env.eval4(compiled, *sy, &pts, Mode::Slice, &interp);
-    let sza = env.eval4(compiled, *sz, &pts, Mode::Slice, &interp);
+    let memo4 = crussty_chunkgen::density::V4Memo::new(compiled.arena.len());
+    let sxa = env.eval4(compiled, *sx, &pts, Mode::Slice, &interp, &memo4);
+    let sya = env.eval4(compiled, *sy, &pts, Mode::Slice, &interp, &memo4);
+    let sza = env.eval4(compiled, *sz, &pts, Mode::Slice, &interp, &memo4);
     println!("sx: scalar={sxv:e} batch={:e} eq={}", sxa[0], sxv.to_bits() == sxa[0].to_bits());
     println!("sy: scalar={syv:e} batch={:e} eq={}", sya[0], syv.to_bits() == sya[0].to_bits());
     println!("sz: scalar={szv:e} batch={:e} eq={}", sza[0], szv.to_bits() == sza[0].to_bits());

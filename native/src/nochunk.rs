@@ -13,7 +13,14 @@ use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 //   - postprocessing marks (shouldScheduleFluidUpdate) are skipped: they carry
 //     no block data, and the Bukkit noise path cannot express them.
 
-use crate::density::{compile_cellfill, CellOp, Compiled, Env, InterpState, MemoCtx, Mode, Pt, WKind};
+use crate::density::{compile_cellfill, CellOp, Compiled, Env, InterpState, MemoCtx, Mode, Pt, V4Memo, WKind};
+
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::_mm256_setzero_pd;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::_mm256_setr_pd;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::_mm256_storeu_pd;
 
 // ---------------------------------------------------------------------------
 // frozen block ids (repo-root block_registry.txt; ore ids appended)
@@ -1094,17 +1101,42 @@ impl<'e> ChunkGen<'e> {
                                 let mut dz = 0.0f64;
                                 let mut stack = [0.0f64; 16];
                                 let mut sp = 0usize;
-                                for _ in 0..cw_i {
-                                    self.cell_cache[idx] = run_cellfill_rows(
-                                        prog,
-                                        &self.cellfill_rows,
-                                        dz,
-                                        block_y,
-                                        &mut stack,
-                                        &mut sp,
-                                    );
-                                    idx += 1;
-                                    dz += dx_step;
+                                if cw_i == 4 && cellfill_simd::avx2_ok() {
+                                    // AVX2: one 4-lane run per row (lane = z-block).
+                                    // dz per lane replicates the scalar += dx_step
+                                    // accumulation exactly.
+                                    let (dzv, mut vstack, mut vsp) =
+                                        cellfill_simd::make_row_state(dx_step);
+                                    let res = unsafe {
+                                        cellfill_simd::run_cellfill_row4(
+                                            prog,
+                                            &self.cellfill_rows,
+                                            dzv,
+                                            block_y,
+                                            &mut vstack,
+                                            &mut vsp,
+                                        )
+                                    };
+                                    unsafe {
+                                        _mm256_storeu_pd(
+                                            self.cell_cache.as_mut_ptr().add(idx),
+                                            res,
+                                        );
+                                    }
+                                    idx += cw_i as usize;
+                                } else {
+                                    for _ in 0..cw_i {
+                                        self.cell_cache[idx] = run_cellfill_rows(
+                                            prog,
+                                            &self.cellfill_rows,
+                                            dz,
+                                            block_y,
+                                            &mut stack,
+                                            &mut sp,
+                                        );
+                                        idx += 1;
+                                        dz += dx_step;
+                                    }
                                 }
                             } else {
                                 let mut dz = 0.0f64;
@@ -1151,6 +1183,23 @@ impl<'e> ChunkGen<'e> {
 
                         for i9 in 0..self.cell_width as i32 {
                             let block_x = cell_start_block_x + i9;
+
+                            // row fast path: 4 z-blocks, constant aquifer result
+                            let base_out = ((block_y - self.min_y) * 256
+                                + (cell_start_block_z - min_block_z) * 16
+                                + (block_x - min_block_x))
+                                as usize;
+                            if self.material_row4(
+                                block_x,
+                                block_y,
+                                cell_start_block_z,
+                                i6,
+                                i9,
+                                base_out,
+                                out,
+                            ) {
+                                continue;
+                            }
 
                             for i12 in 0..self.cell_width as i32 {
                                 let block_z = cell_start_block_z + i12;
@@ -1202,39 +1251,82 @@ impl<'e> ChunkGen<'e> {
         let ny = self.cell_count_y as usize + 1;
         let nslots = self.interp_children.len();
         let total = nz * ny;
+        if self.skip_slice {
+            for i in 0..=self.cell_count_xz {
+                for y in 0..=self.cell_count_y {
+                    for slot in 0..nslots {
+                        let slot = slot as u16;
+                        if is_first {
+                            self.interp.slice0_set(slot, i as usize, y, 0.0);
+                        } else {
+                            self.interp.slice1_set(slot, i as usize, y, 0.0);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        // Slot 0 (final_density) is ~88% of the slice cost: evaluate it in
+        // 4-corner batches through eval4 (lane-identical arithmetic + SIMD
+        // noise kernels — bit-identical to the scalar eval, verified by
+        // eval4_matches_scalar_eval and the fill out_hash checks). Slots 1-7
+        // stay on the scalar memoized path: they are single-noise children
+        // that reuse slot 0's per-point CSE context.
         let nthr = self.slice_threads.min(total);
         if nthr > 1 {
-            // Parallel corner evaluation: corners are pure functions of
-            // (x, y, z); Mode::Slice never touches mutable interp state and
-            // memo is a per-point stamp cache — per-thread MemoCtx instances
-            // keep results bit-identical while dropping the shared-serial
-            // serialization. Threads write disjoint result ranges; the main
-            // thread replays them into the slice buffers.
+            // Parallel: corners are pure functions of (x, y, z); slot 0
+            // batches go through eval4 (no mutable state), slots 1-7 use
+            // per-thread MemoCtx instances (bit-identical, disjoint ranges).
             let env = self.env;
             let compiled = &self.compiled;
             let children = &self.interp_children;
             let interp = &self.interp;
             let cell_noise_min_y = self.cell_noise_min_y;
+            let child0 = self.interp_children[0];
+            let mut slot0 = vec![0f64; total];
             let mut results = vec![0.0f64; nslots * total];
             let per = total.div_ceil(nthr);
             let chunk_len = per * nslots;
             let result_chunks: Vec<&mut [f64]> = results.chunks_mut(chunk_len).collect();
+            let slot0_chunks: Vec<&mut [f64]> = slot0.chunks_mut(per).collect();
             std::thread::scope(|s| {
-                for (t, out) in result_chunks.into_iter().enumerate() {
+                for (t, (out, slot0_out)) in result_chunks.into_iter().zip(slot0_chunks).enumerate() {
                     let lo = t * per;
                     if lo >= total {
                         break;
                     }
+                    let hi = (lo + per).min(total);
                     s.spawn(move || {
                         let mut memo = MemoCtx::new(compiled.arena.len());
-                        for p in lo..lo + out.len() / nslots {
+                        let memo4 = V4Memo::new(compiled.arena.len());
+                        // slot 0 in groups of 4 corners (tail-padded duplicates)
+                        let mut pts = [Pt { x: 0, y: 0, z: 0 }; 4];
+                        let mut p = lo;
+                        while p < hi {
+                            let n = (hi - p).min(4);
+                            for k in 0..4 {
+                                let pp = p + (n - 1).min(k);
+                                let i = pp / ny;
+                                let y = pp % ny;
+                                pts[k] = Pt {
+                                    x: corner_x,
+                                    y: (y as i32 + cell_noise_min_y) * ch,
+                                    z: (first_cell_z + i as i32) * cw,
+                                };
+                            }
+                            let v = env.eval4(compiled, child0, &pts, Mode::Slice, interp, &memo4);
+                            slot0_out[p - lo..p - lo + n].copy_from_slice(&v[..n]);
+                            p += 4;
+                        }
+                        for p in lo..hi {
                             let i = p / ny;
                             let y = p % ny;
                             let corner_z = (first_cell_z + i as i32) * cw;
                             let corner_y = (y as i32 + cell_noise_min_y) * ch;
                             let pt = Pt { x: corner_x, y: corner_y, z: corner_z };
                             memo.next_serial();
-                            for (slot, &child) in children.iter().enumerate() {
+                            for slot in 1..nslots {
+                                let child = children[slot];
                                 let v = env.eval(compiled, child, pt, Mode::Slice, interp, Some(&memo));
                                 out[(p - lo) * nslots + slot] = v;
                             }
@@ -1245,32 +1337,68 @@ impl<'e> ChunkGen<'e> {
             for p in 0..total {
                 let i = p / ny;
                 let y = p % ny;
-                for slot in 0..nslots {
+                if is_first {
+                    self.interp.slice0_set(0, i, y, slot0[p]);
+                } else {
+                    self.interp.slice1_set(0, i, y, slot0[p]);
+                }
+                for slot in 1..nslots {
                     let v = results[p * nslots + slot];
+                    let slot = slot as u16;
                     if is_first {
-                        self.interp.slice0_set(slot as u16, i, y, v);
+                        self.interp.slice0_set(slot, i, y, v);
                     } else {
-                        self.interp.slice1_set(slot as u16, i, y, v);
+                        self.interp.slice1_set(slot, i, y, v);
                     }
                 }
             }
             return;
+        }
+        // Serial: slot 0 via eval4 groups, slots 1-7 scalar with memo.
+        let mut slot0 = vec![0f64; total];
+        {
+            let env = self.env;
+            let compiled = &self.compiled;
+            let interp = &self.interp;
+            let child0 = self.interp_children[0];
+            let cell_noise_min_y = self.cell_noise_min_y;
+            let memo4 = V4Memo::new(compiled.arena.len());
+            let mut pts = [Pt { x: 0, y: 0, z: 0 }; 4];
+            let mut p = 0;
+            while p < total {
+                let n = (total - p).min(4);
+                for k in 0..4 {
+                    let pp = p + (n - 1).min(k);
+                    let i = pp / ny;
+                    let y = pp % ny;
+                    pts[k] = Pt {
+                        x: corner_x,
+                        y: (y as i32 + cell_noise_min_y) * ch,
+                        z: (first_cell_z + i as i32) * cw,
+                    };
+                }
+                let v = env.eval4(compiled, child0, &pts, Mode::Slice, interp, &memo4);
+                slot0[p..p + n].copy_from_slice(&v[..n]);
+                p += 4;
+            }
         }
         for i in 0..=self.cell_count_xz {
             let corner_z = (first_cell_z + i as i32) * cw;
             for y in 0..=self.cell_count_y {
                 let corner_y = (y as i32 + self.cell_noise_min_y) * ch;
                 let pt = Pt { x: corner_x, y: corner_y, z: corner_z };
-                for (slot, &child) in self.interp_children.iter().enumerate() {
-                    let v = if self.skip_slice {
-                        0.0
-                    } else if slot == 0 {
-                        // bump memo context once per corner point; remaining
-                        // slots share it (cross-slot subexpression reuse)
-                        self.eval_fresh(child, pt, Mode::Slice)
+                let p = i * ny + y;
+                {
+                    let slot = 0u16;
+                    if is_first {
+                        self.interp.slice0_set(slot, i as usize, y, slot0[p]);
                     } else {
-                        self.eval(child, pt, Mode::Slice)
-                    };
+                        self.interp.slice1_set(slot, i as usize, y, slot0[p]);
+                    }
+                }
+                for slot in 1..nslots {
+                    let child = self.interp_children[slot];
+                    let v = self.eval(child, pt, Mode::Slice);
                     let slot = slot as u16;
                     if is_first {
                         self.interp.slice0_set(slot, i as usize, y, v);
@@ -1287,6 +1415,87 @@ impl<'e> ChunkGen<'e> {
         let cw = self.cell_width;
         self.cell_cache
             [(((self.cell_height as i32 - 1 - iy) as usize) * cw + ix as usize) * cw + iz as usize]
+    }
+
+    /// Row-level material fast path: 4 z-blocks sharing (x, y) — same
+    /// global_fluid(y), and when every block has substance <= 0 and every
+    /// touched aquifer base cell has an all-same cached summary with one
+    /// uniform status, the vanilla result is one constant block for the
+    /// whole row (sched provably false: it requires a status DIFFERENCE or
+    /// the water-above-lava scan at y == -54). Returns false when the row
+    /// needs the per-block path (any subst > 0 -> ore per block, uncached
+    /// summary, mixed statuses, beard, or the y == -54 water case).
+    fn material_row4(
+        &mut self,
+        block_x: i32,
+        block_y: i32,
+        block_z0: i32,
+        iy: i32,
+        ix: i32,
+        base_out: usize,
+        out: &mut [u16; OUT_LEN],
+    ) -> bool {
+        if !self.beard.is_empty() || self.skip_material || !self.aquifers_enabled {
+            return false;
+        }
+        // substances: all four must be <= 0 (ore path is per-block)
+        if self.cell_cache_value(iy, ix, 0) > 0.0
+            || self.cell_cache_value(iy, ix, 1) > 0.0
+            || self.cell_cache_value(iy, ix, 2) > 0.0
+            || self.cell_cache_value(iy, ix, 3) > 0.0
+        {
+            return false;
+        }
+        let global = self.global_fluid(block_y);
+        let g_at = aquifer_at(global, block_y);
+        if g_at == LAVA {
+            // vanilla early return: LAVA, sched = false
+            self.sched = false;
+            for iz in 0..4i32 {
+                out[base_out + (iz * 16) as usize] = LAVA;
+            }
+            return true;
+        }
+        // summaries of the (up to 2) distinct base cells in the row
+        let mut s0: Option<FluidStatus> = None;
+        let mut gz_prev = i32::MIN;
+        for iz in 0..4i32 {
+            let z = block_z0 + iz;
+            let gx = floor_div(block_x - 5, 16);
+            let gz = floor_div(z - 5, 16);
+            if gz != gz_prev {
+                gz_prev = gz;
+                let gy = floor_div(block_y + 1, 12);
+                let base = self.aquifer.index(gx, gy, gz);
+                let sv = self.aquifer.summary[base].load(Ordering::Relaxed);
+                if sv == 0 {
+                    return false; // uncached — per-block path will populate
+                }
+                let (same, s) = unpack_summary(sv);
+                if !same {
+                    return false;
+                }
+                match s0 {
+                    None => s0 = Some(s),
+                    Some(prev) if prev == s => {}
+                    Some(_) => return false, // mixed statuses across the row
+                }
+            }
+        }
+        let s = match s0 {
+            Some(s) => s,
+            None => return false,
+        };
+        let block = aquifer_at(s, block_y);
+        if block == WATER && aquifer_at(self.global_fluid(block_y - 1), block_y - 1) == LAVA {
+            // y == -54 water-above-lava: per-block scan_two_smallest decides sched
+            return false;
+        }
+        self.sched = false;
+        for iz in 0..4i32 {
+            out[base_out + (iz * 16) as usize] = block;
+        }
+        true
     }
 
     /// Material rule per block (vanilla MaterialRuleList).
@@ -2112,6 +2321,7 @@ impl<'e> ChunkGen<'e> {
         out: &mut [f64],
     ) {
         let interp = InterpState::new(compiled.interp_slots, cell_count_xz, cell_count_y);
+        let memo4 = V4Memo::new(compiled.arena.len());
         let cols = cell_count_y + 1;
         let y_total = cell_count_y + 1;
         let y_batch = y_total & !3; // groups of 4
@@ -2127,7 +2337,7 @@ impl<'e> ChunkGen<'e> {
                 ];
                 for (slot, &child) in children.iter().enumerate() {
                     // 4-wide batch: lane-identical arithmetic (bit-exact)
-                    let v = env.eval4(compiled, child, &pts, Mode::Slice, &interp);
+                    let v = env.eval4(compiled, child, &pts, Mode::Slice, &interp, &memo4);
                     let base = slot * (cell_count_xz + 1) * cols + i * cols + y;
                     out[base] = v[0];
                     out[base + 1] = v[1];
@@ -2202,5 +2412,197 @@ mod marks_tests {
             assert!(x >= 16 && x < 32, "stale mark from previous chunk: x={x}");
         }
         let _ = (n0, n1);
+    }
+}
+
+// ---------------- AVX2 cellfill row runner ----------------
+#[cfg(target_arch = "x86_64")]
+mod cellfill_simd {
+    use super::CellOp;
+    use std::arch::x86_64::*;
+    use std::sync::OnceLock;
+
+    pub fn avx2_ok() -> bool {
+        static OK: OnceLock<bool> = OnceLock::new();
+        *OK.get_or_init(|| std::arch::is_x86_feature_detected!("avx2"))
+    }
+
+    /// dz vector [0, s, s+s, s+s+s] (replicates scalar `dz += dx_step`)
+    /// plus a zeroed stack.
+    pub fn make_row_state(dx_step: f64) -> (__m256d, [__m256d; 16], usize) {
+        unsafe {
+            (
+                _mm256_setr_pd(0.0, dx_step, dx_step + dx_step, dx_step + dx_step + dx_step),
+                [_mm256_setzero_pd(); 16],
+                0,
+            )
+        }
+    }
+
+    /// 4-wide stack-machine run: one row of 4 z-blocks sharing dx/dy (rows[]
+    /// precomputed) and block_y; only dz varies per lane. Lane l = block l.
+    /// Every op performs the exact per-lane IEEE operation sequence of the
+    /// scalar runner (no FMA, no reassociation) — bit-identical results.
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn run_cellfill_row4(
+        prog: &[CellOp],
+        rows: &[f64],
+        dzv: __m256d,
+        block_y: i32,
+        stack: &mut [__m256d; 16],
+        sp: &mut usize,
+    ) -> __m256d {
+        let zero = _mm256_setzero_pd();
+        let sign_abs = _mm256_set1_pd(-0.0);
+        *sp = 0;
+        for op in prog {
+            match op {
+                CellOp::PushConst(v) => {
+                    stack[*sp] = _mm256_set1_pd(*v);
+                    *sp += 1;
+                }
+                CellOp::Lerp3 { slot } => {
+                    let r1 = _mm256_set1_pd(rows[*slot as usize * 2]);
+                    let r2 = _mm256_set1_pd(rows[*slot as usize * 2 + 1]);
+                    // a + t*(b-a)
+                    stack[*sp] = _mm256_add_pd(r1, _mm256_mul_pd(dzv, _mm256_sub_pd(r2, r1)));
+                    *sp += 1;
+                }
+                CellOp::YGrad { from_y, to_y, from_value, to_value } => {
+                    // block_y is constant across the row: fully scalar decision
+                    let t = (block_y as f64 - *from_y as f64) / (*to_y as f64 - *from_y as f64);
+                    let r = if t < 0.0 {
+                        *from_value
+                    } else if t > 1.0 {
+                        *to_value
+                    } else {
+                        *from_value + t * (*to_value - *from_value)
+                    };
+                    stack[*sp] = _mm256_set1_pd(r);
+                    *sp += 1;
+                }
+                CellOp::Add => {
+                    *sp -= 1;
+                    let b = stack[*sp];
+                    *sp -= 1;
+                    let a = stack[*sp];
+                    stack[*sp] = _mm256_add_pd(a, b);
+                    *sp += 1;
+                }
+                CellOp::Mul => {
+                    *sp -= 1;
+                    let b = stack[*sp];
+                    *sp -= 1;
+                    let a = stack[*sp];
+                    // vanilla short-circuit: a == 0.0 ? 0.0 : a * b
+                    let mask = _mm256_cmp_pd(a, zero, _CMP_EQ_OQ);
+                    let prod = _mm256_mul_pd(a, b);
+                    stack[*sp] = _mm256_blendv_pd(prod, zero, mask);
+                    *sp += 1;
+                }
+                CellOp::Min => {
+                    *sp -= 1;
+                    let b = stack[*sp];
+                    *sp -= 1;
+                    let a = stack[*sp];
+                    let mask = _mm256_cmp_pd(a, b, _CMP_LT_OQ);
+                    stack[*sp] = _mm256_blendv_pd(b, a, mask);
+                    *sp += 1;
+                }
+                CellOp::Max => {
+                    *sp -= 1;
+                    let b = stack[*sp];
+                    *sp -= 1;
+                    let a = stack[*sp];
+                    let mask = _mm256_cmp_pd(a, b, _CMP_GT_OQ);
+                    stack[*sp] = _mm256_blendv_pd(b, a, mask);
+                    *sp += 1;
+                }
+                CellOp::Abs => {
+                    *sp -= 1;
+                    let a = stack[*sp];
+                    stack[*sp] = _mm256_andnot_pd(sign_abs, a);
+                    *sp += 1;
+                }
+                CellOp::Square => {
+                    *sp -= 1;
+                    let a = stack[*sp];
+                    stack[*sp] = _mm256_mul_pd(a, a);
+                    *sp += 1;
+                }
+                CellOp::Cube => {
+                    *sp -= 1;
+                    let a = stack[*sp];
+                    let a2 = _mm256_mul_pd(a, a);
+                    stack[*sp] = _mm256_mul_pd(a2, a);
+                    *sp += 1;
+                }
+                CellOp::HalfNeg => {
+                    *sp -= 1;
+                    let a = stack[*sp];
+                    let mask = _mm256_cmp_pd(a, zero, _CMP_GT_OQ);
+                    stack[*sp] = _mm256_blendv_pd(_mm256_mul_pd(a, _mm256_set1_pd(0.5)), a, mask);
+                    *sp += 1;
+                }
+                CellOp::QuarterNeg => {
+                    *sp -= 1;
+                    let a = stack[*sp];
+                    let mask = _mm256_cmp_pd(a, zero, _CMP_GT_OQ);
+                    stack[*sp] = _mm256_blendv_pd(_mm256_mul_pd(a, _mm256_set1_pd(0.25)), a, mask);
+                    *sp += 1;
+                }
+                CellOp::Squeeze => {
+                    *sp -= 1;
+                    let a = stack[*sp];
+                    // d = clamp(a, -1, 1); d/2.0 - d*d*d/24.0
+                    let d = _mm256_min_pd(
+                        _mm256_max_pd(a, _mm256_set1_pd(-1.0)),
+                        _mm256_set1_pd(1.0),
+                    );
+                    let d3 = _mm256_mul_pd(_mm256_mul_pd(d, d), d);
+                    let res = _mm256_sub_pd(
+                        _mm256_div_pd(d, _mm256_set1_pd(2.0)),
+                        _mm256_div_pd(d3, _mm256_set1_pd(24.0)),
+                    );
+                    stack[*sp] = res;
+                    *sp += 1;
+                }
+                CellOp::Clamp { min, max } => {
+                    *sp -= 1;
+                    let a = stack[*sp];
+                    stack[*sp] = _mm256_min_pd(
+                        _mm256_max_pd(a, _mm256_set1_pd(*min)),
+                        _mm256_set1_pd(*max),
+                    );
+                    *sp += 1;
+                }
+                CellOp::RangeChoice { min_inclusive, max_exclusive } => {
+                    *sp -= 1;
+                    let out = stack[*sp];
+                    *sp -= 1;
+                    let inr = stack[*sp];
+                    *sp -= 1;
+                    let v = stack[*sp];
+                    let m1 = _mm256_cmp_pd(v, _mm256_set1_pd(*min_inclusive), _CMP_GE_OQ);
+                    let m2 = _mm256_cmp_pd(v, _mm256_set1_pd(*max_exclusive), _CMP_LT_OQ);
+                    let mask = _mm256_and_pd(m1, m2);
+                    stack[*sp] = _mm256_blendv_pd(out, inr, mask);
+                    *sp += 1;
+                }
+                CellOp::MulOrAdd { is_add, argument } => {
+                    *sp -= 1;
+                    let a = stack[*sp];
+                    stack[*sp] = if *is_add {
+                        _mm256_add_pd(a, _mm256_set1_pd(*argument))
+                    } else if *argument == 0.0 {
+                        zero
+                    } else {
+                        _mm256_mul_pd(a, _mm256_set1_pd(*argument))
+                    };
+                    *sp += 1;
+                }
+            }
+        }
+        stack[0]
     }
 }

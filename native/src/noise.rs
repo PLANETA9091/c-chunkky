@@ -37,6 +37,38 @@ fn grad_dot(g: usize, x: f64, y: f64, z: f64) -> f64 {
     gv[0] as f64 * x + gv[1] as f64 * y + gv[2] as f64 * z
 }
 
+// ---- AVX2 lane-math helpers (strict IEEE, no FMA, no reassociation) ----
+// Every op below performs the exact same per-lane IEEE operation sequence as
+// the scalar helpers above.
+#[cfg(target_arch = "x86_64")]
+mod vec {
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    /// t*t*t*(t*(t*6.0-15.0)+10.0)
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn smoothstep_v(t: __m256d) -> __m256d {
+        let t2 = _mm256_mul_pd(t, t);
+        let t3 = _mm256_mul_pd(t2, t);
+        let a = _mm256_mul_pd(t, _mm256_set1_pd(6.0));
+        let b = _mm256_sub_pd(a, _mm256_set1_pd(15.0));
+        let c = _mm256_mul_pd(b, t);
+        let d = _mm256_add_pd(c, _mm256_set1_pd(10.0));
+        _mm256_mul_pd(t3, d)
+    }
+
+    /// a + t*(b-a)
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn lerp_v(t: __m256d, a: __m256d, b: __m256d) -> __m256d {
+        _mm256_add_pd(a, _mm256_mul_pd(t, _mm256_sub_pd(b, a)))
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+use vec::{lerp_v, smoothstep_v};
+
 #[inline]
 fn mth_floor(x: f64) -> i32 {
     let f = x.floor();
@@ -193,6 +225,23 @@ impl ImprovedNoise {
         y_scale: f64,
         y_max: &[f64; 4],
     ) -> [f64; 4] {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::arch::is_x86_feature_detected!("avx2") {
+                return unsafe { self.noise_5_batch_avx2(xin, yin, zin, y_scale, y_max) };
+            }
+        }
+        self.noise_5_batch_scalar(xin, yin, zin, y_scale, y_max)
+    }
+
+    fn noise_5_batch_scalar(
+        &self,
+        xin: &[f64; 4],
+        yin: &[f64; 4],
+        zin: &[f64; 4],
+        y_scale: f64,
+        y_max: &[f64; 4],
+    ) -> [f64; 4] {
         let mut xi = [0i32; 4];
         let mut yi = [0i32; 4];
         let mut zi = [0i32; 4];
@@ -225,6 +274,119 @@ impl ImprovedNoise {
                 xi[l], yi[l], zi[l], dx[l], dy[l] - d7[l], dz[l], dy[l],
             );
         }
+        out
+    }
+
+    /// AVX2 core of noise_5_batch: the permutation walks stay scalar per lane
+    /// (they are short dependent chains), all IEEE f64 math runs as __m256d
+    /// lanes. Lane l of every vector op computes exactly the same operation
+    /// sequence as the scalar path, so results are bit-identical (no FMA, no
+    /// reassociation; mul/add are strict IEEE in both paths).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn noise_5_batch_avx2(
+        &self,
+        xin: &[f64; 4],
+        yin: &[f64; 4],
+        zin: &[f64; 4],
+        y_scale: f64,
+        y_max: &[f64; 4],
+    ) -> [f64; 4] {
+        use std::arch::x86_64::*;
+        // ---- scalar cell setup (identical to the scalar path) ----
+        let mut xi = [0i32; 4];
+        let mut yi = [0i32; 4];
+        let mut zi = [0i32; 4];
+        let mut dx = [0f64; 4];
+        let mut dy = [0f64; 4];
+        let mut dz = [0f64; 4];
+        let mut d7 = [0f64; 4];
+        for l in 0..4 {
+            let x = xin[l] + self.xo;
+            let y = yin[l] + self.yo;
+            let z = zin[l] + self.zo;
+            let a = mth_floor(x);
+            let b = mth_floor(y);
+            let c = mth_floor(z);
+            xi[l] = a;
+            yi[l] = b;
+            zi[l] = c;
+            dx[l] = x - a as f64;
+            dy[l] = y - b as f64;
+            dz[l] = z - c as f64;
+            if y_scale != 0.0 {
+                let ym = y_max[l];
+                let d6 = if ym >= 0.0 && ym < dy[l] { ym } else { dy[l] };
+                d7[l] = (d6 / y_scale + 1.0000000116860974e-07).floor() * y_scale;
+            }
+        }
+
+        let dxv = _mm256_loadu_pd(dx.as_ptr());
+        let dyv = _mm256_loadu_pd(dy.as_ptr());
+        let dzv = _mm256_loadu_pd(dz.as_ptr());
+        let d7v = _mm256_loadu_pd(d7.as_ptr());
+        let wdyv = _mm256_sub_pd(dyv, d7v); // weirdDeltaY = dy - d7
+        let fx = smoothstep_v(dxv);
+        let fy = smoothstep_v(dyv);
+        let fz = smoothstep_v(dzv);
+
+        // ---- per-lane permutation walk: 8 corner gradient bytes ----
+        // Corner bit mapping (matches sample_and_lerp):
+        //   bit0 = X (dx-1), bit1 = Y (weird_dy-1), bit2 = Z (dz-1)
+        let mut grad = [[0u8; 8]; 4];
+        for l in 0..4 {
+            let p0 = self.p(xi[l]);
+            let p1 = self.p(xi[l] + 1);
+            let i0 = self.p(p0 + yi[l]);
+            let i1 = self.p(p0 + yi[l] + 1);
+            let j0 = self.p(p1 + yi[l]);
+            let j1 = self.p(p1 + yi[l] + 1);
+            let zc = zi[l];
+            let bases = [i0 + zc, j0 + zc, i1 + zc, j1 + zc]; // [X+2*Y]
+            for c in 0..8 {
+                let xbit = c & 1;
+                let ybit = (c >> 1) & 1;
+                let zbit = (c >> 2) & 1;
+                grad[l][c] = self.p(bases[ybit * 2 + xbit] + zbit as i32) as u8;
+            }
+        }
+
+        // ---- 8 grad_dots across the 4 lanes ----
+        let one = _mm256_set1_pd(1.0);
+        let mut vc = [_mm256_setzero_pd(); 8];
+        for c in 0..8 {
+            let mut gxs = [0i32; 4];
+            let mut gys = [0i32; 4];
+            let mut gzs = [0i32; 4];
+            for l in 0..4 {
+                let gv = &GRADIENT[(grad[l][c] & 15) as usize];
+                gxs[l] = gv[0];
+                gys[l] = gv[1];
+                gzs[l] = gv[2];
+            }
+            let gx = _mm256_cvtepi32_pd(_mm_loadu_si128(gxs.as_ptr() as *const __m128i));
+            let gy = _mm256_cvtepi32_pd(_mm_loadu_si128(gys.as_ptr() as *const __m128i));
+            let gz = _mm256_cvtepi32_pd(_mm_loadu_si128(gzs.as_ptr() as *const __m128i));
+            let xv = if c & 1 != 0 { _mm256_sub_pd(dxv, one) } else { dxv };
+            let yv = if c & 2 != 0 { _mm256_sub_pd(wdyv, one) } else { wdyv };
+            let zv = if c & 4 != 0 { _mm256_sub_pd(dzv, one) } else { dzv };
+            // gradDot: (gx*x + gy*y) + gz*z — same association as the scalar path
+            let t0 = _mm256_mul_pd(gx, xv);
+            let t1 = _mm256_mul_pd(gy, yv);
+            let t2 = _mm256_mul_pd(gz, zv);
+            vc[c] = _mm256_add_pd(_mm256_add_pd(t0, t1), t2);
+        }
+
+        // ---- Mth.lerp3 across corners ----
+        let r0 = lerp_v(fx, vc[0], vc[1]);
+        let r1 = lerp_v(fx, vc[2], vc[3]);
+        let r01 = lerp_v(fy, r0, r1);
+        let r2 = lerp_v(fx, vc[4], vc[5]);
+        let r3 = lerp_v(fx, vc[6], vc[7]);
+        let r23 = lerp_v(fy, r2, r3);
+        let res = lerp_v(fz, r01, r23);
+        let mut out = [0f64; 4];
+        _mm256_storeu_pd(out.as_mut_ptr(), res);
         out
     }
 }
@@ -697,5 +859,106 @@ impl BlendedNoise {
             out[l] = v / 128.0;
         }
         out
+    }
+}
+
+// ---------------- SIMD parity tests ----------------
+#[cfg(test)]
+mod simd_tests {
+    use super::*;
+    use crate::rng::XoroshiroRandomSource;
+
+    struct SplitMix(u64);
+    impl SplitMix {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            z ^ (z >> 31)
+        }
+        fn f64(&mut self) -> f64 {
+            // [-4096, 4096) with full mantissa randomness
+            (self.next() as i64 % 8192) as f64 - 4096.0 + (self.next() as f64 / u64::MAX as f64)
+        }
+        fn f64_pm1(&mut self) -> f64 {
+            (self.next() as i64 % 2001) as f64 / 1000.0 - 1.0
+        }
+    }
+
+    fn mk_noise(sm: &mut SplitMix) -> ImprovedNoise {
+        // Build via a real XoroshiroRandomSource seeded from sm (matches prod path)
+        let seed = sm.next();
+        let mut rng = XoroshiroRandomSource::new(seed as i64);
+        ImprovedNoise::new_xoroshiro(&mut rng)
+    }
+
+    #[test]
+    fn noise_batch_simd_matches_scalar() {
+        let mut sm = SplitMix(0xC0FFEE ^ 0xDEAD);
+        for inst in 0..16 {
+            let n = mk_noise(&mut sm);
+            let y_scale = if inst % 3 == 0 { 0.0 } else { sm.f64_pm1().abs() * 2.0 };
+            for iter in 0..2500 {
+                let x = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let y = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let z = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let y_max = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let got = n.noise_5_batch(&x, &y, &z, y_scale, &y_max);
+                for l in 0..4 {
+                    let want = n.noise_5(x[l], y[l], z[l], y_scale, y_max[l]);
+                    assert_eq!(
+                        got[l].to_bits(),
+                        want.to_bits(),
+                        "inst {inst} iter {iter} lane {l} y_scale={y_scale} inputs=({}, {}, {}) ymax={}",
+                        x[l], y[l], z[l], y_max[l]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn perlin_normal_batch_matches_scalar() {
+        let mut sm = SplitMix(0xB105F00D);
+        for inst in 0..8 {
+            let seed = sm.next();
+            let mut rng = XoroshiroRandomSource::new(seed as i64);
+            let amps: Vec<f64> = (0..6).map(|_| if sm.next() % 5 == 0 { 0.0 } else { sm.f64_pm1() }).collect();
+            let pn = PerlinNoise::create(&mut rng, -5, amps.clone());
+            let nn = NormalNoise::create(&mut rng, -5, amps.clone());
+            for _ in 0..1000 {
+                let x = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let y = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let z = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let gb = pn.get_value_batch(&x, &y, &z);
+                let nb = nn.get_value_batch(&x, &y, &z);
+                for l in 0..4 {
+                    assert_eq!(gb[l].to_bits(), pn.get_value(x[l], y[l], z[l]).to_bits(), "perlin inst {inst}");
+                    assert_eq!(nb[l].to_bits(), nn.get_value(x[l], y[l], z[l]).to_bits(), "normal inst {inst}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn blended_batch_matches_scalar() {
+        let mut sm = SplitMix(0x5EED);
+        for inst in 0..6 {
+            let seed = sm.next();
+            let mut rng = XoroshiroRandomSource::new(seed as i64);
+            let xz_scale = 0.25 * sm.f64_pm1().abs() + 0.05;
+            let y_scale = 0.5 * sm.f64_pm1().abs() + 0.05;
+            let bn = BlendedNoise::create(&mut rng, xz_scale, y_scale, 1.0 + sm.f64_pm1().abs() * 2.0, 2.0, 1.0 + (inst % 3) as f64);
+            for _ in 0..500 {
+                let bx = [sm.next() as i32 % 100000, sm.next() as i32 % 100000, sm.next() as i32 % 100000, sm.next() as i32 % 100000];
+                let by = [-100 + (sm.next() as i32 % 320); 4];
+                let bz = [sm.next() as i32 % 100000, sm.next() as i32 % 100000, sm.next() as i32 % 100000, sm.next() as i32 % 100000];
+                let got = bn.compute_batch(&bx, &by, &bz);
+                for l in 0..4 {
+                    assert_eq!(got[l].to_bits(), bn.compute(bx[l], by[l], bz[l]).to_bits(), "blended inst {inst}");
+                }
+            }
+        }
     }
 }
