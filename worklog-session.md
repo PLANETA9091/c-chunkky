@@ -173,3 +173,25 @@ Work Log:
 Stage Summary:
 - HEAD: steady refs + 15s settle + fast path + eval4 + pool + pipeline gate. Awaiting CI verdict (~100%?).
 - Perf: 12.3ms mean (2-core), remaining: material 5.0, slice 4.5, cellfill 2.6. Next levers: material noise batching, threads-in-fill, 8-wide AVX-512.
+
+---
+Task ID: cont-7 (2026-10-12 night 3)
+Agent: Super Z (main)
+Task: judge regression bisect (441 -> 5903) + parallel cells + ShiftB fix
+
+Work Log:
+- Pocket analysis flipped: minijudge 4-chunk set showed ours=water[lv8] EXTRA (over-marking); refactored pocket script (scripts/pocket_analysis.py).
+- FIX(aquifer): all-same fast path sched must be gated on d67>0 (vanilla d<=0 early-return => sched=false since !S.equals(S)); merged fast+slow scans into one vanilla-order pass tracking i6..i9/l0..l3 + all_same; lazy status resolution once all_same breaks. Hashes unchanged (e06a3b56...).
+- PERF(material): base-cell SUMMARY cache (12-neighborhood is a pure function of the base cell): all_same verdict + uniform status memoized => material 7.9 -> 2.9ms, wall 14.9 -> 9.8ms (2-core dev). Deep water-above-lava marks resolved via targeted scan_two_smallest.
+- Dead interp update_for_* calls removed from material walk (chain_value only read in Mode::Block): material 2.85 -> 2.28ms.
+- PERF(slice): parallel corner evaluation (CRUS_FILL_THREADS; per-thread MemoCtx; corners are pure fns of position): slice 3.9 -> 2.35ms @2thr.
+- PERF(cells): parallel x-strips over per-thread ChunkGen clones (thread_clone: fresh memo/aquifer-cells/marks; shared env/compiled(Arc)/prelim(Arc<Mutex>)/aquifer caches(Arc<Atomic*>)); planes precomputed by eval_plane_into workers; OR-merge of out buffers; marks/prof merged.
+- BUG FOUND (CRITICAL, correctness): eval4 ShiftB had x/z->y/z args swapped vs vanilla ShiftNoise.compute(z,x,0): scalar get_value(z*.25, x*.25, 0) but batch put x*.25 into the Z slot and 0 into Y. All prior CI runs' pipeline corners were subtly WRONG (eval_plane_into path). Fixed + eval4-vs-eval parity unit test (8/8 green). planecmp: 0 diffs per plane after fix.
+- CI archaeology: judge artifacts contain a STALE inner judge.zip (441) alongside the REAL streamed verdicts. Real: e6fe197 = 441 (99.993%); 760c518 = 5903 (99.906%); e824200 = 5906. Regression composition: ~2700 granite/diorite/andesite blob swaps (y 0..31) + kelp/seagrass cascades + the SAME ~400 water-pocket undermarks.
+- Ruled out: block output (old vs new native both e06a3b56), marks (old marks 8/2 for 3,-2/2,-2 == new), sea-level, datapack config. Only functional server-path delta e6fe197->760c518: plugin beardifier bridge (collectBeard does synchronous getChunk(STRUCTURE_STARTS, create=true) neighbor re-entrancy during noise stage).
+- Bisect running: 6aec118 = CRUS_BEARD gate default OFF (beard collection skipped) -> if verdict returns to ~441, beard bridge guilty.
+
+Stage Summary:
+- Perf: mean fill 14.9 -> 9.6ms (2-core dev, 2 threads); phases: slice 3.9 (2.35 @2thr), cellfill 2.7, material 2.3.
+- Judge: regression 441 -> 5903 under bisect; verdicts pending (6aec118 beard-gate, 85a1382 ShiftB fix + parallel cells).
+- 100%-goal plan: fix the blob/pocket residuals, then thread-scale on CI (4 cores) -> ~3ms/chunk, then SIMD/VM for the rest.
