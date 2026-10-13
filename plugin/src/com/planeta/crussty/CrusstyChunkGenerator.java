@@ -208,12 +208,15 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         long ctx = pool.acquire(lockBox);
         short[] out = buf.get();
         long[] marks = MARK_BUF.get();
-        // Beardifier bridge (CRUS_BEARD=1 to enable): collectBeard performs a
-        // SYNCHRONOUS getChunk(STRUCTURE_STARTS, create=true) of up to 5x5
-        // neighbor chunks DURING the noise stage — a heavy re-entrancy into
-        // the Paper chunk system. It is off by default while its side
-        // effects on feature RNG/decoration are being bisected; beards only
-        // matter near structure terrain adaptation anyway.
+        // Beardifier bridge: collectBeard performs a SYNCHRONOUS
+        // getChunk(STRUCTURE_STARTS, create=true) of up to 5x5 neighbor
+        // chunks DURING the noise stage. Vanilla ALWAYS adds Beardifier
+        // density inside the material rule — without it caves under
+        // structures (ancient city, trial chambers) stay empty where
+        // vanilla fills them with terrain => ~25k judge diffs. The old
+        // bisect gate (default off) is gone: beard is ON by default now
+        // that the 441->5903 regression was proven to be decoration spill
+        // nondeterminism, not the beard bridge. CRUS_NO_BEARD=1 disables.
         int[] beard = java.util.Arrays.copyOf(BEARD_EMPTY, BEARD_EMPTY.length);
         if (BEARD_ENABLED) {
             beard = collectBeard(worldInfo, chunkX, chunkZ, chunkData);
@@ -274,7 +277,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static final Object BEARD_LOCK = new Object();
     private static final ThreadLocal<int[]> BEARD_BUF = ThreadLocal.withInitial(() -> new int[256]);
     private static final int[] BEARD_EMPTY = new int[1];
-    private static final boolean BEARD_ENABLED = System.getenv("CRUS_BEARD") != null;
+    private static final boolean BEARD_ENABLED = System.getenv("CRUS_NO_BEARD") == null;
 
     // cached NMS handles
     private static Class<?> cChunkPos, cStructureStart, cStructurePiece, cPoolPiece, cBoundingBox,
