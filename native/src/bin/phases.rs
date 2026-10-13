@@ -55,6 +55,14 @@ fn main() {
         )),
         crussty_chunkgen::density::PROF_BLEND_CALLS.load(std::sync::atomic::Ordering::Relaxed) / 16,
     );
+    let g = |v: u64| v as f64 / n as f64;
+    println!(
+        "aq: substance_calls {} fluid_calls {} prelim_scans {} prelim_steps {}",
+        g(crussty_chunkgen::nochunk::AQ_SUBSTANCE_CALLS.load(std::sync::atomic::Ordering::Relaxed)),
+        g(crussty_chunkgen::nochunk::AQ_FLUID_CALLS.load(std::sync::atomic::Ordering::Relaxed)),
+        g(crussty_chunkgen::nochunk::PRELIM_SCANS.load(std::sync::atomic::Ordering::Relaxed)),
+        g(crussty_chunkgen::nochunk::PRELIM_SCAN_STEPS.load(std::sync::atomic::Ordering::Relaxed)),
+    );
     print_slot_anatomy(&gen);
 }
 

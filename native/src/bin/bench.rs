@@ -282,6 +282,9 @@ fn cmd_fill(cx: i32, cz: i32) {
 }
 
 fn cmd_perf(n: usize) {
+    if std::env::var("CRUS_DIAG").ok().as_deref() == Some("1") {
+        crussty_chunkgen::density::PROF_ON.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let seed: i64 = std::env::var("CRUS_BENCH_SEED")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -294,6 +297,10 @@ fn cmd_perf(n: usize) {
         gen.fill(i as i32, 0, &mut out);
     }
     gen.prof.reset_phases();
+    use crussty_chunkgen::nochunk::{AQ_FLUID_CALLS, AQ_HIT_NS, AQ_SCAN_NS, AQ_SUBSTANCE_CALLS, AQ_SUBSTANCE_NS, AQ_SUMMARY_HITS, AQ_SUMMARY_MISS, PRELIM_SCANS, PRELIM_SCAN_STEPS};
+    for c in [&AQ_FLUID_CALLS, &AQ_SUBSTANCE_CALLS, &AQ_SUBSTANCE_NS, &PRELIM_SCANS, &PRELIM_SCAN_STEPS, &AQ_SUMMARY_HITS, &AQ_SUMMARY_MISS, &AQ_HIT_NS, &AQ_SCAN_NS] {
+        c.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
     let mut times = Vec::with_capacity(n);
     let t_all = std::time::Instant::now();
     for i in 0..n {
@@ -315,15 +322,39 @@ fn cmd_perf(n: usize) {
         times[times.len() - 1],
         total
     );
+    let g = |v: u64| v as f64 / n as f64;
+    println!(
+        "aq: substance {:.0} ({:.3}ms) hits {:.0} ({:.3}ms) miss {:.0} fluid {:.0} prelim {:.0}/{}",
+        g(AQ_SUBSTANCE_CALLS.load(std::sync::atomic::Ordering::Relaxed)),
+        g(AQ_SUBSTANCE_NS.load(std::sync::atomic::Ordering::Relaxed)) / 1e6,
+        g(AQ_SUMMARY_HITS.load(std::sync::atomic::Ordering::Relaxed)),
+        g(AQ_HIT_NS.load(std::sync::atomic::Ordering::Relaxed)) / 1e6,
+        g(AQ_SUMMARY_MISS.load(std::sync::atomic::Ordering::Relaxed)),
+        g(AQ_FLUID_CALLS.load(std::sync::atomic::Ordering::Relaxed)),
+        g(PRELIM_SCANS.load(std::sync::atomic::Ordering::Relaxed)),
+        PRELIM_SCAN_STEPS.load(std::sync::atomic::Ordering::Relaxed),
+    );
+    println!(
+        "aq2: scan_ns {:.3}ms post_ns {:.3}ms (post = substance - hits - scan)",
+        g(AQ_SCAN_NS.load(std::sync::atomic::Ordering::Relaxed)) / 1e6,
+        (AQ_SUBSTANCE_NS.load(std::sync::atomic::Ordering::Relaxed)
+            - AQ_HIT_NS.load(std::sync::atomic::Ordering::Relaxed)
+            - AQ_SCAN_NS.load(std::sync::atomic::Ordering::Relaxed)) as f64
+            / n as f64
+            / 1e6,
+    );
     let pr = &gen.prof;
     if pr.enabled {
         let k = n as f64;
         println!(
-            "prof: fill_slice={:.3}ms cellfill={:.3}ms material={:.3}ms select={:.3}ms plane_hits={} subst+={} subst-={}",
+            "prof: fill_slice={:.3}ms cellfill={:.3}ms material={:.3}ms select={:.3}ms par[planes={:.3} strips={:.3} merge={:.3}] plane_hits={} subst+={} subst-={}",
             pr.fill_slice_ns as f64 / k / 1e6,
             pr.cellfill_ns as f64 / k / 1e6,
             pr.material_ns as f64 / k / 1e6,
             pr.select_ns as f64 / k / 1e6,
+            pr.par_planes_ns as f64 / k / 1e6,
+            pr.par_strips_ns as f64 / k / 1e6,
+            pr.par_merge_ns as f64 / k / 1e6,
             pr.plane_hits / n as u64,
             pr.blocks_subst_pos / n as u64,
             pr.blocks_subst_neg / n as u64
