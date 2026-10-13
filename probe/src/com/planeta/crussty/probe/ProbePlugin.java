@@ -69,13 +69,21 @@ public final class ProbePlugin extends JavaPlugin {
         for (World w : Bukkit.getWorlds()) {
             int total = w.getLoadedChunks().length;
             int region = 0;
+            int forced = 0;
+            StringBuilder flags = new StringBuilder();
             for (int cx = REGION_MIN; cx <= REGION_MAX; cx++) {
                 for (int cz = REGION_MIN; cz <= REGION_MAX; cz++) {
                     if (w.isChunkLoaded(cx, cz)) region++;
+                    if (w.isChunkForceLoaded(cx, cz)) forced++;
                 }
             }
+            flags.append(" f(0,-4)=").append(w.isChunkForceLoaded(0, -4))
+                 .append(" f(0,0)=").append(w.isChunkForceLoaded(0, 0))
+                 .append(" l(0,-4)=").append(w.isChunkLoaded(0, -4));
             sender.sendMessage(w.getName() + ": loaded=" + total
                     + " region[-4..3,-4..3]=" + region + "/64"
+                    + " forced=" + forced
+                    + flags
                     + " srvpid=" + ProcessHandle.current().pid());
         }
         return true;
