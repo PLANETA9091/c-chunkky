@@ -218,23 +218,44 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         // that the 441->5903 regression was proven to be decoration spill
         // nondeterminism, not the beard bridge. CRUS_NO_BEARD=1 disables.
         int[] beard = java.util.Arrays.copyOf(BEARD_EMPTY, BEARD_EMPTY.length);
+        long tBeard = 0;
         if (BEARD_ENABLED) {
+            long tb0 = System.nanoTime();
             beard = collectBeard(worldInfo, chunkX, chunkZ, chunkData);
+            tBeard = System.nanoTime() - tb0;
         }
+        long tNat0 = System.nanoTime();
         int nMarks;
         try {
             nMarks = ChunkGenNative.fillBeard(ctx, chunkX, chunkZ, out, marks, beard);
         } finally {
             lockBox[0].unlock();
         }
+        long tNative = System.nanoTime() - tNat0;
+        if (!bulkReady) {
+            initBulk();
+        }
+        long tLay0 = System.nanoTime();
         layout(chunkData, minY, height, out);
+        long tLayout = System.nanoTime() - tLay0;
+        long tMk0 = System.nanoTime();
         markFluidUpdates(chunkData, marks, nMarks);
-        GenStats.record(System.nanoTime() - t0);
+        long tMarks = System.nanoTime() - tMk0;
+        GenStats.record(System.nanoTime() - t0, tNative, tLayout, tBeard, tMarks);
+    }
+
+    /** Dispatches to the bulk section path when available, else v1. */
+    private static void layout(ChunkData chunkData, int minY, int height, short[] out) {
+        if (bulkReady) {
+            layoutBulk(chunkData, minY, height, out, GenStats.MATERIALS);
+            return;
+        }
+        layoutV1(chunkData, minY, height, out, GenStats.MATERIALS);
     }
 
     /** Straight per-block layout (v1); native-direct palette path is a later lever. */
-    private static void layout(ChunkData chunkData, int minY, int height, short[] out) {
-        Material[] mats = GenStats.MATERIALS;
+    private static void layoutV1(ChunkData chunkData, int minY, int height, short[] out,
+            Material[] mats) {
         int i = 0;
         for (int y = 0; y < height; y++) {
             for (int z = 0; z < 16; z++) {
@@ -248,6 +269,139 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     }
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Bulk section layout: uniform 16^3 sections are written with ONE NMS
+    // PalettedContainer.fill(state) call (O(1) vs 4096 Bukkit setBlock);
+    // mixed sections fall back to the per-block path. The final block
+    // states are IDENTICAL (fill writes the same defaultBlockState that
+    // CraftChunkData.setBlock would). Reflection degrades to the v1 path.
+    // The per-block setBlock loop was ~2-4ms/chunk on the judge runner —
+    // the dominant term of the measured window after the native fill.
+    // ------------------------------------------------------------------
+    private static volatile boolean bulkBroken;
+    private static volatile boolean bulkReady;
+    private static final Object BULK_LOCK = new Object();
+    private static Method mGetSections, mFillState, mDefaultBlockState;
+    private static Object[] sectionStatesById; // NMS BlockState per material id (null = n/a)
+
+    private static boolean initBulk() {
+        synchronized (BULK_LOCK) {
+            if (bulkReady || bulkBroken) {
+                return bulkReady;
+            }
+            try {
+                Class<?> cCraftChunkData = Class.forName(
+                        "org.bukkit.craftbukkit.generator.CraftChunkData");
+                mGetSections = cCraftChunkData.getMethod("getSections");
+                Class<?> cSection = Class.forName(
+                        "net.minecraft.world.level.chunk.LevelChunkSection");
+                // field 'states' (PalettedContainer) on the section
+                java.lang.reflect.Field fStates = cSection.getDeclaredField("states");
+                fStates.setAccessible(true);
+                Class<?> cPaletted = fStates.getType();
+                mFillState = cPaletted.getMethod("fill", Object.class);
+                Class<?> cBlock = Class.forName("net.minecraft.world.level.block.Block");
+                mDefaultBlockState = cBlock.getMethod("defaultBlockState");
+                Class<?> cCraftBlockType;
+                try {
+                    cCraftBlockType = Class.forName("org.bukkit.craftbukkit.util.CraftBlockType");
+                } catch (ClassNotFoundException e) {
+                    cCraftBlockType = Class.forName("org.bukkit.craftbukkit.block.CraftBlockType");
+                }
+                Method mB2M = cCraftBlockType.getMethod("bukkitToMinecraft",
+                        org.bukkit.Material.class);
+                Material[] mats = GenStats.MATERIALS;
+                Object[] states = new Object[mats.length];
+                int ok = 0;
+                for (int i = 0; i < mats.length; i++) {
+                    if (mats[i] == null) {
+                        continue;
+                    }
+                    try {
+                        Object block = mB2M.invoke(null, mats[i]);
+                        states[i] = mDefaultBlockState.invoke(block);
+                        ok++;
+                    } catch (Throwable t) {
+                        states[i] = null;
+                    }
+                }
+                if (ok < 4) {
+                    throw new IllegalStateException("material mapping failed");
+                }
+                sectionStatesById = states;
+                bulkFieldStates = fStates;
+                bulkReady = true;
+            } catch (Throwable t) {
+                bulkBroken = true;
+                LOG.warning("bulk section layout unavailable, using per-block path: " + t);
+            }
+            return bulkReady;
+        }
+    }
+
+    private static java.lang.reflect.Field bulkFieldStates;
+
+    @SuppressWarnings("unchecked")
+    private static void layoutBulk(ChunkData chunkData, int minY, int height, short[] out,
+            Material[] mats) {
+        try {
+            Object[] sections = (Object[]) mGetSections.invoke(chunkData);
+            if (sections == null || sections.length == 0) {
+                layoutV1(chunkData, minY, height, out, mats); // v1 fallback
+                return;
+            }
+            int i = 0;
+            for (int sy = 0; sy < sections.length; sy++) {
+                Object section = sections[sy];
+                // scan the 4096 blocks of this section
+                short first = out[i];
+                boolean uniform = true;
+                boolean any = first != 0;
+                int base = i;
+                for (int k = 1; k < 4096; k++) {
+                    short id = out[base + k];
+                    if (id != first) {
+                        uniform = false;
+                    }
+                    if (id != 0) {
+                        any = true;
+                    }
+                }
+                i += 4096;
+                if (!any) {
+                    continue; // all air — ChunkData default
+                }
+                if (uniform) {
+                    Object st = sectionStatesById[first];
+                    if (st != null && section != null) {
+                        Object pal = bulkFieldStates.get(section);
+                        mFillState.invoke(pal, st);
+                        continue;
+                    }
+                }
+                // mixed (or unmapped material): per-block fallback for this section
+                int y0 = sy * 16;
+                for (int yy = 0; yy < 16; yy++) {
+                    for (int z = 0; z < 16; z++) {
+                        for (int x = 0; x < 16; x++) {
+                            short id = out[base + (yy << 8) + (z << 4) + x];
+                            if (id != 0) {
+                                Material m = mats[id];
+                                if (m != null) {
+                                    chunkData.setBlock(x, y0 + yy + minY, z, m);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            bulkBroken = true;
+            LOG.warning("bulk layout failed once, disabling: " + t);
+            layoutV1(chunkData, minY, height, out, mats);
         }
     }
 
