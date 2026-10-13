@@ -44,7 +44,7 @@ fi
 # that order => ~6k block diffs at chunk edges that are NOT parity bugs.
 # Forcing single-threaded generation makes decoration order strictly
 # forceload-order on BOTH sides (vanilla capture and judge) => deterministic.
-PGEN_YML="$ROOT/config/paper-global.yml"
+PGEN_YML="$ROOT/server/config/paper-global.yml"
 if [ -f "$PGEN_YML" ]; then
   sed -i -E 's/^([[:space:]]*gen-parallelism:[[:space:]]*)(default|true)[[:space:]]*$/\1false/' "$PGEN_YML"
 fi
