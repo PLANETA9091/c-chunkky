@@ -353,10 +353,6 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 fIsOpaque = cHeightmap.getDeclaredField("isOpaque");
                 fIsOpaque.setAccessible(true);
                 mSetRawData = cHeightmap.getMethod("setRawData",
-                        cChunkAccess, cHeightmap.getClass()
-                                .getEnclosingClass() == null ? cHeightmap : Class.forName(
-                                "net.minecraft.world.level.levelgen.Heightmap$Types"), long[].class);
-                mSetRawData = cHeightmap.getMethod("setRawData",
                         Class.forName("net.minecraft.world.level.chunk.ChunkAccess"),
                         Class.forName("net.minecraft.world.level.levelgen.Heightmap$Types"),
                         long[].class);
