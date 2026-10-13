@@ -75,7 +75,8 @@ public final class ProbePlugin extends JavaPlugin {
                 }
             }
             sender.sendMessage(w.getName() + ": loaded=" + total
-                    + " region[-4..3,-4..3]=" + region + "/64");
+                    + " region[-4..3,-4..3]=" + region + "/64"
+                    + " srvpid=" + ProcessHandle.current().pid());
         }
         return true;
     }

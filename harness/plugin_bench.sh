@@ -82,7 +82,15 @@ fi
 # Parallel fill threads for the native .so (slice corners + cell strips):
 # corners/strips are pure functions of position; results bit-identical.
 export CRUS_FILL_THREADS="${CRUS_FILL_THREADS:-4}"
+# hard cleanup: a stale server (e.g. from the oracle step) holding RCON port
+# 25575 silently steals judge rcon traffic — kill everything first.
+bash harness/server_down.sh >/dev/null 2>&1 || true
+pkill -9 -f 'paper\.jar' 2>/dev/null || true
+sleep 3
 bash harness/server_up.sh
+SRVPID="$(cat "$SRV/server.pid")"
+echo "=== server pid check: crusstatus must report srvpid=$SRVPID ==="
+rcon "crusstatus" | head -4 || true
 
 # --- pregen + measure -------------------------------------------------------
 # Sequential per-chunk forceload (cx asc, cz asc): ore/blob features write into
