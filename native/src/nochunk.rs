@@ -1955,15 +1955,16 @@ impl<'e> ChunkGen<'e> {
             return true;
         }
         // summaries of the (up to 2) distinct base cells in the row
+        // gx/gy are constant across the z-row — hoisted out of the loop
+        let gx = floor_div(block_x - 5, 16);
+        let gy = floor_div(block_y + 1, 12);
         let mut s0: Option<FluidStatus> = None;
         let mut gz_prev = i32::MIN;
         for iz in 0..4i32 {
             let z = block_z0 + iz;
-            let gx = floor_div(block_x - 5, 16);
             let gz = floor_div(z - 5, 16);
             if gz != gz_prev {
                 gz_prev = gz;
-                let gy = floor_div(block_y + 1, 12);
                 let base = self.aquifer.index(gx, gy, gz);
                 let sv = self.aquifer.summary[base].load(Ordering::Relaxed);
                 if sv == 0 {
