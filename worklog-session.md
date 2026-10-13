@@ -448,3 +448,20 @@ Stage Summary:
   базы -> ~0.5), cellfill ядро (1.0 -> 0.6), затем parallel-фазовая схема даст ~1.0-1.2. Все — большие проекты.
 - Уроки спурта: векторный floor-setup в Perlin — REGRESSION; pool/overlap на 2 ядрах — без выигрыша
   (L2-выдавливание cross-phase); pipeline — главный рычаг (-30%); env-кэш/hoist — микро.
+
+---
+Task ID: cont-19 (2026-10-13, ФИНАЛ спурта II-III)
+Agent: Super Z (main)
+Task: закрытие CI-цикла спурта
+
+Work Log:
+- 5/5 CI-прогонов SUCCESS: c075a1a(через 1c83fc9), 6752bdf, 5d7838c, b97a412, 0d902e2.
+- Финальный вердикт 0d902e2 (весь спурт): vanilla 109/6291456 = 0.002%, datapack 5 = 0.000%,
+  HEIGHTMAP 0/16384 оба мира. Гейт 0.05% PASS (25x запас). Остаток = тиковый класс.
+- Итог перфа (локально, 2-core VM): serial wall 4.57 -> 3.19-3.25 (-30%); bench p50 real seed
+  5.15 -> 3.87 (-25%); parallel-2t 2.59-2.75; parallel-4t недоступен (2 ядра).
+
+Stage Summary:
+- Паритет генерации ПОЛНЫЙ на всех оптимизированных путях (pipeline-дефолт включительно).
+- Спурт закрыт: 5 коммитов (ore-toggle batch+diag, worklog, pipeline default, cellfill store, gx hoist).
+- Следующая сессия: slot0 flat-компиляция, material row4-SIMD, cellfill ядро -> затем parallel к 1.0-1.2.
