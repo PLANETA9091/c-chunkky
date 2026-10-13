@@ -132,26 +132,30 @@ type FluidStatus = (i32, u16);
 /// position functions), so parallel cell threads can share these caches via
 /// Relaxed atomics — concurrent writers store identical bytes (benign race),
 /// and begin_chunk resets them single-threaded before the threads spawn.
-/// Per-thread aquifer caches. EVERY value here is a pure function of
-/// (gx, gy, gz) + env (fresh RNG per position), and begin_chunk resets all
-/// three arrays per fill — so there is nothing to share between the main
-/// thread and the strip workers. Sharing them through Arc<Atomic*> only
-/// created cross-core line ping-pong (12-cell neighborhoods overlap at strip
-/// boundaries): measured 1.86x CPU expansion of the aquifer material part
-/// (cont-20). Plain per-thread Vecs; clones get their own copy.
-#[derive(Clone)]
+/// Aquifer caches, SHARED across fill threads (Arc): all four strips of a
+/// chunk touch the SAME base cells (gx spans only 0..1 for a 16-block chunk),
+/// so per-thread caches duplicated the whole status/loc/summary work
+/// (fluid_calls 261 -> 429, worker strips 1.3x slower). The entries are
+/// first-touch-then-read-only per chunk -> no ping-pong after warmup, and
+/// each entry is cache-line PADDED so adjacent grid-x indices never share
+/// a line (cont-20).
+#[repr(align(64))]
+struct PaddedU64(std::sync::atomic::AtomicU64);
+#[repr(align(64))]
+struct PaddedI64(std::sync::atomic::AtomicI64);
+
 struct AquiferState {
-    cache: Vec<u64>,
-    loc_cache: Vec<i64>,
+    cache: Vec<PaddedU64>,
+    loc_cache: Vec<PaddedI64>,
     /// Per BASE-cell summary: all 12 neighborhood statuses equal + the shared
     /// status. The 12-cell neighborhood depends only on the base cell
     /// (gx, gy, gz), never on the block itself — so the all-same verdict and
     /// the uniform status are pure functions of the base cell and can be
     /// memoized. Reset per chunk together with the other caches.
-    summary: Vec<u64>,
-    min_grid_x: i32,
+    summary: Vec<PaddedU64>,
+    min_grid_x: std::sync::atomic::AtomicI32,
     min_grid_y: i32,
-    min_grid_z: i32,
+    min_grid_z: std::sync::atomic::AtomicI32,
     grid_size_x: i32,
     grid_size_z: i32,
 }
@@ -183,12 +187,12 @@ impl AquiferState {
         let gy_span = max_gy - min_grid_y + 1;
         let cells = (3 * gy_span * 3) as usize;
         AquiferState {
-            cache: vec![0u64; cells],
-            loc_cache: vec![i64::MAX; cells],
-            summary: vec![0u64; cells],
-            min_grid_x: 0,
+            cache: (0..cells).map(|_| PaddedU64(std::sync::atomic::AtomicU64::new(0))).collect(),
+            loc_cache: (0..cells).map(|_| PaddedI64(std::sync::atomic::AtomicI64::new(i64::MAX))).collect(),
+            summary: (0..cells).map(|_| PaddedU64(std::sync::atomic::AtomicU64::new(0))).collect(),
+            min_grid_x: std::sync::atomic::AtomicI32::new(0),
             min_grid_y,
-            min_grid_z: 0,
+            min_grid_z: std::sync::atomic::AtomicI32::new(0),
             grid_size_x: 3,
             grid_size_z: 3,
         }
@@ -199,23 +203,29 @@ impl AquiferState {
     /// before the cell threads spawn) and through Relaxed atomics inside the
     /// parallel phase.
     #[inline]
-    fn begin_chunk(&mut self, cx: i32, cz: i32) {
-        self.min_grid_x = cx - 1;
-        self.min_grid_z = cz - 1;
+    fn begin_chunk(&self, cx: i32, cz: i32) {
+        self.min_grid_x.store(cx - 1, Ordering::Relaxed);
+        self.min_grid_z.store(cz - 1, Ordering::Relaxed);
         // Vanilla allocates fresh caches per NoiseChunk (per chunk); our
         // generator persists across fills and the grid origin re-bases every
         // chunk, so BOTH caches must be reset or stale cells alias into the
         // new chunk's slots (correctness bug: wrong fluid statuses).
-        self.loc_cache.fill(i64::MAX);
-        self.cache.fill(0);
-        self.summary.fill(0);
+        for v in self.loc_cache.iter() {
+            v.0.store(i64::MAX, Ordering::Relaxed);
+        }
+        for v in self.cache.iter() {
+            v.0.store(0, Ordering::Relaxed);
+        }
+        for v in self.summary.iter() {
+            v.0.store(0, Ordering::Relaxed);
+        }
     }
 
     #[inline]
     fn index(&self, gx: i32, gy: i32, gz: i32) -> usize {
-        let i = (gx - self.min_grid_x) as usize;
+        let i = (gx - self.min_grid_x.load(Ordering::Relaxed)) as usize;
         let i1 = (gy - self.min_grid_y) as usize;
-        let i2 = (gz - self.min_grid_z) as usize;
+        let i2 = (gz - self.min_grid_z.load(Ordering::Relaxed)) as usize;
         (i1 * self.grid_size_z as usize + i2) * self.grid_size_x as usize + i
     }
 }
@@ -332,6 +342,9 @@ pub struct ChunkGen<'e> {
     /// every parallel fill. Taken out at fill start (no aliasing), refreshed
     /// with the current fill's per-fill state, returned after the join.
     strip_pool: Option<Vec<ChunkGen<'e>>>,
+    /// Reused per-fill strip out buffers (192KB each): fresh Box allocations
+    /// fault ~96 pages per buffer per fill on the parallel path.
+    out_pool: Vec<Box<[u16; OUT_LEN]>>,
     cellfill_stack: Vec<f64>,
     /// Per-(dx,dy) hoisted trilinear rows: per slot [row1, row2] so the
     /// per-block cost is a single z-lerp per Lerp3 slot (bit-exact: the
@@ -340,6 +353,11 @@ pub struct ChunkGen<'e> {
     cellfill_rows8: Vec<f64>,
     /// Slot ids actually referenced by the cellfill program (hoist these only).
     cellfill_slots: Vec<u16>,
+    /// 4-lane batch memo for the AVX2 preliminary-surface scan (per-thread).
+    /// 8 lanes measured SLOWER on the 2-core VM (material 1.18 vs 1.04):
+    /// the [f64;8] tree walk doubles the memo footprint and the wider
+    /// [f64;8] stack ops spill (same lesson as the slice lanes=8 A/B).
+    prelim_memo: crate::density::BatchMemo<4>,
     /// preliminarySurfaceLevel cache: lock-free direct-mapped atomic slots
     /// keyed by the quart column (bx, bz). The level is a pure function of
     /// the column + seed, so racing writers store IDENTICAL values (benign
@@ -354,7 +372,7 @@ pub struct ChunkGen<'e> {
     plane_cache_x: i64,
     plane_cache_z: i32,
     plane_cache: Vec<f64>,
-    aquifer: AquiferState,
+    aquifer: std::sync::Arc<AquiferState>,
     /// Per-point DAG memo (see MemoCtx). Every evaluation context (corner
     /// point / block / probe) bumps the serial; shared subtrees then evaluate
     /// once per point instead of once per reference.
@@ -422,6 +440,7 @@ pub static AQ_SUMMARY_HITS: std::sync::atomic::AtomicU64 =
 pub static AQ_SUMMARY_MISS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub static AQ_SCAN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PRELIM_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static AQ_HIT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PRELIM_SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PRELIM_SCAN_STEPS: std::sync::atomic::AtomicU64 =
@@ -527,6 +546,7 @@ impl<'e> ChunkGen<'e> {
                 .as_ref()
                 .and_then(|p| flatten_cellfill(p)),
             strip_pool: Some(Vec::new()),
+            out_pool: Vec::new(),
             cellfill_stack: Vec::with_capacity(16),
             cellfill_rows: vec![0.0; compiled.interp_slots as usize * 4],
             cellfill_rows8: vec![0.0; compiled.interp_slots as usize * 16],
@@ -541,6 +561,7 @@ impl<'e> ChunkGen<'e> {
                 }
                 seen.into_iter().collect()
             },
+            prelim_memo: crate::density::BatchMemo::new(compiled.arena.len()),
             initial_density: router("initial_density_without_jaggedness"),
             barrier: router("barrier"),
             floodedness: router("fluid_level_floodedness"),
@@ -564,7 +585,7 @@ impl<'e> ChunkGen<'e> {
             plane_cache_x: i64::MIN,
             plane_cache_z: i32::MIN,
             plane_cache: Vec::new(),
-            aquifer: AquiferState::new(env.wg.min_y, env.wg.height),
+            aquifer: std::sync::Arc::new(AquiferState::new(env.wg.min_y, env.wg.height)),
             memo: MemoCtx::new(compiled.arena.len()),
             env,
             compiled,
@@ -788,8 +809,42 @@ impl<'e> ChunkGen<'e> {
         let mut result = i32::MAX;
         let mut y = self.min_y + self.env.wg.height;
         let diag = crate::density::PROF_ON.load(std::sync::atomic::Ordering::Relaxed);
+        let prelim_t0 = if diag { Some(std::time::Instant::now()) } else { None };
         if diag {
             PRELIM_SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let ch = self.cell_height as i32;
+        // AVX2 4-lane scan: four descending grid points per batch
+        // (lane-identical arithmetic -> bit-exact vs scalar; the first lane
+        // above the threshold wins, matching the top-down scalar loop).
+        let mut pts = [Pt { x: bx, y: 0, z: bz }; 4];
+        while y - 3 * ch >= self.min_y {
+            for (k, pt) in pts.iter_mut().enumerate() {
+                pt.y = y - (k as i32) * ch;
+                if diag {
+                    PRELIM_SCAN_STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            let v = self.env.eval_batch::<4>(
+                &self.compiled,
+                self.initial_density,
+                &pts,
+                Mode::Direct,
+                &self.interp,
+                &self.prelim_memo,
+            );
+            let mut hit = None;
+            for (k, &val) in v.iter().enumerate() {
+                if val > 0.390625 {
+                    hit = Some(k);
+                    break;
+                }
+            }
+            if let Some(k) = hit {
+                result = y - (k as i32) * ch;
+                break;
+            }
+            y -= 4 * ch;
         }
         while y >= self.min_y {
             if diag {
@@ -804,7 +859,10 @@ impl<'e> ChunkGen<'e> {
                 result = y;
                 break;
             }
-            y -= self.cell_height as i32;
+            y -= ch;
+        }
+        if let Some(t) = prelim_t0 {
+            PRELIM_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         }
         self.prelim.put(key, result);
         result
@@ -901,15 +959,17 @@ impl<'e> ChunkGen<'e> {
             cellfill_prog: self.cellfill_prog.clone(),
             cellfill_flat: self.cellfill_flat.clone(),
             strip_pool: None,
+            out_pool: Vec::new(),
             cellfill_stack: Vec::with_capacity(16),
             cellfill_rows: vec![0.0; self.cellfill_rows.len()],
             cellfill_rows8: vec![0.0; self.cellfill_rows8.len()],
             cellfill_slots: self.cellfill_slots.clone(),
+            prelim_memo: crate::density::BatchMemo::new(self.compiled.arena.len()),
             prelim: std::sync::Arc::clone(&self.prelim),
             plane_cache_x: i64::MIN,
             plane_cache_z: i32::MIN,
             plane_cache: Vec::new(),
-            aquifer: self.aquifer.clone(),
+            aquifer: std::sync::Arc::clone(&self.aquifer),
             memo: MemoCtx::new(self.compiled.arena.len()),
             prof: Prof {
                 enabled: self.prof.enabled,
@@ -1086,11 +1146,21 @@ impl<'e> ChunkGen<'e> {
                 None => gens.push(self.thread_clone(cx, cz)),
             }
         }
-        let mut outs: Vec<Box<[u16; OUT_LEN]>> =
-            (1..nthr).map(|_| Box::new([0u16; OUT_LEN])).collect();
+        let mut out_pool = std::mem::take(&mut self.out_pool);
+        let mut outs: Vec<Box<[u16; OUT_LEN]>> = Vec::with_capacity(nthr.saturating_sub(1));
+        for _ in 1..nthr {
+            match out_pool.pop() {
+                Some(mut b) => {
+                    b.fill(AIR);
+                    outs.push(b);
+                }
+                None => outs.push(Box::new([0u16; OUT_LEN])),
+            }
+        }
         let planes_ref = &planes;
         // main thread's own strip buffer (kept out of the threaded split)
-        let mut out0 = Box::new([0u16; OUT_LEN]);
+        let mut out0 = out_pool.pop().unwrap_or_else(|| Box::new([0u16; OUT_LEN]));
+        out0.fill(AIR);
         std::thread::scope(|s| {
             let outs_split: Vec<&mut Box<[u16; OUT_LEN]>> = outs.iter_mut().collect();
             for (t, (g, out_t)) in gens
@@ -1194,6 +1264,14 @@ impl<'e> ChunkGen<'e> {
         // (after the marks/prof merge above — gens must stay intact)
         pool.extend(gens.drain(..));
         self.strip_pool = Some(pool);
+        // recycle the strip out buffers
+        for mut b in outs.into_iter() {
+            b.fill(AIR);
+            out_pool.push(b);
+        }
+        out0.fill(AIR);
+        out_pool.push(out0);
+        self.out_pool = out_pool;
         if let Some(t) = par_t0 {
             p.par_merge_ns += t.elapsed().as_nanos() as u64;
         }
@@ -2084,7 +2162,7 @@ impl<'e> ChunkGen<'e> {
             if gz != gz_prev {
                 gz_prev = gz;
                 let base = self.aquifer.index(gx, gy, gz);
-                let sv = self.aquifer.summary[base];
+                let sv = self.aquifer.summary[base].0.load(Ordering::Relaxed);
                 if sv == 0 {
                     return false; // uncached — per-block path will populate
                 }
@@ -2223,7 +2301,7 @@ impl<'e> ChunkGen<'e> {
         // in which case a targeted two-smallest-distance scan decides the
         // vanilla d67 > 0.0 gate.
         let base = self.aquifer.index(gx, gy, gz);
-        let sv = self.aquifer.summary[base];
+        let sv = self.aquifer.summary[base].0.load(Ordering::Relaxed);
         let hit_t0 = if crate::density::PROF_ON.load(std::sync::atomic::Ordering::Relaxed) {
             Some(std::time::Instant::now())
         } else { None };
@@ -2285,7 +2363,7 @@ impl<'e> ChunkGen<'e> {
                 for i12 in 0..=1i32 {
                     let gzz = gz + i12;
                     let packed = {
-                        let l = self.aquifer.loc_cache[index];
+                        let l = self.aquifer.loc_cache[index].0.load(Ordering::Relaxed);
                         if l != i64::MAX {
                             l
                         } else {
@@ -2295,7 +2373,7 @@ impl<'e> ChunkGen<'e> {
                             gyy * 12 + rng.next_int_bound(9),
                             gzz * 16 + rng.next_int_bound(10),
                         );
-                            self.aquifer.loc_cache[index] = p;
+                            self.aquifer.loc_cache[index].0.store(p, Ordering::Relaxed);
                             p
                         }
                     };
@@ -2333,7 +2411,7 @@ impl<'e> ChunkGen<'e> {
                         // grid cell (cell*dim + rng(dim-1)), so cache[index]
                         // IS the status this cell would resolve to.
                         let st = {
-                            let packed_v = self.aquifer.cache[index];
+                            let packed_v = self.aquifer.cache[index].0.load(Ordering::Relaxed);
                             if packed_v != 0 {
                                 unpack_status(packed_v)
                             } else {
@@ -2342,7 +2420,9 @@ impl<'e> ChunkGen<'e> {
                                     pos_y(packed),
                                     pos_z(packed),
                                 );
-                                self.aquifer.cache[index] = pack_status(v);
+                                self.aquifer.cache[index]
+                                    .0
+                                    .store(pack_status(v), Ordering::Relaxed);
                                 v
                             }
                         };
@@ -2362,7 +2442,9 @@ impl<'e> ChunkGen<'e> {
             AQ_SCAN_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         }
         // Memoize the base-cell verdict (pure function of (gx, gy, gz)).
-        self.aquifer.summary[base] = pack_summary(all_same, first);
+        self.aquifer.summary[base]
+            .0
+            .store(pack_summary(all_same, first), Ordering::Relaxed);
         if all_same {
             let block = aquifer_at(first, y);
             // Vanilla: d <= 0.0 early-returns with sched = false (the
@@ -2458,7 +2540,7 @@ impl<'e> ChunkGen<'e> {
                 for i12 in 0..=1i32 {
                     let gzz = gz + i12;
                     let packed = {
-                        let l = self.aquifer.loc_cache[index];
+                        let l = self.aquifer.loc_cache[index].0.load(Ordering::Relaxed);
                         if l != i64::MAX {
                             l
                         } else {
@@ -2468,7 +2550,7 @@ impl<'e> ChunkGen<'e> {
                             gyy * 12 + rng.next_int_bound(9),
                             gzz * 16 + rng.next_int_bound(10),
                         );
-                            self.aquifer.loc_cache[index] = p;
+                            self.aquifer.loc_cache[index].0.store(p, Ordering::Relaxed);
                             p
                         }
                     };
@@ -2560,12 +2642,14 @@ impl<'e> ChunkGen<'e> {
         let index = self
             .aquifer
             .index(floor_div(x, 16), floor_div(y, 12), floor_div(z, 16));
-        let packed_v = self.aquifer.cache[index];
+        let packed_v = self.aquifer.cache[index].0.load(Ordering::Relaxed);
         if packed_v != 0 {
             return unpack_status(packed_v);
         }
         let v = self.compute_aquifer_fluid(x, y, z);
-        self.aquifer.cache[index] = pack_status(v);
+        self.aquifer.cache[index]
+            .0
+            .store(pack_status(v), Ordering::Relaxed);
         v
     }
 
