@@ -276,7 +276,11 @@ fn cmd_fill(cx: i32, cz: i32) {
 }
 
 fn cmd_perf(n: usize) {
-    let env = Env::new(0);
+    let seed: i64 = std::env::var("CRUS_BENCH_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let env = Env::new(seed);
     let mut gen = ChunkGen::new(&env);
     let mut out = [0u16; OUT_LEN];
     // warmup

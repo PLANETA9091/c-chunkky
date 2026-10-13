@@ -519,7 +519,7 @@ impl<'e> ChunkGen<'e> {
             let reps = 12;
             for _ in 0..reps {
                 if g == 8 {
-                    let mut memo = BatchMemo::<8>::new(compiled.arena.len());
+                    let mut memo = BatchMemo::<8>::new(compiled.arena.len()).with_cols(compiled.col_count as usize);
                     for c in pts.chunks(8) {
                         let mut p8 = [c[0]; 8];
                         for (k, pt) in c.iter().enumerate() {
@@ -531,7 +531,7 @@ impl<'e> ChunkGen<'e> {
                         }
                     }
                 } else {
-                    let mut memo = BatchMemo::<4>::new(compiled.arena.len());
+                    let mut memo = BatchMemo::<4>::new(compiled.arena.len()).with_cols(compiled.col_count as usize);
                     for c in pts.chunks(4) {
                         let p4 = [c[0], c[(1).min(c.len() - 1)], c[(2).min(c.len() - 1)], c[(3).min(c.len() - 1)]];
                         let v = env.eval_batch::<4>(compiled, child0, &p4, Mode::Slice, &interp, &memo);
@@ -1532,7 +1532,7 @@ impl<'e> ChunkGen<'e> {
         hi: usize,
         out: &mut [f64],
     ) {
-        let mut memo = BatchMemo::<G>::new(compiled.arena.len());
+        let mut memo = BatchMemo::<G>::new(compiled.arena.len()).with_cols(compiled.col_count as usize);
         let mut pts = [Pt { x: 0, y: 0, z: 0 }; G];
         let mut p = lo;
         while p < hi {
@@ -2711,7 +2711,7 @@ impl<'e> ChunkGen<'e> {
         interp: &InterpState,
         out: &mut [f64],
     ) {
-        let memo = BatchMemo::<G>::new(compiled.arena.len());
+        let memo = BatchMemo::<G>::new(compiled.arena.len()).with_cols(compiled.col_count as usize);
         let y_batch = y_total & !(G - 1); // groups of G
         for i in 0..=cell_count_xz {
             let corner_z = (first_cell_z + i as i32) * cw;

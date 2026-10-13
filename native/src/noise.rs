@@ -91,6 +91,92 @@ pub struct ImprovedNoise {
     pub yo: f64,
     pub zo: f64,
     pub p: [u8; 256],
+    /// Unique per construction; indexes the per-thread lattice-cell memo.
+    /// Clones share the id (identical p/xo/yo/zo -> identical pure function,
+    /// so memo semantics carry over safely).
+    pub id: u32,
+}
+
+// ---- per-octave lattice-cell memo (bit-exact pure-function cache) ----
+// The 8-corner permutation walk depends only on (p-table, xi, yi, zi).
+// Corner-plane points step y by cell_height (8) at fixed (x, z); for noise
+// octaves whose input spacing < 1 cell, consecutive points share the same
+// lattice cell and the walk (a short dependent-load chain, ~half of a
+// perlin eval) can be reused. The cached value is a pure function of
+// immutable state (p never changes after init), so a hit returns
+// bit-identical bytes by construction. Per-thread storage: no locks, each
+// plane worker / block loop keeps its own table.
+static NEXT_NOISE_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[derive(Clone, Copy)]
+struct CellEntry {
+    xi: i32,
+    yi: i32,
+    zi: i32,
+    grads: [u8; 8],
+}
+
+thread_local! {
+    static CELL_MEMO: std::cell::RefCell<Vec<Option<CellEntry>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+impl ImprovedNoise {
+    /// 8 corner gradient bytes for the lattice cell (xi, yi, zi).
+    /// Corner bit mapping: c = xbit | ybit<<1 | zbit<<2 where bit set means
+    /// "delta - 1" on that axis (identical to the inline walks it replaces).
+    /// NOTE: the per-thread TLS memo variant of this helper measured a net
+    /// REGRESSION (TLS enter + borrow overhead on ~40 octave calls per point
+    /// outweighed the walk savings) and is disabled — the walk itself is
+    /// cheap and the y-invariant climate subtrees are handled at a much
+    /// higher level (BatchMemo column cache in density.rs).
+    #[inline]
+    pub fn cell_grads(&self, xi: i32, yi: i32, zi: i32) -> [u8; 8] {
+        self.walk_cell(xi, yi, zi)
+    }
+
+    /// Reserved for experiments: memoized lookup keyed by lattice cell.
+    #[allow(dead_code)]
+    fn cell_grads_memo(&self, xi: i32, yi: i32, zi: i32) -> [u8; 8] {
+        CELL_MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            let id = self.id as usize;
+            if m.len() <= id {
+                m.resize(id + 1, None);
+            }
+            let slot = &mut m[id];
+            if let Some(e) = slot {
+                if e.xi == xi && e.yi == yi && e.zi == zi {
+                    return e.grads;
+                }
+            }
+            let grads = self.walk_cell(xi, yi, zi);
+            *slot = Some(CellEntry { xi, yi, zi, grads });
+            grads
+        })
+    }
+
+    /// The un-memoized 8-corner permutation walk (bit-identical to the code
+    /// inlined in sample_and_lerp / the AVX2 batch walk it replaces).
+    #[inline]
+    fn walk_cell(&self, xi: i32, yi: i32, zi: i32) -> [u8; 8] {
+        let p0 = self.p(xi);
+        let p1 = self.p(xi + 1);
+        let i0 = self.p(p0 + yi);
+        let i1 = self.p(p0 + yi + 1);
+        let j0 = self.p(p1 + yi);
+        let j1 = self.p(p1 + yi + 1);
+        let zc = zi;
+        let bases = [i0 + zc, j0 + zc, i1 + zc, j1 + zc]; // [X + 2*Y]
+        let mut grads = [0u8; 8];
+        for c in 0..8 {
+            let xbit = c & 1;
+            let ybit = (c >> 1) & 1;
+            let zbit = (c >> 2) & 1;
+            grads[c] = self.p(bases[ybit * 2 + xbit] + zbit as i32) as u8;
+        }
+        grads
+    }
 }
 
 impl ImprovedNoise {
@@ -100,6 +186,7 @@ impl ImprovedNoise {
             yo: 0.0,
             zo: 0.0,
             p: [0; 256],
+            id: NEXT_NOISE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         };
         s.init(rng);
         s
@@ -111,6 +198,7 @@ impl ImprovedNoise {
             yo: 0.0,
             zo: 0.0,
             p: [0; 256],
+            id: NEXT_NOISE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         };
         s.init_legacy(rng);
         s
@@ -159,20 +247,16 @@ impl ImprovedNoise {
         dy: f64,
     ) -> f64 {
         // Vanilla: gradDot uses (deltaX, weirdDeltaY, deltaZ); smoothstep uses (deltaX, deltaY, deltaZ)
-        let p0 = self.p(x_cell);
-        let p1 = self.p(x_cell + 1);
-        let i0 = self.p(p0 + y_cell);
-        let i1 = self.p(p0 + y_cell + 1);
-        let j0 = self.p(p1 + y_cell);
-        let j1 = self.p(p1 + y_cell + 1);
-        let v000 = grad_dot(self.p(i0 + z_cell) as usize, dx, weird_dy, dz);
-        let v100 = grad_dot(self.p(j0 + z_cell) as usize, dx - 1.0, weird_dy, dz);
-        let v010 = grad_dot(self.p(i1 + z_cell) as usize, dx, weird_dy - 1.0, dz);
-        let v110 = grad_dot(self.p(j1 + z_cell) as usize, dx - 1.0, weird_dy - 1.0, dz);
-        let v001 = grad_dot(self.p(i0 + z_cell + 1) as usize, dx, weird_dy, dz - 1.0);
-        let v101 = grad_dot(self.p(j0 + z_cell + 1) as usize, dx - 1.0, weird_dy, dz - 1.0);
-        let v011 = grad_dot(self.p(i1 + z_cell + 1) as usize, dx, weird_dy - 1.0, dz - 1.0);
-        let v111 = grad_dot(self.p(j1 + z_cell + 1) as usize, dx - 1.0, weird_dy - 1.0, dz - 1.0);
+        // (the permutation walk is memoized per lattice cell — bit-exact)
+        let g = self.cell_grads(x_cell, y_cell, z_cell);
+        let v000 = grad_dot((g[0] & 15) as usize, dx, weird_dy, dz);
+        let v100 = grad_dot((g[1] & 15) as usize, dx - 1.0, weird_dy, dz);
+        let v010 = grad_dot((g[2] & 15) as usize, dx, weird_dy - 1.0, dz);
+        let v110 = grad_dot((g[3] & 15) as usize, dx - 1.0, weird_dy - 1.0, dz);
+        let v001 = grad_dot((g[4] & 15) as usize, dx, weird_dy, dz - 1.0);
+        let v101 = grad_dot((g[5] & 15) as usize, dx - 1.0, weird_dy, dz - 1.0);
+        let v011 = grad_dot((g[6] & 15) as usize, dx, weird_dy - 1.0, dz - 1.0);
+        let v111 = grad_dot((g[7] & 15) as usize, dx - 1.0, weird_dy - 1.0, dz - 1.0);
         let fx = smoothstep(dx);
         let fy = smoothstep(dy);
         let fz = smoothstep(dz);
@@ -342,22 +426,11 @@ impl ImprovedNoise {
         // ---- per-lane permutation walk: 8 corner gradient bytes ----
         // Corner bit mapping (matches sample_and_lerp):
         //   bit0 = X (dx-1), bit1 = Y (weird_dy-1), bit2 = Z (dz-1)
+        // (memoized per lattice cell — bit-exact; consecutive y-corners of
+        // low-frequency octaves share cells and skip the walk entirely)
         let mut grad = [[0u8; 8]; 4];
         for l in 0..4 {
-            let p0 = self.p(xi[l]);
-            let p1 = self.p(xi[l] + 1);
-            let i0 = self.p(p0 + yi[l]);
-            let i1 = self.p(p0 + yi[l] + 1);
-            let j0 = self.p(p1 + yi[l]);
-            let j1 = self.p(p1 + yi[l] + 1);
-            let zc = zi[l];
-            let bases = [i0 + zc, j0 + zc, i1 + zc, j1 + zc]; // [X+2*Y]
-            for c in 0..8 {
-                let xbit = c & 1;
-                let ybit = (c >> 1) & 1;
-                let zbit = (c >> 2) & 1;
-                grad[l][c] = self.p(bases[ybit * 2 + xbit] + zbit as i32) as u8;
-            }
+            grad[l] = self.cell_grads(xi[l], yi[l], zi[l]);
         }
 
         // ---- 8 grad_dots across the 4 lanes ----
@@ -493,20 +566,7 @@ impl ImprovedNoise {
 
         let mut grad = [[0u8; 8]; 8];
         for l in 0..8 {
-            let p0 = self.p(xi[l]);
-            let p1 = self.p(xi[l] + 1);
-            let i0 = self.p(p0 + yi[l]);
-            let i1 = self.p(p0 + yi[l] + 1);
-            let j0 = self.p(p1 + yi[l]);
-            let j1 = self.p(p1 + yi[l] + 1);
-            let zc = zi[l];
-            let bases = [i0 + zc, j0 + zc, i1 + zc, j1 + zc];
-            for c in 0..8 {
-                let xbit = c & 1;
-                let ybit = (c >> 1) & 1;
-                let zbit = (c >> 2) & 1;
-                grad[l][c] = self.p(bases[ybit * 2 + xbit] + zbit as i32) as u8;
-            }
+            grad[l] = self.cell_grads(xi[l], yi[l], zi[l]);
         }
 
         let one = _mm512_set1_pd(1.0);

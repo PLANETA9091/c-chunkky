@@ -256,6 +256,14 @@ pub struct Compiled {
     pub interp_slots: u16,
     /// Wrapped child arena index per Interpolated slot.
     pub interp_children: Vec<u32>,
+    /// Column-cache slot per arena node, for Cache2d/FlatCache nodes whose
+    /// subtree is provably y-independent (compile-time analysis); u32::MAX
+    /// otherwise. A y-independent child returns identical f64 values for
+    /// every y at a fixed (x, z), so caching one value per (x, z) column is
+    /// bit-exact value reuse of a pure function.
+    pub col_idx: Vec<u32>,
+    /// Number of assigned column-cache slots (size of BatchMemo col storage).
+    pub col_count: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -779,6 +787,8 @@ impl Env {
                     .unwrap_or_else(|| panic!("noise instance missing: {id}"))
             })
             .collect();
+        // column-cache slots for y-independent Cache2d/FlatCache subtrees
+        let (col_idx, col_count) = compute_col_caches(&c.arena);
         Compiled {
             arena: c.arena,
             noise_ids: c.noise_ids,
@@ -787,6 +797,8 @@ impl Env {
             router,
             interp_slots: c.interp_slots,
             interp_children: c.interp_children,
+            col_idx,
+            col_count,
         }
     }
 
@@ -794,6 +806,123 @@ impl Env {
 
 fn seed_unused() -> i64 {
     0
+}
+
+/// Compile-time y-invariance analysis over the compiled arena (DAG-safe,
+/// iterative). Returns (col_idx, col_count): a Cache2d/FlatCache node whose
+/// child subtree is provably y-independent gets a column-cache slot.
+///
+/// y-invariance rules (conservative): Const / ShiftA / ShiftB are invariant;
+/// pure wrappers and arithmetic propagate; Noise is invariant iff y_scale==0;
+/// ShiftedNoise iff y_scale==0 and all three shift inputs are invariant;
+/// everything touching y directly (OldBlendedNoise, YClampedGradient,
+/// WeirdScaledSampler, Spline, Interpolated, EndIslands) is variant.
+fn compute_col_caches(arena: &[WKind]) -> (Vec<u32>, u32) {
+    // 0 = unknown, 1 = in progress, 2 = y-invariant, 3 = y-variant
+    let mut state = vec![0u8; arena.len()];
+    let mut col_idx = vec![u32::MAX; arena.len()];
+    let mut next_slot = 0u32;
+
+    let children = |i: usize| -> Vec<u32> {
+        match &arena[i] {
+            WKind::Const(_)
+            | WKind::ShiftA { .. }
+            | WKind::ShiftB { .. }
+            | WKind::OldBlendedNoise { .. }
+            | WKind::YClampedGradient { .. }
+            | WKind::EndIslands
+            | WKind::Noise { .. }
+            | WKind::Interpolated { .. }
+            | WKind::WeirdScaledSampler { .. }
+            | WKind::Spline { .. } => Vec::new(),
+            WKind::Clamp { input, .. }
+            | WKind::Mapped { input, .. }
+            | WKind::MulOrAdd { input, .. }
+            | WKind::Cache2d { child: input }
+            | WKind::CacheOnce { child: input }
+            | WKind::FlatCache { child: input }
+            | WKind::CacheAllInCell { child: input } => vec![*input],
+            WKind::Ap2 { a, b, .. } => vec![*a, *b],
+            WKind::RangeChoice {
+                input,
+                when_in_range,
+                when_out_of_range,
+                ..
+            } => vec![*input, *when_in_range, *when_out_of_range],
+            WKind::ShiftedNoise { sx, sy, sz, .. } => vec![*sx, *sy, *sz],
+        }
+    };
+
+    for root in 0..arena.len() {
+        if state[root] != 0 {
+            continue;
+        }
+        let mut stack = vec![(root as u32, false)];
+        while let Some((i, expanded)) = stack.pop() {
+            let iu = i as usize;
+            if !expanded {
+                if state[iu] != 0 {
+                    continue;
+                }
+                let ch = children(iu);
+                state[iu] = 1;
+                stack.push((i, true));
+                for c in ch {
+                    if state[c as usize] == 0 {
+                        stack.push((c, false));
+                    }
+                }
+                continue;
+            }
+            if state[iu] != 1 {
+                continue; // computed via a shared node earlier in this walk
+            }
+            let yinv = match &arena[iu] {
+                WKind::Const(_) | WKind::ShiftA { .. } | WKind::ShiftB { .. } => true,
+                WKind::MulOrAdd { input, .. }
+                | WKind::Clamp { input, .. }
+                | WKind::Mapped { input, .. }
+                | WKind::Cache2d { child: input }
+                | WKind::CacheOnce { child: input }
+                | WKind::FlatCache { child: input }
+                | WKind::CacheAllInCell { child: input } => state[*input as usize] == 2,
+                WKind::Ap2 { a, b, .. } => {
+                    state[*a as usize] == 2 && state[*b as usize] == 2
+                }
+                WKind::RangeChoice {
+                    input,
+                    when_in_range,
+                    when_out_of_range,
+                    ..
+                } => {
+                    state[*input as usize] == 2
+                        && state[*when_in_range as usize] == 2
+                        && state[*when_out_of_range as usize] == 2
+                }
+                WKind::ShiftedNoise {
+                    y_scale, sx, sy, sz, ..
+                } => {
+                    *y_scale == 0.0
+                        && state[*sx as usize] == 2
+                        && state[*sy as usize] == 2
+                        && state[*sz as usize] == 2
+                }
+                WKind::Noise { y_scale, .. } => *y_scale == 0.0,
+                _ => false,
+            };
+            state[iu] = if yinv { 2 } else { 3 };
+            match &arena[iu] {
+                WKind::Cache2d { child } | WKind::FlatCache { child } => {
+                    if state[*child as usize] == 2 {
+                        col_idx[iu] = next_slot;
+                        next_slot += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (col_idx, next_slot)
 }
 
 /// The "minecraft:terrain" XoroshiroRandomSource for the given worldgen seed:
@@ -998,6 +1127,18 @@ pub struct BatchMemo<const N: usize> {
     stamp: Box<[Cell<u64>]>,
     value: Box<[Cell<[f64; N]>]>,
     serial: Cell<u64>,
+    /// Column-cache storage: one entry per y-independent Cache2d/FlatCache
+    /// node (slot = Compiled::col_idx[node]). Valid across the whole plane
+    /// eval — the memo is created per plane, so entries never go stale.
+    col: Box<[Cell<ColEntry>]>,
+}
+
+#[derive(Clone, Copy)]
+pub struct ColEntry {
+    pub ok: bool,
+    pub x: i32,
+    pub z: i32,
+    pub v: f64,
 }
 
 impl<const N: usize> BatchMemo<N> {
@@ -1006,7 +1147,15 @@ impl<const N: usize> BatchMemo<N> {
             stamp: vec![Cell::new(0); n].into_boxed_slice(),
             value: vec![Cell::new([0.0; N]); n].into_boxed_slice(),
             serial: Cell::new(0),
+            col: Box::new([]),
         }
+    }
+
+    /// Allocate column-cache storage for a plane eval (col_count slots).
+    pub fn with_cols(mut self, cols: usize) -> Self {
+        self.col = vec![Cell::new(ColEntry { ok: false, x: 0, z: 0, v: 0.0 }); cols]
+            .into_boxed_slice();
+        self
     }
 
     #[inline]
@@ -1445,6 +1594,35 @@ impl Env {
                     out[l] = d[l] * nv[l].abs();
                 }
                 out
+            }
+            WKind::Cache2d { child } | WKind::FlatCache { child }
+                if c.col_idx[idx as usize] != u32::MAX =>
+            {
+                // y-independent child (compile-time proven): all lanes share
+                // the same (x, z) in a slice batch, so one value serves the
+                // whole column — bit-exact reuse of a pure function.
+                let ci = c.col_idx[idx as usize] as usize;
+                let x0 = pts[0].x;
+                let z0 = pts[0].z;
+                let mut uniform = true;
+                for l in 1..N {
+                    if pts[l].x != x0 || pts[l].z != z0 {
+                        uniform = false;
+                        break;
+                    }
+                }
+                if uniform && ci < memo.col.len() {
+                    let e = memo.col[ci].get();
+                    if e.ok && e.x == x0 && e.z == z0 {
+                        let mut out = [0.0f64; N];
+                        out.fill(e.v);
+                        return out;
+                    }
+                    let v = self.eval_batch_uncached(c, *child, pts, mode, interp, memo);
+                    memo.col[ci].set(ColEntry { ok: true, x: x0, z: z0, v: v[0] });
+                    return v;
+                }
+                self.eval_batch_uncached(c, *child, pts, mode, interp, memo)
             }
             WKind::Cache2d { child }
             | WKind::CacheOnce { child }
