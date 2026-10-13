@@ -1163,15 +1163,17 @@ impl<'e> ChunkGen<'e> {
         let mut pending: Option<std::thread::JoinHandle<Vec<f64>>> = None;
         let plane_len = self.interp_children.len() * (self.cell_count_xz + 1) * (self.cell_count_y + 1);
         // Pipeline: overlaps the next x-plane's corner evaluation (worker)
-        // with this plane's cell work. On 2 cores it LOSES (worker steals
-        // the only cell core, cache pressure); on 4+ cores it wins. Default:
-        // on when >= 4 logical cores; CRUS_NO_PIPELINE=1 forces off,
-        // CRUS_PIPELINE=1 forces on.
+        // Pipeline: overlaps the next x-plane's corner evaluation (worker)
+        // with this plane's cell work. After the cellfill/material fast
+        // paths (flat cellfill, ore row4, aquifer summary) the strip work
+        // (2.5ms) comfortably hides plane evaluation (0.41ms/plane) even
+        // on 2 cores: measured wall 3.2 vs 4.6 (CRUS_PIPELINE=1 A/B on the
+        // 2-core dev VM, cont-17). Default: on when >= 2 logical cores.
         let pipeline = match (self.pipeline_forced, std::env::var("CRUS_PIPELINE").ok().as_deref() == Some("1")) {
             (Some(false), _) => false,
             (Some(true), _) => true,
             (None, _) => std::thread::available_parallelism()
-                .map(|n| n.get() >= 4)
+                .map(|n| n.get() >= 2)
                 .unwrap_or(false),
         };
         // the pipeline worker is an extra internal thread: gate it on the
