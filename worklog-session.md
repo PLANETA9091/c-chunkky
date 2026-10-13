@@ -465,3 +465,38 @@ Stage Summary:
 - Паритет генерации ПОЛНЫЙ на всех оптимизированных путях (pipeline-дефолт включительно).
 - Спурт закрыт: 5 коммитов (ore-toggle batch+diag, worklog, pipeline default, cellfill store, gx hoist).
 - Следующая сессия: slot0 flat-компиляция, material row4-SIMD, cellfill ядро -> затем parallel к 1.0-1.2.
+
+---
+Task ID: cont-20 (2026-10-13, перф-спурт IV: параллельная архитектура + prelim)
+Agent: Super Z (main)
+Task: 1ms/чанк на 2-ядерном CI-раннере; замеры только на историческом наборе
+
+Work Log:
+- CI-калибровка (новый шаг в ci.yml, bench perf/phases на раннере): native p50 4.53 serial /
+  3.78 parallel-2t / phases 3.69 — раннер лишь на 10-15% медленнее dev-VM. Значит GenStats p50
+  9.35ms на судье = ~5.6ms оверхеда Paper/JNI/spawn-схемы, а не медленные ядра. Цель 1ms
+  достижима на нативе; параллельно чиню масштабирование.
+- ПОЧЕМУ ПАРАЛЛЕЛЬ НЕ МАСШТАБИРУЕТСЯ (расследование с par[planes/strips/merge] + worker diag):
+  (1) prelim surface Arc<Mutex<HashMap>> — мьютекс делал 12-скан в 1.9x медленнее (3.9K lock-оп/fill);
+  (2) per-thread aquifer ДУБЛИРОВАЛ работу (все 4 полосы чанка юзают одни base-ячейки: fluid 261->429);
+  (3) Box::new([0u16;98304]) на каждый fill — 2x192KB свежих страниц (~96 page faults).
+- ФИКСЫ: aquifer = shared Arc<Padded<Atomic*>> (паддинг 64B против false sharing, паттерн
+  first-touch-then-read => нет ping-pong); prelim = lock-free direct-mapped AtomicU64 кэш
+  (entry = key<<9|level+65, гонки пишут одинаковые значения — бит-в-бит); out-пул.
+- PRELIM-СКАН = 98% material (1.79ms/fill): AVX2 eval_batch<4> по 4 y-грид-точкам + col-cache
+  (with_cols: y-инвариантный климат-сабтри считается раз на колонку). НО батч выигрывает только
+  на ранних стопах: seed-0 океан 13.8 batched vs 9.3 scalar (y-зависимая часть дерева даёт те же
+  FLOPs на лейн + оверхед штампов). РЕШЕНИЕ — рантайм-калибровка per-world: первые 12 сканов
+  чередуют режимы с таймером, победитель фиксируется (real seed -> batch, seed 0 -> scalar).
+- cellfill: стеки [f64;16]x2 обнулялись на каждый 2-row run (24х/ячейку) — создаются раз на
+  iy-пару (программа топологически упорядочена). 1.06 -> 0.81. 4-row runner (1 диспетчер на оп)
+  РЕГРЕССИЛ 3.2ms — 4 регистровых файла льются; удалён. 8-лейн prelim тоже медленнее (1.18 vs 1.04).
+- Верификация каждого шага: 6/6 чанков serial==parallel бит-в-бит, 11/11 тестов, fastdiff 0,
+  out_hash (0,0)=e06a3b56... неизменен. Seed-0 регрессия 14.1 найдена и устранена калибровкой.
+
+Stage Summary:
+- phases wall 3.25 -> 2.58ms (-21%): slice 0.77 | cellfill 0.81 | material 0.80 | other 0.21.
+- bench perf p50 real seed 4.18 -> 2.52 (-40%); parallel-2t 3.30 -> 2.09 (-37%); seed 0 9.1 (восстановлен).
+- Диагностика: par-бакеты в Prof, aq-счётчики (substance/hit/miss/scan/prelim), spawnbench/thrscale.
+- Next: material 12-скан (~0.15ms) + fluid-машинерия; cellfill хвост; slice-плоскости для
+  параллели; CI-верификация + GenStats на судье.
