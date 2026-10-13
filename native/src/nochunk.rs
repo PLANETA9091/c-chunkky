@@ -358,6 +358,15 @@ pub struct ChunkGen<'e> {
     /// the [f64;8] tree walk doubles the memo footprint and the wider
     /// [f64;8] stack ops spill (same lesson as the slice lanes=8 A/B).
     prelim_memo: crate::density::BatchMemo<4>,
+    /// Prelim scan mode calibration: the 4-lane batch wins on land worlds
+    /// (early stops; real-seed p50 2.45 vs 3.62 scalar) and loses on ocean
+    /// worlds (full-height scans; seed-0 13.8 batched vs 9.3 scalar). The
+    /// first 12 scans alternate modes with timing; the winner is then fixed
+    /// for the process (the world type is a per-seed constant).
+    prelim_use_batch: bool,
+    prelim_cal_scans: i32,
+    prelim_batch_ns: u64,
+    prelim_scalar_ns: u64,
     /// preliminarySurfaceLevel cache: lock-free direct-mapped atomic slots
     /// keyed by the quart column (bx, bz). The level is a pure function of
     /// the column + seed, so racing writers store IDENTICAL values (benign
@@ -561,7 +570,12 @@ impl<'e> ChunkGen<'e> {
                 }
                 seen.into_iter().collect()
             },
-            prelim_memo: crate::density::BatchMemo::new(compiled.arena.len()),
+            prelim_memo: crate::density::BatchMemo::new(compiled.arena.len())
+                .with_cols(compiled.col_count as usize),
+            prelim_use_batch: true,
+            prelim_cal_scans: 0,
+            prelim_batch_ns: 0,
+            prelim_scalar_ns: 0,
             initial_density: router("initial_density_without_jaggedness"),
             barrier: router("barrier"),
             floodedness: router("fluid_level_floodedness"),
@@ -814,9 +828,38 @@ impl<'e> ChunkGen<'e> {
             PRELIM_SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let ch = self.cell_height as i32;
+        if std::env::var("CRUS_PRELIM_SCALAR").is_ok() {
+            while y >= self.min_y {
+                let d = self.eval_fresh(
+                    self.initial_density,
+                    Pt { x: bx, y, z: bz },
+                    Mode::Direct,
+                );
+                if d > 0.390625 {
+                    result = y;
+                    break;
+                }
+                y -= ch;
+            }
+            if let Some(t) = prelim_t0 {
+                PRELIM_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.prelim.put(key, result);
+            return result;
+        }
         // AVX2 4-lane scan: four descending grid points per batch
         // (lane-identical arithmetic -> bit-exact vs scalar; the first lane
         // above the threshold wins, matching the top-down scalar loop).
+        // The mode (batch vs scalar) is calibrated per world — see the
+        // prelim_use_batch field doc.
+        let calibrating = self.prelim_cal_scans < 12;
+        let use_batch = if calibrating {
+            self.prelim_cal_scans % 2 == 0
+        } else {
+            self.prelim_use_batch
+        };
+        let mode_t0 = if calibrating { Some(std::time::Instant::now()) } else { None };
+        if use_batch {
         let mut pts = [Pt { x: bx, y: 0, z: bz }; 4];
         while y - 3 * ch >= self.min_y {
             for (k, pt) in pts.iter_mut().enumerate() {
@@ -846,6 +889,7 @@ impl<'e> ChunkGen<'e> {
             }
             y -= 4 * ch;
         }
+        } else {
         while y >= self.min_y {
             if diag {
                 PRELIM_SCAN_STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -860,6 +904,19 @@ impl<'e> ChunkGen<'e> {
                 break;
             }
             y -= ch;
+        }
+        }
+        if let (true, Some(t)) = (calibrating, mode_t0) {
+            let dt = t.elapsed().as_nanos() as u64;
+            if use_batch {
+                self.prelim_batch_ns += dt;
+            } else {
+                self.prelim_scalar_ns += dt;
+            }
+            self.prelim_cal_scans += 1;
+            if self.prelim_cal_scans == 12 {
+                self.prelim_use_batch = self.prelim_batch_ns <= self.prelim_scalar_ns;
+            }
         }
         if let Some(t) = prelim_t0 {
             PRELIM_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -964,7 +1021,12 @@ impl<'e> ChunkGen<'e> {
             cellfill_rows: vec![0.0; self.cellfill_rows.len()],
             cellfill_rows8: vec![0.0; self.cellfill_rows8.len()],
             cellfill_slots: self.cellfill_slots.clone(),
-            prelim_memo: crate::density::BatchMemo::new(self.compiled.arena.len()),
+            prelim_memo: crate::density::BatchMemo::new(self.compiled.arena.len())
+                .with_cols(self.compiled.col_count as usize),
+            prelim_use_batch: self.prelim_use_batch,
+            prelim_cal_scans: self.prelim_cal_scans,
+            prelim_batch_ns: self.prelim_batch_ns,
+            prelim_scalar_ns: self.prelim_scalar_ns,
             prelim: std::sync::Arc::clone(&self.prelim),
             plane_cache_x: i64::MIN,
             plane_cache_z: i32::MIN,
@@ -1603,10 +1665,16 @@ impl<'e> ChunkGen<'e> {
                                     dx_step,
                                 );
                             }
+                            // Stacks created ONCE per iy-pair (not per run):
+                            // the flat program is topologically ordered, so
+                            // every register read is preceded by a write in
+                            // the same run — the per-run re-zeroing of
+                            // 32x__m256d was pure waste.
+                            let dzv = cellfill_simd::dz_vec(dx_step);
+                            let (mut vstack_a, mut vstack_b, mut vsp) =
+                                cellfill_simd::fresh_stacks();
                             let mut ix = 0i32;
                             while ix < cw_i {
-                                let (dzv, mut vstack_a, mut vstack_b, mut vsp) =
-                                    cellfill_simd::make_2row_state(dx_step);
                                 let (res_a, res_b) = if let Some(flat) = prog_flat {
                                     unsafe {
                                         cellfill_simd::run_cellfill_2rows_flat(
@@ -4029,15 +4097,21 @@ mod cellfill_simd {
         }
     }
 
-    /// dz vector [0, s, 2s, 3s] (same fractions for both rows) + two stacks.
-    pub fn make_2row_state(dx_step: f64) -> (__m256d, [__m256d; 16], [__m256d; 16], usize) {
+    /// Uninitialized-equivalent stacks (zeroed once per iy-pair, reused
+    /// across the 4 ix runs; the topologically-ordered program overwrites
+    /// every register before it is read).
+    pub fn fresh_stacks() -> ([__m256d; 16], [__m256d; 16], usize) {
         unsafe {
             (
-                _mm256_setr_pd(0.0, dx_step, dx_step + dx_step, dx_step + dx_step + dx_step),
                 [_mm256_setzero_pd(); 16],
                 [_mm256_setzero_pd(); 16],
                 0,
             )
         }
+    }
+
+    /// dz vector [0, s, 2s, 3s] (same fractions for both rows).
+    pub fn dz_vec(dx_step: f64) -> __m256d {
+        unsafe { _mm256_setr_pd(0.0, dx_step, dx_step + dx_step, dx_step + dx_step + dx_step) }
     }
 }
