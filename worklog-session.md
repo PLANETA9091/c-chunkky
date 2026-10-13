@@ -420,3 +420,31 @@ Stage Summary:
   дерево (0.65) + climate (0.1); material = per-block база (1.27) + ore (0.29); cellfill 1.0 (AVX 2-row).
 - Уроки: VM 2 ядра = фазовая схема лучше overlap; векторный setup в Perlin ядре НЕ работает; spawn дешёв.
 - Следующие фронты: slot0 flat-компиляция (дерево 0.65), material row4 SIMD (база 1.27), blended LUT.
+
+---
+Task ID: cont-18 (2026-10-13, перф-спурт III: pipeline-дефолт — wall -30%)
+Agent: Super Z (main)
+Task: продолжение к 1ms; замеры на phases/bench (real seed)
+
+Work Log:
+- КРИТИЧЕСКОЕ ОТКРЫТИЕ: A/B CRUS_PIPELINE=1 на 2-ядерной VM — pipeline теперь ВЫИГРЫВАЕТ:
+  wall 4.6 -> 3.25 (-29%). Старое «LOSES on 2 cores» устарело: после flat cellfill / ore row4 / aquifer
+  summary strips (~2.5ms) прячут плоскость (0.41ms) целиком. Дефолт переключён на >=2 ядер (6752bdf).
+- Замеры после: serial+pipeline wall 3.18-3.25 (slice 0.68 | cellfill 1.00 | material 1.33-1.36);
+  bench perf 64 real seed p50 5.15 -> 3.87 (-25%). parallel-2t (фазовая spawn-схема) 2.59-2.75 — без изменений.
+- cellfill: 2-row AVX results пишутся прямо в cell_cache (a_buf/b_buf + copy_from_slice выкинуты) — 1.01 -> 1.00.
+- material: gx/gy hoist в aquifer row4 (LLVM и так делал — в шуме, код чище). NO_AQ+NO_VEIN дно 1.27 =
+  базовый per-block проход 13ns/блок (cell_cache load + gates + out write) — следующий фронт = row4-SIMD.
+- Вердикты судьи: 1c83fc9 (ore-toggle) vanilla 89/6291456 = 0.001%, datapack 4 = 0.000%;
+  6752bdf (pipeline-дефолт) vanilla 225 = 0.004%, datapack 50 = 0.001%; HEIGHTMAP 0/16384 оба.
+  Гейт 0.05% PASS (12-56x запас). Остаток — тиковый класс (kelp/water/lava settle), детерминизм генерации полон.
+- CI: 1c83fc9 SUCCESS, 6752bdf SUCCESS, 5d7838c (+cellfill-store, +gx-hoist) — прогон.
+- CI bench native noise stage: mean 14.9ms (366 чанков, 2-ядерная CI VM, шумная) — паритет сохранён.
+
+Stage Summary:
+- wall: 4.57 -> 3.2 (-30%) за спурт II-III. Структура wall 3.2: strips 2.4 (cellfill 1.0 + material 1.33 +
+  misc 0.2) + slice0 0.69. БОТЛНЕК = strips; при идеальном 2-потоке floor ~1.6-1.8.
+- До 1ms нужны радикальные шаги (оценка): slot0 flat-компиляция (дерево ~0.4), material row4 SIMD (1.27
+  базы -> ~0.5), cellfill ядро (1.0 -> 0.6), затем parallel-фазовая схема даст ~1.0-1.2. Все — большие проекты.
+- Уроки спурта: векторный floor-setup в Perlin — REGRESSION; pool/overlap на 2 ядрах — без выигрыша
+  (L2-выдавливание cross-phase); pipeline — главный рычаг (-30%); env-кэш/hoist — микро.
