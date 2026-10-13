@@ -425,6 +425,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     GenStats.BULK_AIR.incrementAndGet();
                     continue; // all air — ChunkData default
                 }
+                // (self-verification happens once per chunk after the layout)
                 Object st = uniform ? sectionStatesById[first] : null;
                 if (uniform && st != null && section != null) {
                     // O(1): a fresh single-value container replaces the section's
@@ -478,11 +479,60 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     }
                 }
             }
+            // SELF-VERIFICATION: sample 256 positions; a single mismatch
+            // (e.g. stale heightmap/section invariants from the direct
+            // container writes) disables bulk and repairs THIS chunk with an
+            // explicit full overwrite (air included).
+            String mismatch = verifyChunk(chunkData, minY, height, out);
+            if (mismatch != null) {
+                bulkBroken = true;
+                bulkFailReason = "verify " + mismatch;
+                LOG.warning("bulk layout self-check failed, repairing chunk via v1: " + mismatch);
+                layoutFull(chunkData, minY, height, out, mats);
+                return;
+            }
         } catch (Throwable t) {
             bulkBroken = true;
             bulkFailReason = "runtime " + t.getClass().getSimpleName() + ": " + t.getMessage();
             LOG.warning("bulk layout failed once, disabling: " + t);
             layoutV1(chunkData, minY, height, out, mats);
+        }
+    }
+
+    /** Samples 256 blocks across the chunk; null == all match. */
+    private static String verifyChunk(ChunkData chunkData, int minY, int height, short[] out) {
+        Material[] mats = GenStats.MATERIALS;
+        java.util.Random rnd = new java.util.Random(0xC0FFEE);
+        for (int k = 0; k < 256; k++) {
+            int idx = rnd.nextInt(98304);
+            int y = idx >> 8;            // (y-minY)
+            int z = (idx >> 4) & 15;
+            int x = idx & 15;
+            short id = out[idx];
+            Material want = id == 0 ? Material.AIR : mats[id];
+            Material got = chunkData.getType(x, y + minY, z);
+            if (want != got) {
+                return "want=" + want + " got=" + got + " at x=" + x + " y=" + (y + minY)
+                        + " z=" + z + " outIdx=" + idx;
+            }
+        }
+        return null;
+    }
+
+    /** Full overwrite (air explicitly) — repairs a corrupted chunk. */
+    private static void layoutFull(ChunkData chunkData, int minY, int height, short[] out,
+            Material[] mats) {
+        int i = 0;
+        for (int y = 0; y < height; y++) {
+            for (int z = 0; z < 16; z++) {
+                for (int x = 0; x < 16; x++) {
+                    short id = out[i++];
+                    Material m = id == 0 ? Material.AIR : mats[id];
+                    if (m != null) {
+                        chunkData.setBlock(x, y + minY, z, m);
+                    }
+                }
+            }
         }
     }
 
