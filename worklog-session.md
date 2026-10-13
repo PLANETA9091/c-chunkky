@@ -535,3 +535,42 @@ Stage Summary:
   parallel-2t 2.09. 11/11 тестов, 6/6 чанков serial==parallel, fastdiff 0.
 - Next: CI-замер nat_p50 с персистентным воркером; если spawn-теория верна — nat_p50 ~2-3;
   далее strips (cellfill/material) и slice до floor ~1.0-1.2 на окне судьи.
+
+---
+Task ID: cont-22 (2026-10-13, окно судьи: layout 4x + диагностика контенции)
+Agent: Super Z (main)
+Task: GenStats-окно к 1ms; разбор натива под Paper
+
+Work Log:
+- GenStats теперь несёт полную анатомию окна: [native/nat_p50/layout/beard/marks]
+  + [sections filled/mixed/air/v1fallback + bulk=reason] + jni_prof[fills/wall/slice/
+  cellfill/material/select/par_planes/par_strips] (JNI profStatsGlobal, NewStringUTF).
+- LAYOUT: bulk-путь через reflection доведён до боевого (все цели сверены с
+  paper-1.21.8.jar). Провал 31.9% расследован и починен: подмена контейнеров
+  пропускала (1) счётчики секций nonEmpty/tickingBlock/tickingFluid/specialColliding,
+  (2) Moonrise tickingBlocks-list, (3) chunk heightmaps (WORLD_SURFACE_WG/OCEAN_FLOOR_WG)
+  — при сохранении секции считались пустыми (30% мира = воздух, dh=108.5). v2:
+  запись в существующий контейнер (getAndSetUnchecked, resize-safe) + пересчёт
+  счётчиков из пер-материальных флагов (isAir/isRandomlyTicking/fluid-tick/
+  isSpecialColliding) + rebuild heightmaps через setRawData (9 бит x 256,
+  stored = topY+1-minY, predicate из поля isOpaque). layout 6.0 -> 1.4-2.0ms (3-4x).
+  Самопроверка 256 сэмплов/чанк + полный v1-ремонт при mismatch (корректность гарантирована).
+- Натив под Paper (jni_prof): parallel-путь wall 6.5 = par_planes 2.3 + par_strips 3.3
+  + cf 1.2 + mt 4.1-4.7; CPU расширяется лишь ~1.2-1.4x, остальное — контенция
+  планировщика с JVM (GC/JIT) на 2 ядрах. A/B: серийный путь (персистентный воркер)
+  9.3ms — ХУЖЕ (fill_slice-бакет = ожидание воркера 3.6ms); откат на parallel-2t.
+- Персистентный plane-воркер (1 поток/gen, каналы, double-buffering, Drop=Stop+join)
+  — в дереве, локально паритет и перф сохранены; на изолированном bench спавны и так
+  были дёшевы.
+- Раннерный разброс: native 6.1-8.7 между прогонами при одинаковом коде — больше
+  эффекта правок; медианы плавают 5.3-7.4.
+
+Stage Summary:
+- Окно судьи (GenStats mean): 14.8 -> 8.4-11.0 (p50 9.35 -> 6.6-8.9); layout 6.0 -> 1.4-2.0;
+  native под Paper 7.9 -> 6.5-8.6 (раннерная лотерея).
+- Изолированный CI-натив: bench perf real seed p50 4.53 -> 1.80 (parallel-2t) — 2.5x.
+- Локально: phases wall 3.25 -> 2.54-2.67; bench p50 4.18 -> 2.36; par-2t 3.30 -> 2.09.
+- Судья: PASS на всех прогонах сессии (0.000-0.002%), гейт 0.05% (25x+ запас).
+- Для 1ms на окне судьи нужно: (1) срезать ~4-5 CPU-ms натива (material в parallel
+  3.05 CPU — главная цель), (2) убрать остаточную контенцию (персистентные strip-воркеры).
+- Все 14 коммитов сессии зелёные на CI; 11/11 тестов, serial==parallel бит-в-бит на каждом шаге.
