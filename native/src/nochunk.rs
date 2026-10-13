@@ -1143,12 +1143,6 @@ impl<'e> ChunkGen<'e> {
                     // empty beardifier (a beard contribution could push
                     // substance <= 0).
                     let fds = match self.final_density_slot { Some(s) => s, None => 0 };
-                    let all_solid = self.beard.is_empty()
-                        && {
-                            let n = self.interp.corners_pub(fds);
-                            n[0] > 0.0 && n[1] > 0.0 && n[2] > 0.0 && n[3] > 0.0
-                                && n[4] > 0.0 && n[5] > 0.0 && n[6] > 0.0 && n[7] > 0.0
-                        };
 
                     // CacheAllInCell (vanilla Java-level wrap of final_density):
                     // fill 128 in-cell values via lerp3 path (fillingCell=true).
@@ -1156,36 +1150,6 @@ impl<'e> ChunkGen<'e> {
                     // inner z-loop; fractions via multiply (bit-identical:
                     // /4 == *0.25 and /8 == *0.125 exactly in IEEE754).
                     let t_cf = if prof || dbg { Some(std::time::Instant::now()) } else { None };
-                    if all_solid {
-                        // cellfill skipped entirely (see gate above)
-                        if let Some(t) = t_cf {
-                            p.cellfill_ns += t.elapsed().as_nanos() as u64;
-                        }
-                        // material: every block is ore/stone (subst > 0)
-                        let t_mt2 = if prof { Some(std::time::Instant::now()) } else { None };
-                        self.sched = false;
-                        for i6 in (0..self.cell_height as i32).rev() {
-                            let block_y = (self.cell_noise_min_y + i5 as i32) * ch + i6;
-                            for i9 in 0..self.cell_width as i32 {
-                                let block_x = cell_start_block_x + i9;
-                                for i12 in 0..self.cell_width as i32 {
-                                    let block_z = cell_start_block_z + i12;
-                                    let block = self.ore_row_block(block_x, block_y, block_z);
-                                    if block != AIR {
-                                        let out_idx = ((block_y - self.min_y) * 256
-                                            + (block_z - min_block_z) * 16
-                                            + (block_x - min_block_x))
-                                            as usize;
-                                        out[out_idx] = block;
-                                    }
-                                }
-                            }
-                        }
-                        if let Some(t) = t_mt2 {
-                            p.material_ns += t.elapsed().as_nanos() as u64;
-                        }
-                        continue;
-                    }
                     let cw_i = cw;
                     let dx_step = 1.0f64 / self.cell_width as f64; // exact: 0.25
                     let dy_step = 1.0f64 / self.cell_height as f64; // exact: 0.125
@@ -1200,7 +1164,7 @@ impl<'e> ChunkGen<'e> {
                             && cw_i == 4
                             && iy >= 1
                             && cellfill_simd::avx2_ok()
-                        {
+                                                    {
                             // cell_cache layout is [iy][ix][iz]: row A (iy) must
                             // be fully written before row B (iy-1) — buffer each
                             // row separately, then place both blocks in order.
@@ -1611,6 +1575,12 @@ impl<'e> ChunkGen<'e> {
                         self.interp.slice1_set(slot, i as usize, y, slot0[p]);
                     }
                 }
+                // The batch slot0 eval does not touch self.memo; slots 1-7
+                // read it — bump the context once per corner point exactly
+                // like the pre-batch eval_fresh did, otherwise slots 1-7
+                // resolve stale stamps from an older point (silently wrong
+                // plane values -> wrong substances).
+                self.memo.next_serial();
                 for slot in 1..nslots {
                     let child = self.interp_children[slot];
                     let v = self.eval(child, pt, Mode::Slice);
@@ -1619,6 +1589,20 @@ impl<'e> ChunkGen<'e> {
                         self.interp.slice0_set(slot, i as usize, y, v);
                     } else {
                         self.interp.slice1_set(slot, i as usize, y, v);
+                    }
+                }
+            }
+        }
+        if std::env::var("CRUS_DUMP_PLANES").is_ok() {
+            let want: i32 = std::env::var("CRUS_DUMP_PLANES").unwrap().parse().unwrap_or(i32::MIN);
+            if start_cell_x == want {
+                let nz = self.cell_count_xz + 1;
+                let ny = self.cell_count_y + 1;
+                for y in 0..ny {
+                    for z in 0..nz {
+                        let v0 = self.interp.slice0_get_pub(0, z, y);
+                        let v1 = self.interp.slice1_get_pub(0, z, y);
+                        println!("PLANE x={} z={} y={} s0={:016x} s1={:016x}", start_cell_x, z, y, v0.to_bits(), v1.to_bits());
                     }
                 }
             }

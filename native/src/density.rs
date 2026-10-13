@@ -964,6 +964,15 @@ impl InterpState {
     }
 
     #[inline]
+
+    pub fn slice0_get_pub(&self, slot: u16, z: usize, y: usize) -> f64 {
+        let stride = self.slice_rows * self.slice_cols;
+        self.slice0[slot as usize * stride + z * self.slice_cols + y]
+    }
+    pub fn slice1_get_pub(&self, slot: u16, z: usize, y: usize) -> f64 {
+        let stride = self.slice_rows * self.slice_cols;
+        self.slice1[slot as usize * stride + z * self.slice_cols + y]
+    }
     pub fn slice1_set(&mut self, slot: u16, z: usize, y: usize, v: f64) {
         let stride = self.slice_rows * self.slice_cols;
         self.slice1[slot as usize * stride + z * self.slice_cols + y] = v;
