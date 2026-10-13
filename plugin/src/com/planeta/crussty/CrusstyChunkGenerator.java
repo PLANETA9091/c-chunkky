@@ -287,7 +287,10 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static volatile boolean bulkBroken;
     private static volatile boolean bulkReady;
     private static final Object BULK_LOCK = new Object();
-    private static Method mGetSections, mFillState, mDefaultBlockState;
+    private static Method mGetSectionsAcc, mFillState, mDefaultBlockState;
+    private static Constructor<?> ctorPal;
+    private static Object sectionStrategyField;
+    private static java.lang.reflect.Field bulkRegistryField;
     private static Object[] sectionStatesById; // NMS BlockState per material id (null = n/a)
     /** Human-readable reason when the bulk path is unavailable (GenStats). */
     public static volatile String bulkFailReason = "not-initialized";
@@ -298,22 +301,29 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 return bulkReady;
             }
             try {
-                Class<?> cCraftChunkData;
-                try {
-                    // the runtime impl class first (Paper may hand a wrapper)
-                    cCraftChunkData = chunkDataClass();
-                } catch (Throwable t) {
-                    cCraftChunkData = Class.forName(
-                            "org.bukkit.craftbukkit.generator.CraftChunkData");
-                }
-                mGetSections = cCraftChunkData.getMethod("getSections");
+                // CraftChunkData has NO getSections(); the sections live on
+                // the backing ChunkAccess (getHandle().getSections()).
+                Class<?> cCraftChunkData = Class.forName(
+                        "org.bukkit.craftbukkit.generator.CraftChunkData");
+                mGetHandle = cCraftChunkData.getMethod("getHandle");
+                Class<?> cChunkAccess = Class.forName(
+                        "net.minecraft.world.level.chunk.ChunkAccess");
+                mGetSectionsAcc = cChunkAccess.getMethod("getSections");
                 Class<?> cSection = Class.forName(
                         "net.minecraft.world.level.chunk.LevelChunkSection");
-                // field 'states' (PalettedContainer) on the section
                 java.lang.reflect.Field fStates = cSection.getDeclaredField("states");
-                fStates.setAccessible(true);
+                fStates.setAccessible(true); // public final instance field — writable
                 Class<?> cPaletted = fStates.getType();
-                mFillState = cPaletted.getMethod("fill", Object.class);
+                mFillState = cPaletted.getMethod("getAndSetUnchecked",
+                        int.class, int.class, int.class, Object.class);
+                java.lang.reflect.Field fRegistry = cPaletted.getField("registry");
+                Class<?> cStrategy = Class.forName(
+                        "net.minecraft.world.level.chunk.PalettedContainer$Strategy");
+                Object sectionStrategy = cStrategy.getField("SECTION_STATES").get(null);
+                ctorPal = cPaletted.getConstructor(
+                        fRegistry.getType(), Object.class, cStrategy);
+                sectionStrategyField = sectionStrategy;
+                bulkRegistryField = fRegistry;
                 Class<?> cBlock = Class.forName("net.minecraft.world.level.block.Block");
                 mDefaultBlockState = cBlock.getMethod("defaultBlockState");
                 Class<?> cCraftBlockType;
@@ -373,16 +383,30 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static void layoutBulk(ChunkData chunkData, int minY, int height, short[] out,
             Material[] mats) {
         try {
-            Object[] sections = (Object[]) mGetSections.invoke(chunkData);
+            Object handle = mGetHandle.invoke(chunkData);
+            Object[] sections = (Object[]) mGetSectionsAcc.invoke(handle);
             if (sections == null || sections.length == 0) {
                 GenStats.BULK_BROKEN_COUNT.incrementAndGet();
                 layoutV1(chunkData, minY, height, out, mats); // v1 fallback
                 return;
             }
+            Object registry = null;
+            try {
+                Object pal0 = bulkFieldStates.get(sections[0]);
+                if (pal0 != null) {
+                    registry = bulkRegistryField.get(pal0);
+                }
+            } catch (Throwable t) {
+                registry = null;
+            }
+            if (registry == null) {
+                GenStats.BULK_BROKEN_COUNT.incrementAndGet();
+                layoutV1(chunkData, minY, height, out, mats);
+                return;
+            }
             int i = 0;
             for (int sy = 0; sy < sections.length; sy++) {
                 Object section = sections[sy];
-                // scan the 4096 blocks of this section
                 short first = out[i];
                 boolean uniform = true;
                 boolean any = first != 0;
@@ -401,17 +425,44 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     GenStats.BULK_AIR.incrementAndGet();
                     continue; // all air — ChunkData default
                 }
-                if (uniform) {
-                    Object st = sectionStatesById[first];
-                    if (st != null && section != null) {
-                        Object pal = bulkFieldStates.get(section);
-                        mFillState.invoke(pal, st);
-                        GenStats.BULK_FILLED.incrementAndGet();
+                Object st = uniform ? sectionStatesById[first] : null;
+                if (uniform && st != null && section != null) {
+                    // O(1): a fresh single-value container replaces the section's
+                    // palette data wholesale (same final BlockState that the
+                    // per-block setBlock would produce for every position).
+                    Object fresh = ctorPal.newInstance(registry, st, sectionStrategyField);
+                    bulkFieldStates.set(section, fresh);
+                    GenStats.BULK_FILLED.incrementAndGet();
+                    continue;
+                }
+                GenStats.BULK_MIXED.incrementAndGet();
+                if (section != null && ctorPal != null) {
+                    // mixed: a fresh growable container + direct NMS per-block set
+                    // (no CraftChunkData bounds/conversion per call)
+                    Object air = sectionStatesById[0];
+                    if (air != null) {
+                        Object fresh = ctorPal.newInstance(registry, air, sectionStrategyField);
+                        int y0 = sy * 16;
+                        for (int yy = 0; yy < 16; yy++) {
+                            int rowBase = base + (yy << 8);
+                            for (int z = 0; z < 16; z++) {
+                                int cellBase = rowBase + (z << 4);
+                                for (int x = 0; x < 16; x++) {
+                                    short id = out[cellBase + x];
+                                    if (id != 0) {
+                                        Object state = sectionStatesById[id];
+                                        if (state != null) {
+                                            mFillState.invoke(fresh, x, yy, z, state);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        bulkFieldStates.set(section, fresh);
                         continue;
                     }
                 }
-                GenStats.BULK_MIXED.incrementAndGet();
-                // mixed (or unmapped material): per-block fallback for this section
+                // last resort: v1 per-block for this section
                 int y0 = sy * 16;
                 for (int yy = 0; yy < 16; yy++) {
                     for (int z = 0; z < 16; z++) {
@@ -429,6 +480,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             }
         } catch (Throwable t) {
             bulkBroken = true;
+            bulkFailReason = "runtime " + t.getClass().getSimpleName() + ": " + t.getMessage();
             LOG.warning("bulk layout failed once, disabling: " + t);
             layoutV1(chunkData, minY, height, out, mats);
         }
