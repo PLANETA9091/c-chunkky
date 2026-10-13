@@ -458,6 +458,49 @@ pub static PRELIM_SCAN_STEPS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub static AQ_FLUID_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+// Global per-fill phase accumulators (JNI diagnostics under Paper): the
+// plugin reads them via profStatsGlobal() to see the fill's phase split
+// inside the measured window.
+pub static JP_FILLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static JP_WALL_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static JP_SLICE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static JP_CELLFILL_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static JP_MATERIAL_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static JP_SELECT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static JP_PAR_PLANES_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static JP_PAR_STRIPS_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Accumulate one fill's phase deltas into the global JNI prof.
+fn jni_prof_accum(before: &Prof, after: &Prof, wall_ns: u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    JP_FILLS.fetch_add(1, Relaxed);
+    JP_WALL_NS.fetch_add(wall_ns, Relaxed);
+    JP_SLICE_NS.fetch_add(after.fill_slice_ns - before.fill_slice_ns, Relaxed);
+    JP_CELLFILL_NS.fetch_add(after.cellfill_ns - before.cellfill_ns, Relaxed);
+    JP_MATERIAL_NS.fetch_add(after.material_ns - before.material_ns, Relaxed);
+    JP_SELECT_NS.fetch_add(after.select_ns - before.select_ns, Relaxed);
+    JP_PAR_PLANES_NS.fetch_add(after.par_planes_ns - before.par_planes_ns, Relaxed);
+    JP_PAR_STRIPS_NS.fetch_add(after.par_strips_ns - before.par_strips_ns, Relaxed);
+}
+
+/// Compact one-line snapshot for the plugin stats command.
+pub fn jni_prof_snapshot() -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    let n = JP_FILLS.load(Relaxed).max(1) as f64;
+    let f = |a: &std::sync::atomic::AtomicU64| a.load(Relaxed) as f64 / n / 1e6;
+    format!(
+        "jni_prof[fills={} wall={:.2}ms slice={:.2} cellfill={:.2} material={:.2} select={:.2} par_planes={:.2} par_strips={:.2}]",
+        JP_FILLS.load(Relaxed),
+        f(&JP_WALL_NS),
+        f(&JP_SLICE_NS),
+        f(&JP_CELLFILL_NS),
+        f(&JP_MATERIAL_NS),
+        f(&JP_SELECT_NS),
+        f(&JP_PAR_PLANES_NS),
+        f(&JP_PAR_STRIPS_NS),
+    )
+}
+
 struct AqTimer {
     t0: std::time::Instant,
 }
@@ -1472,6 +1515,13 @@ impl<'e> ChunkGen<'e> {
 
     /// Vanilla NoiseBasedChunkGenerator.doFill.
     pub fn fill(&mut self, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
+        let jni_before = self.prof;
+        let jni_t0 = std::time::Instant::now();
+        self.fill_inner(cx, cz, out);
+        jni_prof_accum(&jni_before, &self.prof, jni_t0.elapsed().as_nanos() as u64);
+    }
+
+    fn fill_inner(&mut self, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
         // Prof counters ACCUMULATE across fills (bench resets after warmup).
         let mut p = self.prof;
         let prof = p.enabled;

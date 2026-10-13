@@ -196,6 +196,32 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fillBeard(
     fill_jni(env, ctx, cx, cz, out, marks)
 }
 
+/// profStatsGlobal() -> String: the global per-fill phase snapshot.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_profStatsGlobal(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+) -> jni_sys::jstring {
+    let s = crate::nochunk::jni_prof_snapshot();
+    let tbl = *env;
+    let bytes = s.as_bytes();
+    let arr = ((*tbl).v1_1.NewByteArray)(env, bytes.len() as jni_sys::jsize);
+    if arr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let ptr = ((*tbl).v1_1.GetByteArrayElements)(env, arr, std::ptr::null_mut());
+    if !ptr.is_null() {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
+        ((*tbl).v1_1.ReleaseByteArrayElements)(
+            env,
+            arr,
+            ptr,
+            0,
+        );
+    }
+    arr as jni_sys::jstring
+}
+
 /// Shared fill path. If `marks` is non-null it receives the packed fluid
 /// update positions; returns the mark count (0 when marks is null).
 unsafe fn fill_jni(

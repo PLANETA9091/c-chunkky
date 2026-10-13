@@ -44,6 +44,10 @@ public final class CrusstyGenPlugin extends JavaPlugin {
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (command.getName().equals("crusgenstats")) {
             sender.sendMessage("[CrusstyGen] native noise stage: " + GenStats.snapshot());
+            try {
+                sender.sendMessage("[CrusstyGen] " + ChunkGenNative.profStatsGlobal());
+            } catch (Throwable ignored) {
+            }
             return true;
         }
         return false;

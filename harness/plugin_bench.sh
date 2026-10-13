@@ -87,6 +87,7 @@ fi
 # Parallel fill threads for the native .so (slice corners + cell strips):
 # corners/strips are pure functions of position; results bit-identical.
 export CRUS_FILL_THREADS="${CRUS_FILL_THREADS:-2}"
+export CRUS_PROFILE="${CRUS_PROFILE:-1}"
 # hard cleanup: a stale server (e.g. from the oracle step) holding RCON port
 # 25575 silently steals judge rcon traffic — kill everything first.
 bash harness/server_down.sh >/dev/null 2>&1 || true

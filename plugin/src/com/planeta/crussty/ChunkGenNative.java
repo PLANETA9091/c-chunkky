@@ -37,6 +37,9 @@ public final class ChunkGenNative {
      */
     public static native int fillBeard(long ctx, int chunkX, int chunkZ, short[] out, long[] marks, int[] beard);
 
+    /** Global per-fill phase snapshot from the native (JNI diagnostics). */
+    public static native String profStatsGlobal();
+
     private ChunkGenNative() {
     }
 }
