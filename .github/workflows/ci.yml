@@ -121,7 +121,7 @@ jobs:
           echo "vanilla diff% = $D"
           python3 harness/judge_gate.py "${D:-999}" "${CRUS_GATE_VANILLA:-35.0}" vanilla
         env:
-          CRUS_GATE_VANILLA: 35.0
+          CRUS_GATE_VANILLA: 0.05
 
       - name: Judge world=datapack
         run: |
@@ -131,7 +131,7 @@ jobs:
           echo "datapack diff% = $D"
           python3 harness/judge_gate.py "${D:-999}" "${CRUS_GATE_DATAPACK:-35.0}" datapack
         env:
-          CRUS_GATE_DATAPACK: 35.0
+          CRUS_GATE_DATAPACK: 0.05
 
       - name: Timing summary
         if: always()
