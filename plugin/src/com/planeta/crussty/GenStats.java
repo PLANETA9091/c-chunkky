@@ -40,6 +40,7 @@ public final class GenStats {
 
     private static final int RING = 4096;
     private static final long[] NANOS = new long[RING];
+    private static final long[] NATIVE_NANOS = new long[RING];
     private static final AtomicLong COUNT = new AtomicLong();
     private static final AtomicLong TOTAL = new AtomicLong();
     // phase breakdown of the measured window (native fill / java layout /
@@ -68,6 +69,7 @@ public final class GenStats {
     static void record(long nanos, long nativeNs, long layoutNs, long beardNs, long marksNs) {
         long i = COUNT.getAndIncrement();
         NANOS[(int) (i % RING)] = nanos;
+        NATIVE_NANOS[(int) (i % RING)] = nativeNs;
         TOTAL.addAndGet(nanos);
         NATIVE_TOTAL.addAndGet(nativeNs);
         LAYOUT_TOTAL.addAndGet(layoutNs);
@@ -86,13 +88,18 @@ public final class GenStats {
         java.util.Arrays.sort(copy);
         long p50 = copy[(int) (n / 2)];
         long p99 = copy[(int) Math.min(n - 1, (long) (n * 0.99))];
+        long[] ncopy = new long[(int) n];
+        System.arraycopy(NATIVE_NANOS, 0, ncopy, 0, (int) n);
+        java.util.Arrays.sort(ncopy);
+        long natP50 = ncopy[(int) n / 2];
         double meanUs = (TOTAL.get() / Math.max(1, COUNT.get())) / 1000.0;
         long cnt = Math.max(1, COUNT.get());
         return String.format(
-                "chunks=%d  mean=%.1fus  p50=%.1fus  p99=%.1fus  max=%.1fus  [native=%.2fms layout=%.2fms beard=%.2fms marks=%.2fms]  [sections filled=%d mixed=%d air=%d v1fallback=%d bulk=%s]  marks_seen=%d marks_landed=%d bridge_no_chunk=%d bridge_err=%d beard_chunks=%d beard_pieces=%d",
+                "chunks=%d  mean=%.1fus  p50=%.1fus  p99=%.1fus  max=%.1fus  [native=%.2fms nat_p50=%.2fms layout=%.2fms beard=%.2fms marks=%.2fms]  [sections filled=%d mixed=%d air=%d v1fallback=%d bulk=%s]  marks_seen=%d marks_landed=%d bridge_no_chunk=%d bridge_err=%d beard_chunks=%d beard_pieces=%d",
                 COUNT.get(), meanUs,
                 p50 / 1000.0, p99 / 1000.0, copy[(int) (n - 1)] / 1000.0,
                 NATIVE_TOTAL.get() / (double) cnt / 1e6,
+                natP50 / 1e6,
                 LAYOUT_TOTAL.get() / (double) cnt / 1e6,
                 BEARD_TOTAL.get() / (double) cnt / 1e6,
                 MARKS_TOTAL.get() / (double) cnt / 1e6,
