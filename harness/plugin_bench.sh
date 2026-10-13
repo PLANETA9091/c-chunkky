@@ -93,31 +93,33 @@ bash harness/server_up.sh
 T0=$(date +%s%N)
 EXPECT=0
 STALL=0
+RETRY_MAX=4
 for cz in $(seq -4 3); do
   for cx in $(seq -4 3); do
     EXPECT=$((EXPECT + 1))
-    rcon "forceload add $((cx * 16)) $((cz * 16)) $((cx * 16 + 15)) $((cz * 16 + 15))" >/dev/null || true
-    for i in $(seq 1 45); do
-      LOADED=$(rcon "crusstatus" | grep -m1 -o "region\[-4\.\.3,-4\.\.3\]=[0-9]*" | grep -o "[0-9]*" | head -1 || true)
-      if [ "${LOADED:-0}" -ge "$EXPECT" ]; then STALL=0; break; fi
-      if [ "$((i % 15))" -eq 0 ]; then
-        echo "[pregen stall] chunk $cx $cz: wait ${i}s, loaded=${LOADED:-?}/$EXPECT (server alive check below)"
-        tail -n 6 "$SRV/run.out" 2>/dev/null || true
-        if [ "$i" -eq 30 ]; then
-          echo "=== jstack (worker threads stuck?) chunk $cx $cz ==="
-          JP=$(pgrep -f 'paper.jar' | head -1)
-          [ -n "$JP" ] && (timeout 20 "${JAVA_HOME:-}/bin/jstack" "$JP" 2>/dev/null || jstack "$JP" 2>/dev/null || true) | grep -A 12 -E '"(Worker-Main|Server thread|Chunk)"' | head -120
-          echo "=== paper debug chunks (chunk $cx $cz) ==="
-          python3 harness/rcon.py 127.0.0.1 25575 crussty "paper debug chunks" >/dev/null 2>&1 || true
-          sleep 3
-          tail -n 25 "$SRV/run.out" 2>/dev/null || true
+    loaded_ok=0
+    for attempt in $(seq 1 $RETRY_MAX); do
+      rcon "forceload add $((cx * 16)) $((cz * 16)) $((cx * 16 + 15)) $((cz * 16 + 15))" >/dev/null || true
+      for i in $(seq 1 30); do
+        LOADED=$(rcon "crusstatus" | grep -m1 -o "region\[-4\.\.3,-4\.\.3\]=[0-9]*" | grep -o "[0-9]*" | head -1 || true)
+        if [ "${LOADED:-0}" -ge "$EXPECT" ]; then loaded_ok=1; STALL=0; break; fi
+        if [ "$((i % 15))" -eq 0 ]; then
+          echo "[pregen stall] chunk $cx $cz (attempt $attempt): wait ${i}s, loaded=${LOADED:-?}/$EXPECT"
+          tail -n 4 "$SRV/run.out" 2>/dev/null || true
         fi
-      fi
-      sleep 1
+        sleep 1
+      done
+      [ "$loaded_ok" -eq 1 ] && break
+      # Paper's chunk scheduler can lose the generation task when generation
+      # is extremely fast (native fill ~16ms): the ticket exists but no worker
+      # is scheduled (jstack: all Worker-Main idle). A repeated forceload add
+      # re-issues the ticket — idempotent, and the vanilla reference capture
+      # (bench.sh, slow path) never hits this, so parity is unaffected.
+      echo "[pregen RETRY] chunk $cx $cz did not load in 30s (attempt $attempt/$RETRY_MAX) — re-issuing forceload"
     done
-    if [ "${LOADED:-0}" -lt "$EXPECT" ]; then
+    if [ "$loaded_ok" -ne 1 ]; then
       STALL=$((STALL + 1))
-      echo "[pregen STALL] chunk $cx $cz did not load in 45s (loaded=${LOADED:-?}/$EXPECT, stalls=$STALL)"
+      echo "[pregen STALL] chunk $cx $cz did not load after $RETRY_MAX attempts (loaded=${LOADED:-?}/$EXPECT, stalls=$STALL)"
       if [ "$STALL" -ge 3 ]; then
         echo "=== FATAL: server not loading chunks — full jstack ==="
         JP=$(pgrep -f 'paper.jar' | head -1)
