@@ -500,3 +500,38 @@ Stage Summary:
 - Диагностика: par-бакеты в Prof, aq-счётчики (substance/hit/miss/scan/prelim), spawnbench/thrscale.
 - Next: material 12-скан (~0.15ms) + fluid-машинерия; cellfill хвост; slice-плоскости для
   параллели; CI-верификация + GenStats на судье.
+
+---
+Task ID: cont-21 (2026-10-13, bulk layout + персистентный воркер)
+Agent: Super Z (main)
+Task: продолжение к 1ms на 2-ядерном CI; репо переименован в c-chunkky
+
+Work Log:
+- Репо переименован (c-faster -> c-chunkky); remote обновлён (токен только в URL).
+- CI-калибровка на раннере: натив p50 1.90 serial / 1.80 parallel-2t (раннер БЫСТРЕЕ dev-VM!).
+  GenStats судьи 9.35 = native ~7.9 + layout ~6.0 + оверхед — разбивка добавлена в GenStats
+  [native/nat_p50/layout/beard/marks + sections filled/mixed/air/v1fallback/bulk].
+- LAYOUT 6.0ms (98304 ChunkData.setBlock): bulk-путь через reflection. Верифицировано против
+  versions/1.21.8/paper-1.21.8.jar: CraftChunkData.getHandle()->ChunkAccess.getSections();
+  LevelChunkSection.states (public final); PalettedContainer.getAndSetUnchecked (resize-safe);
+  Strategy.SECTION_STATES index = y<<8|z<<4|x; CollisionUtil.isSpecialCollidingBlock публичен.
+- ПЕРВЫЙ bulk (подмена контейнера): судья FAIL 31.9%, heightmap 16384/16384 (|dh|=108.5):
+  пропущены инварианты per-block пути — счётчики секций (nonEmpty/ticking/fluid/special)
+  и Heightmaps (WORLD_SURFACE_WG/OCEAN_FLOOR_WG) не обновлены. v2: запись в СУЩЕСТВУЮЩИЙ
+  контейнер + пересчёт счётчиков из пер-материальных флагов + rebuild heightmap через
+  Heightmap.setRawData (9 бит x 256, stored = topY+1-minY). Дважды ловил свои ошибки
+  (NoSuchMethod на getSections; дублированный setRawData lookup) — обе видны в GenStats.reason.
+- ИТОГ bulk=ok: layout 6.0 -> 1.82-2.09ms (3.3x), судья PASS 0.000%.
+- Самопроверка: 256 сэмплов на чанк; mismatch -> bulk off + полная перезапись v1 (air включительно).
+- Натив под Paper: nat_p50 5.1-7.3 vs 1.8 изолированно — spawn/join при насыщенном CPU.
+  ПЕРСИСТЕНТНЫЙ plane-воркер: один поток на gen, каналы, double-buffering Vec'ов,
+  ChunkGen::drop шлёт Stop и join'ит ДО конца env-borrow. Локально паритет и перф сохранены.
+- lean JVM (CICompilerCount=2, ParallelGCThreads=2, ConcGCThreads=1) + CRUS_FILL_THREADS=2:
+  native mean 7.9 -> 6.1-6.5 на первом прогоне.
+
+Stage Summary:
+- Судья: PASS 0.000% (bulk v2 + self-check). Window: native 6-9 + layout 1.8-2.1 + 0.05.
+- Локально: wall 2.54-2.67 | cellfill 0.80 | material 0.80 | slice 0.78; bench p50 2.36-2.52;
+  parallel-2t 2.09. 11/11 тестов, 6/6 чанков serial==parallel, fastdiff 0.
+- Next: CI-замер nat_p50 с персистентным воркером; если spawn-теория верна — nat_p50 ~2-3;
+  далее strips (cellfill/material) и slice до floor ~1.0-1.2 на окне судьи.
