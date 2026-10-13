@@ -389,3 +389,34 @@ Stage Summary:
 - Локальный перф: wall 5.21 -> 4.57ms, slice 2.69 -> 2.07, parallel-2t 2.73 -> 2.50, bench p50 3.19.
 - Следующие фронты: персистентные plane-воркеры (spawn-оверхед), slice LUT градиентов,
   cellfill -- 1.0ms (интерпретатор уже flat), material ore -- скалярный (батч не подходит).
+
+---
+Task ID: cont-17 (2026-10-13, перф-спурт II: ore-toggle батч + диагностическая анатомия)
+Agent: Super Z (main)
+Task: продолжение оптимизации к 1ms; замеры на тех же phases/bench
+
+Work Log:
+- Базлайн (2-core VM): serial wall 4.57-4.60 (slice 2.11-2.13 | cellfill 1.01 | material 1.28-1.31 | other 0.16);
+  parallel-2t 2.51-2.75; bench perf 2t p50 6.97. bench perf p50 на seed 0 (12.5ms) В ДВА раза тяжелее реального seed
+  (5.15) — seed-0 мир плотнее по aquifer-работе; bench fill получил CRUS_BENCH_SEED для честных хэшей обоих миров.
+- Анатомия slice (новые PROF-счётчики, CRUS_DIAG=1): NormalNoise-batch 0.75ms/2443 вызова (320ns ср.), BlendedNoise
+  0.64ms/225; дерево+memo+сплайны ~0.65ms. Слоты 1-7 — noodle/ore_vein шумы (slotdump: 7 детей, ВСЕ с y_scale=1..4 —
+  честно y-зависимы, column-cache неприменим; total col-cache нод 7/279). lanes=8 медленнее lanes=4 на VM (memo
+  footprint) — подтверждено дважды.
+- ПОПЫТКИ С ОТКАТОМ: (1) векторный floor-setup в noise_5_batch_avx2 (vroundpd+cvtpd) — slice 2.07->2.24 REGRESSION
+  (скалярные floor перекрываются OoO, векторная цепочка сериализует walk-зависимости; повтор известного урока);
+  (2) персистентный plane-pool (Mutex+Condvar) — p50 не улучшился (spawn ~50us дёшев), прогоны шумные;
+  (3) overlap (main strips, pool workers planes) — wall 3.0 vs 2.75 REGRESSION: cross-phase L2 eviction (BatchMemo
+  ~108KB vs cell_cache 784KB). Все три откаты зафиксированы комментарием в fill_parallel.
+- ВНЕДРЕНО: (1) ore-toggle 4-wide AVX2 батч для all-solid рядов + y-range гейт [-60,50] -> STONE (ore_reached
+  457850->436462/16ч); material 1.31->1.28; ore_finish с next_serial перед ridged (защита от stale memo);
+  (2) env-диагностика кэшируется в полях (5 getenv/fill снято); (3) diag-инструменты: PROF counters, slotdump,
+  bench fill CRUS_BENCH_SEED. NO_AQUIFER+NO_VEIN дно: material 1.27 — базовый per-block проход 13ns/блок.
+- Верификация каждого шага: 6 чанков x (seed 0 + real 3257840388504953787) out_hash бит-в-байт, parallel-2t ==
+  serial, 11/11 юнит-тестов. Коммит c075a1a -> push -> CI.
+
+Stage Summary:
+- Прогресс скромный (wall ~-0.05), но анатомия теперь точная: slice = noodle/ore y-шум (0.65) + blended (0.64) +
+  дерево (0.65) + climate (0.1); material = per-block база (1.27) + ore (0.29); cellfill 1.0 (AVX 2-row).
+- Уроки: VM 2 ядра = фазовая схема лучше overlap; векторный setup в Perlin ядре НЕ работает; spawn дешёв.
+- Следующие фронты: slot0 flat-компиляция (дерево 0.65), material row4 SIMD (база 1.27), blended LUT.
