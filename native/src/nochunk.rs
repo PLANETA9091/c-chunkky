@@ -368,6 +368,24 @@ pub struct ChunkGen<'e> {
     slice_threads: usize,
     /// calibrated batch width for slice corner evaluation (4 or 8)
     slice_lanes: usize,
+    /// Fast-path resolve of the vein_toggle node: when the router root is a
+    /// bare Noise node, the 4 z-neighborhood blocks of an all-solid row can
+    /// sample it through one AVX2 batch (lane-identical arithmetic,
+    /// bit-exact vs the per-block scalar eval).
+    ore_toggle_fast: Option<OreToggleFast>,
+    /// Env-gated diagnostics, resolved ONCE at construction (getenv in the
+    /// hot path costs several us per fill at 5+ call sites).
+    dbg_slice: bool,
+    dbg_plane: bool,
+    dump_planes_want: Option<i32>,
+    pipeline_forced: Option<bool>,
+}
+
+#[derive(Clone, Copy)]
+struct OreToggleFast {
+    noise_idx: usize,
+    xz_scale: f64,
+    y_scale: f64,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -425,6 +443,24 @@ impl<'e> ChunkGen<'e> {
         let sea_level = env.wg.sea_level as i32;
         let interp = InterpState::new(compiled.interp_slots, cell_count_xz, cell_count_y);
         let cellfill_prog_opt = compile_cellfill(&compiled.arena, compiled.router["final_density"]);
+        let ore_toggle_fast = {
+            let vt = compiled.router["vein_toggle"] as usize;
+            match &compiled.arena[vt] {
+                WKind::Noise { noise_id, xz_scale, y_scale } => Some(OreToggleFast {
+                    noise_idx: compiled.noise_resolved[*noise_id as usize] as usize,
+                    xz_scale: *xz_scale,
+                    y_scale: *y_scale,
+                }),
+                _ => None,
+            }
+        };
+        let pipeline_forced = if std::env::var("CRUS_NO_PIPELINE").is_ok() {
+            Some(false)
+        } else if std::env::var("CRUS_PIPELINE").ok().as_deref() == Some("1") {
+            Some(true)
+        } else {
+            None
+        };
         ChunkGen {
             sched: false,
             marks: Vec::with_capacity(1024),
@@ -477,6 +513,13 @@ impl<'e> ChunkGen<'e> {
             vein_toggle: router("vein_toggle"),
             vein_ridged: router("vein_ridged"),
             vein_gap: router("vein_gap"),
+            ore_toggle_fast,
+            dbg_slice: std::env::var("CRUS_DBG_SLICE").is_ok(),
+            dbg_plane: std::env::var("CRUS_DBG_PLANE").is_ok(),
+            dump_planes_want: std::env::var("CRUS_DUMP_PLANES")
+                .ok()
+                .and_then(|v| v.parse::<i32>().ok()),
+            pipeline_forced,
             interp,
             cell_cache: vec![0.0; cell_width * cell_height * cell_width],
             prelim: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -761,6 +804,11 @@ impl<'e> ChunkGen<'e> {
             vein_toggle: self.vein_toggle,
             vein_ridged: self.vein_ridged,
             vein_gap: self.vein_gap,
+            ore_toggle_fast: self.ore_toggle_fast,
+            dbg_slice: self.dbg_slice,
+            dbg_plane: self.dbg_plane,
+            dump_planes_want: self.dump_planes_want,
+            pipeline_forced: self.pipeline_forced,
             interp: self.interp.clone(),
             cell_cache: vec![0.0; self.cell_cache.len()],
             final_density_slot: self.final_density_slot,
@@ -846,6 +894,11 @@ impl<'e> ChunkGen<'e> {
         // planes 1..=ccx in parallel (each plane = 5*49 corner points).
         // Worker count is bounded by the GLOBAL thread budget: concurrent
         // fills from Paper chunk workers must not multiply threads.
+        // NOTE: a persistent worker pool (Mutex+Condvar queue) and an
+        // overlapped variant (main strips while workers plane) were both
+        // measured NO FASTER than this spawn scheme on the 2-core dev VM
+        // (spawn is ~50us; Condvar round-trips and cross-phase L2 eviction
+        // ate the gain). Kept spawn; revisit on 4+ cores.
         {
             let env = self.env;
             let compiled = std::sync::Arc::clone(&self.compiled);
@@ -1038,7 +1091,7 @@ impl<'e> ChunkGen<'e> {
         // Prof counters ACCUMULATE across fills (bench resets after warmup).
         let mut p = self.prof;
         let prof = p.enabled;
-        let dbg = std::env::var("CRUS_DBG_SLICE").is_ok();
+        let dbg = self.dbg_slice;
         out.fill(AIR);
         let min_block_x = cx * 16;
         let min_block_z = cz * 16;
@@ -1070,7 +1123,7 @@ impl<'e> ChunkGen<'e> {
 
         // initializeForFirstCellX: fill slice0 at x-plane first_cell_x
         let t_fs0 = if prof { Some(std::time::Instant::now()) } else { None };
-        let dbg = std::env::var("CRUS_DBG_SLICE").is_ok();
+        let dbg = self.dbg_slice;
         let t0 = std::time::Instant::now();
         let plane_slots = self.interp_children.len() as usize;
         let plane_len = plane_slots * (self.cell_count_xz + 1) * (self.cell_count_y + 1);
@@ -1081,7 +1134,7 @@ impl<'e> ChunkGen<'e> {
             && self.plane_cache.len() == plane_len;
         if cache_hit {
             p.plane_hits += 1;
-        } else if std::env::var("CRUS_DBG_PLANE").is_ok() {
+        } else if self.dbg_plane {
             eprintln!(
                 "[plane-miss] want_x={} have_x={} want_z={} have_z={} len {}/{}",
                 first_cell_x * cw, self.plane_cache_x, first_cell_z, self.plane_cache_z,
@@ -1114,13 +1167,10 @@ impl<'e> ChunkGen<'e> {
         // the only cell core, cache pressure); on 4+ cores it wins. Default:
         // on when >= 4 logical cores; CRUS_NO_PIPELINE=1 forces off,
         // CRUS_PIPELINE=1 forces on.
-        let pipeline = match (
-            std::env::var("CRUS_NO_PIPELINE").is_ok(),
-            std::env::var("CRUS_PIPELINE").ok().as_deref() == Some("1"),
-        ) {
-            (true, _) => false,
-            (false, true) => true,
-            (false, false) => std::thread::available_parallelism()
+        let pipeline = match (self.pipeline_forced, std::env::var("CRUS_PIPELINE").ok().as_deref() == Some("1")) {
+            (Some(false), _) => false,
+            (Some(true), _) => true,
+            (None, _) => std::thread::available_parallelism()
                 .map(|n| n.get() >= 4)
                 .unwrap_or(false),
         };
@@ -1247,7 +1297,7 @@ impl<'e> ChunkGen<'e> {
             self.plane_cache_x = plane_x;
             self.plane_cache_z = first_cell_z;
         }
-        if std::env::var("CRUS_DBG_PLANE").is_ok() {
+        if self.dbg_plane {
             eprintln!("[fill-end] ({},{}) plane_hits_now={} cache_x={} want_next={}", cx, cz, p.plane_hits, self.plane_cache_x, ((first_cell_x + self.cell_count_xz as i32) * cw) as i64);
         }
         // merge per-block counters (material_rule mutates self.prof directly;
@@ -1783,8 +1833,7 @@ impl<'e> ChunkGen<'e> {
                 }
             }
         }
-        if std::env::var("CRUS_DUMP_PLANES").is_ok() {
-            let want: i32 = std::env::var("CRUS_DUMP_PLANES").unwrap().parse().unwrap_or(i32::MIN);
+        if let Some(want) = self.dump_planes_want {
             if start_cell_x == want {
                 let nz = self.cell_count_xz + 1;
                 let ny = self.cell_count_y + 1;
@@ -1850,9 +1899,31 @@ impl<'e> ChunkGen<'e> {
         };
         if s0 > 0.0 && s1 > 0.0 && s2 > 0.0 && s3 > 0.0 {
             self.sched = false;
+            // Both vein tuples' y-ranges (copper [0,50], iron [-60,-8]) fail
+            // outside [-60, 50] regardless of toggle sign: vanilla's ore
+            // rule resolves to None for EVERY block -> STONE fallback. The
+            // whole row can skip toggle/rng/ridged sampling entirely.
+            if !self.ore_veins_enabled
+                || self.no_ore
+                || block_y > 50
+                || block_y < -60
+            {
+                for iz in 0..4i32 {
+                    out[base_out + (iz * 16) as usize] = STONE;
+                }
+                return true;
+            }
+            // 4-wide vein_toggle batch: one AVX2 NormalNoise sample for the
+            // whole row (bit-exact lane-identical arithmetic).
+            let ds = self.ore_toggle_row4(block_x, block_y, block_z0);
             for iz in 0..4i32 {
                 let block_z = block_z0 + iz;
-                let block = self.ore_row_block(block_x, block_y, block_z);
+                let block = match ds[iz as usize] {
+                    Some(d) => self
+                        .ore_finish(Pt { x: block_x, y: block_y, z: block_z }, d)
+                        .unwrap_or(STONE),
+                    None => self.ore_row_block(block_x, block_y, block_z),
+                };
                 if block != AIR {
                     let out_idx = base_out + (iz * 16) as usize;
                     out[out_idx] = block;
@@ -2488,6 +2559,12 @@ impl<'e> ChunkGen<'e> {
         }
         self.memo.next_serial(); // fresh pt context (block coords)
         let d = self.eval(self.vein_toggle, pt, Mode::Block);
+        self.ore_finish(pt, d)
+    }
+
+    /// Continuation of ore_vein after the toggle sample (shared by the
+    /// scalar path and the 4-wide batch toggle path in material_row4).
+    fn ore_finish(&self, pt: Pt, d: f64) -> Option<u16> {
         let y = pt.y;
         let (ore, raw, filler, ty_min_y, ty_max_y) = if d > 0.0 {
             (COPPER_ORE, RAW_COPPER_BLOCK, GRANITE, 0, 50)
@@ -2509,6 +2586,10 @@ impl<'e> ChunkGen<'e> {
         if rng.next_f32() > 0.7f32 {
             return None;
         }
+        // Fresh serial: the batch toggle path bypasses memo entirely, so
+        // this evaluation context must not inherit the previous block's
+        // stamps (scalar path re-bumps too — harmless serial bump).
+        self.memo.next_serial();
         let ridged = self.eval(self.vein_ridged, pt, Mode::Block);
         if ridged >= 0.0 {
             return None;
@@ -2531,6 +2612,32 @@ impl<'e> ChunkGen<'e> {
             }
         }
         Some(filler)
+    }
+
+    /// 4-wide vein_toggle batch for an all-solid row (x, y fixed, z0..z0+4).
+    /// Bit-exact: mirrors the WKind::Noise node exactly (coordinate scales,
+    /// then NormalNoise::get_value_batch — lane-identical arithmetic to the
+    /// scalar eval). None entries (fast path unavailable) fall back to the
+    /// per-block scalar eval in the caller.
+    #[inline]
+    fn ore_toggle_row4(&self, x: i32, y: i32, z0: i32) -> [Option<f64>; 4] {
+        let mut out = [None; 4];
+        if let Some(f) = &self.ore_toggle_fast {
+            let mut xi = [0f64; 4];
+            let mut yi = [0f64; 4];
+            let mut zi = [0f64; 4];
+            for l in 0..4 {
+                xi[l] = x as f64 * f.xz_scale;
+                yi[l] = y as f64 * f.y_scale;
+                zi[l] = (z0 + l as i32) as f64 * f.xz_scale;
+            }
+            let n = &self.env.noise.list[f.noise_idx];
+            let v = n.get_value_batch(&xi, &yi, &zi);
+            for l in 0..4 {
+                out[l] = Some(v[l]);
+            }
+        }
+        out
     }
 }
 

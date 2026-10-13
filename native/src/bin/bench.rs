@@ -237,7 +237,13 @@ fn cmd_marks(cx: i32, cz: i32, seed: i64) {
 }
 
 fn cmd_fill(cx: i32, cz: i32) {
-    let env = Env::new(0);
+    // CRUS_BENCH_SEED: verify bit-exactness on the real-world seed too
+    // (seed-0 hashes alone can miss real-seed-only bugs — see worklog).
+    let seed: i64 = std::env::var("CRUS_BENCH_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let env = Env::new(seed);
     let mut gen = ChunkGen::new(&env);
     let mut out = [0u16; OUT_LEN];
     let t0 = std::time::Instant::now();

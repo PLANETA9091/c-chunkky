@@ -387,6 +387,10 @@ impl ImprovedNoise {
     ) -> [f64; 4] {
         use std::arch::x86_64::*;
         // ---- scalar cell setup (identical to the scalar path) ----
+        // NOTE: a vectorized variant of this setup (vroundpd + cvtpd_epi32)
+        // was measured as a REGRESSION (slice 2.07 -> 2.24): the scalar
+        // floors overlap via OoO while the vector chain serializes the
+        // dependency into the permutation walks. Kept scalar.
         let mut xi = [0i32; 4];
         let mut yi = [0i32; 4];
         let mut zi = [0i32; 4];

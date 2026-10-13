@@ -1234,6 +1234,14 @@ fn narrow_ref<T, const N: usize, const M: usize>(a: &[T; N]) -> &[T; M] {
 /// batch kernels (bit-exact per lane in both). N is a const-generic known at
 /// monomorphization time, so the dead branch is compiled out (the runtime
 /// len checks in copy_from_slice never fire).
+/// Diagnostic phase counters (CRUS_PROFILE=1): AVX noise batch time inside
+/// the slice tree walk. Zero-cost when profiling is off.
+pub static PROF_NOISE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_BLEND_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_NOISE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_BLEND_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[inline]
 fn noise_batch_n<const N: usize>(
     n: &crate::noise::NormalNoise,
@@ -1244,12 +1252,26 @@ fn noise_batch_n<const N: usize>(
     // try_into on &[f64; N] is an identity cast when N matches the target —
     // zero copies at monomorphization.
     let mut out = [0.0f64; N];
+    let t0 = if crate::density::PROF_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
     if N == 8 {
         let v = n.get_value_batch8(narrow_ref(x), narrow_ref(y), narrow_ref(z));
         out.copy_from_slice(&v);
     } else {
         let v = n.get_value_batch(narrow_ref(x), narrow_ref(y), narrow_ref(z));
         out.copy_from_slice(&v);
+    }
+    if let Some(t0) = t0 {
+        PROF_NOISE_NS.fetch_add(
+            t0.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    if PROF_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        PROF_NOISE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     out
 }
@@ -1263,6 +1285,11 @@ fn blended_batch_n<const N: usize>(
     bz: &[i32; N],
 ) -> [f64; N] {
     let mut out = [0.0f64; N];
+    let t0 = if PROF_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
     if N == 8 {
         let v = blended[instance].compute_batch8(
             narrow_ref(bx),
@@ -1277,6 +1304,15 @@ fn blended_batch_n<const N: usize>(
             narrow_ref(bz),
         );
         out.copy_from_slice(&v);
+    }
+    if let Some(t0) = t0 {
+        PROF_BLEND_NS.fetch_add(
+            t0.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    if PROF_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        PROF_BLEND_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     out
 }
