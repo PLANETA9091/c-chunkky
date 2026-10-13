@@ -24,4 +24,12 @@ fn main() {
         }
         None => println!("cellfill: None (fallback interpreter)"),
     }
+    // column-cache stats: how many Cache2d/FlatCache nodes got slots
+    let assigned = compiled.col_idx.iter().filter(|&&c| c != u32::MAX).count();
+    println!(
+        "col-cache: {} slots / {} cache2d+flatcache candidates, arena {} nodes",
+        compiled.col_count,
+        assigned,
+        compiled.arena.len()
+    );
 }

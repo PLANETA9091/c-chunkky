@@ -426,11 +426,19 @@ impl ImprovedNoise {
         // ---- per-lane permutation walk: 8 corner gradient bytes ----
         // Corner bit mapping (matches sample_and_lerp):
         //   bit0 = X (dx-1), bit1 = Y (weird_dy-1), bit2 = Z (dz-1)
-        // (memoized per lattice cell — bit-exact; consecutive y-corners of
-        // low-frequency octaves share cells and skip the walk entirely)
+        // Lane dedup: slice batches fill lanes with CONSECUTIVE y corners at
+        // fixed (x, z); low-frequency octaves land several corners in the
+        // same lattice cell, so a lane equal to its predecessor skips the
+        // walk. Three integer compares on miss — bit-exact by pure-function
+        // identity.
         let mut grad = [[0u8; 8]; 4];
-        for l in 0..4 {
-            grad[l] = self.cell_grads(xi[l], yi[l], zi[l]);
+        grad[0] = self.cell_grads(xi[0], yi[0], zi[0]);
+        for l in 1..4 {
+            grad[l] = if xi[l] == xi[l - 1] && yi[l] == yi[l - 1] && zi[l] == zi[l - 1] {
+                grad[l - 1]
+            } else {
+                self.cell_grads(xi[l], yi[l], zi[l])
+            };
         }
 
         // ---- 8 grad_dots across the 4 lanes ----
@@ -565,8 +573,13 @@ impl ImprovedNoise {
         let fz = smooth(dzv);
 
         let mut grad = [[0u8; 8]; 8];
-        for l in 0..8 {
-            grad[l] = self.cell_grads(xi[l], yi[l], zi[l]);
+        grad[0] = self.cell_grads(xi[0], yi[0], zi[0]);
+        for l in 1..8 {
+            grad[l] = if xi[l] == xi[l - 1] && yi[l] == yi[l - 1] && zi[l] == zi[l - 1] {
+                grad[l - 1]
+            } else {
+                self.cell_grads(xi[l], yi[l], zi[l])
+            };
         }
 
         let one = _mm512_set1_pd(1.0);
