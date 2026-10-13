@@ -1,0 +1,87 @@
+name: judge_ab
+# A/B diagnostic judge: run ONE judge world with configurable env knobs and
+# upload the verdict + dumps. Used to isolate judge nondeterminism sources
+# (beard bridge create-tickets, fill threads, lanes) without touching main CI.
+on:
+  workflow_dispatch:
+    inputs:
+      world:
+        description: 'judge world (vanilla | datapack)'
+        required: false
+        default: 'vanilla'
+      no_beard:
+        description: 'CRUS_NO_BEARD=1 (disable beardifier bridge)'
+        required: false
+        default: '1'
+      fill_threads:
+        description: 'CRUS_FILL_THREADS'
+        required: false
+        default: '4'
+      lanes:
+        description: 'CRUS_LANES (0 = runtime calibration)'
+        required: false
+        default: '0'
+      pipeline:
+        description: 'CRUS_PIPELINE (1=on, 0=no, empty=auto)'
+        required: false
+        default: ''
+
+jobs:
+  judge_ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: native/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('native/Cargo.lock') }}
+      - name: Cache paper server
+        uses: actions/cache@v4
+        with:
+          path: |
+            server/versions
+            server/libraries
+            server/paper.jar
+          key: paper-1.21.8-b60
+
+      - name: Build native (release)
+        working-directory: native
+        run: cargo build --release --locked || cargo build --release
+      - name: Build plugin
+        run: |
+          chmod +x plugin/build.sh
+          ./plugin/build.sh
+      - name: Bootstrap server dir
+        run: |
+          chmod +x harness/bootstrap_server.sh
+          bash harness/bootstrap_server.sh 60
+
+      - name: Judge (A/B)
+        run: |
+          set -o pipefail
+          W=${{ inputs.world }}
+          export CRUS_FRESH=1
+          export CRUS_NO_BEARD=${{ inputs.no_beard }}
+          export CRUS_FILL_THREADS=${{ inputs.fill_threads }}
+          [ "${{ inputs.lanes }}" != "0" ] && export CRUS_LANES=${{ inputs.lanes }}
+          [ -n "${{ inputs.pipeline }}" ] && export CRUS_PIPELINE=${{ inputs.pipeline }}
+          timeout 900 bash harness/plugin_bench.sh "$W" 2>&1 | tee judge_ab.log || true
+          D=$(grep -oP 'OVERALL: \d+/\d+ blocks differ = \K[0-9.]+' judge_ab.log | tail -1)
+          echo "AB verdict diff% = $D (no_beard=${{ inputs.no_beard }} threads=${{ inputs.fill_threads }} lanes=${{ inputs.lanes }} pipe=${{ inputs.pipeline }})"
+
+      - name: Upload A/B artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: judge-ab-${{ inputs.world }}-nb${{ inputs.no_beard }}-t${{ inputs.fill_threads }}
+          path: |
+            judge_ab.log
+            reference/dumps_plugin/
