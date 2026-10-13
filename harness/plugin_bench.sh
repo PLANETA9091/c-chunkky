@@ -103,6 +103,11 @@ for cz in $(seq -4 3); do
       if [ "$((i % 15))" -eq 0 ]; then
         echo "[pregen stall] chunk $cx $cz: wait ${i}s, loaded=${LOADED:-?}/$EXPECT (server alive check below)"
         tail -n 6 "$SRV/run.out" 2>/dev/null || true
+        if [ "$i" -eq 30 ]; then
+          echo "=== jstack (worker threads stuck?) chunk $cx $cz ==="
+          JP=$(pgrep -f 'paper.jar' | head -1)
+          [ -n "$JP" ] && (timeout 20 "${JAVA_HOME:-}/bin/jstack" "$JP" 2>/dev/null || jstack "$JP" 2>/dev/null || true) | grep -A 12 -E '"(Worker-Main|Server thread|Chunk)"' | head -120
+        fi
       fi
       sleep 1
     done
@@ -110,8 +115,11 @@ for cz in $(seq -4 3); do
       STALL=$((STALL + 1))
       echo "[pregen STALL] chunk $cx $cz did not load in 45s (loaded=${LOADED:-?}/$EXPECT, stalls=$STALL)"
       if [ "$STALL" -ge 3 ]; then
-        echo "=== FATAL: server not loading chunks — last 80 lines of run.out ==="
-        tail -n 80 "$SRV/run.out" 2>/dev/null || true
+        echo "=== FATAL: server not loading chunks — full jstack ==="
+        JP=$(pgrep -f 'paper.jar' | head -1)
+        [ -n "$JP" ] && (timeout 30 "${JAVA_HOME:-}/bin/jstack" "$JP" 2>/dev/null || jstack "$JP" 2>/dev/null || true) | head -400
+        echo "=== FATAL: last 120 lines of run.out ==="
+        tail -n 120 "$SRV/run.out" 2>/dev/null || true
         exit 9
       fi
     fi
