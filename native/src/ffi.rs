@@ -204,22 +204,11 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_profStatsG
 ) -> jni_sys::jstring {
     let s = crate::nochunk::jni_prof_snapshot();
     let tbl = *env;
-    let bytes = s.as_bytes();
-    let arr = ((*tbl).v1_1.NewByteArray)(env, bytes.len() as jni_sys::jsize);
-    if arr.is_null() {
-        return std::ptr::null_mut();
-    }
-    let ptr = ((*tbl).v1_1.GetByteArrayElements)(env, arr, std::ptr::null_mut());
-    if !ptr.is_null() {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
-        ((*tbl).v1_1.ReleaseByteArrayElements)(
-            env,
-            arr,
-            ptr,
-            0,
-        );
-    }
-    arr as jni_sys::jstring
+    let c = match std::ffi::CString::new(s) {
+        Ok(c) => c,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    ((*tbl).v1_1.NewStringUTF)(env, c.as_ptr())
 }
 
 /// Shared fill path. If `marks` is non-null it receives the packed fluid
