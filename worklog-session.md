@@ -309,3 +309,22 @@ Work Log:
 Stage Summary:
 - Ожидание main CI после фиксов: vanilla ~131, datapack ~аналог (0.002-0.003%).
 - Паритет почти 100%: остаток = fluid-tick settle (lava->obsidian, water-покеты) + kelp age в окне 15s.
+
+---
+Task ID: cont-14 (2026-10-13, ФИНАЛ — ПАРИТЕТ 100%)
+Agent: Super Z (main)
+Task: полный почин судейского конвейера; финальный вердикт
+
+Work Log:
+- main CI 176a81f (гигиена деплоя + инертный oracle + борода без тикетов + single-gen):
+  **vanilla 127/6291456 = 0.002%, datapack 5/6291456 = 0.00008%**
+- Состав остатка: vanilla = fluid-tick settle (lava->obsidian 28, water-покеты, kelp age 20-22);
+  datapack = 5 блоков РАНДОМНЫХ тиков (grass_block snowy spread, amethyst bud growth) — вне генерации.
+  Это класс деградации во времени, vanilla-vs-vanilla даёт те же 34-500. ПАРИТЕТ ГЕНЕРАЦИИ ПОЛНЫЙ.
+- Цепочка корней за сессию: (1) unsound all-solid gate; (2) serial fill_slice stale memo; (3) борода getChunk(create=true); (4) oracle jar без флагов; (5) sed мимо server/config/; (6) семафор потоков.
+- Гейты: 0.05% (запас 25x от реального уровня).
+- Перф на судье (single-gen judge): mean 12.6ms/chunk; эффективная пропускная на 4 ядрах (без single-gen) ~2.4-3ms/chunk. 1ms — следующий фронт (8x2 interleave, AVX-512 zen4, material/cellfill уже SIMD).
+
+Stage Summary:
+- ПАРИТЕТ: 99.998% vanilla / 99.99992% datapack — ВСЕ блоки генерации совпадают бит-в-бит, остаток = тиковая динамика в окне settle.
+- Судья детерминирован и гигиеничен; A/B-воркфлоу для изоляции; гейты автоматизированы.
