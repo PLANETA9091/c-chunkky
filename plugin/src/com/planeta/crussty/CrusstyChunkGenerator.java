@@ -350,6 +350,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         try {
             Object[] sections = (Object[]) mGetSections.invoke(chunkData);
             if (sections == null || sections.length == 0) {
+                GenStats.BULK_BROKEN_COUNT.incrementAndGet();
                 layoutV1(chunkData, minY, height, out, mats); // v1 fallback
                 return;
             }
@@ -372,6 +373,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 }
                 i += 4096;
                 if (!any) {
+                    GenStats.BULK_AIR.incrementAndGet();
                     continue; // all air — ChunkData default
                 }
                 if (uniform) {
@@ -379,9 +381,11 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     if (st != null && section != null) {
                         Object pal = bulkFieldStates.get(section);
                         mFillState.invoke(pal, st);
+                        GenStats.BULK_FILLED.incrementAndGet();
                         continue;
                     }
                 }
+                GenStats.BULK_MIXED.incrementAndGet();
                 // mixed (or unmapped material): per-block fallback for this section
                 int y0 = sy * 16;
                 for (int yy = 0; yy < 16; yy++) {

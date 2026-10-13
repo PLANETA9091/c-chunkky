@@ -49,7 +49,14 @@ if [ -f "$PGEN_YML" ]; then
   sed -i -E 's/^([[:space:]]*gen-parallelism:[[:space:]]*)(default|true)[[:space:]]*$/\1false/' "$PGEN_YML"
 fi
 
-java -Xms512M -Xmx1536M $JAVA_LIB_PATH_ARGS -Dpaper.chunk-system.gen-parallelism=false -jar paper.jar nogui < run.in > run.out 2>&1 &
+# Lean JVM for the judge box (2 cores): the native fill threads and the
+# measured GenStats window compete with JIT compiler / GC threads. Fewer
+# background JVM threads = less interference with the parallel fill.
+java -Xms512M -Xmx1536M $JAVA_LIB_PATH_ARGS \
+  -Dpaper.chunk-system.gen-parallelism=false \
+  -XX:CICompilerCount=2 -XX:ParallelGCThreads=2 -XX:ConcGCThreads=1 \
+  -XX:NonProfiledCodeHeapSize=64m \
+  -jar paper.jar nogui < run.in > run.out 2>&1 &
 echo $! > server.pid
 echo "paper started pid=$(cat server.pid) fifo_holder=$(cat fifo.pid)"
 

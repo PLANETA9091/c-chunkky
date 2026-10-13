@@ -48,6 +48,11 @@ public final class GenStats {
     static final AtomicLong LAYOUT_TOTAL = new AtomicLong();
     static final AtomicLong BEARD_TOTAL = new AtomicLong();
     static final AtomicLong MARKS_TOTAL = new AtomicLong();
+    // bulk section layout diagnostics
+    static final AtomicLong BULK_FILLED = new AtomicLong();
+    static final AtomicLong BULK_MIXED = new AtomicLong();
+    static final AtomicLong BULK_AIR = new AtomicLong();
+    static final AtomicLong BULK_BROKEN_COUNT = new AtomicLong();
     // fluid-update mark diagnostics
     static final AtomicLong MARKS_SEEN = new AtomicLong();
     static final AtomicLong MARKS_LANDED = new AtomicLong();
@@ -84,13 +89,14 @@ public final class GenStats {
         double meanUs = (TOTAL.get() / Math.max(1, COUNT.get())) / 1000.0;
         long cnt = Math.max(1, COUNT.get());
         return String.format(
-                "chunks=%d  mean=%.1fus  p50=%.1fus  p99=%.1fus  max=%.1fus  [native=%.2fms layout=%.2fms beard=%.2fms marks=%.2fms]  marks_seen=%d marks_landed=%d bridge_no_chunk=%d bridge_err=%d beard_chunks=%d beard_pieces=%d",
+                "chunks=%d  mean=%.1fus  p50=%.1fus  p99=%.1fus  max=%.1fus  [native=%.2fms layout=%.2fms beard=%.2fms marks=%.2fms]  [sections filled=%d mixed=%d air=%d v1fallback=%d]  marks_seen=%d marks_landed=%d bridge_no_chunk=%d bridge_err=%d beard_chunks=%d beard_pieces=%d",
                 COUNT.get(), meanUs,
                 p50 / 1000.0, p99 / 1000.0, copy[(int) (n - 1)] / 1000.0,
                 NATIVE_TOTAL.get() / (double) cnt / 1e6,
                 LAYOUT_TOTAL.get() / (double) cnt / 1e6,
                 BEARD_TOTAL.get() / (double) cnt / 1e6,
                 MARKS_TOTAL.get() / (double) cnt / 1e6,
+                BULK_FILLED.get(), BULK_MIXED.get(), BULK_AIR.get(), BULK_BROKEN_COUNT.get(),
                 MARKS_SEEN.get(), MARKS_LANDED.get(), BRIDGE_NO_CHUNK.get(), BRIDGE_ERROR.get(),
                 BEARD_CHUNKS.get(), BEARD_PIECES.get());
     }
