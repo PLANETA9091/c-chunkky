@@ -288,10 +288,17 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static volatile boolean bulkReady;
     private static final Object BULK_LOCK = new Object();
     private static Method mGetSectionsAcc, mFillState, mDefaultBlockState;
+    private static Method mGetAndSetUnch, mSpecialPred, mSetRawData;
+    private static java.lang.reflect.Field fNonEmpty, fTickingBlock, fTickingFluid, fSpecial;
+    private static java.lang.reflect.Field fTickingList, fIsOpaque, fChunkHeightmaps;
     private static Constructor<?> ctorPal;
     private static Object sectionStrategyField;
     private static java.lang.reflect.Field bulkRegistryField;
     private static Object[] sectionStatesById; // NMS BlockState per material id (null = n/a)
+    // per-material invariant flags (computed once from the NMS states)
+    private static boolean[] matAir, matTicking, matFluidTicking, matSpecial;
+    private static final java.util.Map<Object, boolean[]> opaqueCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
     /** Human-readable reason when the bulk path is unavailable (GenStats). */
     public static volatile String bulkFailReason = "not-initialized";
 
@@ -324,6 +331,36 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                         fRegistry.getType(), Object.class, cStrategy);
                 sectionStrategyField = sectionStrategy;
                 bulkRegistryField = fRegistry;
+                mGetAndSetUnch = cPaletted.getMethod("getAndSetUnchecked",
+                        int.class, int.class, int.class, Object.class);
+                fNonEmpty = cSection.getDeclaredField("nonEmptyBlockCount");
+                fTickingBlock = cSection.getDeclaredField("tickingBlockCount");
+                fTickingFluid = cSection.getDeclaredField("tickingFluidCount");
+                fSpecial = cSection.getDeclaredField("specialCollidingBlocks");
+                fTickingList = cSection.getDeclaredField("tickingBlocks");
+                fNonEmpty.setAccessible(true);
+                fTickingBlock.setAccessible(true);
+                fTickingFluid.setAccessible(true);
+                fSpecial.setAccessible(true);
+                fTickingList.setAccessible(true);
+                Class<?> cCollisionUtil = Class.forName(
+                        "ca.spottedleaf.moonrise.patches.collisions.CollisionUtil");
+                Class<?> cStateBase = Class.forName(
+                        "net.minecraft.world.level.block.state.BlockBehaviour$BlockStateBase");
+                mSpecialPred = cCollisionUtil.getMethod("isSpecialCollidingBlock", cStateBase);
+                Class<?> cHeightmap = Class.forName(
+                        "net.minecraft.world.level.levelgen.Heightmap");
+                fIsOpaque = cHeightmap.getDeclaredField("isOpaque");
+                fIsOpaque.setAccessible(true);
+                mSetRawData = cHeightmap.getMethod("setRawData",
+                        cChunkAccess, cHeightmap.getClass()
+                                .getEnclosingClass() == null ? cHeightmap : Class.forName(
+                                "net.minecraft.world.level.levelgen.Heightmap$Types"), long[].class);
+                mSetRawData = cHeightmap.getMethod("setRawData",
+                        Class.forName("net.minecraft.world.level.chunk.ChunkAccess"),
+                        Class.forName("net.minecraft.world.level.levelgen.Heightmap$Types"),
+                        long[].class);
+                fChunkHeightmaps = cChunkAccess.getField("heightmaps");
                 Class<?> cBlock = Class.forName("net.minecraft.world.level.block.Block");
                 mDefaultBlockState = cBlock.getMethod("defaultBlockState");
                 Class<?> cCraftBlockType;
@@ -354,6 +391,34 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 }
                 sectionStatesById = states;
                 bulkFieldStates = fStates;
+                // per-material invariant flags for the section recount
+                int n = mats.length;
+                matAir = new boolean[n];
+                matTicking = new boolean[n];
+                matFluidTicking = new boolean[n];
+                matSpecial = new boolean[n];
+                Class<?> cBlockState = Class.forName(
+                        "net.minecraft.world.level.block.state.BlockState");
+                Method mIsAir = cBlockState.getMethod("isAir");
+                Method mIsRandTick = cBlockState.getMethod("isRandomlyTicking");
+                Method mGetFluid = cBlockState.getMethod("getFluidState");
+                Class<?> cFluidState = Class.forName(
+                        "net.minecraft.world.level.material.FluidState");
+                Method mFluidRand = cFluidState.getMethod("isRandomlyTicking");
+                Method mFluidEmpty = cFluidState.getMethod("isEmpty");
+                for (int i = 0; i < n; i++) {
+                    Object st = states[i];
+                    if (st == null) {
+                        matAir[i] = true;
+                        continue;
+                    }
+                    matAir[i] = (Boolean) mIsAir.invoke(st);
+                    matTicking[i] = (Boolean) mIsRandTick.invoke(st);
+                    Object fluid = mGetFluid.invoke(st);
+                    matFluidTicking[i] = (Boolean) mFluidRand.invoke(fluid)
+                            && !(Boolean) mFluidEmpty.invoke(fluid);
+                    matSpecial[i] = (Boolean) mSpecialPred.invoke(null, st);
+                }
                 bulkReady = true;
                 bulkFailReason = null;
             } catch (Throwable t) {
@@ -408,16 +473,12 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             for (int sy = 0; sy < sections.length; sy++) {
                 Object section = sections[sy];
                 short first = out[i];
-                boolean uniform = true;
                 boolean any = first != 0;
                 int base = i;
                 for (int k = 1; k < 4096; k++) {
-                    short id = out[base + k];
-                    if (id != first) {
-                        uniform = false;
-                    }
-                    if (id != 0) {
+                    if (out[base + k] != 0) {
                         any = true;
+                        break;
                     }
                 }
                 i += 4096;
@@ -425,45 +486,56 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     GenStats.BULK_AIR.incrementAndGet();
                     continue; // all air — ChunkData default
                 }
-                // (self-verification happens once per chunk after the layout)
-                Object st = uniform ? sectionStatesById[first] : null;
-                if (uniform && st != null && section != null) {
-                    // O(1): a fresh single-value container replaces the section's
-                    // palette data wholesale (same final BlockState that the
-                    // per-block setBlock would produce for every position).
-                    Object fresh = ctorPal.newInstance(registry, st, sectionStrategyField);
-                    bulkFieldStates.set(section, fresh);
-                    GenStats.BULK_FILLED.incrementAndGet();
-                    continue;
-                }
-                GenStats.BULK_MIXED.incrementAndGet();
-                if (section != null && ctorPal != null) {
-                    // mixed: a fresh growable container + direct NMS per-block set
-                    // (no CraftChunkData bounds/conversion per call)
-                    Object air = sectionStatesById[0];
-                    if (air != null) {
-                        Object fresh = ctorPal.newInstance(registry, air, sectionStrategyField);
-                        int y0 = sy * 16;
-                        for (int yy = 0; yy < 16; yy++) {
-                            int rowBase = base + (yy << 8);
-                            for (int z = 0; z < 16; z++) {
-                                int cellBase = rowBase + (z << 4);
-                                for (int x = 0; x < 16; x++) {
-                                    short id = out[cellBase + x];
-                                    if (id != 0) {
-                                        Object state = sectionStatesById[id];
-                                        if (state != null) {
-                                            mFillState.invoke(fresh, x, yy, z, state);
-                                        }
-                                    }
-                                }
+                if (section != null) {
+                    // write the blocks into the EXISTING (air-filled) container via
+                    // the resize-safe NMS path, then rebuild the section's cached
+                    // counters and the Moonrise ticking list — the invariants the
+                    // per-block ChunkAccess.setBlockState normally maintains.
+                    Object pal = bulkFieldStates.get(section);
+                    int nonEmpty = 0, tickB = 0, tickF = 0, special = 0;
+                    for (int k = 0; k < 4096; k++) {
+                        short id = out[base + k];
+                        if (id == 0) {
+                            continue;
+                        }
+                        Object state = sectionStatesById[id];
+                        if (state == null) {
+                            continue;
+                        }
+                        mGetAndSetUnch.invoke(pal, k & 15, k >> 8, (k >> 4) & 15, state);
+                        nonEmpty++;
+                        if (matTicking[id]) {
+                            tickB++;
+                        }
+                        if (matFluidTicking[id]) {
+                            tickF++;
+                        }
+                        if (matSpecial[id]) {
+                            special++;
+                        }
+                    }
+                    fNonEmpty.setShort(section, (short) nonEmpty);
+                    fTickingBlock.setShort(section, (short) tickB);
+                    fTickingFluid.setShort(section, (short) tickF);
+                    fSpecial.setShort(section, (short) special);
+                    Object list = fTickingList.get(section);
+                    if (tickB > 0) {
+                        Method mAdd = list.getClass().getMethod("add", short.class);
+                        for (int k = 0; k < 4096; k++) {
+                            short id = out[base + k];
+                            if (id != 0 && matTicking[id]) {
+                                mAdd.invoke(list, (short) k);
                             }
                         }
-                        bulkFieldStates.set(section, fresh);
-                        continue;
                     }
+                    if (uniform2(out, base)) {
+                        GenStats.BULK_FILLED.incrementAndGet();
+                    } else {
+                        GenStats.BULK_MIXED.incrementAndGet();
+                    }
+                    continue;
                 }
-                // last resort: v1 per-block for this section
+                // null section: v1 per-block (creates the section lazily)
                 int y0 = sy * 16;
                 for (int yy = 0; yy < 16; yy++) {
                     for (int z = 0; z < 16; z++) {
@@ -479,6 +551,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     }
                 }
             }
+            rebuildHeightmaps(handle, out, minY);
             // SELF-VERIFICATION: sample 256 positions; a single mismatch
             // (e.g. stale heightmap/section invariants from the direct
             // container writes) disables bulk and repairs THIS chunk with an
@@ -496,6 +569,68 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             bulkFailReason = "runtime " + t.getClass().getSimpleName() + ": " + t.getMessage();
             LOG.warning("bulk layout failed once, disabling: " + t);
             layoutV1(chunkData, minY, height, out, mats);
+        }
+    }
+
+    private static boolean uniform2(short[] out, int base) {
+        short f = out[base];
+        for (int k = 1; k < 4096; k++) {
+            if (out[base + k] != f) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Rebuild the chunk's generation heightmaps from out[] (the per-block
+     * ChunkAccess.setBlockState path updates them incrementally; the bulk
+     * write must reproduce them or the surface/carver stages misplace). */
+    private static void rebuildHeightmaps(Object handle, short[] out, int minY)
+            throws Exception {
+        Object hmaps = fChunkHeightmaps.get(handle);
+        for (Object e : ((java.util.Map<?, ?>) hmaps).entrySet()) {
+            Object type = ((java.util.Map.Entry<?, ?>) e).getKey();
+            Object hm = ((java.util.Map.Entry<?, ?>) e).getValue();
+            java.util.function.Predicate<Object> pred =
+                    (java.util.function.Predicate<Object>) fIsOpaque.get(hm);
+            boolean[] opq = opaqueCache.computeIfAbsent(type, t -> {
+                boolean[] a = new boolean[sectionStatesById.length];
+                for (int i2 = 0; i2 < a.length; i2++) {
+                    try {
+                        a[i2] = sectionStatesById[i2] != null
+                                && pred.test(sectionStatesById[i2]);
+                    } catch (Throwable tt) {
+                        a[i2] = false;
+                    }
+                }
+                return a;
+            });
+            // 9 bits x 256 entries, LSB-first, spanning across longs
+            long[] raw = new long[(256 * 9 + 63) / 64];
+            for (int x = 0; x < 16; x++) {
+                for (int z = 0; z < 16; z++) {
+                    int val = 0;
+                    for (int yy = 383; yy >= 0; yy--) {
+                        short id = out[(yy << 8) + (z << 4) + x];
+                        if (id != 0 && opq[id]) {
+                            // Heightmap.update stores (worldY+1) - minY; with
+                            // worldY = minY + yy the stored value is yy+1.
+                            val = yy + 1;
+                            break;
+                        }
+                    }
+                    int stored = val;
+                    int idx = x * 16 + z;
+                    long bitPos = (long) idx * 9;
+                    int li = (int) (bitPos >> 6);
+                    int off = (int) (bitPos & 63);
+                    raw[li] |= ((long) stored) << off;
+                    if (off + 9 > 64) {
+                        raw[li + 1] |= ((long) stored) >>> (64 - off);
+                    }
+                }
+            }
+            mSetRawData.invoke(hm, handle, type, raw);
         }
     }
 
