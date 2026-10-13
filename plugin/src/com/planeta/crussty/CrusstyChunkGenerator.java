@@ -398,9 +398,16 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     int sx = (int) (refPos & 0xFFFFFFFFL);
                     int sz = (int) (refPos >> 32);
                     Object startChunk = mGetChunkAtIfLoaded.invoke(chunkSource, sx, sz);
-                    if (startChunk == null) {
-                        startChunk = mGetChunkFull.invoke(chunkSource, sx, sz, startsStatus, true);
-                    }
+                    // NEVER pass create=true to getChunk here (the old fallback
+                    // did). Issuing chunk tickets from INSIDE the noise stage
+                    // makes Paper generate dependency chunks out of forceload
+                    // order, reshuffling the feature-decoration streams -> blob/
+                    // kelp features land differently => ~5900 judge diffs vs a
+                    // vanilla capture (measured: beard ON 6046, beard OFF 190).
+                    // Per vanilla dependency semantics the 3x3 structure starts
+                    // already exist at noise stage; a not-yet-loaded start
+                    // (region border) is skipped below — strictly closer to
+                    // vanilla than reordering the world.
                     if (startChunk == null) {
                         continue;
                     }

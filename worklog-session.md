@@ -275,3 +275,20 @@ Work Log:
 Stage Summary:
 - Судья: 25211 -> 6133; после recapture с детерминизмом ожидание существенного падения.
 - Перф: CI 16.4 -> 9.4ms mean (семафор); локально serial 12.8ms, @2thr 7.0ms.
+
+---
+Task ID: cont-12 (2026-10-13, СПИЛЛ НАЙДЕН)
+Agent: Super Z (main)
+Task: корень ~5900 feature-диффов найден и устранён
+
+Work Log:
+- Цепочка вердиктов: 7f1c567 (гейт удалён) -> 6133; +детерминизм gen-parallelism (sed был no-op — неверный путь $ROOT/config/ vs $ROOT/server/config/, исправлен d314e07); рефы пересняты дважды (a4a6fc5: обе стороны single-gen) -> всё равно 6046. Vanilla-vs-vanilla (два capture) = ~500 fluid-tick блоков, блобы НЕ сдвинуты и не совпадают -> RNG-поток декораций.
+- A/B workflow (judge_ab.yml, dispatch): CRUS_NO_BEARD=1 -> **190/6291456 = 0.003%** (beard ON давал 6046).
+- КОРЕНЬ: collectBeard -> getChunk(STRUCTURE_STARTS, create=true) по соседям — тикеты изнутри noise-стадии переставляют генерацию dependency-чанков -> Paper декорирует в другом порядке -> спорные spill-блоки и сдвинутые RNG-потоки (блобы/келп).
+- beard_chunks=0 вводил в заблуждение: getChunk(create) срабатывает ДО проверки piece (refsMap с non-NONE adaptation непуст в регионе).
+- FIX: create=true убран (getChunkAtIfLoaded только; не загружен -> skip). Комментарий в коде с измерениями.
+- Остаток 190: y=-54/-55 lava->obsidian + water-покеты (fluid-tick settle) + kelp age 20-22 (рост в окне 15s) — та же природа, что vanilla-vs-vanilla (34). НЕ парити.
+
+Stage Summary:
+- Паритет: 6046 -> 190 (0.003%) после фикса bridge; ожидание CI == 190 на vanilla и ~аналог на datapack.
+- Пуш 07157ab: judge_ab workflow + вердикт-инфраструктура.
