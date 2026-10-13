@@ -2023,6 +2023,10 @@ impl WKind {
 impl InterpState {
     /// Copy helpers for the cross-chunk corner-plane cache (raw f64 copy of
     /// the slice0 buffer; layout is slot-major and stable).
+    pub fn slice0_len(&self) -> usize {
+        self.slice0.len()
+    }
+
     pub fn copy_slice0_from(&mut self, src: &[f64]) {
         let n = self.slice0.len().min(src.len());
         self.slice0[..n].copy_from_slice(&src[..n]);

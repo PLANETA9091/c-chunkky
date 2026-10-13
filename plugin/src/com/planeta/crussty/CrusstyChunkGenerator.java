@@ -232,7 +232,10 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             lockBox[0].unlock();
         }
         long tNative = System.nanoTime() - tNat0;
-        if (!bulkReady) {
+        if (!bulkReady && !bulkBroken) {
+            if (cachedChunkDataClass == null) {
+                cachedChunkDataClass = chunkData.getClass();
+            }
             initBulk();
         }
         long tLay0 = System.nanoTime();
@@ -286,6 +289,8 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static final Object BULK_LOCK = new Object();
     private static Method mGetSections, mFillState, mDefaultBlockState;
     private static Object[] sectionStatesById; // NMS BlockState per material id (null = n/a)
+    /** Human-readable reason when the bulk path is unavailable (GenStats). */
+    public static volatile String bulkFailReason = "not-initialized";
 
     private static boolean initBulk() {
         synchronized (BULK_LOCK) {
@@ -293,8 +298,14 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 return bulkReady;
             }
             try {
-                Class<?> cCraftChunkData = Class.forName(
-                        "org.bukkit.craftbukkit.generator.CraftChunkData");
+                Class<?> cCraftChunkData;
+                try {
+                    // the runtime impl class first (Paper may hand a wrapper)
+                    cCraftChunkData = chunkDataClass();
+                } catch (Throwable t) {
+                    cCraftChunkData = Class.forName(
+                            "org.bukkit.craftbukkit.generator.CraftChunkData");
+                }
                 mGetSections = cCraftChunkData.getMethod("getSections");
                 Class<?> cSection = Class.forName(
                         "net.minecraft.world.level.chunk.LevelChunkSection");
@@ -334,12 +345,26 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 sectionStatesById = states;
                 bulkFieldStates = fStates;
                 bulkReady = true;
+                bulkFailReason = null;
             } catch (Throwable t) {
                 bulkBroken = true;
+                bulkFailReason = t.getClass().getSimpleName() + ": " + t.getMessage()
+                        + (t.getCause() != null ? " / cause " + t.getCause() : "");
                 LOG.warning("bulk section layout unavailable, using per-block path: " + t);
             }
             return bulkReady;
         }
+    }
+
+    private static volatile Class<?> cachedChunkDataClass;
+    private static Class<?> chunkDataClass() {
+        // resolved from a live instance by the first generateNoise caller;
+        // null until then -> caller falls back to the static name.
+        Class<?> c = cachedChunkDataClass;
+        if (c == null) {
+            throw new IllegalStateException("no runtime chunk-data class yet");
+        }
+        return c;
     }
 
     private static java.lang.reflect.Field bulkFieldStates;

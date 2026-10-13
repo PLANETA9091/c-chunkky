@@ -700,6 +700,16 @@ impl<'e> ChunkGen<'e> {
     /// Evaluates every interp child over the exact fill_slice corner points
     /// (5 x-planes x 5 z-corners x 49 y-corners = 1225) and prints timings
     /// plus a node-kind histogram of each child subtree.
+    pub fn interp_children_len(&self) -> usize {
+        self.interp_children.len()
+    }
+    pub fn slice0_len(&self) -> usize {
+        self.interp.slice0_len()
+    }
+    pub fn plane_cache_len(&self) -> usize {
+        self.plane_cache.len()
+    }
+
     pub fn profile_slice_children(&self, cx: i32, cz: i32) {
         use std::collections::BTreeMap;
         let min_block_x = cx * 16;
