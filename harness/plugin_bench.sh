@@ -109,7 +109,10 @@ for cz in $(seq -4 3); do
     for attempt in $(seq 1 $RETRY_MAX); do
       rcon "forceload add $((cx * 16)) $((cz * 16)) $((cx * 16 + 15)) $((cz * 16 + 15))" >/dev/null || true
       for i in $(seq 1 30); do
-        LOADED=$(rcon "crusstatus" | grep -m1 -o "region\[-4\.\.3,-4\.\.3\]=[0-9]*" | grep -o "[0-9]*" | head -1 || true)
+        # parse the counter AFTER '=': the naive [0-9]* match returned "4"
+        # (the first number inside "[-4..3,-4..3]") — the loop then waited
+        # forever on chunk #5. [0-9]+$ grabs the trailing counter only.
+        LOADED=$(rcon "crusstatus" | grep -m1 -o "region\[-4\.\.3,-4\.\.3\]=[0-9]*" | grep -oE "[0-9]+$" || true)
         if [ "${LOADED:-0}" -ge "$EXPECT" ]; then loaded_ok=1; STALL=0; break; fi
         if [ "$((i % 15))" -eq 0 ]; then
           echo "[pregen stall] chunk $cx $cz (attempt $attempt): wait ${i}s, loaded=${LOADED:-?}/$EXPECT"
