@@ -23,6 +23,17 @@ jobs:
       - name: Bench smoke (fills a few chunks, checks ABI)
         working-directory: native
         run: cargo run --release --bin bench -- --smoke 2>/dev/null || cargo run --release --bin bench | head -20
+      - name: Perf calibration on the target 2-core runner (same suite as local)
+        working-directory: native
+        run: |
+          echo "=== bench perf 64 (seed 0) ==="
+          cargo run --release --bin bench -- perf 64
+          echo "=== bench perf 64 (real seed, CRUS_BENCH_SEED) ==="
+          CRUS_BENCH_SEED=3257840388504953787 cargo run --release --bin bench -- perf 64
+          echo "=== phases (real seed) ==="
+          cargo run --release --bin phases
+          echo "=== parallel-2t bench perf 64 (real seed) ==="
+          CRUS_FILL_THREADS=2 CRUS_BENCH_SEED=3257840388504953787 cargo run --release --bin bench -- perf 64
       - name: Clippy (non-blocking)
         working-directory: native
         run: cargo clippy --release 2>&1 | tail -20
