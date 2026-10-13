@@ -35,7 +35,21 @@ NATIVE_SO="$ROOT/native/target/release/libcrussty_chunkgen.so"
 if [ -f "$NATIVE_SO" ]; then
   JAVA_LIB_PATH_ARGS="-Djava.library.path=$ROOT/native/target/release"
 fi
-java -Xms512M -Xmx1536M $JAVA_LIB_PATH_ARGS -jar paper.jar nogui < run.in > run.out 2>&1 &
+
+# --- generation determinism ------------------------------------------------
+# Paper's chunk system generates/decorates chunks on a worker pool; with the
+# native noise stage ~5x faster than vanilla the relative decoration order of
+# the dependency-cascade chunks changes run-to-run. Features spill into the
+# 3x3 WorldGenRegion, so the winner of a contested boundary block depends on
+# that order => ~6k block diffs at chunk edges that are NOT parity bugs.
+# Forcing single-threaded generation makes decoration order strictly
+# forceload-order on BOTH sides (vanilla capture and judge) => deterministic.
+PGEN_YML="$ROOT/config/paper-global.yml"
+if [ -f "$PGEN_YML" ]; then
+  sed -i -E 's/^([[:space:]]*gen-parallelism:[[:space:]]*)(default|true)[[:space:]]*$/\1false/' "$PGEN_YML"
+fi
+
+java -Xms512M -Xmx1536M $JAVA_LIB_PATH_ARGS -Dpaper.chunk-system.gen-parallelism=false -jar paper.jar nogui < run.in > run.out 2>&1 &
 echo $! > server.pid
 echo "paper started pid=$(cat server.pid) fifo_holder=$(cat fifo.pid)"
 

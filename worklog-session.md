@@ -257,3 +257,21 @@ Stage Summary:
 - Паритет восстановлен локально; push -> CI должен вернуть судью к ~441-эре (детерминированный протокол) или лучше.
 - Перф на dev-box: 12.8ms serial / 7.0ms @2thr (этот Xeon vCPU заметно медленнее прежнего бокса; re-baseline на CI).
 - Next: CI-вердикт, затем перф-спурт (slice single-thread латентность, AVX-512 калибровка, threads).
+
+---
+Task ID: cont-11 (2026-10-13, verdict + determinism)
+Agent: Super Z (main)
+Task: разбор зелёного вердикта 7f1c567 (6133), перф-семafor, детерминизм декораций
+
+Work Log:
+- Вердикт 7f1c567: vanilla 6133 (0.097%), datapack 3709 (0.059%), перф mean 9.36ms (было 16.4). Пещеры/лава/аквифер — ПОЛНОСТЬЮ исправлены (air->deepslate 10006 -> 0, lava->deepslate 1954 -> 0).
+- Остаток 6133: ~3700 stone-blob swaps + ~2000 kelp/seagrass — ВСЕ на краях чанков (d=0: 1309, d=1: 1059, ->0 к d=6) = decoration spill 3x3 WorldGenRegion.
+- 441-эра была на 50ms/чанк нативе (chunks=312), сейчас 9.4ms (chunks=366) — скорость фазы шума меняет порядок декораций dependency-каскада => разный winner спорных блоков на границах. Это НЕ парити-баг, а недетерминизм протокола.
+- Семафор потоков натива (THREAD_PERMITS, budget=CRUS_MAX_THREADS или available_parallelism): fill_parallel плоскости/стрипы + pipeline берут пермиты из общего пула -> 4 Paper-воркера больше не множат потоки (16.4 -> 9.4ms на CI подтверждено вердиктом).
+- Дебаг plane_hits=0 оказался целочисленным делением 7/8 в печати — кэш плоскостей работает (7/8 попаданий).
+- ДЕТЕРМИНИЗМ: paper-global.yml chunk-system.gen-parallelism=false (sed в server_up.sh + -Dpaper.chunk-system.gen-parallelism=false) на ОБЕИХ сторонах (capture и judge идут через server_up.sh). Ключ подтверждён локальным бутом Paper 1.21.8 b30.
+- Next: recapture refs (recapture.yml) с gen-parallelism=false -> judge должен упасть до истинного остатка (ожидание ~0-441).
+
+Stage Summary:
+- Судья: 25211 -> 6133; после recapture с детерминизмом ожидание существенного падения.
+- Перф: CI 16.4 -> 9.4ms mean (семафор); локально serial 12.8ms, @2thr 7.0ms.

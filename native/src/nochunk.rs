@@ -226,6 +226,63 @@ impl AquiferState {
 /// are well under 10k/chunk — overflow just skips extra marks).
 const MARK_CAP: usize = 65535;
 
+// ---- Global native-thread budget ----
+// Paper calls fill() from SEVERAL chunk-worker threads concurrently. Without
+// coordination, each fill spawns its own plane/strip/pipeline workers ->
+// (Paper workers) x (internal threads) oversubscription: on a 4-vCPU CI runner
+// that measured 16.4ms p50 per chunk vs ~7ms local. A process-wide permit pool
+// (budget = cores) hands internal parallelism only to fills that can actually
+// use it; concurrent fills run serial or partially parallel instead of
+// thrashing. Bit-exactness is unaffected: all parallel paths were already
+// deterministic partitions of pure functions.
+static THREAD_PERMITS: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+fn thread_budget() -> usize {
+    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        std::env::var("CRUS_MAX_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1))
+    })
+}
+
+/// Take up to `want` permits from the global pool; returns granted (0..=want).
+#[inline]
+fn take_permits(want: usize) -> usize {
+    if want == 0 {
+        return 0;
+    }
+    loop {
+        let cur = THREAD_PERMITS.load(std::sync::atomic::Ordering::Relaxed);
+        let avail = (thread_budget() as isize - cur).max(0) as usize;
+        let grant = avail.min(want);
+        if grant > 0 {
+            if THREAD_PERMITS
+                .compare_exchange_weak(
+                    cur,
+                    cur + grant as isize,
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return grant;
+            }
+        } else {
+            return 0;
+        }
+    }
+}
+
+#[inline]
+fn give_permits(n: usize) {
+    if n > 0 {
+        THREAD_PERMITS.fetch_sub(n as isize, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 pub struct ChunkGen<'e> {
     /// vanilla shouldScheduleFluidUpdate for the last aquifer eval.
     sched: bool,
@@ -741,7 +798,8 @@ impl<'e> ChunkGen<'e> {
         let cnmy = self.cell_noise_min_y;
         let plane_slots = self.interp_children.len();
         let plane_len = plane_slots * (ccx + 1) * (ccy + 1);
-        let nthr = self.slice_threads.min(self.cell_count_xz);
+        let slice_threads_cap = self.slice_threads.min(ccx);
+        let nthr = slice_threads_cap;
         let lanes = self.slice_lanes;
 
         // plane 0: cross-chunk cache or fresh evaluation
@@ -757,43 +815,86 @@ impl<'e> ChunkGen<'e> {
             planes.push(self.interp.slice0.clone());
         }
 
-        // planes 1..=ccx in parallel (each plane = 5*49 corner points)
+        // planes 1..=ccx in parallel (each plane = 5*49 corner points).
+        // Worker count is bounded by the GLOBAL thread budget: concurrent
+        // fills from Paper chunk workers must not multiply threads.
         {
             let env = self.env;
             let compiled = std::sync::Arc::clone(&self.compiled);
             let children = self.interp_children.clone();
-            std::thread::scope(|s| {
-                let mut handles = Vec::new();
+            let grant = take_permits(slice_threads_cap.min(ccx));
+            if grant > 0 {
+                std::thread::scope(|s| {
+                    let mut handles = Vec::new();
+                    for t in 0..grant {
+                        let compiled = std::sync::Arc::clone(&compiled);
+                        let children = children.clone();
+                        handles.push(s.spawn(move || {
+                            let mut bufs: Vec<Vec<f64>> = Vec::new();
+                            for k in (t + 1..=ccx).step_by(grant) {
+                                let plane_x = (first_cell_x + k as i32) * cw;
+                                let mut buf = vec![0f64; plane_len];
+                                Self::eval_plane_into(
+                                    env,
+                                    &compiled,
+                                    &children,
+                                    plane_x,
+                                    first_cell_z,
+                                    ccx,
+                                    ccy,
+                                    cnmy,
+                                    cw,
+                                    ch,
+                                    lanes,
+                                    &mut buf,
+                                );
+                                bufs.push(buf);
+                            }
+                            (t, bufs)
+                        }));
+                    }
+                    // place results by plane index; worker t handles planes t+1, t+1+grant, ...
+                    let mut placed: Vec<Option<Vec<f64>>> = (1..=ccx).map(|_| None).collect();
+                    for h in handles {
+                        let (t, bufs) = h.join().expect("plane worker panicked");
+                        for (j, buf) in bufs.into_iter().enumerate() {
+                            let k = t + 1 + j * grant;
+                            placed[k - 1] = Some(buf);
+                        }
+                    }
+                    for b in placed {
+                        planes.push(b.expect("plane worker missing plane"));
+                    }
+                });
+                give_permits(grant);
+            } else {
+                // no permits: serial plane evaluation
                 for k in 1..=ccx {
-                    let compiled = std::sync::Arc::clone(&compiled);
-                    let children = children.clone();
                     let plane_x = (first_cell_x + k as i32) * cw;
-                    handles.push(s.spawn(move || {
-                        let mut buf = vec![0f64; plane_len];
-                        Self::eval_plane_into(
-                            env,
-                            &compiled,
-                            &children,
-                            plane_x,
-                            first_cell_z,
-                            ccx,
-                            ccy,
-                            cnmy,
-                            cw,
-                            ch,
-                            lanes,
-                            &mut buf,
-                        );
-                        buf
-                    }));
+                    let mut buf = vec![0f64; plane_len];
+                    Self::eval_plane_into(
+                        env,
+                        &compiled,
+                        &children,
+                        plane_x,
+                        first_cell_z,
+                        ccx,
+                        ccy,
+                        cnmy,
+                        cw,
+                        ch,
+                        lanes,
+                        &mut buf,
+                    );
+                    planes.push(buf);
                 }
-                for h in handles {
-                    planes.push(h.join().expect("plane worker panicked"));
-                }
-            });
+            }
         }
 
-        // distribute x-strips over per-thread clones
+        // distribute x-strips over per-thread clones (extra threads bounded by
+        // the global budget; with 0 permits the main thread does all strips)
+        let extra = if nthr > 1 { take_permits(nthr - 1) } else { 0 };
+        let nthr = 1 + extra;
         let strips_per = (ccx + nthr - 1) / nthr;
         let mut gens: Vec<ChunkGen<'e>> = (1..nthr).map(|_| self.thread_clone(cx, cz)).collect();
         let mut outs: Vec<Box<[u16; OUT_LEN]>> =
@@ -856,6 +957,7 @@ impl<'e> ChunkGen<'e> {
             }
         });
 
+        give_permits(extra);
         // merge outs (disjoint positions; AIR=0 so OR is exact)
         for (o, b) in out.iter_mut().zip(out0.iter()) {
             *o |= *b;
@@ -935,6 +1037,12 @@ impl<'e> ChunkGen<'e> {
             && self.plane_cache.len() == plane_len;
         if cache_hit {
             p.plane_hits += 1;
+        } else if std::env::var("CRUS_DBG_PLANE").is_ok() {
+            eprintln!(
+                "[plane-miss] want_x={} have_x={} want_z={} have_z={} len {}/{}",
+                first_cell_x * cw, self.plane_cache_x, first_cell_z, self.plane_cache_z,
+                self.plane_cache.len(), plane_len
+            );
         }
         if cache_hit {
             // previous fill's final plane == this fill's initial plane
@@ -972,6 +1080,9 @@ impl<'e> ChunkGen<'e> {
                 .map(|n| n.get() >= 4)
                 .unwrap_or(false),
         };
+        // the pipeline worker is an extra internal thread: gate it on the
+        // global budget too (with concurrent fills it stays off)
+        let pipeline = pipeline && take_permits(1) == 1;
         if pipeline && self.cell_count_xz > 0 && !self.skip_slice {
             let env_addr = self.env as *const Env as usize;
             let compiled_addr = std::sync::Arc::as_ptr(&self.compiled) as usize;
@@ -1082,12 +1193,18 @@ impl<'e> ChunkGen<'e> {
 
             self.interp.swap_slices();
         }
+        if pipeline {
+            give_permits(1);
+        }
         // save the final x-plane (slice0 after the last swap) for the next fill
         {
             let plane_x = ((first_cell_x + self.cell_count_xz as i32) * cw) as i64;
             self.interp.copy_slice0_into(&mut self.plane_cache);
             self.plane_cache_x = plane_x;
             self.plane_cache_z = first_cell_z;
+        }
+        if std::env::var("CRUS_DBG_PLANE").is_ok() {
+            eprintln!("[fill-end] ({},{}) plane_hits_now={} cache_x={} want_next={}", cx, cz, p.plane_hits, self.plane_cache_x, ((first_cell_x + self.cell_count_xz as i32) * cw) as i64);
         }
         // merge per-block counters (material_rule mutates self.prof directly;
         // self.prof is the live accumulator — replace, do not add, or the
