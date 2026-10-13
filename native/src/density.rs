@@ -2113,6 +2113,133 @@ pub fn compile_cellfill(arena: &[WKind], root: u32) -> Option<Vec<CellOp>> {
     Some(prog)
 }
 
+/// Flat (static-stack-slot) form of a CellFill program: the postfix program's
+/// stack depth is a static property, so every op's destination and operand
+/// slots are resolved once at compile time. The AVX2 runner indexes its
+/// register file directly — no stack-pointer dependency chain, half the µops.
+#[derive(Clone, Copy, Debug)]
+pub enum FlatOp {
+    Const { dst: u8, v: f64 },
+    Lerp3 { dst: u8, slot: u16 },
+    YGrad { dst: u8, from_y: i32, to_y: i32, from_value: f64, to_value: f64 },
+    Add { dst: u8, a: u8, b: u8 },
+    Mul { dst: u8, a: u8, b: u8 },
+    Min { dst: u8, a: u8, b: u8 },
+    Max { dst: u8, a: u8, b: u8 },
+    Abs { dst: u8, a: u8 },
+    Square { dst: u8, a: u8 },
+    Cube { dst: u8, a: u8 },
+    HalfNeg { dst: u8, a: u8 },
+    QuarterNeg { dst: u8, a: u8 },
+    Squeeze { dst: u8, a: u8 },
+    Clamp { dst: u8, a: u8, min: f64, max: f64 },
+    RangeChoice { dst: u8, a: u8, min_inclusive: f64, max_exclusive: f64 },
+    MulOrAdd { dst: u8, a: u8, is_add: bool, argument: f64 },
+}
+
+#[derive(Clone, Debug)]
+pub struct FlatProg {
+    pub ops: Vec<FlatOp>,
+    /// Stack slot of the program result (the last op's destination).
+    pub result: u8,
+}
+
+/// Resolve static stack slots. Returns None if the program's stack exceeds
+/// the runner's 16-slot register file (same bound as the stack machine).
+pub fn flatten_cellfill(prog: &[CellOp]) -> Option<FlatProg> {
+    let mut sp = 0usize;
+    let mut ops = Vec::with_capacity(prog.len());
+    let mut result = 0u8;
+    for op in prog {
+        let f = match *op {
+            CellOp::PushConst(v) => {
+                let f = FlatOp::Const { dst: sp as u8, v };
+                sp += 1;
+                f
+            }
+            CellOp::Lerp3 { slot } => {
+                let f = FlatOp::Lerp3 { dst: sp as u8, slot };
+                sp += 1;
+                f
+            }
+            CellOp::YGrad { from_y, to_y, from_value, to_value } => {
+                let f = FlatOp::YGrad { dst: sp as u8, from_y, to_y, from_value, to_value };
+                sp += 1;
+                f
+            }
+            // binary ops pop 2 push 1: with sp already decremented to S-1,
+            // the operands sit at b = sp (old top) and a = sp - 1, dst = sp - 1
+            CellOp::Add => {
+                sp -= 1;
+                FlatOp::Add { dst: (sp - 1) as u8, a: (sp - 1) as u8, b: sp as u8 }
+            }
+            CellOp::Mul => {
+                sp -= 1;
+                FlatOp::Mul { dst: (sp - 1) as u8, a: (sp - 1) as u8, b: sp as u8 }
+            }
+            CellOp::Min => {
+                sp -= 1;
+                FlatOp::Min { dst: (sp - 1) as u8, a: (sp - 1) as u8, b: sp as u8 }
+            }
+            CellOp::Max => {
+                sp -= 1;
+                FlatOp::Max { dst: (sp - 1) as u8, a: (sp - 1) as u8, b: sp as u8 }
+            }
+            CellOp::Abs => FlatOp::Abs { dst: (sp - 1) as u8, a: (sp - 1) as u8 },
+            CellOp::Square => FlatOp::Square { dst: (sp - 1) as u8, a: (sp - 1) as u8 },
+            CellOp::Cube => FlatOp::Cube { dst: (sp - 1) as u8, a: (sp - 1) as u8 },
+            CellOp::HalfNeg => FlatOp::HalfNeg { dst: (sp - 1) as u8, a: (sp - 1) as u8 },
+            CellOp::QuarterNeg => FlatOp::QuarterNeg { dst: (sp - 1) as u8, a: (sp - 1) as u8 },
+            CellOp::Squeeze => FlatOp::Squeeze { dst: (sp - 1) as u8, a: (sp - 1) as u8 },
+            CellOp::Clamp { min, max } => {
+                FlatOp::Clamp { dst: (sp - 1) as u8, a: (sp - 1) as u8, min, max }
+            }
+            CellOp::RangeChoice { min_inclusive, max_exclusive } => {
+                // stack order: input, when_in, when_out (top)
+                FlatOp::RangeChoice {
+                    dst: (sp - 3) as u8,
+                    a: (sp - 3) as u8,
+                    min_inclusive,
+                    max_exclusive,
+                }
+            }
+            CellOp::MulOrAdd { is_add, argument } => {
+                FlatOp::MulOrAdd { dst: (sp - 1) as u8, a: (sp - 1) as u8, is_add, argument }
+            }
+        };
+        match f {
+            FlatOp::RangeChoice { .. } => sp -= 2,
+            _ => {}
+        }
+        if sp > 16 {
+            return None;
+        }
+        result = match f {
+            FlatOp::Const { dst, .. }
+            | FlatOp::Lerp3 { dst, .. }
+            | FlatOp::YGrad { dst, .. }
+            | FlatOp::Add { dst, .. }
+            | FlatOp::Mul { dst, .. }
+            | FlatOp::Min { dst, .. }
+            | FlatOp::Max { dst, .. }
+            | FlatOp::Abs { dst, .. }
+            | FlatOp::Square { dst, .. }
+            | FlatOp::Cube { dst, .. }
+            | FlatOp::HalfNeg { dst, .. }
+            | FlatOp::QuarterNeg { dst, .. }
+            | FlatOp::Squeeze { dst, .. }
+            | FlatOp::Clamp { dst, .. }
+            | FlatOp::RangeChoice { dst, .. }
+            | FlatOp::MulOrAdd { dst, .. } => dst,
+        };
+        ops.push(f);
+    }
+    if prog.is_empty() {
+        return None;
+    }
+    Some(FlatProg { ops, result })
+}
+
 impl InterpState {
     /// cellfill_value with explicit fractions (no cell_frac dependency).
     #[inline]

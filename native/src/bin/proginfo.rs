@@ -1,6 +1,6 @@
 // Quick probe: what does the compiled cellfill program look like for the
 // vanilla overworld (length, op mix)?
-use crussty_chunkgen::density::{compile_cellfill, Env};
+use crussty_chunkgen::density::{compile_cellfill, flatten_cellfill, Env};
 
 fn main() {
     let seed: i64 = std::env::args()
@@ -24,6 +24,17 @@ fn main() {
         }
         None => println!("cellfill: None (fallback interpreter)"),
     }
+    // flat program stats
+    if let Some(prog) = compile_cellfill(&compiled.arena, root) {
+        match flatten_cellfill(&prog) {
+            Some(flat) => println!(
+                "flat: {} ops, result slot {}, OK",
+                flat.ops.len(),
+                flat.result
+            ),
+            None => println!("flat: None (stack too deep)"),
+        }
+    }
     // column-cache stats: how many Cache2d/FlatCache nodes got slots
     let assigned = compiled.col_idx.iter().filter(|&&c| c != u32::MAX).count();
     println!(
@@ -33,3 +44,4 @@ fn main() {
         compiled.arena.len()
     );
 }
+// (appended below in main — see edit)

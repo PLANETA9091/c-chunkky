@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 //   - postprocessing marks (shouldScheduleFluidUpdate) are skipped: they carry
 //     no block data, and the Bukkit noise path cannot express them.
 
-use crate::density::{compile_cellfill, BatchMemo, CellOp, Compiled, Env, InterpState, MemoCtx, Mode, Pt, V4Memo, V8Memo, WKind};
+use crate::density::{compile_cellfill, flatten_cellfill, BatchMemo, CellOp, Compiled, Env, FlatOp, FlatProg, InterpState, MemoCtx, Mode, Pt, V4Memo, V8Memo, WKind};
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::_mm256_loadu_pd;
@@ -323,6 +323,13 @@ pub struct ChunkGen<'e> {
     final_density_slot: Option<u16>,
     /// Compiled CellFill program (None -> interpreter fallback).
     cellfill_prog: Option<Vec<CellOp>>,
+    /// Static-stack-slot form of cellfill_prog (preferred by the AVX2 runners).
+    cellfill_flat: Option<FlatProg>,
+    /// Reusable strip-worker clones (fill_parallel): avoids re-allocating
+    /// and re-zeroing ~1MB of worker buffers (cell_cache, interp, rows) on
+    /// every parallel fill. Taken out at fill start (no aliasing), refreshed
+    /// with the current fill's per-fill state, returned after the join.
+    strip_pool: Option<Vec<ChunkGen<'e>>>,
     cellfill_stack: Vec<f64>,
     /// Per-(dx,dy) hoisted trilinear rows: per slot [row1, row2] so the
     /// per-block cost is a single z-lerp per Lerp3 slot (bit-exact: the
@@ -417,6 +424,7 @@ impl<'e> ChunkGen<'e> {
         let cell_noise_min_y = floor_div(env.wg.min_y, cell_height as i32);
         let sea_level = env.wg.sea_level as i32;
         let interp = InterpState::new(compiled.interp_slots, cell_count_xz, cell_count_y);
+        let cellfill_prog_opt = compile_cellfill(&compiled.arena, compiled.router["final_density"]);
         ChunkGen {
             sched: false,
             marks: Vec::with_capacity(1024),
@@ -440,7 +448,11 @@ impl<'e> ChunkGen<'e> {
                 WKind::Interpolated { slot, .. } => Some(*slot),
                 _ => None,
             },
-            cellfill_prog: compile_cellfill(&compiled.arena, compiled.router["final_density"]),
+            cellfill_prog: cellfill_prog_opt.clone(),
+            cellfill_flat: cellfill_prog_opt
+                .as_ref()
+                .and_then(|p| flatten_cellfill(p)),
+            strip_pool: Some(Vec::new()),
             cellfill_stack: Vec::with_capacity(16),
             cellfill_rows: vec![0.0; compiled.interp_slots as usize * 4],
             cellfill_rows8: vec![0.0; compiled.interp_slots as usize * 16],
@@ -753,6 +765,8 @@ impl<'e> ChunkGen<'e> {
             cell_cache: vec![0.0; self.cell_cache.len()],
             final_density_slot: self.final_density_slot,
             cellfill_prog: self.cellfill_prog.clone(),
+            cellfill_flat: self.cellfill_flat.clone(),
+            strip_pool: None,
             cellfill_stack: Vec::with_capacity(16),
             cellfill_rows: vec![0.0; self.cellfill_rows.len()],
             cellfill_rows8: vec![0.0; self.cellfill_rows8.len()],
@@ -781,6 +795,20 @@ impl<'e> ChunkGen<'e> {
     fn load_planes(&mut self, p0: &[f64], p1: &[f64]) {
         self.interp.slice0.copy_from_slice(p0);
         self.interp.slice1.copy_from_slice(p1);
+    }
+
+    /// Refresh a pooled strip-worker clone with the current fill's per-fill
+    /// state (everything else — cell_cache, interp planes, rows — is fully
+    /// overwritten by process_strip before it is read).
+    fn strip_reset_for_fill(&mut self, beard: &crate::beard::Beard) {
+        self.sched = false;
+        self.marks.clear();
+        self.beard = beard.clone();
+        self.prof = Prof {
+            enabled: self.prof.enabled,
+            ..Default::default()
+        };
+        self.memo = MemoCtx::new(self.compiled.arena.len());
     }
 
     /// Parallel fill: all corner planes up front (workers over planes), then
@@ -896,7 +924,19 @@ impl<'e> ChunkGen<'e> {
         let extra = if nthr > 1 { take_permits(nthr - 1) } else { 0 };
         let nthr = 1 + extra;
         let strips_per = (ccx + nthr - 1) / nthr;
-        let mut gens: Vec<ChunkGen<'e>> = (1..nthr).map(|_| self.thread_clone(cx, cz)).collect();
+        // Reuse pooled worker clones when possible (buffers are fully
+        // overwritten per strip; per-fill state is refreshed below).
+        let mut pool = self.strip_pool.take().unwrap_or_default();
+        let mut gens: Vec<ChunkGen<'e>> = Vec::with_capacity(nthr.saturating_sub(1));
+        for _ in 1..nthr {
+            match pool.pop() {
+                Some(mut g) => {
+                    g.strip_reset_for_fill(&self.beard);
+                    gens.push(g);
+                }
+                None => gens.push(self.thread_clone(cx, cz)),
+            }
+        }
         let mut outs: Vec<Box<[u16; OUT_LEN]>> =
             (1..nthr).map(|_| Box::new([0u16; OUT_LEN])).collect();
         let planes_ref = &planes;
@@ -982,6 +1022,10 @@ impl<'e> ChunkGen<'e> {
             p.blocks_ore_reached += g.prof.blocks_ore_reached;
             p.blocks_aquifer_air += g.prof.blocks_aquifer_air;
         }
+        // hand the worker clones back to the pool for the next fill
+        // (after the marks/prof merge above — gens must stay intact)
+        pool.extend(gens.drain(..));
+        self.strip_pool = Some(pool);
         // save the final plane for the next fill's plane-0 cache
         self.plane_cache.clear();
         self.plane_cache.extend_from_slice(&planes[ccx]);
@@ -1286,6 +1330,7 @@ impl<'e> ChunkGen<'e> {
                             // be fully written before row B (iy-1) — buffer each
                             // row separately, then place both blocks in order.
                             let prog = self.cellfill_prog.as_ref().unwrap();
+                            let prog_flat = self.cellfill_flat.as_ref();
                             let dy_a = iy as f64 * dy_step;
                             let iy_b = iy - 1;
                             let dy_b = iy_b as f64 * dy_step;
@@ -1314,18 +1359,33 @@ impl<'e> ChunkGen<'e> {
                             while ix < cw_i {
                                 let (dzv, mut vstack_a, mut vstack_b, mut vsp) =
                                     cellfill_simd::make_2row_state(dx_step);
-                                let (res_a, res_b) = unsafe {
-                                    cellfill_simd::run_cellfill_2rows(
-                                        prog,
-                                        &self.cellfill_rows8,
-                                        block_y_a,
-                                        block_y_b,
-                                        dzv,
-                                        &ix,
-                                        &mut vstack_a,
-                                        &mut vstack_b,
-                                        &mut vsp,
-                                    )
+                                let (res_a, res_b) = if let Some(flat) = prog_flat {
+                                    unsafe {
+                                        cellfill_simd::run_cellfill_2rows_flat(
+                                            flat,
+                                            &self.cellfill_rows8,
+                                            block_y_a,
+                                            block_y_b,
+                                            dzv,
+                                            &ix,
+                                            &mut vstack_a,
+                                            &mut vstack_b,
+                                        )
+                                    }
+                                } else {
+                                    unsafe {
+                                        cellfill_simd::run_cellfill_2rows(
+                                            prog,
+                                            &self.cellfill_rows8,
+                                            block_y_a,
+                                            block_y_b,
+                                            dzv,
+                                            &ix,
+                                            &mut vstack_a,
+                                            &mut vstack_b,
+                                            &mut vsp,
+                                        )
+                                    }
                                 };
                                 unsafe {
                                     _mm256_storeu_pd(a_buf.as_mut_ptr().add((ix * 4) as usize), res_a);
@@ -1356,6 +1416,7 @@ impl<'e> ChunkGen<'e> {
                                 // stages (lerp_dx + lerp_dy) are computed once
                                 // per row; per block only the z-lerp remains.
                                 let prog = self.cellfill_prog.as_ref().unwrap();
+                                let prog_flat = self.cellfill_flat.as_ref();
                                 let block_y = cell_start_block_y + iy;
                                 let rows = &mut self.cellfill_rows;
                                 for &s in &self.cellfill_slots {
@@ -1380,15 +1441,27 @@ impl<'e> ChunkGen<'e> {
                                     // accumulation exactly.
                                     let (dzv, mut vstack, mut vsp) =
                                         cellfill_simd::make_row_state(dx_step);
-                                    let res = unsafe {
-                                        cellfill_simd::run_cellfill_row4(
-                                            prog,
-                                            &self.cellfill_rows,
-                                            dzv,
-                                            block_y,
-                                            &mut vstack,
-                                            &mut vsp,
-                                        )
+                                    let res = if let Some(flat) = prog_flat {
+                                        unsafe {
+                                            cellfill_simd::run_cellfill_row4_flat(
+                                                flat,
+                                                &self.cellfill_rows,
+                                                dzv,
+                                                block_y,
+                                                &mut vstack,
+                                            )
+                                        }
+                                    } else {
+                                        unsafe {
+                                            cellfill_simd::run_cellfill_row4(
+                                                prog,
+                                                &self.cellfill_rows,
+                                                dzv,
+                                                block_y,
+                                                &mut vstack,
+                                                &mut vsp,
+                                            )
+                                        }
                                     };
                                     unsafe {
                                         _mm256_storeu_pd(
@@ -2806,6 +2879,7 @@ mod marks_tests {
 #[cfg(target_arch = "x86_64")]
 mod cellfill_simd {
     use super::CellOp;
+    use crate::density::{FlatOp, FlatProg};
     use std::arch::x86_64::*;
     use std::sync::OnceLock;
 
@@ -2991,6 +3065,346 @@ mod cellfill_simd {
             }
         }
         stack[0]
+    }
+
+    /// Flat-form single-row runner: static stack slots (FlatOp), no
+    /// stack-pointer dependency chain. Every op performs the exact same
+    /// per-lane IEEE sequence as the stack-machine runner — bit-identical.
+    /// Slot indices are < 16 by construction (flatten_cellfill rejects
+    /// deeper programs), so unchecked indexing is sound.
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn run_cellfill_row4_flat(
+        prog: &FlatProg,
+        rows: &[f64],
+        dzv: __m256d,
+        block_y: i32,
+        reg: &mut [__m256d; 16],
+    ) -> __m256d {
+        let zero = _mm256_setzero_pd();
+        let sign_abs = _mm256_set1_pd(-0.0);
+        for op in &prog.ops {
+            match *op {
+                FlatOp::Const { dst, v } => {
+                    *reg.get_unchecked_mut(dst as usize) = _mm256_set1_pd(v);
+                }
+                FlatOp::Lerp3 { dst, slot } => {
+                    let r1 = _mm256_set1_pd(*rows.get_unchecked(slot as usize * 2));
+                    let r2 = _mm256_set1_pd(*rows.get_unchecked(slot as usize * 2 + 1));
+                    *reg.get_unchecked_mut(dst as usize) =
+                        _mm256_add_pd(r1, _mm256_mul_pd(dzv, _mm256_sub_pd(r2, r1)));
+                }
+                FlatOp::YGrad { dst, from_y, to_y, from_value, to_value } => {
+                    let t = (block_y as f64 - from_y as f64) / (to_y as f64 - from_y as f64);
+                    let r = if t < 0.0 {
+                        from_value
+                    } else if t > 1.0 {
+                        to_value
+                    } else {
+                        from_value + t * (to_value - from_value)
+                    };
+                    *reg.get_unchecked_mut(dst as usize) = _mm256_set1_pd(r);
+                }
+                FlatOp::Add { dst, a, b } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    let bv = *reg.get_unchecked(b as usize);
+                    *reg.get_unchecked_mut(dst as usize) = _mm256_add_pd(av, bv);
+                }
+                FlatOp::Mul { dst, a, b } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    let bv = *reg.get_unchecked(b as usize);
+                    // vanilla short-circuit: a == 0.0 ? 0.0 : a * b
+                    let mask = _mm256_cmp_pd(av, zero, _CMP_EQ_OQ);
+                    let prod = _mm256_mul_pd(av, bv);
+                    *reg.get_unchecked_mut(dst as usize) = _mm256_blendv_pd(prod, zero, mask);
+                }
+                FlatOp::Min { dst, a, b } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    let bv = *reg.get_unchecked(b as usize);
+                    let mask = _mm256_cmp_pd(av, bv, _CMP_LT_OQ);
+                    *reg.get_unchecked_mut(dst as usize) = _mm256_blendv_pd(bv, av, mask);
+                }
+                FlatOp::Max { dst, a, b } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    let bv = *reg.get_unchecked(b as usize);
+                    let mask = _mm256_cmp_pd(av, bv, _CMP_GT_OQ);
+                    *reg.get_unchecked_mut(dst as usize) = _mm256_blendv_pd(bv, av, mask);
+                }
+                FlatOp::Abs { dst, a } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    *reg.get_unchecked_mut(dst as usize) = _mm256_andnot_pd(sign_abs, av);
+                }
+                FlatOp::Square { dst, a } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    *reg.get_unchecked_mut(dst as usize) = _mm256_mul_pd(av, av);
+                }
+                FlatOp::Cube { dst, a } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    let a2 = _mm256_mul_pd(av, av);
+                    *reg.get_unchecked_mut(dst as usize) = _mm256_mul_pd(a2, av);
+                }
+                FlatOp::HalfNeg { dst, a } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    let mask = _mm256_cmp_pd(av, zero, _CMP_GT_OQ);
+                    *reg.get_unchecked_mut(dst as usize) =
+                        _mm256_blendv_pd(_mm256_mul_pd(av, _mm256_set1_pd(0.5)), av, mask);
+                }
+                FlatOp::QuarterNeg { dst, a } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    let mask = _mm256_cmp_pd(av, zero, _CMP_GT_OQ);
+                    *reg.get_unchecked_mut(dst as usize) =
+                        _mm256_blendv_pd(_mm256_mul_pd(av, _mm256_set1_pd(0.25)), av, mask);
+                }
+                FlatOp::Squeeze { dst, a } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    let d = _mm256_min_pd(
+                        _mm256_max_pd(av, _mm256_set1_pd(-1.0)),
+                        _mm256_set1_pd(1.0),
+                    );
+                    let d3 = _mm256_mul_pd(_mm256_mul_pd(d, d), d);
+                    *reg.get_unchecked_mut(dst as usize) = _mm256_sub_pd(
+                        _mm256_div_pd(d, _mm256_set1_pd(2.0)),
+                        _mm256_div_pd(d3, _mm256_set1_pd(24.0)),
+                    );
+                }
+                FlatOp::Clamp { dst, a, min, max } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    *reg.get_unchecked_mut(dst as usize) = _mm256_min_pd(
+                        _mm256_max_pd(av, _mm256_set1_pd(min)),
+                        _mm256_set1_pd(max),
+                    );
+                }
+                FlatOp::RangeChoice { dst, a, min_inclusive, max_exclusive } => {
+                    let v = *reg.get_unchecked(a as usize);
+                    let m1 = _mm256_cmp_pd(v, _mm256_set1_pd(min_inclusive), _CMP_GE_OQ);
+                    let m2 = _mm256_cmp_pd(v, _mm256_set1_pd(max_exclusive), _CMP_LT_OQ);
+                    // when_in / when_out slots: input slot + 1 / + 2
+                    let inr = *reg.get_unchecked(a as usize + 1);
+                    let out = *reg.get_unchecked(a as usize + 2);
+                    *reg.get_unchecked_mut(dst as usize) =
+                        _mm256_blendv_pd(out, inr, _mm256_and_pd(m1, m2));
+                }
+                FlatOp::MulOrAdd { dst, a, is_add, argument } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    *reg.get_unchecked_mut(dst as usize) = if is_add {
+                        _mm256_add_pd(av, _mm256_set1_pd(argument))
+                    } else if argument == 0.0 {
+                        zero
+                    } else {
+                        _mm256_mul_pd(av, _mm256_set1_pd(argument))
+                    };
+                }
+            }
+        }
+        *reg.get_unchecked(prog.result as usize)
+    }
+
+    /// Flat-form two-row runner: two register files driven by one dispatch
+    /// loop (A = block_y_a row, B = block_y_b row). Bit-identical to the
+    /// stack-machine runner; static slots remove the sp dependency chain.
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn run_cellfill_2rows_flat(
+        prog: &FlatProg,
+        rows8: &[f64],
+        block_y_a: i32,
+        block_y_b: i32,
+        dzv: __m256d,
+        ixp: &i32,
+        reg_a: &mut [__m256d; 16],
+        reg_b: &mut [__m256d; 16],
+    ) -> (__m256d, __m256d) {
+        let zero = _mm256_setzero_pd();
+        let sign_abs = _mm256_set1_pd(-0.0);
+        for op in &prog.ops {
+            match *op {
+                FlatOp::Const { dst, v } => {
+                    let c = _mm256_set1_pd(v);
+                    *reg_a.get_unchecked_mut(dst as usize) = c;
+                    *reg_b.get_unchecked_mut(dst as usize) = c;
+                }
+                FlatOp::Lerp3 { dst, slot } => {
+                    let base = slot as usize * 16 + *ixp as usize;
+                    let r1a = _mm256_set1_pd(*rows8.get_unchecked(base));
+                    let r2a = _mm256_set1_pd(*rows8.get_unchecked(base + 4));
+                    let r1b = _mm256_set1_pd(*rows8.get_unchecked(base + 8));
+                    let r2b = _mm256_set1_pd(*rows8.get_unchecked(base + 12));
+                    *reg_a.get_unchecked_mut(dst as usize) =
+                        _mm256_add_pd(r1a, _mm256_mul_pd(dzv, _mm256_sub_pd(r2a, r1a)));
+                    *reg_b.get_unchecked_mut(dst as usize) =
+                        _mm256_add_pd(r1b, _mm256_mul_pd(dzv, _mm256_sub_pd(r2b, r1b)));
+                }
+                FlatOp::YGrad { dst, from_y, to_y, from_value, to_value } => {
+                    let grad = |by: i32| -> f64 {
+                        let t = (by as f64 - from_y as f64) / (to_y as f64 - from_y as f64);
+                        if t < 0.0 {
+                            from_value
+                        } else if t > 1.0 {
+                            to_value
+                        } else {
+                            from_value + t * (to_value - from_value)
+                        }
+                    };
+                    *reg_a.get_unchecked_mut(dst as usize) = _mm256_set1_pd(grad(block_y_a));
+                    *reg_b.get_unchecked_mut(dst as usize) = _mm256_set1_pd(grad(block_y_b));
+                }
+                FlatOp::Add { dst, a, b } => {
+                    let (ia, ib) = (a as usize, b as usize);
+                    let aa = *reg_a.get_unchecked(ia);
+                    let ba = *reg_a.get_unchecked(ib);
+                    let ab = *reg_b.get_unchecked(ia);
+                    let bb = *reg_b.get_unchecked(ib);
+                    *reg_a.get_unchecked_mut(dst as usize) = _mm256_add_pd(aa, ba);
+                    *reg_b.get_unchecked_mut(dst as usize) = _mm256_add_pd(ab, bb);
+                }
+                FlatOp::Mul { dst, a, b } => {
+                    let (ia, ib) = (a as usize, b as usize);
+                    let aa = *reg_a.get_unchecked(ia);
+                    let ba = *reg_a.get_unchecked(ib);
+                    let ab = *reg_b.get_unchecked(ia);
+                    let bb = *reg_b.get_unchecked(ib);
+                    let ma = _mm256_cmp_pd(aa, zero, _CMP_EQ_OQ);
+                    let mb = _mm256_cmp_pd(ab, zero, _CMP_EQ_OQ);
+                    *reg_a.get_unchecked_mut(dst as usize) =
+                        _mm256_blendv_pd(_mm256_mul_pd(aa, ba), zero, ma);
+                    *reg_b.get_unchecked_mut(dst as usize) =
+                        _mm256_blendv_pd(_mm256_mul_pd(ab, bb), zero, mb);
+                }
+                FlatOp::Min { dst, a, b } => {
+                    let (ia, ib) = (a as usize, b as usize);
+                    let aa = *reg_a.get_unchecked(ia);
+                    let ba = *reg_a.get_unchecked(ib);
+                    let ab = *reg_b.get_unchecked(ia);
+                    let bb = *reg_b.get_unchecked(ib);
+                    *reg_a.get_unchecked_mut(dst as usize) =
+                        _mm256_blendv_pd(ba, aa, _mm256_cmp_pd(aa, ba, _CMP_LT_OQ));
+                    *reg_b.get_unchecked_mut(dst as usize) =
+                        _mm256_blendv_pd(bb, ab, _mm256_cmp_pd(ab, bb, _CMP_LT_OQ));
+                }
+                FlatOp::Max { dst, a, b } => {
+                    let (ia, ib) = (a as usize, b as usize);
+                    let aa = *reg_a.get_unchecked(ia);
+                    let ba = *reg_a.get_unchecked(ib);
+                    let ab = *reg_b.get_unchecked(ia);
+                    let bb = *reg_b.get_unchecked(ib);
+                    *reg_a.get_unchecked_mut(dst as usize) =
+                        _mm256_blendv_pd(ba, aa, _mm256_cmp_pd(aa, ba, _CMP_GT_OQ));
+                    *reg_b.get_unchecked_mut(dst as usize) =
+                        _mm256_blendv_pd(bb, ab, _mm256_cmp_pd(ab, bb, _CMP_GT_OQ));
+                }
+                FlatOp::Abs { dst, a } => {
+                    let av = *reg_a.get_unchecked(a as usize);
+                    let bv = *reg_b.get_unchecked(a as usize);
+                    *reg_a.get_unchecked_mut(dst as usize) = _mm256_andnot_pd(sign_abs, av);
+                    *reg_b.get_unchecked_mut(dst as usize) = _mm256_andnot_pd(sign_abs, bv);
+                }
+                FlatOp::Square { dst, a } => {
+                    let av = *reg_a.get_unchecked(a as usize);
+                    let bv = *reg_b.get_unchecked(a as usize);
+                    *reg_a.get_unchecked_mut(dst as usize) = _mm256_mul_pd(av, av);
+                    *reg_b.get_unchecked_mut(dst as usize) = _mm256_mul_pd(bv, bv);
+                }
+                FlatOp::Cube { dst, a } => {
+                    let av = *reg_a.get_unchecked(a as usize);
+                    let bv = *reg_b.get_unchecked(a as usize);
+                    let a2 = _mm256_mul_pd(av, av);
+                    let b2 = _mm256_mul_pd(bv, bv);
+                    *reg_a.get_unchecked_mut(dst as usize) = _mm256_mul_pd(a2, av);
+                    *reg_b.get_unchecked_mut(dst as usize) = _mm256_mul_pd(b2, bv);
+                }
+                FlatOp::HalfNeg { dst, a } => {
+                    let av = *reg_a.get_unchecked(a as usize);
+                    let bv = *reg_b.get_unchecked(a as usize);
+                    let ma = _mm256_cmp_pd(av, zero, _CMP_GT_OQ);
+                    let mb = _mm256_cmp_pd(bv, zero, _CMP_GT_OQ);
+                    *reg_a.get_unchecked_mut(dst as usize) =
+                        _mm256_blendv_pd(_mm256_mul_pd(av, _mm256_set1_pd(0.5)), av, ma);
+                    *reg_b.get_unchecked_mut(dst as usize) =
+                        _mm256_blendv_pd(_mm256_mul_pd(bv, _mm256_set1_pd(0.5)), bv, mb);
+                }
+                FlatOp::QuarterNeg { dst, a } => {
+                    let av = *reg_a.get_unchecked(a as usize);
+                    let bv = *reg_b.get_unchecked(a as usize);
+                    let ma = _mm256_cmp_pd(av, zero, _CMP_GT_OQ);
+                    let mb = _mm256_cmp_pd(bv, zero, _CMP_GT_OQ);
+                    *reg_a.get_unchecked_mut(dst as usize) =
+                        _mm256_blendv_pd(_mm256_mul_pd(av, _mm256_set1_pd(0.25)), av, ma);
+                    *reg_b.get_unchecked_mut(dst as usize) =
+                        _mm256_blendv_pd(_mm256_mul_pd(bv, _mm256_set1_pd(0.25)), bv, mb);
+                }
+                FlatOp::Squeeze { dst, a } => {
+                    let av = *reg_a.get_unchecked(a as usize);
+                    let bv = *reg_b.get_unchecked(a as usize);
+                    let da = _mm256_min_pd(
+                        _mm256_max_pd(av, _mm256_set1_pd(-1.0)),
+                        _mm256_set1_pd(1.0),
+                    );
+                    let db = _mm256_min_pd(
+                        _mm256_max_pd(bv, _mm256_set1_pd(-1.0)),
+                        _mm256_set1_pd(1.0),
+                    );
+                    let d3a = _mm256_mul_pd(_mm256_mul_pd(da, da), da);
+                    let d3b = _mm256_mul_pd(_mm256_mul_pd(db, db), db);
+                    *reg_a.get_unchecked_mut(dst as usize) = _mm256_sub_pd(
+                        _mm256_div_pd(da, _mm256_set1_pd(2.0)),
+                        _mm256_div_pd(d3a, _mm256_set1_pd(24.0)),
+                    );
+                    *reg_b.get_unchecked_mut(dst as usize) = _mm256_sub_pd(
+                        _mm256_div_pd(db, _mm256_set1_pd(2.0)),
+                        _mm256_div_pd(d3b, _mm256_set1_pd(24.0)),
+                    );
+                }
+                FlatOp::Clamp { dst, a, min, max } => {
+                    let av = *reg_a.get_unchecked(a as usize);
+                    let bv = *reg_b.get_unchecked(a as usize);
+                    *reg_a.get_unchecked_mut(dst as usize) = _mm256_min_pd(
+                        _mm256_max_pd(av, _mm256_set1_pd(min)),
+                        _mm256_set1_pd(max),
+                    );
+                    *reg_b.get_unchecked_mut(dst as usize) = _mm256_min_pd(
+                        _mm256_max_pd(bv, _mm256_set1_pd(min)),
+                        _mm256_set1_pd(max),
+                    );
+                }
+                FlatOp::RangeChoice { dst, a, min_inclusive, max_exclusive } => {
+                    let va = *reg_a.get_unchecked(a as usize);
+                    let vb = *reg_b.get_unchecked(a as usize);
+                    let inra = *reg_a.get_unchecked(a as usize + 1);
+                    let inrb = *reg_b.get_unchecked(a as usize + 1);
+                    let outa = *reg_a.get_unchecked(a as usize + 2);
+                    let outb = *reg_b.get_unchecked(a as usize + 2);
+                    let m1a = _mm256_cmp_pd(va, _mm256_set1_pd(min_inclusive), _CMP_GE_OQ);
+                    let m2a = _mm256_cmp_pd(va, _mm256_set1_pd(max_exclusive), _CMP_LT_OQ);
+                    let m1b = _mm256_cmp_pd(vb, _mm256_set1_pd(min_inclusive), _CMP_GE_OQ);
+                    let m2b = _mm256_cmp_pd(vb, _mm256_set1_pd(max_exclusive), _CMP_LT_OQ);
+                    *reg_a.get_unchecked_mut(dst as usize) =
+                        _mm256_blendv_pd(outa, inra, _mm256_and_pd(m1a, m2a));
+                    *reg_b.get_unchecked_mut(dst as usize) =
+                        _mm256_blendv_pd(outb, inrb, _mm256_and_pd(m1b, m2b));
+                }
+                FlatOp::MulOrAdd { dst, a, is_add, argument } => {
+                    let av = *reg_a.get_unchecked(a as usize);
+                    let bv = *reg_b.get_unchecked(a as usize);
+                    let (ra, rb) = if is_add {
+                        (
+                            _mm256_add_pd(av, _mm256_set1_pd(argument)),
+                            _mm256_add_pd(bv, _mm256_set1_pd(argument)),
+                        )
+                    } else if argument == 0.0 {
+                        (zero, zero)
+                    } else {
+                        (
+                            _mm256_mul_pd(av, _mm256_set1_pd(argument)),
+                            _mm256_mul_pd(bv, _mm256_set1_pd(argument)),
+                        )
+                    };
+                    *reg_a.get_unchecked_mut(dst as usize) = ra;
+                    *reg_b.get_unchecked_mut(dst as usize) = rb;
+                }
+            }
+        }
+        (
+            *reg_a.get_unchecked(prog.result as usize),
+            *reg_b.get_unchecked(prog.result as usize),
+        )
     }
 
     /// Two-row runner: TWO 4-wide stacks (A = block_y_a row, B = block_y_b
