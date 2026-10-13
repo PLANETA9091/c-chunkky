@@ -25,7 +25,7 @@ echo "--- deployed.md5 ---"; cat deployed.md5
 # --- FIFO stdin holder ----------------------------------------------------
 rm -f run.in
 mkfifo run.in
-( sleep 28800 > run.in ) &
+( sleep 28800 > run.in ) >/dev/null 2>&1 &
 echo $! > fifo.pid
 
 # --- launch ---------------------------------------------------------------

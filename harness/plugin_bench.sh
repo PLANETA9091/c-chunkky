@@ -107,6 +107,10 @@ for cz in $(seq -4 3); do
           echo "=== jstack (worker threads stuck?) chunk $cx $cz ==="
           JP=$(pgrep -f 'paper.jar' | head -1)
           [ -n "$JP" ] && (timeout 20 "${JAVA_HOME:-}/bin/jstack" "$JP" 2>/dev/null || jstack "$JP" 2>/dev/null || true) | grep -A 12 -E '"(Worker-Main|Server thread|Chunk)"' | head -120
+          echo "=== paper debug chunks (chunk $cx $cz) ==="
+          python3 harness/rcon.py 127.0.0.1 25575 crussty "paper debug chunks" >/dev/null 2>&1 || true
+          sleep 3
+          tail -n 25 "$SRV/run.out" 2>/dev/null || true
         fi
       fi
       sleep 1
