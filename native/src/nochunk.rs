@@ -1389,8 +1389,8 @@ impl<'e> ChunkGen<'e> {
                             let block_y_a = cell_start_block_y + iy;
                             let block_y_b = cell_start_block_y + iy_b;
                             let idx_base = idx;
-                            let mut a_buf = [0f64; 16];
-                            let mut b_buf = [0f64; 16];
+
+
                             // Vectorized rows hoisting: cell corners are fixed
                             // per (iy-pair, iz-cell) while dx takes the four
                             // fractions [0, .25, .5, .75] — exactly the dz lane
@@ -1439,14 +1439,22 @@ impl<'e> ChunkGen<'e> {
                                         )
                                     }
                                 };
+                                // store straight into cell_cache (row A then
+                                // row B); the [0f64;16] stack buffers + memcpy
+                                // were redundant — LLVM cannot elide the
+                                // copy through the static-slice indices.
                                 unsafe {
-                                    _mm256_storeu_pd(a_buf.as_mut_ptr().add((ix * 4) as usize), res_a);
-                                    _mm256_storeu_pd(b_buf.as_mut_ptr().add((ix * 4) as usize), res_b);
+                                    _mm256_storeu_pd(
+                                        self.cell_cache.as_mut_ptr().add(idx_base + (ix * 4) as usize),
+                                        res_a,
+                                    );
+                                    _mm256_storeu_pd(
+                                        self.cell_cache.as_mut_ptr().add(idx_base + 16 + (ix * 4) as usize),
+                                        res_b,
+                                    );
                                 }
                                 ix += 1;
                             }
-                            self.cell_cache[idx_base..idx_base + 16].copy_from_slice(&a_buf);
-                            self.cell_cache[idx_base + 16..idx_base + 32].copy_from_slice(&b_buf);
                             idx += 32;
                             iy -= 2;
                             continue;
