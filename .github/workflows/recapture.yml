@@ -33,7 +33,7 @@ jobs:
       - name: Deploy probe plugin (crusstatus / crusstydumpregion commands)
         run: |
           mkdir -p server/plugins
-          cp probe/CrusstyProbe.jar server/plugins/
+          rm -f server/plugins/*.jar && cp probe/CrusstyProbe.jar server/plugins/
 
       - name: Capture vanilla reference (steady state)
         run: |

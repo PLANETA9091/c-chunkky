@@ -47,6 +47,16 @@ public final class OracleNoiseStagePlugin extends JavaPlugin {
 
     @Override
     public void onEnable() {
+        // HARD GATE: this plugin evaluates vanilla density functions and
+        // forces chunk generation at onEnable. If it ever boots WITHOUT the
+        // explicit -Doraclemarks/-Doraclewalk flags (e.g. the jar left in
+        // plugins/ when the judge server starts), that out-of-order
+        // generation scrambles the world's decoration order — measured
+        // ~5900 phantom judge diffs. Do nothing unless explicitly invoked.
+        if (!MARKS && !STATUSWALK) {
+            getLogger().info("OracleNoiseStage: no -Doraclemarks/-Doraclewalk — staying inert");
+            return;
+        }
         try {
             if (STATUSWALK) {
                 statusWalk();

@@ -292,3 +292,20 @@ Work Log:
 Stage Summary:
 - Паритет: 6046 -> 190 (0.003%) после фикса bridge; ожидание CI == 190 на vanilla и ~аналог на datapack.
 - Пуш 07157ab: judge_ab workflow + вердикт-инфраструктура.
+
+---
+Task ID: cont-13 (2026-10-13, ЯД №2 — oracle jar)
+Agent: Super Z (main)
+Task: изоляция скремблера main CI; полный почин
+
+Work Log:
+- A/B матрица (judge_ab.yml): no_beard=1 (07157ab) = 190; no_beard=0 С ФИКСОМ create=true (38ba1ef) = **131 (0.002%)**; main CI (c oracle-степом) = 6212.
+- => фикс бороды РАБОТАЕТ, но main CI травит ORACLE-СТЕП: oracle_marks.sh оставляет CrusstyOracle.jar в plugins/, а plugin_bench его не удаляет.
+- OracleNoiseStagePlugin.onEnable БЕЗ -Doraclemarks выполняет run() безусловно -> при старте judge-сервера форсирует генерацию чанков -> сдвиг декораций (тот же механизм, что борода).
+- ПОЯСНЕНИЕ истории: 441-эра была ДО добавления oracle-степа в ci.yml; все бисекты (5896/5903) шли с отравленным oracle jar -> «борода exonerated» была ложным выводом (bisect обе ветки отравлены).
+- ФИКСЫ: (1) plugin_bench.sh удаляет ВСЕ чужие jar кроме Probe; (2) OracleNoiseStagePlugin.onEnable инертен без явных -D флагов; (3) recapture.yml: rm -f server/plugins/*.jar перед деплоем Probe.
+- Гейты судьи: 35% -> 0.05%.
+
+Stage Summary:
+- Ожидание main CI после фиксов: vanilla ~131, datapack ~аналог (0.002-0.003%).
+- Паритет почти 100%: остаток = fluid-tick settle (lava->obsidian, water-покеты) + kelp age в окне 15s.

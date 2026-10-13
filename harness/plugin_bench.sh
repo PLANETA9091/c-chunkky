@@ -42,6 +42,11 @@ rcon() {
 
 # --- deploy -----------------------------------------------------------------
 mkdir -p "$SRV/plugins"
+# Deploy hygiene: remove EVERY foreign plugin first. The oracle marks step
+# leaves CrusstyOracle.jar behind; it boots in the judge server and its
+# onEnable generates chunks out of order -> decoration streams shift ->
+# ~5900 phantom diffs. The judge must run EXACTLY Gen + Probe.
+find "$SRV/plugins" -maxdepth 1 -name '*.jar' ! -name 'CrusstyProbe.jar' -delete
 cp "$JAR" "$SRV/plugins/CrusstyGen.jar"
 [ -f "$PROBE_JAR" ] && cp "$PROBE_JAR" "$SRV/plugins/CrusstyProbe.jar"
 {
