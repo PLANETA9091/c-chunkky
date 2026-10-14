@@ -402,17 +402,13 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                         "net.minecraft.world.level.block.Blocks");
                 Object airBlock = cBlocks.getField("AIR").get(null);
                 Object airSt = mDefaultBlockState.invoke(airBlock);
-                // template container: capture singleton + linear configurations
-                Object reg0 = null;
-                for (Object st : states) {
-                    if (st != null) {
-                        reg0 = bulkRegistryField.get(st);
-                        break;
-                    }
-                }
-                if (reg0 == null) {
-                    throw new IllegalStateException("no registry");
-                }
+                // template container: capture singleton + linear configurations.
+                // The registry IdMap lives on the CONTAINER (not on states);
+                // vanilla's BLOCK_STATE_REGISTRY is the same IdMap the
+                // section containers are constructed with.
+                Object reg0 = Class.forName(
+                        "net.minecraft.world.level.block.Block")
+                        .getField("BLOCK_STATE_REGISTRY").get(null);
                 Object tpl = ctorPal.newInstance(reg0, airSt, sectionStrategyField);
                 airState = airSt;
                 Object d0 = fPalData.get(tpl);
