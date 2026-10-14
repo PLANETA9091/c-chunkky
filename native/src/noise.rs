@@ -2285,29 +2285,37 @@ impl BlendedNoise {
             d4[l] = d1[l] / self.y_factor;
         }
 
-        // main noise loop (unchanged generic path; x is column-uniform but
-        // y/z are per-lane, so only minor hoisting is available here)
+        // main noise loop: x/z are column-constant (bx/bz scalars), so the
+        // per-octave x/z walk memoizes in the same TLS column state the
+        // min/max loop uses (slots col_base+32..40; BLEND_COL_STRIDE=40).
+        // Bit-exact: noise_5_batch_col is lane-identical to noise_5_batch.
         let mut d10 = [0f64; 4];
-        let mut amp = 1.0f64;
-        for i in 0..8usize {
-            if let Some(oct) = self.main_noise.get_octave_noise(i) {
-                let mut wx = [0f64; 4];
-                let mut wy = [0f64; 4];
-                let mut wz = [0f64; 4];
-                let mut ymax = [0f64; 4];
-                for l in 0..4 {
-                    wx[l] = wrap(d3 * amp);
-                    wy[l] = wrap(d4[l] * amp);
-                    wz[l] = wrap(d5 * amp);
-                    ymax[l] = d4[l] * amp;
-                }
-                let v = oct.noise_5_batch(&wx, &wy, &wz, d7 * amp, &ymax);
-                for l in 0..4 {
-                    d10[l] += v[l] / amp;
-                }
+        BLEND_COL_CACHE.with(|m| {
+            let mut m = m.borrow_mut();
+            let need = col_base + BLEND_COL_STRIDE;
+            if m.len() < need {
+                m.resize(need, OctColState::INVALID);
             }
-            amp /= 2.0;
-        }
+            let mut amp = 1.0f64;
+            for i in 0..8usize {
+                if let Some(oct) = self.main_noise.get_octave_noise(i) {
+                    let kx = wrap(d3 * amp);
+                    let kz = wrap(d5 * amp);
+                    let mut wy = [0f64; 4];
+                    let mut ymax = [0f64; 4];
+                    for l in 0..4 {
+                        wy[l] = wrap(d4[l] * amp);
+                        ymax[l] = d4[l] * amp;
+                    }
+                    let st = &mut m[col_base + 32 + i];
+                    let v = oct.noise_5_batch_col(st, kx, kz, &wy, d7 * amp, &ymax);
+                    for l in 0..4 {
+                        d10[l] += v[l] / amp;
+                    }
+                }
+                amp /= 2.0;
+            }
+        });
         let mut d11b = [0f64; 4];
         let mut skip_min = [false; 4];
         let mut skip_max = [false; 4];
