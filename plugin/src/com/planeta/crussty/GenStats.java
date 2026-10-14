@@ -66,6 +66,30 @@ public final class GenStats {
     private GenStats() {
     }
 
+    /** Zero the ring buffer + all counters: starts a fresh measurement window
+     *  (used after the JIT-warmup pregen pass so the reported window is
+     *  steady-state — the shared CI runner makes cold windows unreproducible). */
+    static void reset() {
+        COUNT.set(0);
+        TOTAL.set(0);
+        NATIVE_TOTAL.set(0);
+        LAYOUT_TOTAL.set(0);
+        BEARD_TOTAL.set(0);
+        MARKS_TOTAL.set(0);
+        BULK_FILLED.set(0);
+        BULK_MIXED.set(0);
+        BULK_AIR.set(0);
+        BULK_BROKEN_COUNT.set(0);
+        MARKS_SEEN.set(0);
+        MARKS_LANDED.set(0);
+        BRIDGE_NO_CHUNK.set(0);
+        BRIDGE_ERROR.set(0);
+        BEARD_CHUNKS.set(0);
+        BEARD_PIECES.set(0);
+        java.util.Arrays.fill(NANOS, 0L);
+        java.util.Arrays.fill(NATIVE_NANOS, 0L);
+    }
+
     static void record(long nanos, long nativeNs, long layoutNs, long beardNs, long marksNs) {
         long i = COUNT.getAndIncrement();
         NANOS[(int) (i % RING)] = nanos;
@@ -88,6 +112,8 @@ public final class GenStats {
         java.util.Arrays.sort(copy);
         long p50 = copy[(int) (n / 2)];
         long p99 = copy[(int) Math.min(n - 1, (long) (n * 0.99))];
+        long pmin = copy[0]; // noise-free estimate: additive noise (GC, desched,
+                             // runner neighbors) only ever inflates a chunk time
         long[] ncopy = new long[(int) n];
         System.arraycopy(NATIVE_NANOS, 0, ncopy, 0, (int) n);
         java.util.Arrays.sort(ncopy);
@@ -95,9 +121,9 @@ public final class GenStats {
         double meanUs = (TOTAL.get() / Math.max(1, COUNT.get())) / 1000.0;
         long cnt = Math.max(1, COUNT.get());
         return String.format(
-                "chunks=%d  mean=%.1fus  p50=%.1fus  p99=%.1fus  max=%.1fus  [native=%.2fms nat_p50=%.2fms layout=%.2fms beard=%.2fms marks=%.2fms]  [sections filled=%d mixed=%d air=%d v1fallback=%d bulk=%s]  marks_seen=%d marks_landed=%d bridge_no_chunk=%d bridge_err=%d beard_chunks=%d beard_pieces=%d",
+                "chunks=%d  mean=%.1fus  min=%.1fus  p50=%.1fus  p99=%.1fus  max=%.1fus  [native=%.2fms nat_p50=%.2fms layout=%.2fms beard=%.2fms marks=%.2fms]  [sections filled=%d mixed=%d air=%d v1fallback=%d bulk=%s]  marks_seen=%d marks_landed=%d bridge_no_chunk=%d bridge_err=%d beard_chunks=%d beard_pieces=%d",
                 COUNT.get(), meanUs,
-                p50 / 1000.0, p99 / 1000.0, copy[(int) (n - 1)] / 1000.0,
+                pmin / 1000.0, p50 / 1000.0, p99 / 1000.0, copy[(int) (n - 1)] / 1000.0,
                 NATIVE_TOTAL.get() / (double) cnt / 1e6,
                 natP50 / 1e6,
                 LAYOUT_TOTAL.get() / (double) cnt / 1e6,

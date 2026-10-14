@@ -98,6 +98,27 @@ SRVPID="$(cat "$SRV/server.pid")"
 echo "=== server pid check: crusstatus must report srvpid=$SRVPID ==="
 rcon "crusstatus" | head -4 || true
 
+# --- JIT warmup pass (noise control) ----------------------------------------
+# The shared 2-core runner makes a COLD measurement window unreproducible:
+# the first ~16 of 64 chunks include C1/C2 compilation of the Java hot paths
+# (bulk layout packer, JNI glue), shifting p50 by up to 2x run-to-run and
+# inflating the mean with 100ms+ compile pauses. Pregen an 8x8 region OUTSIDE
+# the measured one first (identical code paths — same world/seed/datapack),
+# unload it, then reset the stats ring — the measured window below is
+# steady-state, which is the honest per-chunk cost.
+echo "=== JIT warmup region (chunks 8..15, 8..15) — discarded ==="
+rcon "forceload add 128 128 255 255" >/dev/null || true
+NWARM=0
+for i in $(seq 1 90); do
+  NWARM=$(rcon "crusgenstats" | grep -m1 -o "chunks=[0-9]*" | grep -oE "[0-9]+" || true)
+  if [ "${NWARM:-0}" -ge 64 ]; then break; fi
+  sleep 1
+done
+echo "=== warmup done: chunks=${NWARM:-?}/64 ==="
+rcon "forceload remove all" >/dev/null || true
+sleep 2
+rcon "crusgenstats reset" >/dev/null || true
+
 # --- pregen + measure -------------------------------------------------------
 # Sequential per-chunk forceload (cx asc, cz asc): ore/blob features write into
 # the 3x3 WorldGenRegion, so the final block at contested boundary positions

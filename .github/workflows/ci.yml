@@ -35,8 +35,13 @@ jobs:
           CRUS_BENCH_SEED=3257840388504953787 cargo run --release --bin bench -- perf 64
           echo "=== phases (real seed) ==="
           cargo run --release --bin phases
-          echo "=== parallel-2t bench perf 64 (real seed) ==="
-          CRUS_FILL_THREADS=2 CRUS_BENCH_SEED=3257840388504953787 cargo run --release --bin bench -- perf 64
+          # Noise control on the shared 2-core runner: neighbor VMs inject
+          # additive-only noise into a chunk time, so the MIN of repeated
+          # p50s is the honest noise-free estimate (p50 alone swings ~15%).
+          echo "=== parallel-2t bench perf 64 (real seed) x3 ==="
+          for i in 1 2 3; do
+            CRUS_FILL_THREADS=2 CRUS_BENCH_SEED=3257840388504953787 cargo run --release --bin bench -- perf 64
+          done
       - name: Clippy (non-blocking)
         working-directory: native
         run: cargo clippy --release 2>&1 | tail -20

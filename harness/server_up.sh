@@ -56,10 +56,15 @@ fi
 # the native fill during young collections (the judge tail max=163ms is a
 # GC pause signature). CRUS_SERIAL_GC=1 opts in; default kept for A/B.
 GC_FLAGS="-XX:CICompilerCount=2 -XX:ParallelGCThreads=2 -XX:ConcGCThreads=1"
+HEAP_ARGS="-Xms512M -Xmx1536M"
 if [ "${CRUS_SERIAL_GC:-0}" = "1" ]; then
+  # judge mode: SerialGC (no parallel GC threads stealing cores) + fixed heap
+  # commit (Xms=Xmx-ish): heap resize during the measured window shows up as
+  # multi-ms layout spikes on the 2-core box.
   GC_FLAGS="-XX:CICompilerCount=2 -XX:+UseSerialGC"
+  HEAP_ARGS="-Xms1G -Xmx1536M"
 fi
-java -Xms512M -Xmx1536M $JAVA_LIB_PATH_ARGS \
+java $HEAP_ARGS $JAVA_LIB_PATH_ARGS \
   -Dpaper.chunk-system.gen-parallelism=false \
   $GC_FLAGS \
   -XX:NonProfiledCodeHeapSize=64m \

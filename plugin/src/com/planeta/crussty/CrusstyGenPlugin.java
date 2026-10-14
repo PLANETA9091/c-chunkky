@@ -43,6 +43,11 @@ public final class CrusstyGenPlugin extends JavaPlugin {
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (command.getName().equals("crusgenstats")) {
+            if (args.length >= 1 && args[0].equalsIgnoreCase("reset")) {
+                GenStats.reset();
+                sender.sendMessage("[CrusstyGen] stats window reset");
+                return true;
+            }
             sender.sendMessage("[CrusstyGen] native noise stage: " + GenStats.snapshot());
             try {
                 sender.sendMessage("[CrusstyGen] " + ChunkGenNative.profStatsGlobal());

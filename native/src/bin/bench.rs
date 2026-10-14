@@ -314,9 +314,10 @@ fn cmd_perf(n: usize) {
     let p50 = times[times.len() / 2];
     let p99 = times[(times.len() as f64 * 0.99) as usize % times.len()];
     println!(
-        "n={} mean={:.3}ms p50={:.3}ms p99={:.3}ms max={:.3}ms total={:.1}ms",
+        "n={} mean={:.3}ms min={:.3}ms p50={:.3}ms p99={:.3}ms max={:.3}ms total={:.1}ms",
         n,
         mean,
+        times[0],
         p50,
         p99,
         times[times.len() - 1],
