@@ -360,7 +360,6 @@ pub struct ChunkGen<'e> {
     /// Next-chunk plane prefetcher (runs during the Java-side gap between
     /// fills; main gen only).
     prefetch: Option<PrefetchWorker>,
-    prefetch_done: Option<PrefetchResult>,
     /// Gap-adaptive prefetch gate: enabled only when the previous inter-fill
     /// gap was large enough to hide the plane work (isolated benches have
     /// ~0 gap — there the prefetch thread would just fight the fill workers).
@@ -668,6 +667,10 @@ impl<'a, 'e> FillGraph<'a, 'e> {
             // 2) claim the next plane
             let k = self.next_plane.fetch_add(1, Ordering::Relaxed);
             if k <= self.ccx {
+                // a prefetched plane may already be in the store
+                if self.plane_ready.load(Ordering::Acquire) & (1u32 << k) != 0 {
+                    continue;
+                }
                 let t0 = std::time::Instant::now();
                 let mut buf = vec![0f64; self.plane_len];
                 ChunkGen::eval_plane_into(
@@ -829,7 +832,6 @@ impl<'e> ChunkGen<'e> {
             out_pool: Vec::new(),
             plane_worker: None,
             prefetch: None,
-            prefetch_done: None,
             prefetch_enabled: false,
             last_fill_end: None,
             cellfill_stack: Vec::with_capacity(16),
@@ -1362,9 +1364,10 @@ impl PlaneWorker {
 /// Next-chunk plane prefetch worker: after a fill completes, it evaluates
 /// the NEXT chunk's planes (1..=ccx — plane 0 arrives via the cross-chunk
 /// cache) during the Java-side gap between fills (layout / beardifier /
-/// vanilla SURFACE run on the gen thread while our cores are idle). The
-/// next fill then starts straight on strips. Planes are pure functions of
-/// (env, compiled, corner x, z origin) — bit-identical wherever computed.
+/// vanilla SURFACE run on the gen thread while our cores are idle). Planes
+/// are sent ONE BY ONE as they complete, so a consumer that starts mid-way
+/// takes whatever is ready and lets the in-fill graph compute only the
+/// missing planes — graceful partial hits instead of all-or-nothing.
 enum PrefetchMsg {
     Prefetch {
         /// next chunk's first_cell_x (cell units)
@@ -1374,19 +1377,20 @@ enum PrefetchMsg {
     Stop,
 }
 
-struct PrefetchResult {
+struct PrefetchPlane {
     /// plane-0 world x of the CONSUMING chunk: next_first_cell_x * cw
     key_x: i64,
     key_z: i32,
-    /// planes 1..=ccx of the consuming chunk, laid out [slot][z][y]
-    planes: Vec<Vec<f64>>,
+    /// plane index within the consuming chunk (1..=ccx)
+    k: usize,
+    buf: Vec<f64>,
 }
 
 struct PrefetchWorker {
     tx: std::sync::mpsc::Sender<PrefetchMsg>,
-    rx: std::sync::mpsc::Receiver<PrefetchResult>,
+    rx: std::sync::mpsc::Receiver<PrefetchPlane>,
     handle: Option<std::thread::JoinHandle<()>>,
-    /// one outstanding request at a time (cleared when consumed/answered)
+    /// one outstanding request at a time (cleared when drained/discarded)
     pending: bool,
 }
 
@@ -1405,7 +1409,7 @@ impl PrefetchWorker {
         plane_len: usize,
     ) -> PrefetchWorker {
         let (tx, rx) = std::sync::mpsc::channel::<PrefetchMsg>();
-        let (dtx, drx) = std::sync::mpsc::channel::<PrefetchResult>();
+        let (dtx, drx) = std::sync::mpsc::channel::<PrefetchPlane>();
         let handle = std::thread::Builder::new()
             .stack_size(1 << 21)
             .spawn(move || {
@@ -1419,7 +1423,7 @@ impl PrefetchWorker {
                             next_first_cell_x,
                             first_cell_z,
                         }) => {
-                            let mut planes = Vec::with_capacity(cell_count_xz);
+                            let key_x = (next_first_cell_x * cw) as i64;
                             for k in 1..=cell_count_xz {
                                 let mut buf = vec![0f64; plane_len];
                                 <ChunkGen<'static>>::eval_plane_into(
@@ -1436,15 +1440,15 @@ impl PrefetchWorker {
                                     lanes,
                                     &mut buf,
                                 );
-                                planes.push(buf);
-                            }
-                            let res = PrefetchResult {
-                                key_x: (next_first_cell_x * cw) as i64,
-                                key_z: first_cell_z,
-                                planes,
-                            };
-                            if dtx.send(res).is_err() {
-                                return;
+                                let msg = PrefetchPlane {
+                                    key_x,
+                                    key_z: first_cell_z,
+                                    k,
+                                    buf,
+                                };
+                                if dtx.send(msg).is_err() {
+                                    return;
+                                }
                             }
                         }
                         Ok(PrefetchMsg::Stop) | Err(_) => return,
@@ -1546,7 +1550,6 @@ impl<'e> ChunkGen<'e> {
             out_pool: Vec::new(),
             plane_worker: None,
             prefetch: None,
-            prefetch_done: None,
             prefetch_enabled: false,
             last_fill_end: None,
             cellfill_stack: Vec::with_capacity(16),
@@ -1663,61 +1666,55 @@ impl<'e> ChunkGen<'e> {
             planes.push(self.interp.slice0.clone());
         }
 
-        // Consume a pending next-chunk plane prefetch (requested by the
-        // PREVIOUS fill; the prefetch worker evaluated it during the
-        // Java-side gap between fills — layout/beard/SURFACE run on the gen
-        // thread while our cores idle). Valid only when plane 0 came from
-        // the cross-chunk cache (same cz, +x adjacency) and the key matches
-        // this fill's origin. 400us cap: if the worker isn't done, the
-        // graph below evaluates planes itself (duplicate work ends quickly).
-        let mut prefetched: Vec<std::sync::Arc<Vec<f64>>> = Vec::new();
+        // Consume a pending next-chunk plane prefetch: drain whatever planes
+        // are already evaluated (the worker computed them during the
+        // Java-side gap). Partial hits are fine — the graph below computes
+        // only the missing planes; late arrivals are discarded by key on the
+        // next drain. Bit-exact: planes are pure functions of their origin.
+        let mut prefetched: Vec<Option<std::sync::Arc<Vec<f64>>>> = vec![None; ccx];
+        let mut pf_got = 0usize;
         if let Some(pf) = self.prefetch.as_mut() {
             if pf.pending {
                 use std::sync::mpsc::RecvTimeoutError;
-                let wait = if self.prefetch_enabled && cache_hit {
-                    std::time::Duration::from_micros(400)
+                let mut wait = if self.prefetch_enabled && cache_hit {
+                    std::time::Duration::from_micros(200)
                 } else {
                     std::time::Duration::from_secs(0)
                 };
-                match pf.rx.recv_timeout(wait) {
-                    Ok(res) => {
-                        pf.pending = false;
-                        if self.prefetch_enabled {
-                            self.prefetch_done = Some(res);
+                loop {
+                    match pf.rx.recv_timeout(wait) {
+                        Ok(m) => {
+                            wait = std::time::Duration::from_secs(0);
+                            if m.k >= 1
+                                && m.k <= ccx
+                                && m.key_x == (first_cell_x * cw) as i64
+                                && m.key_z == first_cell_z
+                            {
+                                if prefetched[m.k - 1].is_none() {
+                                    pf_got += 1;
+                                }
+                                prefetched[m.k - 1] = Some(std::sync::Arc::new(m.buf));
+                            }
+                            // else: stale plane from a discarded request — drop
+                        }
+                        Err(RecvTimeoutError::Timeout) => break,
+                        Err(RecvTimeoutError::Disconnected) => {
+                            pf.pending = false;
+                            break;
                         }
                     }
-                    Err(RecvTimeoutError::Disconnected) => {
-                        pf.pending = false;
-                    }
-                    Err(RecvTimeoutError::Timeout) => {}
                 }
+                pf.pending = false;
             }
         }
-        if self.prefetch_enabled && cache_hit {
-            let key_ok = self
-                .prefetch_done
-                .as_ref()
-                .map(|r| r.key_x == (first_cell_x * cw) as i64 && r.key_z == first_cell_z)
-                .unwrap_or(false);
-            if key_ok {
-                let res = self.prefetch_done.take().unwrap();
-                prefetched = res.planes.into_iter().map(std::sync::Arc::new).collect();
-            } else {
-                // stale (row turn / first fill of a row): drop
-                self.prefetch_done = None;
-            }
-        } else if !self.prefetch_enabled {
-            self.prefetch_done = None;
-        }
-        let prefetched_all = prefetched.len() == ccx;
         if std::env::var("CRUS_PF_DIAG").ok().as_deref() == Some("1") {
             eprintln!(
-                "[pf-diag] cx={} hit={} enabled={} pending_in={} got={}",
+                "[pf-diag] cx={} hit={} enabled={} got={}/{}",
                 first_cell_x / cw.max(1),
                 cache_hit,
                 self.prefetch_enabled,
-                self.prefetch.as_ref().map(|p| p.pending).unwrap_or(false),
-                prefetched_all
+                pf_got,
+                ccx
             );
         }
 
@@ -1738,17 +1735,18 @@ impl<'e> ChunkGen<'e> {
             let store: Mutex<Vec<Option<std::sync::Arc<Vec<f64>>>>> =
                 Mutex::new((0..=ccx).map(|_| None).collect());
             store.lock().unwrap()[0] = Some(std::sync::Arc::new(plane0));
-            if prefetched_all {
-                for (k, buf) in prefetched.into_iter().enumerate() {
-                    store.lock().unwrap()[k + 1] = Some(buf);
+            let mut pre_mask = 0u32;
+            if pf_got > 0 {
+                let mut st = store.lock().unwrap();
+                for (i, b) in prefetched.into_iter().enumerate() {
+                    if let Some(buf) = b {
+                        st[i + 1] = Some(buf);
+                        pre_mask |= 1u32 << (i + 1);
+                    }
                 }
             }
-            let plane_ready = AtomicU32::new(if prefetched_all {
-                (1u32 << (ccx + 1)) - 1
-            } else {
-                1
-            });
-            let next_plane = AtomicUsize::new(if prefetched_all { ccx + 1 } else { 1 });
+            let plane_ready = AtomicU32::new(1u32 | pre_mask);
+            let next_plane = AtomicUsize::new(1);
             let next_strip = AtomicUsize::new(0);
             let strips_done = AtomicUsize::new(0);
             let graph = FillGraph {
