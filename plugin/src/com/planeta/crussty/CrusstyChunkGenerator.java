@@ -387,6 +387,57 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 }
                 sectionStatesById = states;
                 bulkFieldStates = fStates;
+                // ---- v3 Data-swap init ----
+                fPalData = cPaletted.getField("data"); // public volatile
+                Class<?> cData = Class.forName(
+                        "net.minecraft.world.level.chunk.PalettedContainer$Data");
+                Class<?> cCfg = Class.forName(
+                        "net.minecraft.world.level.chunk.PalettedContainer$Configuration");
+                ctorData = cData.getConstructor(
+                        cCfg,
+                        Class.forName("net.minecraft.util.BitStorage"),
+                        Class.forName("net.minecraft.world.level.chunk.Palette"));
+                // NMS air state
+                Class<?> cBlocks = Class.forName(
+                        "net.minecraft.world.level.block.Blocks");
+                Object airBlock = cBlocks.getField("AIR").get(null);
+                Object airSt = mDefaultBlockState.invoke(airBlock);
+                // template container: capture singleton + linear configurations
+                Object reg0 = null;
+                for (Object st : states) {
+                    if (st != null) {
+                        reg0 = bulkRegistryField.get(st);
+                        break;
+                    }
+                }
+                if (reg0 == null) {
+                    throw new IllegalStateException("no registry");
+                }
+                Object tpl = ctorPal.newInstance(reg0, airSt, sectionStrategyField);
+                airState = airSt;
+                Object d0 = fPalData.get(tpl);
+                Method mCfg = d0.getClass().getMethod("configuration");
+                cfgSingleton = mCfg.invoke(d0);
+                Method mCfgFactory = cfgSingleton.getClass().getMethod("factory");
+                mPalCreate = Class.forName(
+                        "net.minecraft.world.level.chunk.Palette$Factory").getMethod("create",
+                        int.class,
+                        Class.forName("net.minecraft.core.IdMap"),
+                        Class.forName("net.minecraft.world.level.chunk.PaletteResize"),
+                        java.util.List.class);
+                factorySingleton = mCfgFactory.invoke(cfgSingleton);
+                // force the template to the linear configuration (2 distinct values)
+                Object otherSt = states[1] != null ? states[1] : states[2];
+                mGetAndSetUnch.invoke(tpl, 0, 0, 0, otherSt);
+                Object d1 = fPalData.get(tpl);
+                cfgLinear = mCfg.invoke(d1);
+                factoryLinear = mCfgFactory.invoke(cfgLinear);
+                ctorSimpleBit = Class.forName("net.minecraft.util.SimpleBitStorage")
+                        .getConstructor(int.class, int.class, long[].class);
+                ctorZeroBit = Class.forName("net.minecraft.util.ZeroBitStorage")
+                        .getConstructor(int.class);
+                palIdxScratch = new int[states.length];
+                // ---- end v3 init ----
                 // per-material invariant flags for the section recount
                 int n = mats.length;
                 matAir = new boolean[n];
@@ -439,6 +490,20 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     }
 
     private static java.lang.reflect.Field bulkFieldStates;
+    // ---- v3 Data-swap: replace a section's PalettedContainer.data in ONE
+    // volatile field write instead of ~4096 getAndSetUnchecked calls ----
+    private static java.lang.reflect.Field fPalData;
+    private static java.lang.reflect.Constructor<?> ctorData;
+    private static Object cfgSingleton; // Configuration(bits=0, SINGLE_VALUE factory)
+    private static Object cfgLinear;    // Configuration(bits=4, LINEAR factory)
+    private static Object airState;     // NMS air block state (palette slot 0)
+    private static Method mPalCreate;   // Palette$Factory.create(bits, registry, resize, List)
+    private static Object factorySingleton; // Palette$Factory from cfgSingleton
+    private static Object factoryLinear;    // Palette$Factory from cfgLinear
+    private static java.lang.reflect.Constructor<?> ctorSimpleBit; // SimpleBitStorage(int,int,long[])
+    private static java.lang.reflect.Constructor<?> ctorZeroBit;   // ZeroBitStorage(int)
+    private static final Object[] valuesScratch = new Object[17];  // palette values (slot 0 = air)
+    private static int[] palIdxScratch; // material id -> palette index (0 = air)
 
     @SuppressWarnings("unchecked")
     private static void layoutBulk(ChunkData chunkData, int minY, int height, short[] out,
@@ -488,7 +553,114 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     // counters and the Moonrise ticking list — the invariants the
                     // per-block ChunkAccess.setBlockState normally maintains.
                     Object pal = bulkFieldStates.get(section);
+                    // ---- v3 Data-swap fast path ----
+                    // A fresh section container is a singleton(air). Instead of
+                    // ~4096 getAndSetUnchecked reflection calls, build the whole
+                    // (Configuration, BitStorage, Palette) triple for the
+                    // section's data and replace `pal.data` in ONE volatile
+                    // field write. The resulting reads are identical: palette
+                    // slot 0 is the NMS air state, every position maps to the
+                    // same defaultBlockState the per-block path would store.
+                    // Any reflection miss degrades to the per-block path below.
+                    boolean swapped = false;
+                    try {
+                        Object reg = bulkRegistryField.get(pal);
+                        // 1) distinct non-air states (palette slots 1..15)
+                        int vn = 1;
+                        int[] usedIds = new int[16];
+                        int usedN = 0;
+                        boolean over = false;
+                        for (int k = 0; k < 4096 && !over; k++) {
+                            short id = out[base + k];
+                            if (id == 0 || sectionStatesById[id] == null
+                                    || palIdxScratch[id] != 0) {
+                                continue;
+                            }
+                            if (vn >= 16) {
+                                over = true;
+                                break;
+                            }
+                            valuesScratch[vn] = sectionStatesById[id];
+                            palIdxScratch[id] = vn;
+                            usedIds[usedN++] = id;
+                            vn++;
+                        }
+                        if (over) {
+                            // >15 distinct states: per-block path (rare)
+                            for (int u = 0; u < usedN; u++) {
+                                palIdxScratch[usedIds[u]] = 0;
+                            }
+                        } else {
+                            Object storage = null;
+                            Object palette = null;
+                            Object cfg = null;
+                            if (vn == 1) {
+                                // singleton (uniform non-air section)
+                                Object st0 = out[base] != 0
+                                        ? sectionStatesById[out[base]] : airState;
+                                // st0 null (unmapped material) -> per-block path
+                                if (st0 == null) {
+                                    for (int u = 0; u < usedN; u++) {
+                                        palIdxScratch[usedIds[u]] = 0;
+                                    }
+                                    swapped = false;
+                                } else {
+                                    cfg = cfgSingleton;
+                                    palette = mPalCreate.invoke(factorySingleton, reg, pal,
+                                            java.util.List.of(st0));
+                                    storage = ctorZeroBit.newInstance(4096);
+                                    swapped = true;
+                                }
+                            } else {
+                                cfg = cfgLinear;
+                                java.util.List<Object> vals = new java.util.ArrayList<>(vn);
+                                vals.add(airState);
+                                for (int v = 1; v < vn; v++) {
+                                    vals.add(valuesScratch[v]);
+                                }
+                                palette = mPalCreate.invoke(factoryLinear, reg, pal, vals);
+                                long[] raw = new long[256]; // 4096 * 4 bits
+                                for (int k = 0; k < 4096; k++) {
+                                    short id = out[base + k];
+                                    int pi = (id == 0 || sectionStatesById[id] == null)
+                                            ? 0 : palIdxScratch[id];
+                                    if (pi != 0) {
+                                        int word = k >> 4;
+                                        int shift = (k & 15) << 2;
+                                        raw[word] |= ((long) pi) << shift;
+                                    }
+                                }
+                                storage = ctorSimpleBit.newInstance(4, 4096, raw);
+                                swapped = true;
+                            }
+                            if (swapped) {
+                                Object nd = ctorData.newInstance(cfg, storage, palette);
+                                fPalData.set(pal, nd);
+                            }
+                        }
+                    } catch (Throwable t3) {
+                        swapped = false; // degrade silently to per-block
+                    }
                     int nonEmpty = 0, tickB = 0, tickF = 0, special = 0;
+                    if (swapped) {
+                        // counters from the material flags (same as per-block)
+                        for (int k = 0; k < 4096; k++) {
+                            short id = out[base + k];
+                            if (id == 0 || sectionStatesById[id] == null) {
+                                continue;
+                            }
+                            nonEmpty++;
+                            if (matTicking[id]) {
+                                tickB++;
+                            }
+                            if (matFluidTicking[id]) {
+                                tickF++;
+                            }
+                            if (matSpecial[id]) {
+                                special++;
+                            }
+                        }
+                    } else {
                     for (int k = 0; k < 4096; k++) {
                         short id = out[base + k];
                         if (id == 0) {
@@ -509,6 +681,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                         if (matSpecial[id]) {
                             special++;
                         }
+                    }
                     }
                     fNonEmpty.setShort(section, (short) nonEmpty);
                     fTickingBlock.setShort(section, (short) tickB);
