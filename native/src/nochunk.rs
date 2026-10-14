@@ -1822,6 +1822,138 @@ impl<'e> ChunkGen<'e> {
                     }
                     let cell_start_block_y = (i5 as i32 + self.cell_noise_min_y) * ch;
 
+                    // Cell verdict gate: interval-evaluate the compiled cellfill
+                    // program over the cell's corner ranges. AllNeg / AllPos
+                    // prove every in-cell substance has that sign (every op's
+                    // interval is a sound superset; Lerp3 of corners stays in
+                    // [min, max] since lerp weights are in [0,1)).
+                    //
+                    // What is safe to skip is dictated by where the exact
+                    // substance VALUE is read:
+                    //  - substance > 0.0 gates (aquifer early return, ore
+                    //    eligibility): sign only.
+                    //  - aquifer PRESSURE BARRIER (substance + d1 > 0.0 ->
+                    //    None -> stone): exact value, but only reachable when
+                    //    the 12-cell neighborhood statuses are MIXED and the
+                    //    nearest-pair similarity is positive.
+                    // Therefore:
+                    //  - AllPos: poison +1.0 is bit-exact everywhere (the
+                    //    pressure path requires substance <= 0), and when the
+                    //    whole cell is outside the ore y-range the material
+                    //    collapses to STONE outright.
+                    //  - AllNeg: exact values are required unless the block
+                    //    result provably never consults them:
+                    //      * whole cell below the lava line: global-fluid
+                    //        early return (LAVA, sched=false) fires before any
+                    //        scan -> direct LAVA;
+                    //      * whole cell at y >= 64 AND every base aquifer
+                    //        cell summary in the covered 2x2x2 neighborhood is
+                    //        cached-uniform: every block early-returns with
+                    //        status.at(y) = AIR (no fluid level reaches 64),
+                    //        sched=false -> direct AIR;
+                    //      * otherwise: full cellfill (exact values) + normal
+                    //        material walk.
+                    // Gated on an empty beardifier (a beard contribution could
+                    // flip the sign per block) and on the material/cellfill
+                    // probe switches (test-only).
+                    let verdict = if self.beard.is_empty()
+                        && !self.skip_material
+                        && !self.skip_cellfill
+                    {
+                        match self.cellfill_prog.as_deref() {
+                            Some(prog) => {
+                                match crate::density::cell_interval(
+                                    prog,
+                                    &self.interp,
+                                    cell_start_block_y,
+                                ) {
+                                    Some((lo, hi)) if hi < 0.0 => 1i8, // AllNeg
+                                    Some((lo, hi)) if lo > 0.0 => 2,  // AllPos
+                                    _ => 0,
+                                }
+                            }
+                            None => 0,
+                        }
+                    } else {
+                        0
+                    };
+                    let lava_line = self.sea_level.min(-54);
+                    let ore_free = !self.ore_veins_enabled
+                        || self.no_ore
+                        || cell_start_block_y > 50
+                        || cell_start_block_y + (self.cell_height as i32 - 1) < -60;
+                    let y_top = cell_start_block_y + (self.cell_height as i32 - 1);
+                    // All base aquifer cells covered by this 4x8x4 material
+                    // cell (gx/gz span at most 2, gy at most 2) must have a
+                    // cached all-same summary for the AIR direct write.
+                    let air_zone_safe = cell_start_block_y >= 64 && {
+                        let mut ok = true;
+                        'scan: for gx in [
+                            floor_div(cell_start_block_x - 5, 16),
+                            floor_div(cell_start_block_x + self.cell_width as i32 - 1 - 5, 16),
+                        ] {
+                            for gy in [
+                                floor_div(cell_start_block_y + 1, 12),
+                                floor_div(y_top + 1, 12),
+                            ] {
+                                for gz in [
+                                    floor_div(cell_start_block_z - 5, 16),
+                                    floor_div(cell_start_block_z + self.cell_width as i32 - 1 - 5, 16),
+                                ] {
+                                    let base = self.aquifer.index(gx, gy, gz);
+                                    let sv = self.aquifer.summary[base].0.load(Ordering::Relaxed);
+                                    if sv == 0 {
+                                        ok = false;
+                                        break 'scan;
+                                    }
+                                    let (same, _) = unpack_summary(sv);
+                                    if !same {
+                                        ok = false;
+                                        break 'scan;
+                                    }
+                                }
+                            }
+                        }
+                        ok
+                    };
+                    let direct: Option<u16> = match verdict {
+                        1 if y_top < lava_line => Some(LAVA),
+                        1 if air_zone_safe => Some(AIR),
+                        2 if ore_free => Some(STONE),
+                        _ => None,
+                    };
+                    // AllNeg cells that fall back keep their exact values:
+                    // only AllPos cells take the poison fill (the +1.0 value
+                    // is never read beyond the subst>0 gates).
+                    let poison = verdict == 2;
+                    if let Some(b) = direct {
+                        // constant cell: write it out, no cellfill, no walk
+                        if b != AIR {
+                            for iy2 in 0..self.cell_height as i32 {
+                                let row_base = (((cell_start_block_y + iy2 - self.min_y) * 256
+                                    + (cell_start_block_z - min_block_z) * 16
+                                    + (cell_start_block_x - min_block_x)))
+                                    as usize;
+                                for iz2 in 0..self.cell_width as usize {
+                                    let rr = row_base + iz2 * 16;
+                                    for ix2 in 0..self.cell_width as usize {
+                                        out[rr + ix2] = b;
+                                    }
+                                }
+                            }
+                        }
+                        if self.prof.enabled {
+                            let cell_blocks =
+                                (self.cell_width * self.cell_width * self.cell_height) as u64;
+                            if verdict == 1 {
+                                self.prof.blocks_subst_neg += cell_blocks;
+                            } else {
+                                self.prof.blocks_subst_pos += cell_blocks;
+                            }
+                        }
+                        continue;
+                    }
+
                     // All-solid cell gate: if every final_density corner is
                     // > 0, every trilinearly interpolated in-cell substance
                     // is > 0 too (convex combination, IEEE lerp of positives
@@ -1850,6 +1982,7 @@ impl<'e> ChunkGen<'e> {
                     while iy >= 0 {
                         // try the 2-row path: iy (row A) + iy-1 (row B)
                         if !skipping
+                            && !poison
                             && self.cellfill_prog.is_some()
                             && cw_i == 4
                             && iy >= 1
@@ -1988,9 +2121,21 @@ impl<'e> ChunkGen<'e> {
                         let mut ix = 0i32;
                         while ix < cw_i {
                             let dx = ix as f64 * dx_step;
-                            if skipping {
+                            // verdict != 0 (AllPos only): poison the cell_cache
+                            // with a sign-representative value. The exact value
+                            // is never read: the aquifer early-returns on
+                            // substance > 0.0 before the pressure barrier (the
+                            // only value-sensitive read), and the ore path is
+                            // position-driven. AllNeg cells never poison —
+                            // they fall back to the exact cellfill.
+                            if skipping || poison {
+                                let fill_v = if skipping {
+                                    0.0f64
+                                } else {
+                                    1.0f64
+                                };
                                 for _ in 0..cw_i {
-                                    self.cell_cache[idx] = 0.0;
+                                    self.cell_cache[idx] = fill_v;
                                     idx += 1;
                                 }
                             } else if self.cellfill_prog.is_some() {
@@ -2100,6 +2245,39 @@ impl<'e> ChunkGen<'e> {
                             ix += 1;
                         }
                         iy -= 1;
+                    }
+                    // TEMP DEBUG: verify interval soundness against the real
+                    // cellfill values (verdict==0 cells only).
+                    if std::env::var("CRUS_GATE_DEBUG").is_ok() && verdict == 0 {
+                        if let Some(prog) = self.cellfill_prog.as_deref() {
+                            if let Some((ilo, ihi)) = crate::density::cell_interval(
+                                prog,
+                                &self.interp,
+                                cell_start_block_y,
+                            ) {
+                                let n = (self.cell_width
+                                    * self.cell_width
+                                    * self.cell_height) as usize;
+                                let mut rmin = f64::INFINITY;
+                                let mut rmax = f64::NEG_INFINITY;
+                                for &v in &self.cell_cache[..n] {
+                                    rmin = rmin.min(v);
+                                    rmax = rmax.max(v);
+                                }
+                                if rmin < ilo || rmax > ihi {
+                                    eprintln!(
+                                        "INTERVAL VIOLATION cell(i2={i2},i3={i3},i5={i5}): real [{rmin:.6}, {rmax:.6}] interval [{ilo:.6}, {ihi:.6}]"
+                                    );
+                                }
+                                if std::env::var("CRUS_GATE_DEBUG").as_deref() == Ok("2")
+                                    && (40..48).contains(&cell_start_block_y)
+                                {
+                                    eprintln!(
+                                        "cell(i2={i2},i3={i3},i5={i5}) by={cell_start_block_y}: real [{rmin:.6}, {rmax:.6}] interval [{ilo:.6}, {ihi:.6}]"
+                                    );
+                                }
+                            }
+                        }
                     }
                     if let Some(t) = t_cf {
                         p.cellfill_ns += t.elapsed().as_nanos() as u64;

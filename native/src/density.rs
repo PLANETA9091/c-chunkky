@@ -2105,6 +2105,230 @@ pub enum CellOp {
     MulOrAdd { is_add: bool, argument: f64 },
 }
 
+// ---- cell-level interval verdict (uniform-sign early-out) ----
+// Interval-evaluates the cellfill program over a cell's corner ranges.
+// Every op's interval is a SOUND superset of the actual per-block values:
+//  - Lerp3: every trilinear combination of corners[slot] lies inside
+//    [min(corners), max(corners)] (all lerp weights are in [0, 1)).
+//  - Add/Mul/Min/Max/Abs/Square/Cube/Clamp/HalfNeg/QuarterNeg: standard
+//    interval hulls (HalfNeg/QuarterNeg/Squeeze/Cube are monotone, so the
+//    hull of the endpoint images covers the range; Squeeze's derivative
+//    1/2 - d^2/8 > 0 on the clamped range and constant beyond it).
+//  - Mul keeps the vanilla `a == 0.0 -> 0.0` short-circuit inside the hull
+//    (0 is always contained when 0 is in the left interval).
+//  - RangeChoice: exact when the input interval lies entirely inside or
+//    outside [min_inclusive, max_exclusive); otherwise the hull of both
+//    branches (conservative).
+//  - YGrad: sampled at all 8 block y values of the cell (piecewise-linear
+//    in y, so the hull of the samples covers the cell's range).
+// A verdict of AllNeg (hi < 0) or AllPos (lo > 0) therefore proves that
+// EVERY in-cell substance has that sign, and material_rule only ever reads
+// the sign of the substance (aquifer/ore branches are y/position-driven).
+#[inline]
+fn ihull(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    (a.0.min(b.0), a.1.max(b.1))
+}
+
+#[inline]
+fn imul(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let mut lo = a.0 * b.0;
+    let mut hi = lo;
+    for x in [a.0, a.1] {
+        for y in [b.0, b.1] {
+            let p = x * y;
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+    }
+    (lo, hi)
+}
+
+#[inline]
+fn imono(a: (f64, f64), f: impl Fn(f64) -> f64) -> (f64, f64) {
+    let x = f(a.0);
+    let y = f(a.1);
+    (x.min(y), x.max(y))
+}
+
+/// Squeeze: d = clamp(a, -1, 1); d/2 - d^3/24 (monotone increasing).
+#[inline]
+fn f_squeeze(a: f64) -> f64 {
+    let d = a.clamp(-1.0, 1.0);
+    d / 2.0 - d * d * d / 24.0
+}
+
+/// YGrad as a function of block y (vanilla YClampedGradient).
+#[inline]
+fn f_ygrad(y: i32, from_y: i32, to_y: i32, fv: f64, tv: f64) -> f64 {
+    let t = (y as f64 - from_y as f64) / (to_y as f64 - from_y as f64);
+    if t < 0.0 {
+        fv
+    } else if t > 1.0 {
+        tv
+    } else {
+        fv + t * (tv - fv)
+    }
+}
+
+/// Cell verdict interval for the compiled program, or None when the program
+/// contains an op that must stay per-block (none today — kept for safety
+/// against future op additions) or when any corner is non-finite.
+pub fn cell_interval(
+    prog: &[CellOp],
+    interp: &InterpState,
+    block_y0: i32,
+) -> Option<(f64, f64)> {
+    let corners = |slot: u16| interp.corners_pub(slot);
+    // 16-slot interval stack (program depth validated <= 16 by the compiler)
+    let mut st: [(f64, f64); 16] = [(0.0, 0.0); 16];
+    let mut sp = 0usize;
+    for op in prog {
+        match op {
+            CellOp::PushConst(v) => {
+                if !v.is_finite() {
+                    return None;
+                }
+                st[sp] = (*v, *v);
+                sp += 1;
+            }
+            CellOp::Lerp3 { slot } => {
+                let c = corners(*slot);
+                let mut lo = c[0];
+                let mut hi = lo;
+                for &v in &c[1..] {
+                    if !v.is_finite() {
+                        return None;
+                    }
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+                st[sp] = (lo, hi);
+                sp += 1;
+            }
+            CellOp::YGrad { from_y, to_y, from_value, to_value } => {
+                let mut v = f_ygrad(block_y0, *from_y, *to_y, *from_value, *to_value);
+                let mut lo = v;
+                let mut hi = v;
+                for k in 1..8 {
+                    v = f_ygrad(block_y0 + k, *from_y, *to_y, *from_value, *to_value);
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+                st[sp] = (lo, hi);
+                sp += 1;
+            }
+            CellOp::Add => {
+                sp -= 1;
+                let b = st[sp];
+                sp -= 1;
+                let a = st[sp];
+                st[sp] = (a.0 + b.0, a.1 + b.1);
+                sp += 1;
+            }
+            CellOp::Mul => {
+                sp -= 1;
+                let b = st[sp];
+                sp -= 1;
+                let a = st[sp];
+                st[sp] = imul(a, b);
+                sp += 1;
+            }
+            CellOp::Min => {
+                sp -= 1;
+                let b = st[sp];
+                sp -= 1;
+                let a = st[sp];
+                st[sp] = (a.0.min(b.0), a.1.min(b.1));
+                sp += 1;
+            }
+            CellOp::Max => {
+                sp -= 1;
+                let b = st[sp];
+                sp -= 1;
+                let a = st[sp];
+                st[sp] = (a.0.max(b.0), a.1.max(b.1));
+                sp += 1;
+            }
+            CellOp::Abs => {
+                sp -= 1;
+                let a = st[sp];
+                st[sp] = (0.0, a.0.abs().max(a.1.abs()));
+                sp += 1;
+            }
+            CellOp::Square => {
+                sp -= 1;
+                let a = st[sp];
+                st[sp] = imul(a, a);
+                sp += 1;
+            }
+            CellOp::Cube => {
+                sp -= 1;
+                let a = st[sp];
+                st[sp] = imono(a, |x| x * x * x);
+                sp += 1;
+            }
+            CellOp::HalfNeg => {
+                sp -= 1;
+                let a = st[sp];
+                st[sp] = imono(a, |x| if x > 0.0 { x } else { x * 0.5 });
+                sp += 1;
+            }
+            CellOp::QuarterNeg => {
+                sp -= 1;
+                let a = st[sp];
+                st[sp] = imono(a, |x| if x > 0.0 { x } else { x * 0.25 });
+                sp += 1;
+            }
+            CellOp::Squeeze => {
+                sp -= 1;
+                let a = st[sp];
+                st[sp] = imono(a, f_squeeze);
+                sp += 1;
+            }
+            CellOp::Clamp { min, max } => {
+                sp -= 1;
+                let a = st[sp];
+                st[sp] = imono(a, |x| x.clamp(*min, *max));
+                sp += 1;
+            }
+            CellOp::RangeChoice { min_inclusive, max_exclusive } => {
+                sp -= 1;
+                let out = st[sp];
+                sp -= 1;
+                let inr = st[sp];
+                sp -= 1;
+                let v = st[sp];
+                let inside = v.1 < *max_exclusive && v.0 >= *min_inclusive;
+                let outside = v.1 < *min_inclusive || v.0 >= *max_exclusive;
+                st[sp] = if inside {
+                    inr
+                } else if outside {
+                    out
+                } else {
+                    ihull(inr, out)
+                };
+                sp += 1;
+            }
+            CellOp::MulOrAdd { is_add, argument } => {
+                sp -= 1;
+                let a = st[sp];
+                st[sp] = if *is_add {
+                    (a.0 + *argument, a.1 + *argument)
+                } else if *argument == 0.0 {
+                    (0.0, 0.0)
+                } else {
+                    imul(a, (*argument, *argument))
+                };
+                sp += 1;
+            }
+        }
+        if sp >= 16 {
+            return None;
+        }
+    }
+    Some(st[0])
+}
+
 /// Compile the CellFill program for `root`, or None if the tree contains
 /// nodes that require per-block noise sampling (raw noises, splines with
 /// node values, weird samplers, end islands).

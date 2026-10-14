@@ -665,3 +665,36 @@ Work Log:
 Stage Summary:
 - Срез: slice 0.53 | cellfill 0.78 | material 0.76 | other 0.17 (wall 2.24-2.28).
 - Blended hoist готов; главный оставшийся объём — cellfill+material (68%).
+
+---
+Task ID: cont-27 (2026-10-14, cell-verdict gate — интервальный early-out ячеек)
+Agent: Super Z (main)
+Task: cellfill/material cell-level skipping (66% секций чанка — чистый AIR)
+
+Work Log:
+- cell_interval в density.rs: интервальный прогон 17-опной cellfill-программы по
+  диапазонам 8 углов ячейки. Каждый op даёт ЗВУКНУТЫЙ над-интервал (Lerp3 — [min,max]
+  углов, т.к. веса в [0,1); Mul/Min/Max/Abs/Square — стандартные hulls;
+  Squeeze/Cube/HalfNeg/QuarterNeg — монотонны; RangeChoice — точен при полной
+  внутри/вне, иначе hull; YGrad — сэмплы 8 y). NaN углов -> None (полный путь).
+- ВЕРДИКТ AllPos/AllNeg доказывает знак всех 128 substance. КРИТИЧЕСКОЕ ОТКРЫТИЕ:
+  аквиферный барьер давления читает ТОЧНОЕ значение (substance + d1 > 0 -> STONE,
+  строка material_rule/aquifer border) — poison для AllNeg НЕВАЛИДЕН (поймано
+  golden'ом: 25 блоков STONE->WATER на (7,-3); бисекция CRUS_GATE; dump+diff по
+  координатам). Итоговый безопасный дизайн:
+  * AllPos: poison +1.0 везде (давление требует substance<=0) + прямой STONE вне
+    ore-диапазона;
+  * AllNeg: прямой LAVA ниже лавовой черты; прямой AIR при y>=64 ЕСЛИ все базовые
+    aquifer-ячейки 2x2x2-окрестности имеют закэшированные однородные summary;
+    иначе полный точный cellfill.
+- Дебаг-валидатор CRUS_GATE_DEBUG: interval vs реальные 128 значений на всех
+  ячейках — 0 нарушений (интервал звуковой).
+- Верификация: 11/11 тестов, golden 8/8 x 4 режима.
+- Эффект (phases, локально): wall 2.25 -> 2.02 (-10%); cellfill 0.78 -> 0.39 (-50%);
+  material 0.76 -> 0.65 (-14%). slice-бакет 0.53 -> 0.73 — это ожидание plane-воркера
+  (пайплайн сместился), реальный slice не изменился.
+
+Stage Summary:
+- Локальный serial wall 2.02 (slice 0.73* | cellfill 0.39 | material 0.65 | other 0.24).
+- (*slice включает простои ожидания плоскостей — узкое место сместилось в пайплайн.)
+- Далее: ore-путь (батчинг ridged/gap), затем layout и CI-прогон.
