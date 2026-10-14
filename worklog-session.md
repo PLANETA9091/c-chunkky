@@ -642,3 +642,26 @@ Work Log:
 Stage Summary:
 - Plane-major perm-дедуп готов и верифицирован; локальный phases wall 2.25-2.32.
 - Далее по плану: blended same-x hoist -> prelim-скан -> layout (1.2 -> 0.15).
+
+---
+Task ID: cont-26 (2026-10-14, blended same-x hoist)
+Agent: Super Z (main)
+Task: blended column-путь (min/max октавы через hoisted column state)
+
+Work Log:
+- noise_5_batch_col на ImprovedNoise: x/z column state в TLS-слотах (ключ — биты
+  пре-образа kx/kz), per-lane y-setup + weird-dy (smear-квирк y_scale!=0), ходьба
+  из hoisted p0/p1 с consecutive-yi дедупом, fy из RAW dy. AVX2-кернел с broadcast
+  fx/fz/dx/dz; порядок операций lane-идентичен общему пути.
+- compute_batch_col / compute_batch8_col на BlendedNoise: main-цикл остался на общем
+  пути (z per-lane), min/max (32 из 40 октава-батчей) через слоты [base..16)/[base+16..32);
+  skip-флаги и полусемейства 8-wide сохранены. Гейт в density: lanes_uniform_i32(bx,bz)
+  + avx2_available() (OnceLock).
+- Верификация: 11/11 тестов, golden 8/8 x 4 режима бит-в-бит с первого прогона.
+- Эффект: blended-batch diag 0.72 -> 0.58 (-20% blended), slice 0.54 -> 0.53 (скромно:
+  y-шаг входа min/max октав 5475*amp >> 1 ячейки — ходьба остаётся per-lane, экономится
+  в основном x/z-setup). Реально ~0.03-0.05ms.
+
+Stage Summary:
+- Срез: slice 0.53 | cellfill 0.78 | material 0.76 | other 0.17 (wall 2.24-2.28).
+- Blended hoist готов; главный оставшийся объём — cellfill+material (68%).

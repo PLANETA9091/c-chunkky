@@ -821,6 +821,138 @@ impl ImprovedNoise {
     }
 }
 
+impl ImprovedNoise {
+    /// noise_5 batch over lanes sharing the SAME wrapped octave x/z inputs
+    /// (blended min/max octaves: x/z column-constants, y per-lane), with
+    /// y_scale != 0 (the smear quirk). The x/z column state lives in `st`
+    /// keyed by exact bit-compare of the pre-image (kx, kz); per-lane work
+    /// is y setup + weird-dy + the walk (started from the hoisted p0/p1).
+    /// Lane-identical to noise_5_batch_avx2 for uniform lanes (bit-exact).
+    #[cfg(target_arch = "x86_64")]
+    pub fn noise_5_batch_col(
+        &self,
+        st: &mut OctColState,
+        kx: f64,
+        kz: f64,
+        wy: &[f64; 4],
+        y_scale: f64,
+        y_max: &[f64; 4],
+    ) -> [f64; 4] {
+        if !st.valid || st.key_x != kx.to_bits() || st.key_z != kz.to_bits() {
+            let wx = wrap(kx);
+            let wz = wrap(kz);
+            self.col_init(st, wx, wz);
+            st.valid = true;
+            st.key_x = kx.to_bits();
+            st.key_z = kz.to_bits();
+        }
+        let mut yi = [0i32; 4];
+        let mut dy = [0f64; 4];
+        let mut wdy = [0f64; 4];
+        for l in 0..4 {
+            let yv = wy[l] + self.yo;
+            let b = mth_floor(yv);
+            yi[l] = b;
+            let d = yv - b as f64;
+            dy[l] = d;
+            if y_scale != 0.0 {
+                let ym = y_max[l];
+                let d6 = if ym >= 0.0 && ym < d { ym } else { d };
+                let d7 = (d6 / y_scale + 1.0000000116860974e-07).floor() * y_scale;
+                wdy[l] = d - d7;
+            } else {
+                wdy[l] = d;
+            }
+        }
+        unsafe { self.noise_5_col_avx2(st, &yi, &dy, &wdy) }
+    }
+
+    /// Permutation walk for one y-cell within a hoisted column (x/z state
+    /// from `st`); bit-identical to the per-lane chain in the AVX2 kernels.
+    #[inline]
+    fn walk_y_cell(&self, st: &OctColState, yi: i32) -> [u8; 8] {
+        let i0 = self.p(st.p0 + yi);
+        let i1 = self.p(st.p0 + yi + 1);
+        let j0 = self.p(st.p1 + yi);
+        let j1 = self.p(st.p1 + yi + 1);
+        let zc = st.zi;
+        let bases = [i0 + zc, j0 + zc, i1 + zc, j1 + zc];
+        let mut grads = [0u8; 8];
+        for c in 0..8 {
+            let xbit = c & 1;
+            let ybit = (c >> 1) & 1;
+            let zbit = (c >> 2) & 1;
+            grads[c] = self.p(bases[ybit * 2 + xbit] + zbit as i32) as u8;
+        }
+        grads
+    }
+
+    /// Column kernel for noise_5_batch_col: per-lane walks (consecutive-yi
+    /// dedup), broadcast x/z smoothsteps and deltas, per-lane fy (raw dy)
+    /// and the per-corner y dot term from the per-lane weird-dy. Same op
+    /// order as noise_5_batch_avx2 (no FMA, no reassociation).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn noise_5_col_avx2(
+        &self,
+        st: &OctColState,
+        yi: &[i32; 4],
+        dy: &[f64; 4],
+        wdy: &[f64; 4],
+    ) -> [f64; 4] {
+        use std::arch::x86_64::*;
+        let mut grad = [[0u8; 8]; 4];
+        grad[0] = self.walk_y_cell(st, yi[0]);
+        for l in 1..4 {
+            grad[l] = if yi[l] == yi[l - 1] {
+                grad[l - 1]
+            } else {
+                self.walk_y_cell(st, yi[l])
+            };
+        }
+        let dyv = _mm256_loadu_pd(dy.as_ptr());
+        let wdyv = _mm256_loadu_pd(wdy.as_ptr());
+        let fy = smoothstep_v(dyv); // RAW dy (smear quirk: corner uses wdy)
+        let fxv = _mm256_set1_pd(st.fx);
+        let fzv = _mm256_set1_pd(st.fz);
+        let dxv = _mm256_set1_pd(st.dx);
+        let dzv = _mm256_set1_pd(st.dz);
+        let one = _mm256_set1_pd(1.0);
+        let mut vc = [_mm256_setzero_pd(); 8];
+        for c in 0..8 {
+            let mut gxs = [0i32; 4];
+            let mut gys = [0i32; 4];
+            let mut gzs = [0i32; 4];
+            for l in 0..4 {
+                let gv = &GRADIENT[(grad[l][c] & 15) as usize];
+                gxs[l] = gv[0];
+                gys[l] = gv[1];
+                gzs[l] = gv[2];
+            }
+            let gx = _mm256_cvtepi32_pd(_mm_loadu_si128(gxs.as_ptr() as *const __m128i));
+            let gy = _mm256_cvtepi32_pd(_mm_loadu_si128(gys.as_ptr() as *const __m128i));
+            let gz = _mm256_cvtepi32_pd(_mm_loadu_si128(gzs.as_ptr() as *const __m128i));
+            let xv = if c & 1 != 0 { _mm256_sub_pd(dxv, one) } else { dxv };
+            let yv = if c & 2 != 0 { _mm256_sub_pd(wdyv, one) } else { wdyv };
+            let zv = if c & 4 != 0 { _mm256_sub_pd(dzv, one) } else { dzv };
+            let t0 = _mm256_mul_pd(gx, xv);
+            let t1 = _mm256_mul_pd(gy, yv);
+            let t2 = _mm256_mul_pd(gz, zv);
+            vc[c] = _mm256_add_pd(_mm256_add_pd(t0, t1), t2);
+        }
+        let r0 = lerp_v(fxv, vc[0], vc[1]);
+        let r1 = lerp_v(fxv, vc[2], vc[3]);
+        let r01 = lerp_v(fy, r0, r1);
+        let r2 = lerp_v(fxv, vc[4], vc[5]);
+        let r3 = lerp_v(fxv, vc[6], vc[7]);
+        let r23 = lerp_v(fy, r2, r3);
+        let res = lerp_v(fzv, r01, r23);
+        let mut out = [0f64; 4];
+        _mm256_storeu_pd(out.as_mut_ptr(), res);
+        out
+    }
+}
+
 // ---------------- PerlinNoise ----------------
 pub struct PerlinNoise {
     pub first_octave: i32,
@@ -1158,6 +1290,10 @@ impl OctColState {
 thread_local! {
     static COL_CACHE: std::cell::RefCell<Vec<OctColState>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    // BlendedNoise column state: [base..base+16) = min octaves,
+    // [base+16..base+32) = max octaves (main stays on the generic kernel).
+    static BLEND_COL_CACHE: std::cell::RefCell<Vec<OctColState>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[inline]
@@ -1170,6 +1306,14 @@ fn lanes_uniform<const N: usize>(x: &[f64; N], z: &[f64; N]) -> bool {
         }
     }
     true
+}
+
+/// Cached AVX2 availability for the density-side col-path gates (std's
+/// detector is cached too, but the static avoids the atomic re-load in the
+/// per-batch hot check).
+pub fn avx2_available() -> bool {
+    static AVX2: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVX2.get_or_init(|| std::arch::is_x86_feature_detected!("avx2"))
 }
 
 impl NormalNoise {
@@ -1304,6 +1448,12 @@ impl NormalNoise {
 }
 
 // ---------------- BlendedNoise (old_blended_noise) ----------------
+/// Column-state slot stride for blended min/max octave caches:
+/// 16 (min) + 16 (max) + 8 reserved = 40 slots per instance.
+pub const BLEND_COL_STRIDE: usize = 40;
+
+static NEXT_BLENDED_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 pub struct BlendedNoise {
     pub min_noise: PerlinNoise,
     pub max_noise: PerlinNoise,
@@ -1314,6 +1464,8 @@ pub struct BlendedNoise {
     pub y_factor: f64,
     pub smear_scale_multiplier: f64,
     pub max_value: f64,
+    /// Unique per construction; indexes the per-thread blended column cache.
+    pub col_base: usize,
 }
 
 impl BlendedNoise {
@@ -1366,6 +1518,8 @@ impl BlendedNoise {
             y_factor,
             smear_scale_multiplier,
             max_value,
+            col_base: NEXT_BLENDED_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize
+                * BLEND_COL_STRIDE,
         }
     }
 
@@ -1675,6 +1829,146 @@ impl BlendedNoise {
             };
             out[l] = v / 128.0;
         }
+        out
+    }
+
+    /// Column-uniform compute (x/z block coords shared by all 4 lanes):
+    /// the min/max octave loops take the plane-major column path (hoisted
+    /// x/z octave state, per-lane walks); the main loop keeps the generic
+    /// batch (its z input is per-lane). Skip flags per lane as before.
+    /// Bit-exact vs compute_batch for uniform lanes.
+    pub fn compute_batch_col(
+        &self,
+        bx: i32,
+        by: &[i32; 4],
+        bz: i32,
+        col_base: usize,
+    ) -> [f64; 4] {
+        let d0 = bx as f64 * self.xz_multiplier;
+        let d2 = bz as f64 * self.xz_multiplier;
+        let d3 = d0 / self.xz_factor;
+        let d5 = d2 / self.xz_factor;
+        let d6 = self.y_multiplier * self.smear_scale_multiplier;
+        let d7 = d6 / self.y_factor;
+        let mut d1 = [0f64; 4];
+        let mut d4 = [0f64; 4];
+        for l in 0..4 {
+            d1[l] = by[l] as f64 * self.y_multiplier;
+            d4[l] = d1[l] / self.y_factor;
+        }
+
+        // main noise loop (unchanged generic path; x is column-uniform but
+        // y/z are per-lane, so only minor hoisting is available here)
+        let mut d10 = [0f64; 4];
+        let mut amp = 1.0f64;
+        for i in 0..8usize {
+            if let Some(oct) = self.main_noise.get_octave_noise(i) {
+                let mut wx = [0f64; 4];
+                let mut wy = [0f64; 4];
+                let mut wz = [0f64; 4];
+                let mut ymax = [0f64; 4];
+                for l in 0..4 {
+                    wx[l] = wrap(d3 * amp);
+                    wy[l] = wrap(d4[l] * amp);
+                    wz[l] = wrap(d5 * amp);
+                    ymax[l] = d4[l] * amp;
+                }
+                let v = oct.noise_5_batch(&wx, &wy, &wz, d7 * amp, &ymax);
+                for l in 0..4 {
+                    d10[l] += v[l] / amp;
+                }
+            }
+            amp /= 2.0;
+        }
+        let mut d11b = [0f64; 4];
+        let mut skip_min = [false; 4];
+        let mut skip_max = [false; 4];
+        for l in 0..4 {
+            d11b[l] = (d10[l] / 10.0 + 1.0) / 2.0;
+            skip_min[l] = d11b[l] >= 1.0;
+            skip_max[l] = d11b[l] <= 0.0;
+        }
+
+        BLEND_COL_CACHE.with(|m| {
+            let mut m = m.borrow_mut();
+            let need = col_base + BLEND_COL_STRIDE;
+            if m.len() < need {
+                m.resize(need, OctColState::INVALID);
+            }
+            let mut d8 = [0f64; 4];
+            let mut d9 = [0f64; 4];
+            let mut amp = 1.0f64;
+            for i in 0..16usize {
+                // column-constant wrapped inputs (shared by min and max)
+                let kx = wrap(d0 * amp);
+                let kz = wrap(d2 * amp);
+                let dyy = d6 * amp;
+                let mut dy = [0f64; 4];
+                let mut ymax = [0f64; 4];
+                for l in 0..4 {
+                    dy[l] = wrap(d1[l] * amp);
+                    ymax[l] = d1[l] * amp;
+                }
+                if !skip_min.iter().all(|s| *s) {
+                    if let Some(oct) = self.min_noise.get_octave_noise(i) {
+                        let st = &mut m[col_base + i];
+                        let v = oct.noise_5_batch_col(st, kx, kz, &dy, dyy, &ymax);
+                        for l in 0..4 {
+                            if !skip_min[l] {
+                                d8[l] += v[l] / amp;
+                            }
+                        }
+                    }
+                }
+                if !skip_max.iter().all(|s| *s) {
+                    if let Some(oct) = self.max_noise.get_octave_noise(i) {
+                        let st = &mut m[col_base + 16 + i];
+                        let v = oct.noise_5_batch_col(st, kx, kz, &dy, dyy, &ymax);
+                        for l in 0..4 {
+                            if !skip_max[l] {
+                                d9[l] += v[l] / amp;
+                            }
+                        }
+                    }
+                }
+                amp /= 2.0;
+            }
+            let mut out = [0f64; 4];
+            for l in 0..4 {
+                let t = d11b[l];
+                let (a, b) = (d8[l] / 512.0, d9[l] / 512.0);
+                let v = if t < 0.0 {
+                    a
+                } else if t > 1.0 {
+                    b
+                } else {
+                    a + t * (b - a)
+                };
+                out[l] = v / 128.0;
+            }
+            out
+        })
+    }
+
+    /// 8-wide column-uniform compute: two independent 4-wide column halves
+    /// sharing the same TLS column state (identical keys -> second half
+    /// hits). Per-half skip mirrors compute_batch8.
+    pub fn compute_batch8_col(
+        &self,
+        bx: i32,
+        by: &[i32; 8],
+        bz: i32,
+        col_base: usize,
+    ) -> [f64; 8] {
+        let mut lo = [0i32; 4];
+        let mut hi = [0i32; 4];
+        lo.copy_from_slice(&by[..4]);
+        hi.copy_from_slice(&by[4..]);
+        let a = self.compute_batch_col(bx, &lo, bz, col_base);
+        let b = self.compute_batch_col(bx, &hi, bz, col_base);
+        let mut out = [0f64; 8];
+        out[..4].copy_from_slice(&a);
+        out[4..].copy_from_slice(&b);
         out
     }
 }

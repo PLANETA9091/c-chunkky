@@ -1233,6 +1233,20 @@ fn narrow_ref<T, const N: usize, const M: usize>(a: &[T; N]) -> &[T; M] {
     unsafe { &*(a as *const [T; N] as *const [T; M]) }
 }
 
+/// Column-uniformity of slice corner batches (blended col path gate):
+/// all lanes share the same block x and z. Bit-compare semantics are
+/// irrelevant for i32 (exact equality is the same thing).
+#[inline]
+fn lanes_uniform_i32<const N: usize>(x: &[i32; N], z: &[i32; N]) -> bool {
+    let (x0, z0) = (x[0], z[0]);
+    for l in 1..N {
+        if x[l] != x0 || z[l] != z0 {
+            return false;
+        }
+    }
+    true
+}
+
 /// Noise-node dispatch: route [f64; N] arrays into the 4-wide or 8-wide
 /// batch kernels (bit-exact per lane in both). N is a const-generic known at
 /// monomorphization time, so the dead branch is compiled out (the runtime
@@ -1294,18 +1308,36 @@ fn blended_batch_n<const N: usize>(
         None
     };
     if N == 8 {
-        let v = blended[instance].compute_batch8(
-            narrow_ref(bx),
-            narrow_ref(by),
-            narrow_ref(bz),
-        );
+        let v = if crate::noise::avx2_available() && lanes_uniform_i32(bx, bz) {
+            blended[instance].compute_batch8_col(
+                bx[0],
+                narrow_ref(by),
+                bz[0],
+                blended[instance].col_base,
+            )
+        } else {
+            blended[instance].compute_batch8(
+                narrow_ref(bx),
+                narrow_ref(by),
+                narrow_ref(bz),
+            )
+        };
         out.copy_from_slice(&v);
     } else {
-        let v = blended[instance].compute_batch(
-            narrow_ref(bx),
-            narrow_ref(by),
-            narrow_ref(bz),
-        );
+        let v = if crate::noise::avx2_available() && lanes_uniform_i32(bx, bz) {
+            blended[instance].compute_batch_col(
+                bx[0],
+                narrow_ref(by),
+                bz[0],
+                blended[instance].col_base,
+            )
+        } else {
+            blended[instance].compute_batch(
+                narrow_ref(bx),
+                narrow_ref(by),
+                narrow_ref(bz),
+            )
+        };
         out.copy_from_slice(&v);
     }
     if let Some(t0) = t0 {
