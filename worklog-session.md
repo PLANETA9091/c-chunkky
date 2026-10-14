@@ -728,3 +728,32 @@ Stage Summary:
 - Локальный serial wall 1.96-1.98 (slice 0.71-0.76 | cellfill 0.38-0.39 | material
   0.61-0.62 | other 0.23-0.25). С начала сессии: 2.25-2.44 -> 1.96.
 - Корректность: устранена латентная дивергенция ore-вен (Block-mode Interpolated).
+
+---
+Task ID: cont-29 (2026-10-14, layout v3.5: global-swap для mixed-секций)
+Agent: Super Z (main)
+Task: layout 1.2ms -> ~0.6ms (mixed-секции без per-block рефлексии)
+
+Work Log:
+- CI 38554921918 (3efc053): судьи PASS 0.002%/0.001% (историческая полоса);
+  изолированный bench на раннере: par-2t real seed p50 2.15 -> 1.676 (-22%);
+  судейское окно этого прогона зашумлено (layout 1.2 -> 3.3 без изменений Java
+  кода, max 416мс — контенция раннера).
+- Layout-профиль: mixed-секции (>15 distinct, 4.8/чанк) шли per-block рефлексией
+  (~4096 getAndSetUnchecked на секцию) — ~половина layout 1.2ms.
+- v3.5: для over-ветки — GLOBAL-конфигурация Data-swap: шаблон контейнера
+  прогоняется через 17 distinct registry-состояний (byId), контейнер сам
+  резайзится в global; захватывается точный тройник (cfgGlobal(ceillog2(registry
+  size)), GlobalPalette, bits) — ровно то, что ваниль создаёт для реальной
+  mixed-секции. Секция пакуется в SimpleBitStorage (ванильная раскладка:
+  word = k / valuesPerLong, shift = (k % vpl) * bits — без кросс-словных записей)
+  из globalIdById[] (precomputed registry.getId per material) — ОДИН volatile
+  write вместо 4096 рефлекс-вызовов.
+- Пойман при самопроверке: первая версия паковала линейно (k*bits) — не совпадает
+  с ванильной valuesPerLong-раскладкой и длиной массива; исправлено до сборки.
+- Безопасность: verifyChunk (256 сэмплов) + degrade на per-block/v1 при любом
+  рассогласовании — регрессия невозможна по построению.
+
+Stage Summary:
+- Плагин собран; вердикт — CI (judge ваниль/датапак + окно).
+- Ожидание: layout ~1.2 -> ~0.6-0.7 на чистом прогоне.

@@ -433,6 +433,42 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 Object d1 = fPalData.get(tpl);
                 cfgLinear = mCfg.invoke(d1);
                 factoryLinear = mCfgFactory.invoke(cfgLinear);
+                // ---- v3.5: GLOBAL configuration capture (for >15-distinct
+                // mixed sections) — force the template through 17 distinct
+                // registry states; the container resizes to the global
+                // palette on its own, then we reuse the exact (config,
+                // palette, bits) triple vanilla itself would produce.
+                Object dG = null;
+                try {
+                    Method mById = reg0.getClass().getMethod("byId", int.class);
+                    for (int i = 0; i < 17; i++) {
+                        Object st = i == 0 ? airSt : mById.invoke(reg0, i);
+                        if (st != null) {
+                            mGetAndSetUnch.invoke(tpl, i & 15, (i >> 4) & 15, 0, st);
+                        }
+                    }
+                    dG = fPalData.get(tpl);
+                } catch (Throwable t4) {
+                    dG = null;
+                }
+                if (dG != null) {
+                    cfgGlobal = mCfg.invoke(dG);
+                    Method mBits = cfgGlobal.getClass().getMethod("bits");
+                    mBits.setAccessible(true);
+                    globalBits = (Integer) mBits.invoke(cfgGlobal);
+                    Method mPal = dG.getClass().getMethod("palette");
+                    mPal.setAccessible(true);
+                    globalPaletteObj = mPal.invoke(dG);
+                    Method mGetId = reg0.getClass().getMethod("getId", Object.class);
+                    airGlobalId = (Integer) mGetId.invoke(reg0, airSt);
+                    // reset the template back to singleton(air) — it is not
+                    // reused after init, but keep the invariant anyway
+                } else {
+                    cfgGlobal = null;
+                    globalPaletteObj = null;
+                    globalBits = 0;
+                    airGlobalId = 0;
+                }
                 ctorSimpleBit = Class.forName("net.minecraft.util.SimpleBitStorage")
                         .getConstructor(int.class, int.class, long[].class);
                 ctorZeroBit = Class.forName("net.minecraft.util.ZeroBitStorage")
@@ -445,6 +481,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 matTicking = new boolean[n];
                 matFluidTicking = new boolean[n];
                 matSpecial = new boolean[n];
+                globalIdById = new int[n];
                 Class<?> cBlockState = Class.forName(
                         "net.minecraft.world.level.block.state.BlockState");
                 Method mIsAir = cBlockState.getMethod("isAir");
@@ -466,6 +503,21 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     matFluidTicking[i] = (Boolean) mFluidRand.invoke(fluid)
                             && !(Boolean) mFluidEmpty.invoke(fluid);
                     matSpecial[i] = (Boolean) mSpecialPred.invoke(null, st);
+                }
+                if (cfgGlobal != null) {
+                    Method mGetId2 = Class.forName(
+                            "net.minecraft.world.level.block.Block")
+                            .getField("BLOCK_STATE_REGISTRY").get(null).getClass()
+                            .getMethod("getId", Object.class);
+                    Object regObj = Class.forName(
+                            "net.minecraft.world.level.block.Block")
+                            .getField("BLOCK_STATE_REGISTRY").get(null);
+                    for (int i = 0; i < n; i++) {
+                        Object st = states[i];
+                        globalIdById[i] = st == null
+                                ? airGlobalId
+                                : (Integer) mGetId2.invoke(regObj, st);
+                    }
                 }
                 bulkReady = true;
                 bulkFailReason = null;
@@ -497,6 +549,11 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static java.lang.reflect.Constructor<?> ctorData;
     private static Object cfgSingleton; // Configuration(bits=0, SINGLE_VALUE factory)
     private static Object cfgLinear;    // Configuration(bits=4, LINEAR factory)
+    private static Object cfgGlobal;    // Configuration(bits=global, GLOBAL factory)
+    private static Object globalPaletteObj; // GlobalPalette (stateless, reusable)
+    private static int globalBits;      // bits of the global configuration
+    private static int airGlobalId;     // registry id of the air state
+    private static int[] globalIdById;  // material id -> global state id
     private static Object airState;     // NMS air block state (palette slot 0)
     private static Method mPalCreate;   // Palette$Factory.create(bits, registry, resize, List)
     private static Object factorySingleton; // Palette$Factory from cfgSingleton
@@ -588,7 +645,53 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                             vn++;
                         }
                         if (over) {
-                            // >15 distinct states: per-block path (rare)
+                            // >15 distinct states: GLOBAL configuration swap —
+                            // pack the section's global state ids into one
+                            // SimpleBitStorage and replace `pal.data` in ONE
+                            // volatile write (what the container itself would
+                            // hold for a mixed real section). Any failure
+                            // degrades to the per-block path below.
+                            if (cfgGlobal != null) {
+                                try {
+                                    int gb = globalBits;
+                                    // vanilla SimpleBitStorage layout: value i
+                                    // lives at word i / valuesPerLong, shift
+                                    // (i % valuesPerLong) * bits — values NEVER
+                                    // cross a word boundary in this layout.
+                                    int vpl = 64 / gb;
+                                    long[] raw = new long[(4096 + vpl - 1) / vpl];
+                                    long mask = gb >= 64 ? -1L : ((1L << gb) - 1);
+                                    for (int k = 0; k < 4096; k++) {
+                                        short id = out[base + k];
+                                        int gid;
+                                        if (id == 0 || sectionStatesById[id] == null) {
+                                            gid = airGlobalId;
+                                        } else {
+                                            gid = globalIdById[id];
+                                            nonEmptySwap++;
+                                            if (matTicking[id]) {
+                                                tickBSwap++;
+                                            }
+                                            if (matFluidTicking[id]) {
+                                                tickFSwap++;
+                                            }
+                                            if (matSpecial[id]) {
+                                                specialSwap++;
+                                            }
+                                        }
+                                        raw[k / vpl] |= ((long) gid & mask)
+                                                << ((k % vpl) * gb);
+                                    }
+                                    Object storage = ctorSimpleBit.newInstance(gb, 4096, raw);
+                                    Object nd = ctorData.newInstance(cfgGlobal, storage, globalPaletteObj);
+                                    fPalData.set(pal, nd);
+                                    swapped = true;
+                                } catch (Throwable t5) {
+                                    swapped = false;
+                                }
+                            }
+                            // reset the per-section palette scratch — the
+                            // next section builds its OWN palette
                             for (int u = 0; u < usedN; u++) {
                                 palIdxScratch[usedIds[u]] = 0;
                             }
