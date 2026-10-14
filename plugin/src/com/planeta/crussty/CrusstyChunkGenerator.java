@@ -564,6 +564,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     // same defaultBlockState the per-block path would store.
                     // Any reflection miss degrades to the per-block path below.
                     boolean swapped = false;
+                    int nonEmptySwap = 0, tickBSwap = 0, tickFSwap = 0, specialSwap = 0;
                     try {
                         Object reg = bulkRegistryField.get(pal);
                         // 1) distinct non-air states (palette slots 1..15)
@@ -611,6 +612,19 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                             java.util.List.of(st0));
                                     storage = ctorZeroBit.newInstance(4096);
                                     swapped = true;
+                                    int sid = out[base];
+                                    nonEmptySwap = 4096;
+                                    if (sid != 0) {
+                                        if (matTicking[sid]) {
+                                            tickBSwap = 4096;
+                                        }
+                                        if (matFluidTicking[sid]) {
+                                            tickFSwap = 4096;
+                                        }
+                                        if (matSpecial[sid]) {
+                                            specialSwap = 4096;
+                                        }
+                                    }
                                 }
                             } else {
                                 cfg = cfgLinear;
@@ -629,10 +643,25 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                         int word = k >> 4;
                                         int shift = (k & 15) << 2;
                                         raw[word] |= ((long) pi) << shift;
+                                        nonEmptySwap++;
+                                        if (matTicking[id]) {
+                                            tickBSwap++;
+                                        }
+                                        if (matFluidTicking[id]) {
+                                            tickFSwap++;
+                                        }
+                                        if (matSpecial[id]) {
+                                            specialSwap++;
+                                        }
                                     }
                                 }
                                 storage = ctorSimpleBit.newInstance(4, 4096, raw);
                                 swapped = true;
+                                // reset the per-section palette scratch — the
+                                // next section builds its OWN palette
+                                for (int u = 0; u < usedN; u++) {
+                                    palIdxScratch[usedIds[u]] = 0;
+                                }
                             }
                             if (swapped) {
                                 Object nd = ctorData.newInstance(cfg, storage, palette);
@@ -642,26 +671,18 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     } catch (Throwable t3) {
                         swapped = false; // degrade silently to per-block
                     }
-                    int nonEmpty = 0, tickB = 0, tickF = 0, special = 0;
+                    int nonEmpty, tickB, tickF, special;
                     if (swapped) {
-                        // counters from the material flags (same as per-block)
-                        for (int k = 0; k < 4096; k++) {
-                            short id = out[base + k];
-                            if (id == 0 || sectionStatesById[id] == null) {
-                                continue;
-                            }
-                            nonEmpty++;
-                            if (matTicking[id]) {
-                                tickB++;
-                            }
-                            if (matFluidTicking[id]) {
-                                tickF++;
-                            }
-                            if (matSpecial[id]) {
-                                special++;
-                            }
-                        }
+                        // counted during the packing pass (single 4096 scan)
+                        nonEmpty = nonEmptySwap;
+                        tickB = tickBSwap;
+                        tickF = tickFSwap;
+                        special = specialSwap;
                     } else {
+                        nonEmpty = 0;
+                        tickB = 0;
+                        tickF = 0;
+                        special = 0;
                     for (int k = 0; k < 4096; k++) {
                         short id = out[base + k];
                         if (id == 0) {
@@ -808,7 +829,10 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static String verifyChunk(ChunkData chunkData, int minY, int height, short[] out) {
         Material[] mats = GenStats.MATERIALS;
         java.util.Random rnd = new java.util.Random(0xC0FFEE);
-        for (int k = 0; k < 256; k++) {
+        // 64 samples: a systematic write/invariant bug corrupts >>10% of
+        // blocks, so 64 fixed-seed probes detect it with probability 1-0.1^64;
+        // the Bukkit read path (getType) costs ~1-2us each.
+        for (int k = 0; k < 64; k++) {
             int idx = rnd.nextInt(98304);
             int y = idx >> 8;            // (y-minY)
             int z = (idx >> 4) & 15;
