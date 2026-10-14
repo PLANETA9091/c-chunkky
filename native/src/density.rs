@@ -264,6 +264,13 @@ pub struct Compiled {
     pub col_idx: Vec<u32>,
     /// Number of assigned column-cache slots (size of BatchMemo col storage).
     pub col_count: u32,
+    /// Per-Interpolated-slot y-range constants: Some((lo, hi, c)) when the
+    /// wrapped child is a RangeChoice whose input is the vanilla "minecraft:y"
+    /// identity gradient and whose out-of-range branch is a constant — the
+    /// slot value is EXACTLY c for corner y < lo or y >= hi (bit-exact: the
+    /// in-place eval takes the same constant branch there). Ore-vein slots
+    /// (range [-60, 51), out 0.0) collapse to a constant for y >= 51.
+    pub interp_slot_y_const: Vec<Option<(f64, f64, f64)>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -789,6 +796,12 @@ impl Env {
             .collect();
         // column-cache slots for y-independent Cache2d/FlatCache subtrees
         let (col_idx, col_count) = compute_col_caches(&c.arena);
+        // per-slot y-range constants (RangeChoice over the y identity)
+        let interp_slot_y_const = c
+            .interp_children
+            .iter()
+            .map(|&child| slot_y_const_meta(&c.arena, child))
+            .collect();
         Compiled {
             arena: c.arena,
             noise_ids: c.noise_ids,
@@ -799,9 +812,57 @@ impl Env {
             interp_children: c.interp_children,
             col_idx,
             col_count,
+            interp_slot_y_const,
         }
     }
 
+}
+
+/// RangeChoice over the vanilla "minecraft:y" identity gradient with a
+/// constant out-of-range branch: the slot is exactly the constant for any
+/// corner y outside [min_inclusive, max_exclusive).
+fn slot_y_const_meta(arena: &[WKind], child: u32) -> Option<(f64, f64, f64)> {
+    match &arena[child as usize] {
+        WKind::RangeChoice {
+            input,
+            min_inclusive,
+            max_exclusive,
+            when_out_of_range,
+            ..
+        } => {
+            let c = match &arena[*when_out_of_range as usize] {
+                WKind::Const(v) => *v,
+                _ => return None,
+            };
+            match &arena[*input as usize] {
+                WKind::YClampedGradient {
+                    from_y,
+                    to_y,
+                    from_value,
+                    to_value,
+                } => {
+                    // identity gradient (vanilla y.json: value == y) — the
+                    // gradient domain must cover any plausible world y so the
+                    // range choice branches purely on y.
+                    if *from_value == *from_y as f64 && *to_value == *to_y as f64 {
+                        let (glo, ghi) = (
+                            (*from_y as f64).min(*to_y as f64),
+                            (*from_y as f64).max(*to_y as f64),
+                        );
+                        if glo <= -4064.0 && ghi >= 4062.0 {
+                            Some((*min_inclusive, *max_exclusive, c))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn seed_unused() -> i64 {

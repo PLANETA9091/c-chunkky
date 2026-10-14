@@ -2804,7 +2804,13 @@ impl<'e> ChunkGen<'e> {
                             memo.next_serial();
                             for slot in 1..nslots {
                                 let child = children[slot];
-                                let v = env.eval(compiled, child, pt, Mode::Slice, interp, Some(&memo));
+                                // y-range constant slots (ore veins above y=51):
+                                // the in-place eval would take the same constant
+                                // branch — bit-exact skip of the noise subtree.
+                                let v = match compiled.interp_slot_y_const[slot] {
+                                    Some((lo, hi, c)) if (corner_y as f64) < lo || (corner_y as f64) >= hi => c,
+                                    _ => env.eval(compiled, child, pt, Mode::Slice, interp, Some(&memo)),
+                                };
                                 out[(p - lo) * nslots + slot] = v;
                             }
                         }
@@ -2873,7 +2879,11 @@ impl<'e> ChunkGen<'e> {
                 self.memo.next_serial();
                 for slot in 1..nslots {
                     let child = self.interp_children[slot];
-                    let v = self.eval(child, pt, Mode::Slice);
+                    // y-range constant slots (see the parallel path note)
+                    let v = match self.compiled.interp_slot_y_const[slot] {
+                        Some((lo, hi, c)) if (corner_y as f64) < lo || (corner_y as f64) >= hi => c,
+                        _ => self.eval(child, pt, Mode::Slice),
+                    };
                     let slot = slot as u16;
                     if is_first {
                         self.interp.slice0_set(slot, i as usize, y, v);
@@ -4114,6 +4124,18 @@ impl<'e> ChunkGen<'e> {
                     };
                 }
                 for (slot, &child) in children.iter().enumerate() {
+                    // y-range constant slot: if EVERY corner in the group is
+                    // outside the range, fill the constant (bit-exact — the
+                    // in-place eval takes the same branch); mixed groups
+                    // evaluate normally.
+                    if let Some((lo, hi, c)) = compiled.interp_slot_y_const.get(slot).and_then(|m| *m) {
+                        let all_out = pts.iter().all(|pt| (pt.y as f64) < lo || (pt.y as f64) >= hi);
+                        if all_out {
+                            let base = slot * (cell_count_xz + 1) * cols + i * cols + y;
+                            out[base..base + G].fill(c);
+                            continue;
+                        }
+                    }
                     // G-wide batch: lane-identical arithmetic (bit-exact)
                     let v = env.eval_batch::<G>(compiled, child, &pts, Mode::Slice, interp, &memo);
                     let base = slot * (cell_count_xz + 1) * cols + i * cols + y;
@@ -4125,7 +4147,10 @@ impl<'e> ChunkGen<'e> {
                 let corner_y = (y as i32 + cell_noise_min_y) * ch;
                 let pt = Pt { x: corner_x, y: corner_y, z: corner_z };
                 for (slot, &child) in children.iter().enumerate() {
-                    let v = env.eval(compiled, child, pt, Mode::Slice, interp, None);
+                    let v = match compiled.interp_slot_y_const.get(slot).and_then(|m| *m) {
+                        Some((lo, hi, c)) if (corner_y as f64) < lo || (corner_y as f64) >= hi => c,
+                        _ => env.eval(compiled, child, pt, Mode::Slice, interp, None),
+                    };
                     out[slot * (cell_count_xz + 1) * cols + i * cols + y] = v;
                 }
             }
