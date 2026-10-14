@@ -1635,9 +1635,8 @@ impl<'e> ChunkGen<'e> {
             && !self.skip_slice
         {
             let on = match std::env::var("CRUS_PREFETCH").ok().as_deref() {
-                Some("0") => false,
                 Some("1") => true,
-                _ => true,
+                _ => false,
             };
             if on {
                 self.prefetch = Some(PrefetchWorker::spawn(

@@ -192,7 +192,16 @@ pub fn probe_avx512_width() {
         }
         // 8 lanes per call = 2x the work of a 4-lane call: 8-wide wins when
         // best8 < 2*best4*0.97 (>=3% per-lane advantage).
-        set_avx512_selected(best8 < best4 * 2.0 * 0.97);
+        let pick = best8 < best4 * 2.0 * 0.97;
+        set_avx512_selected(pick);
+        if std::env::var("CRUS_PROBE_PRINT").ok().as_deref() == Some("1") {
+            eprintln!(
+                "[probe] col-width={} best4={:.0}ns best8={:.0}ns",
+                if pick { "8(avx512)" } else { "4(avx2)" },
+                best4,
+                best8
+            );
+        }
         if sink == u64::MAX {
             eprintln!("probe: sink"); // never: keeps the math observable
         }
