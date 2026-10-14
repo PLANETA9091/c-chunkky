@@ -302,6 +302,9 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             new java.util.concurrent.ConcurrentHashMap<>();
     /** Human-readable reason when the bulk path is unavailable (GenStats). */
     public static volatile String bulkFailReason = "not-initialized";
+    /** Why the per-section Data-swap degraded to per-block (null = never failed). */
+    public static volatile String swapFail = null;
+    static volatile boolean swapProbed = false;
 
     private static boolean initBulk() {
         synchronized (BULK_LOCK) {
@@ -635,6 +638,9 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     long tPath = System.nanoTime();
                     byte path = 0; // 1=singleton 2=linear 3=global 4=per-block
                     try {
+                        if (swapFail == null && !swapProbed) {
+                            swapProbed = true;
+                        }
                         Object reg = bulkRegistryField.get(pal);
                         // 1) distinct non-air states (palette slots 1..15)
                         int vn = 1;
@@ -787,7 +793,14 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                             }
                         }
                     } catch (Throwable t3) {
-                        swapped = false; // degrade silently to per-block
+                        swapped = false; // degrade to per-block, remember why
+                        if (swapFail == null) {
+                            StackTraceElement st = t3.getStackTrace().length > 0
+                                    ? t3.getStackTrace()[0] : null;
+                            swapFail = t3.getClass().getSimpleName()
+                                    + (t3.getMessage() != null ? (": " + t3.getMessage()) : "")
+                                    + " @ " + (st != null ? st.toString() : "?");
+                        }
                     }
                     GenStats.LAY_PATH_NS[path].addAndGet(System.nanoTime() - tPath);
                     if (!swapped) {

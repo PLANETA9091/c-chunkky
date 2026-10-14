@@ -143,7 +143,7 @@ public final class GenStats {
         double meanUs = (TOTAL.get() / Math.max(1, COUNT.get())) / 1000.0;
         long cnt = Math.max(1, COUNT.get());
         return String.format(
-                "chunks=%d  mean=%.1fus  min=%.1fus  p50=%.1fus  p99=%.1fus  max=%.1fus  [native=%.2fms nat_p50=%.2fms layout=%.2fms beard=%.2fms marks=%.2fms]  [lay setup=%.2f sec=%.2f hmap=%.2f verify=%.2f | uni=%.2f/%.1f lin=%.2f/%.1f glob=%.2f/%.1f pb=%.2f/%.2f]  [sections filled=%d mixed=%d air=%d v1fallback=%d bulk=%s]  marks_seen=%d marks_landed=%d bridge_no_chunk=%d bridge_err=%d beard_chunks=%d beard_pieces=%d",
+                "chunks=%d  mean=%.1fus  min=%.1fus  p50=%.1fus  p99=%.1fus  max=%.1fus  [native=%.2fms nat_p50=%.2fms layout=%.2fms beard=%.2fms marks=%.2fms]  [lay setup=%.2f sec=%.2f hmap=%.2f verify=%.2f | uni=%.2f/%.1f lin=%.2f/%.1f glob=%.2f/%.1f pb=%.2f/%.2f]  [sections filled=%d mixed=%d air=%d v1fallback=%d bulk=%s]  swapfail=%s  marks_seen=%d marks_landed=%d bridge_no_chunk=%d bridge_err=%d beard_chunks=%d beard_pieces=%d",
                 COUNT.get(), meanUs,
                 pmin / 1000.0, p50 / 1000.0, p99 / 1000.0, copy[(int) (n - 1)] / 1000.0,
                 NATIVE_TOTAL.get() / (double) cnt / 1e6,
@@ -165,6 +165,7 @@ public final class GenStats {
                 LAY_PATH_COUNT[4].get() / (double) cnt,
                 BULK_FILLED.get(), BULK_MIXED.get(), BULK_AIR.get(), BULK_BROKEN_COUNT.get(),
                 com.planeta.crussty.CrusstyChunkGenerator.bulkFailReason == null ? "ok" : com.planeta.crussty.CrusstyChunkGenerator.bulkFailReason,
+                com.planeta.crussty.CrusstyChunkGenerator.swapFail,
                 MARKS_SEEN.get(), MARKS_LANDED.get(), BRIDGE_NO_CHUNK.get(), BRIDGE_ERROR.get(),
                 BEARD_CHUNKS.get(), BEARD_PIECES.get());
     }
