@@ -596,3 +596,22 @@ Stage Summary:
 - Судья: 8.26 -> 6.04ms на 390650d; 378a0ba (Data-swap + SerialGC A/B + 512-cellfill) — CI в прогрессе.
 - Локально: serial 2.38 | par-2t 1.96-2.07 | phases: slice 0.66 | cellfill 0.79 | material 0.77.
 - Next: вердикт 378a0ba (Data-swap на живом judge + SerialGC + wide8-калибровка на Zen4), затем material-prelim/ore, slice-кернелы (plane-major perm-дедуп), layout-остаток.
+
+---
+Task ID: cont-24 (2026-10-14, судья 8.26 -> 4.4-4.9; layout v3 Data-swap боевой)
+Agent: Super Z (main)
+Task: продолжение к 1ms; judge-окно и кернелы
+
+Work Log:
+- Раннер определён: AMD EPYC 7763 (Zen3, AVX-512 double-pumped) — обе калибровки (slice lanes, cellfill wide) корректно выбирают 4-лейн; 512-пути остаются для будущих Zen4-раннеров.
+- CI-цепочка фиксов layout v3: (1) registry брался из BlockState -> bulk disabled, v1-фоллбек 6.05ms (судья всё равно PASS 0.002%); фикс — Block.BLOCK_STATE_REGISTRY; (2) Configuration package-private -> setAccessible(true) на factory/configuration.
+- d371323 (всё вместе): **bulk=ok, окно судьи vanilla mean 4402us (native 2.90 + layout 1.20)**, datapack 5832; PASS 0.002%/0.001%; marks_seen 20329/5966 идентичны; sections filled=1260 mixed=1741 air=5783.
+- 054d260 (полировка layout: verify 64 сэмпла, счётчики из packing-прохода, фикс сброса palIdxScratch — критичный баг, отравлял бы следующую секцию): PASS оба мира; окно 4890/5323 — раннерная лотерея (разброс прогонов > эффекта; медианы 3.64/3.92 vs 3.42/3.97).
+- par-2t bench perf (real seed) на раннере: p50 2.15-2.19 стабильно (было 1.8-2.4 лотерея). phases на раннере: wall 2.91 (slice 0.96 | cellfill 0.91 | material 0.86).
+- SerialGC на judge (A/B): max-хвост 163 -> 123-131ms — в пределах шума, оставлен включённым.
+
+Stage Summary:
+- Судейское окно за сессию: **8.26 -> 4.4-4.9ms (-45±5%)**: task-graph fill (-1.5-2 CPU-ms), col-контракт Cache2D/FlatCache, layout v3 Data-swap (1.6 -> 1.2-1.5), полировка.
+- Паритет генерации не тронут ни одним шагом: PASS на всех 6 прогонах сессии (0.001-0.005%, гейт 0.05% = 10-50x запас), marks_seen бит-в-бит.
+- 11/11 тестов; золотые out_hash 8/8 (serial, parallel-2t, wide8=1 принудительно).
+- До 1ms на окне судьи: нужен native ~0.6 (сейчас 2.9) — фронт: plane-major perm-дедуп NormalNoise (2-4x на noise-часть slice), blended same-x hoist (~10%), material prelim; layout ~0.15 (сейчас 1.2-1.6). Это отдельные крупные итерации.
