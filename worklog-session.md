@@ -875,3 +875,42 @@ Stage Summary:
   к 1ms на новых раннерах пула.
 - Кандидаты дальше: slot0-const при y>=256 (нулевая ветка top_grad, нужен
   sign-of-zero-safe анализ, ~0.13ms wall), material/cellfill в окне.
+
+---
+Task ID: cont-33 (2026-10-14, СВОП ПОЧИНЕН — layout 0.87 -> 0.28; slot0-const; slot-consts)
+Agent: Super Z (main)
+Task: root-cause мёртвых своп-путей; slot-consts; slot0 upper-y const
+
+Work Log:
+- slot_y_const (bf39dd5): Compiled::interp_slot_y_const — RangeChoice над
+  vanilla 'minecraft:y' (identity) с Const out-веткой; ore-слоты 5-7 = 0.0
+  выше y=51; noodle-слоты 1-4 вне [-60,321). Skip во всех plane-путях.
+- slot0 upper-y const (6a38d15): compute_y_upper_consts — compile-time
+  'const for y>=y0' с sign-of-zero safe правилами (YClampedGradient upper ->
+  Val(to_value); Mul(0,x) -> ZeroU; Add(nonzero, ZeroU) -> nonzero; Min/Max
+  bail). Vanilla slot0 = Val(-0.078125) @ y>=256 (подтверждено ymeta).
+  Empirically ~neutral на ваниле (высокие y уже дёшевы через RC-микс), но
+  срезает cave-recipe на датапаках с большими слайдами. Kill-switch
+  CRUS_NO_YCONST=1 (OnceLock-cached; env::var в горячем цикле стоил 3%!).
+- ГЛАВНОЕ (026786a): Palette$Factory.create(int bits, IdMap, Resize, List) —
+  4 аргумента; плагин звал с 3-мя → IllegalArgumentException на КАЖДЫЙ вызов
+  → все своп-пути молча деградировали в per-block рефлекс-фоллбек С САМОГО
+  ПОЯВЛЕНИЯ v3. Починено: singletonBits/linearBits из Configuration.bits().
+  РЕЗУЛЬТАТ CI: [lay | uni=0.2 lin=0 glob=8.0 pb=0.0] swapfail=null —
+  layout 0.87 -> 0.28-0.30ms (-67%), все секции через global-пак.
+  Паритет: 0.000-0.002% PASS во всех прогонах.
+- Инструменты: javap/jar обёртки через jdk-модули (scripts/), SnapTest
+  (рефлекс-тест snapshot локально), ymeta (метаданные слотов), constcheck.
+- Наблюдение: классификация секций сместилась (filled=0, все через global) —
+ vn==1 ветка мертва по построению (первый non-air даёт vn=2); глобальный пак
+  0.02ms/секция — достаточно, оставлено как есть (паритет решает).
+
+Stage Summary:
+- Окно судьи (арбитр): 8.26 (старт) -> 4.4-4.9 -> 2.83-3.11 -> 2.44-2.70
+  (026786a, тихий раннер) при layout 0.28-0.36 СТАБИЛЬНО во всех прогонах.
+- Изолированный native par-2t: 2.15 -> 1.59 (Intel 8573C) / 0.92 (Turin 9V45).
+- Все прогоны PASS (гейт 0.05%): 51a13f5, 63f1ec9, 804af42, 6aefead,
+  81cc88f, 5f0c35a, 560c785, d4414c0, bf39dd5, 747b0a8, 026786a, 8e5ddf8.
+- Остаток до 1ms окна: native 2.1-2.2 (тихий Intel) — контенция +0.3-0.5;
+  дальше только глубокие срезы noise-ядра или ожидание Turin-класса раннеров
+  в пуле (там isolated уже 0.92).
