@@ -289,6 +289,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static final Object BULK_LOCK = new Object();
     private static Method mGetSectionsAcc, mFillState, mDefaultBlockState;
     private static Method mGetAndSetUnch, mSpecialPred, mSetRawData;
+    private static Method mTickingAdd; // Moonrise tickingBlocks.add(short)
     private static java.lang.reflect.Field fNonEmpty, fTickingBlock, fTickingFluid, fSpecial;
     private static java.lang.reflect.Field fTickingList, fIsOpaque, fChunkHeightmaps;
     private static Constructor<?> ctorPal;
@@ -338,6 +339,12 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 fTickingFluid = cSection.getDeclaredField("tickingFluidCount");
                 fSpecial = cSection.getDeclaredField("specialCollidingBlocks");
                 fTickingList = cSection.getDeclaredField("tickingBlocks");
+                fTickingList.setAccessible(true);
+                try {
+                    mTickingAdd = fTickingList.getType().getMethod("add", short.class);
+                } catch (Throwable tt) {
+                    mTickingAdd = null; // ticking-list rebuild then degrades
+                }
                 fNonEmpty.setAccessible(true);
                 fTickingBlock.setAccessible(true);
                 fTickingFluid.setAccessible(true);
@@ -625,6 +632,8 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     // Any reflection miss degrades to the per-block path below.
                     boolean swapped = false;
                     int nonEmptySwap = 0, tickBSwap = 0, tickFSwap = 0, specialSwap = 0;
+                    long tPath = System.nanoTime();
+                    byte path = 0; // 1=singleton 2=linear 3=global 4=per-block
                     try {
                         Object reg = bulkRegistryField.get(pal);
                         // 1) distinct non-air states (palette slots 1..15)
@@ -689,6 +698,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                     Object nd = ctorData.newInstance(cfgGlobal, storage, globalPaletteObj);
                                     fPalData.set(pal, nd);
                                     swapped = true;
+                                    path = 3;
                                 } catch (Throwable t5) {
                                     swapped = false;
                                 }
@@ -718,6 +728,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                             java.util.List.of(st0));
                                     storage = ctorZeroBit.newInstance(4096);
                                     swapped = true;
+                                    path = 1;
                                     int sid = out[base];
                                     nonEmptySwap = 4096;
                                     if (sid != 0) {
@@ -763,6 +774,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                 }
                                 storage = ctorSimpleBit.newInstance(4, 4096, raw);
                                 swapped = true;
+                                path = 2;
                                 // reset the per-section palette scratch — the
                                 // next section builds its OWN palette
                                 for (int u = 0; u < usedN; u++) {
@@ -777,6 +789,11 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     } catch (Throwable t3) {
                         swapped = false; // degrade silently to per-block
                     }
+                    GenStats.LAY_PATH_NS[path].addAndGet(System.nanoTime() - tPath);
+                    if (!swapped) {
+                        path = 4;
+                    }
+                    GenStats.LAY_PATH_COUNT[path].incrementAndGet();
                     int nonEmpty, tickB, tickF, special;
                     if (swapped) {
                         // counted during the packing pass (single 4096 scan)
@@ -815,18 +832,24 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     fTickingBlock.setShort(section, (short) tickB);
                     fTickingFluid.setShort(section, (short) tickF);
                     fSpecial.setShort(section, (short) special);
-                    Object list = fTickingList.get(section);
                     if (tickB > 0) {
-                        Method mAdd = list.getClass().getMethod("add", short.class);
+                        Object list = fTickingList.get(section);
                         for (int k = 0; k < 4096; k++) {
                             short id = out[base + k];
                             if (id != 0 && matTicking[id]) {
-                                mAdd.invoke(list, (short) k);
+                                mTickingAdd.invoke(list, (short) k);
                             }
                         }
                     }
-                    if (uniform2(out, base)) {
+                    if (path == 1) {
                         GenStats.BULK_FILLED.incrementAndGet();
+                    } else if (path == 4) {
+                        // per-block fallback: classify by a real scan
+                        if (uniform2(out, base)) {
+                            GenStats.BULK_FILLED.incrementAndGet();
+                        } else {
+                            GenStats.BULK_MIXED.incrementAndGet();
+                        }
                     } else {
                         GenStats.BULK_MIXED.incrementAndGet();
                     }
