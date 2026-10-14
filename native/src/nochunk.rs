@@ -357,6 +357,15 @@ pub struct ChunkGen<'e> {
     out_pool: Vec<Box<[u16; OUT_LEN]>>,
     /// Persistent plane worker for the pipeline path (main gen only).
     plane_worker: Option<PlaneWorker>,
+    /// Next-chunk plane prefetcher (runs during the Java-side gap between
+    /// fills; main gen only).
+    prefetch: Option<PrefetchWorker>,
+    prefetch_done: Option<PrefetchResult>,
+    /// Gap-adaptive prefetch gate: enabled only when the previous inter-fill
+    /// gap was large enough to hide the plane work (isolated benches have
+    /// ~0 gap — there the prefetch thread would just fight the fill workers).
+    prefetch_enabled: bool,
+    last_fill_end: Option<std::time::Instant>,
     cellfill_stack: Vec<f64>,
     /// Per-(dx,dy) hoisted trilinear rows: per slot [row1, row2] so the
     /// per-block cost is a single z-lerp per Lerp3 slot (bit-exact: the
@@ -819,6 +828,10 @@ impl<'e> ChunkGen<'e> {
             strip_pool: Some(Vec::new()),
             out_pool: Vec::new(),
             plane_worker: None,
+            prefetch: None,
+            prefetch_done: None,
+            prefetch_enabled: false,
+            last_fill_end: None,
             cellfill_stack: Vec::with_capacity(16),
             cellfill_rows: vec![0.0; compiled.interp_slots as usize * 4],
             cellfill_rows8: vec![0.0; compiled.interp_slots as usize * 16],
@@ -1346,9 +1359,135 @@ impl PlaneWorker {
     }
 }
 
+/// Next-chunk plane prefetch worker: after a fill completes, it evaluates
+/// the NEXT chunk's planes (1..=ccx — plane 0 arrives via the cross-chunk
+/// cache) during the Java-side gap between fills (layout / beardifier /
+/// vanilla SURFACE run on the gen thread while our cores are idle). The
+/// next fill then starts straight on strips. Planes are pure functions of
+/// (env, compiled, corner x, z origin) — bit-identical wherever computed.
+enum PrefetchMsg {
+    Prefetch {
+        /// next chunk's first_cell_x (cell units)
+        next_first_cell_x: i32,
+        first_cell_z: i32,
+    },
+    Stop,
+}
+
+struct PrefetchResult {
+    /// plane-0 world x of the CONSUMING chunk: next_first_cell_x * cw
+    key_x: i64,
+    key_z: i32,
+    /// planes 1..=ccx of the consuming chunk, laid out [slot][z][y]
+    planes: Vec<Vec<f64>>,
+}
+
+struct PrefetchWorker {
+    tx: std::sync::mpsc::Sender<PrefetchMsg>,
+    rx: std::sync::mpsc::Receiver<PrefetchResult>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    /// one outstanding request at a time (cleared when consumed/answered)
+    pending: bool,
+}
+
+impl PrefetchWorker {
+    #[allow(clippy::too_many_arguments)]
+    fn spawn(
+        env_addr: usize,
+        compiled: std::sync::Arc<Compiled>,
+        children: Vec<u32>,
+        cell_count_xz: usize,
+        cell_count_y: usize,
+        cell_noise_min_y: i32,
+        cw: i32,
+        ch: i32,
+        lanes: usize,
+        plane_len: usize,
+    ) -> PrefetchWorker {
+        let (tx, rx) = std::sync::mpsc::channel::<PrefetchMsg>();
+        let (dtx, drx) = std::sync::mpsc::channel::<PrefetchResult>();
+        let handle = std::thread::Builder::new()
+            .stack_size(1 << 21)
+            .spawn(move || {
+                // SAFETY: ChunkGen::drop sends Stop and joins this thread
+                // before the env borrow can end.
+                let env: &Env = unsafe { &*(env_addr as *const Env) };
+                let children: &[u32] = &children;
+                loop {
+                    match rx.recv() {
+                        Ok(PrefetchMsg::Prefetch {
+                            next_first_cell_x,
+                            first_cell_z,
+                        }) => {
+                            let mut planes = Vec::with_capacity(cell_count_xz);
+                            for k in 1..=cell_count_xz {
+                                let mut buf = vec![0f64; plane_len];
+                                <ChunkGen<'static>>::eval_plane_into(
+                                    env,
+                                    &compiled,
+                                    children,
+                                    (next_first_cell_x + k as i32) * cw,
+                                    first_cell_z,
+                                    cell_count_xz,
+                                    cell_count_y,
+                                    cell_noise_min_y,
+                                    cw,
+                                    ch,
+                                    lanes,
+                                    &mut buf,
+                                );
+                                planes.push(buf);
+                            }
+                            let res = PrefetchResult {
+                                key_x: (next_first_cell_x * cw) as i64,
+                                key_z: first_cell_z,
+                                planes,
+                            };
+                            if dtx.send(res).is_err() {
+                                return;
+                            }
+                        }
+                        Ok(PrefetchMsg::Stop) | Err(_) => return,
+                    }
+                }
+            })
+            .expect("spawn prefetch worker");
+        PrefetchWorker {
+            tx,
+            rx: drx,
+            handle: Some(handle),
+            pending: false,
+        }
+    }
+
+    fn request(&mut self, next_first_cell_x: i32, first_cell_z: i32) {
+        self.pending = true;
+        if self
+            .tx
+            .send(PrefetchMsg::Prefetch {
+                next_first_cell_x,
+                first_cell_z,
+            })
+            .is_err()
+        {
+            // worker died: leave pending cleared by the consume path
+        }
+    }
+
+    fn stop_and_join(mut self) {
+        let _ = self.tx.send(PrefetchMsg::Stop);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
 impl<'e> Drop for ChunkGen<'e> {
     fn drop(&mut self) {
         if let Some(w) = self.plane_worker.take() {
+            w.stop_and_join();
+        }
+        if let Some(w) = self.prefetch.take() {
             w.stop_and_join();
         }
     }
@@ -1406,6 +1545,10 @@ impl<'e> ChunkGen<'e> {
             strip_pool: None,
             out_pool: Vec::new(),
             plane_worker: None,
+            prefetch: None,
+            prefetch_done: None,
+            prefetch_enabled: false,
+            last_fill_end: None,
             cellfill_stack: Vec::with_capacity(16),
             cellfill_rows: vec![0.0; self.cellfill_rows.len()],
             cellfill_rows8: vec![0.0; self.cellfill_rows8.len()],
@@ -1477,6 +1620,37 @@ impl<'e> ChunkGen<'e> {
         let lanes = self.slice_lanes;
 
         // plane 0: cross-chunk cache or fresh evaluation
+        // Lazily spawn the next-chunk plane prefetcher (one thread per main
+        // generator; gap-gated + CRUS_PREFETCH=0/1 forces). The gap gate is
+        // measured per fill in fill(): with a ~0 inter-fill gap (isolated
+        // bench) the prefetcher would fight the fill workers, so it stays
+        // off and the classic in-graph plane path runs.
+        if self.prefetch.is_none()
+            && self.prefetch_enabled
+            && self.slice_threads > 1
+            && self.cell_count_xz > 0
+            && !self.skip_slice
+        {
+            let on = match std::env::var("CRUS_PREFETCH").ok().as_deref() {
+                Some("0") => false,
+                Some("1") => true,
+                _ => true,
+            };
+            if on {
+                self.prefetch = Some(PrefetchWorker::spawn(
+                    self.env as *const Env as usize,
+                    std::sync::Arc::clone(&self.compiled),
+                    self.interp_children.clone(),
+                    ccx,
+                    ccy,
+                    cnmy,
+                    cw,
+                    ch,
+                    lanes,
+                    plane_len,
+                ));
+            }
+        }
         let cache_hit = self.plane_cache_x == (first_cell_x * cw) as i64
             && self.plane_cache_z == first_cell_z
             && self.plane_cache.len() == plane_len;
@@ -1487,6 +1661,64 @@ impl<'e> ChunkGen<'e> {
         } else {
             self.fill_slice(first_cell_x, first_cell_z, true);
             planes.push(self.interp.slice0.clone());
+        }
+
+        // Consume a pending next-chunk plane prefetch (requested by the
+        // PREVIOUS fill; the prefetch worker evaluated it during the
+        // Java-side gap between fills — layout/beard/SURFACE run on the gen
+        // thread while our cores idle). Valid only when plane 0 came from
+        // the cross-chunk cache (same cz, +x adjacency) and the key matches
+        // this fill's origin. 400us cap: if the worker isn't done, the
+        // graph below evaluates planes itself (duplicate work ends quickly).
+        let mut prefetched: Vec<std::sync::Arc<Vec<f64>>> = Vec::new();
+        if let Some(pf) = self.prefetch.as_mut() {
+            if pf.pending {
+                use std::sync::mpsc::RecvTimeoutError;
+                let wait = if self.prefetch_enabled && cache_hit {
+                    std::time::Duration::from_micros(400)
+                } else {
+                    std::time::Duration::from_secs(0)
+                };
+                match pf.rx.recv_timeout(wait) {
+                    Ok(res) => {
+                        pf.pending = false;
+                        if self.prefetch_enabled {
+                            self.prefetch_done = Some(res);
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        pf.pending = false;
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                }
+            }
+        }
+        if self.prefetch_enabled && cache_hit {
+            let key_ok = self
+                .prefetch_done
+                .as_ref()
+                .map(|r| r.key_x == (first_cell_x * cw) as i64 && r.key_z == first_cell_z)
+                .unwrap_or(false);
+            if key_ok {
+                let res = self.prefetch_done.take().unwrap();
+                prefetched = res.planes.into_iter().map(std::sync::Arc::new).collect();
+            } else {
+                // stale (row turn / first fill of a row): drop
+                self.prefetch_done = None;
+            }
+        } else if !self.prefetch_enabled {
+            self.prefetch_done = None;
+        }
+        let prefetched_all = prefetched.len() == ccx;
+        if std::env::var("CRUS_PF_DIAG").ok().as_deref() == Some("1") {
+            eprintln!(
+                "[pf-diag] cx={} hit={} enabled={} pending_in={} got={}",
+                first_cell_x / cw.max(1),
+                cache_hit,
+                self.prefetch_enabled,
+                self.prefetch.as_ref().map(|p| p.pending).unwrap_or(false),
+                prefetched_all
+            );
         }
 
         // Dependency-aware fill graph: planes and strips are one task pool
@@ -1506,8 +1738,17 @@ impl<'e> ChunkGen<'e> {
             let store: Mutex<Vec<Option<std::sync::Arc<Vec<f64>>>>> =
                 Mutex::new((0..=ccx).map(|_| None).collect());
             store.lock().unwrap()[0] = Some(std::sync::Arc::new(plane0));
-            let plane_ready = AtomicU32::new(1);
-            let next_plane = AtomicUsize::new(1);
+            if prefetched_all {
+                for (k, buf) in prefetched.into_iter().enumerate() {
+                    store.lock().unwrap()[k + 1] = Some(buf);
+                }
+            }
+            let plane_ready = AtomicU32::new(if prefetched_all {
+                (1u32 << (ccx + 1)) - 1
+            } else {
+                1
+            });
+            let next_plane = AtomicUsize::new(if prefetched_all { ccx + 1 } else { 1 });
             let next_strip = AtomicUsize::new(0);
             let strips_done = AtomicUsize::new(0);
             let graph = FillGraph {
@@ -1587,6 +1828,16 @@ impl<'e> ChunkGen<'e> {
             self.plane_cache_x = ((first_cell_x + ccx as i32) * cw) as i64;
         self.plane_cache_z = first_cell_z;
 
+        // Hand the NEXT chunk's planes to the prefetch worker: it evaluates
+        // them during the Java-side gap (layout / beard / SURFACE) so the
+        // next fill starts straight on strips. One outstanding request at a
+        // time; stale results are discarded by key at the consuming fill.
+        if let Some(pf) = self.prefetch.as_mut() {
+            if !pf.pending && self.prefetch_enabled {
+                pf.request(first_cell_x + ccx as i32, first_cell_z);
+            }
+        }
+
         // merge outs (disjoint positions; AIR=0 so OR is exact)
         for (o, b) in out.iter_mut().zip(out0.iter()) {
             *o |= *b;
@@ -1631,9 +1882,22 @@ impl<'e> ChunkGen<'e> {
 
     /// Vanilla NoiseBasedChunkGenerator.doFill.
     pub fn fill(&mut self, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
+        // Gap-adaptive prefetch gate: measure the inter-fill gap (Java-side
+        // layout/beard/SURFACE time). Plane work (~0.33ms per plane serial)
+        // is only worth prefetching when there is room to hide it; with a
+        // ~0 gap (isolated bench, back-to-back fills) the prefetch thread
+        // would fight the fill workers instead.
+        let now = std::time::Instant::now();
+        let gap = self
+            .last_fill_end
+            .map(|e| now.saturating_duration_since(e))
+            .unwrap_or_default();
+        self.prefetch_enabled = gap >= std::time::Duration::from_micros(1000);
+        self.last_fill_end = None;
         let jni_before = self.prof;
         let jni_t0 = std::time::Instant::now();
         self.fill_inner(cx, cz, out);
+        self.last_fill_end = Some(std::time::Instant::now());
         jni_prof_accum(&jni_before, &self.prof, jni_t0.elapsed().as_nanos() as u64);
     }
 

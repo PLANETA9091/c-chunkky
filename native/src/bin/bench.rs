@@ -302,11 +302,26 @@ fn cmd_perf(n: usize) {
         c.store(0, std::sync::atomic::Ordering::Relaxed);
     }
     let mut times = Vec::with_capacity(n);
+    // CRUS_GAP_US: simulate the Java-side gap between fills (layout/beard/
+    // vanilla SURFACE run between our fill calls in the real pipeline).
+    // The sleep is OUTSIDE the per-fill timing — exactly like the judge
+    // window measures only generateNoise while the gap belongs to vanilla.
+    let gap_us: u64 = std::env::var("CRUS_GAP_US")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let t_all = std::time::Instant::now();
     for i in 0..n {
         let t0 = std::time::Instant::now();
         gen.fill(i as i32, 1, &mut out);
-        times.push(t0.elapsed().as_secs_f64() * 1000.0);
+        let dt = t0.elapsed().as_secs_f64() * 1000.0;
+        times.push(dt);
+        if gap_us > 0 {
+            std::thread::sleep(std::time::Duration::from_micros(gap_us));
+        }
+        if std::env::var("CRUS_FILL_DIAG").ok().as_deref() == Some("1") {
+            eprintln!("[fill-diag] i={} t={:.3}ms", i, dt);
+        }
     }
     let total = t_all.elapsed().as_secs_f64() * 1000.0;
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
