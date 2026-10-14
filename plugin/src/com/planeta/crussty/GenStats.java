@@ -57,6 +57,11 @@ public final class GenStats {
     // fluid-update mark diagnostics
     static final AtomicLong MARKS_SEEN = new AtomicLong();
     static final AtomicLong MARKS_LANDED = new AtomicLong();
+    // layout phase breakdown (setup reflection / section writes / heightmaps / self-verify)
+    static final AtomicLong LAY_SETUP_TOTAL = new AtomicLong();
+    static final AtomicLong LAY_SEC_TOTAL = new AtomicLong();
+    static final AtomicLong LAY_HMAP_TOTAL = new AtomicLong();
+    static final AtomicLong LAY_VER_TOTAL = new AtomicLong();
     static final AtomicLong BRIDGE_NO_CHUNK = new AtomicLong();
     static final AtomicLong BRIDGE_ERROR = new AtomicLong();
     // beardifier (structure terrain adaptation) diagnostics
@@ -82,6 +87,10 @@ public final class GenStats {
         BULK_BROKEN_COUNT.set(0);
         MARKS_SEEN.set(0);
         MARKS_LANDED.set(0);
+        LAY_SETUP_TOTAL.set(0);
+        LAY_SEC_TOTAL.set(0);
+        LAY_HMAP_TOTAL.set(0);
+        LAY_VER_TOTAL.set(0);
         BRIDGE_NO_CHUNK.set(0);
         BRIDGE_ERROR.set(0);
         BEARD_CHUNKS.set(0);
@@ -121,7 +130,7 @@ public final class GenStats {
         double meanUs = (TOTAL.get() / Math.max(1, COUNT.get())) / 1000.0;
         long cnt = Math.max(1, COUNT.get());
         return String.format(
-                "chunks=%d  mean=%.1fus  min=%.1fus  p50=%.1fus  p99=%.1fus  max=%.1fus  [native=%.2fms nat_p50=%.2fms layout=%.2fms beard=%.2fms marks=%.2fms]  [sections filled=%d mixed=%d air=%d v1fallback=%d bulk=%s]  marks_seen=%d marks_landed=%d bridge_no_chunk=%d bridge_err=%d beard_chunks=%d beard_pieces=%d",
+                "chunks=%d  mean=%.1fus  min=%.1fus  p50=%.1fus  p99=%.1fus  max=%.1fus  [native=%.2fms nat_p50=%.2fms layout=%.2fms beard=%.2fms marks=%.2fms]  [lay setup=%.2f sec=%.2f hmap=%.2f verify=%.2f]  [sections filled=%d mixed=%d air=%d v1fallback=%d bulk=%s]  marks_seen=%d marks_landed=%d bridge_no_chunk=%d bridge_err=%d beard_chunks=%d beard_pieces=%d",
                 COUNT.get(), meanUs,
                 pmin / 1000.0, p50 / 1000.0, p99 / 1000.0, copy[(int) (n - 1)] / 1000.0,
                 NATIVE_TOTAL.get() / (double) cnt / 1e6,
@@ -129,6 +138,10 @@ public final class GenStats {
                 LAYOUT_TOTAL.get() / (double) cnt / 1e6,
                 BEARD_TOTAL.get() / (double) cnt / 1e6,
                 MARKS_TOTAL.get() / (double) cnt / 1e6,
+                LAY_SETUP_TOTAL.get() / (double) cnt / 1e6,
+                LAY_SEC_TOTAL.get() / (double) cnt / 1e6,
+                LAY_HMAP_TOTAL.get() / (double) cnt / 1e6,
+                LAY_VER_TOTAL.get() / (double) cnt / 1e6,
                 BULK_FILLED.get(), BULK_MIXED.get(), BULK_AIR.get(), BULK_BROKEN_COUNT.get(),
                 com.planeta.crussty.CrusstyChunkGenerator.bulkFailReason == null ? "ok" : com.planeta.crussty.CrusstyChunkGenerator.bulkFailReason,
                 MARKS_SEEN.get(), MARKS_LANDED.get(), BRIDGE_NO_CHUNK.get(), BRIDGE_ERROR.get(),
