@@ -701,6 +701,9 @@ impl<'a, 'e> FillGraph<'a, 'e> {
 impl<'e> ChunkGen<'e> {
     pub fn new(env: &'e Env) -> ChunkGen<'e> {
         let compiled = std::sync::Arc::new(env.compile());
+        // Probe the column-kernel width (AVX-512 8-wide vs AVX2 4-wide) once,
+        // before any fill worker exists (single-threaded, TLS caches empty).
+        crate::noise::probe_avx512_width();
         let slice_lanes = Self::pick_slice_lanes(env, &compiled);
         let interp_children = compiled.interp_children.clone();
         let router = |name: &str| -> u32 {

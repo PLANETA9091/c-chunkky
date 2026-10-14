@@ -78,6 +78,132 @@ mod vec {
 #[cfg(target_arch = "x86_64")]
 use vec::{lerp_v, smoothstep_v};
 
+// ---- AVX-512 lane-math helpers (same per-lane op order as the AVX2 ones) ----
+#[cfg(target_arch = "x86_64")]
+mod vec512 {
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    /// t*t*t*(t*(t*6.0-15.0)+10.0)
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    pub unsafe fn smoothstep_v512(t: __m512d) -> __m512d {
+        let t2 = _mm512_mul_pd(t, t);
+        let t3 = _mm512_mul_pd(t2, t);
+        let a = _mm512_mul_pd(t, _mm512_set1_pd(6.0));
+        let b = _mm512_sub_pd(a, _mm512_set1_pd(15.0));
+        let c = _mm512_mul_pd(b, t);
+        let d = _mm512_add_pd(c, _mm512_set1_pd(10.0));
+        _mm512_mul_pd(t3, d)
+    }
+
+    /// a + t*(b-a)
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    pub unsafe fn lerp_v512(t: __m512d, a: __m512d, b: __m512d) -> __m512d {
+        _mm512_add_pd(a, _mm512_mul_pd(t, _mm512_sub_pd(b, a)))
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+use vec512::{lerp_v512, smoothstep_v512};
+
+/// AVX-512 selection state: 0 = not probed yet (=> disabled), 1 = disabled
+/// (2x AVX2), 2 = enabled. Set once by probe_avx512_width() at ChunkGen
+/// construction; CRUS_AVX512=1/0 overrides. History: on SKX/CLX 512-bit f64
+/// downclocks and measured SLOWER than 2x AVX2, so the winner is measured,
+/// not assumed — Ice Lake-class parts (typical CI runners) win with 512.
+static AVX512_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn avx512_selected() -> bool {
+    AVX512_MODE.load(std::sync::atomic::Ordering::Relaxed) == 2
+}
+
+pub fn set_avx512_selected(v: bool) {
+    AVX512_MODE.store(
+        if v { 2 } else { 1 },
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// Measure the column-kernel width (AVX-512 8-wide vs AVX2 4-wide) on a real
+/// NormalNoise column workload and cache the winner process-wide. Called
+/// once from ChunkGen::new before any worker exists (single-threaded).
+pub fn probe_avx512_width() {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if let Ok(v) = std::env::var("CRUS_AVX512") {
+            set_avx512_selected(v == "1");
+            return;
+        }
+        if !std::arch::is_x86_feature_detected!("avx512f") {
+            set_avx512_selected(false);
+            return;
+        }
+        let mut rng = crate::rng::XoroshiroRandomSource::new(0x0DEC5102);
+        let nn = NormalNoise::create(&mut rng, -5, vec![1.0; 6]);
+        let pn = &nn.first; // PerlinNoise owns the octave col kernels
+        let col_base = nn.col_base;
+        let mut y4 = [0f64; 4];
+        let mut y8 = [0f64; 8];
+        for l in 0..8 {
+            y8[l] = (l as f64) * 8.0;
+        }
+        for l in 0..4 {
+            y4[l] = (l as f64) * 8.0;
+        }
+        let mut sink = 0u64;
+        let run4 = |sink: &mut u64, reps: usize| {
+            for _ in 0..reps {
+                let v = pn.get_value_batch_col::<4>(64.0, -128.0, &y4, col_base);
+                for x in v {
+                    *sink ^= x.to_bits();
+                }
+            }
+        };
+        let run8 = |sink: &mut u64, reps: usize| {
+            for _ in 0..reps {
+                let v = pn.get_value_batch_col::<8>(64.0, -128.0, &y8, col_base);
+                for x in v {
+                    *sink ^= x.to_bits();
+                }
+            }
+        };
+        // warm both branches (kernel code + TLS col state)
+        set_avx512_selected(false);
+        run4(&mut sink, 300);
+        set_avx512_selected(true);
+        run8(&mut sink, 300);
+        // Interleaved rounds with MIN aggregation: a single early measurement
+        // races CPU frequency ramp (turbo not settled at process start) and
+        // picks the wrong width; the min over interleaved rounds is the
+        // noise-free estimate for each variant.
+        let reps = 400;
+        let (mut best4, mut best8) = (f64::MAX, f64::MAX);
+        for _ in 0..3 {
+            set_avx512_selected(false);
+            let t0 = std::time::Instant::now();
+            run4(&mut sink, reps);
+            best4 = best4.min(t0.elapsed().as_nanos() as f64);
+            set_avx512_selected(true);
+            let t0 = std::time::Instant::now();
+            run8(&mut sink, reps);
+            best8 = best8.min(t0.elapsed().as_nanos() as f64);
+        }
+        // 8 lanes per call = 2x the work of a 4-lane call: 8-wide wins when
+        // best8 < 2*best4*0.97 (>=3% per-lane advantage).
+        set_avx512_selected(best8 < best4 * 2.0 * 0.97);
+        if sink == u64::MAX {
+            eprintln!("probe: sink"); // never: keeps the math observable
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        set_avx512_selected(false);
+    }
+}
+
+
 #[inline]
 fn mth_floor(x: f64) -> i32 {
     let f = x.floor();
@@ -369,6 +495,145 @@ impl ImprovedNoise {
         let res = lerp_v(fzv, r01, r23);
         let mut out = [0f64; 4];
         _mm256_storeu_pd(out.as_mut_ptr(), res);
+        out
+    }
+
+    /// 8-lane noise(x, y, z) (y_scale = 0) sharing the column state `st`.
+    /// Lane-identical to noise_col4 / the scalar eval (same per-lane op
+    /// order), so mixing widths across batches is bit-safe.
+    #[inline]
+    pub fn noise_col8(&self, st: &mut OctColState, wy: &[f64; 8]) -> [f64; 8] {
+        let mut yi = [0i32; 8];
+        let mut dy = [0f64; 8];
+        for l in 0..8 {
+            let yv = wy[l] + self.yo;
+            let b = mth_floor(yv);
+            yi[l] = b;
+            dy[l] = yv - b as f64;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            let same = yi[0] == yi[1]
+                && yi[1] == yi[2]
+                && yi[2] == yi[3]
+                && yi[3] == yi[4]
+                && yi[4] == yi[5]
+                && yi[5] == yi[6]
+                && yi[6] == yi[7];
+            if same {
+                if yi[0] != st.cell_yi {
+                    self.col_walk(st, yi[0]);
+                }
+                unsafe {
+                    return self.noise_col8_same_avx512(st, &dy);
+                }
+            }
+            // mixed y-cells: per-lane walks; y-cell memo invalidated (any
+            // cell is a valid pure cache, but the grads/t0/t2 slots are
+            // single-entry and the mixed kernel does not rebuild them).
+            st.cell_yi = i32::MIN;
+            unsafe {
+                return self.noise_col8_mixed_avx512(st, &yi, &dy);
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        unreachable!("column path requires AVX2 (x86_64)")
+    }
+
+    /// All-8-lanes-same-cell kernel (AVX-512): one column walk serves the
+    /// batch; per lane only the Y dot term and the lerp3 run. Lane-identical
+    /// to noise_col4_same_avx2 (same op order, no FMA, no reassociation).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f")]
+    unsafe fn noise_col8_same_avx512(&self, st: &OctColState, dy: &[f64; 8]) -> [f64; 8] {
+        use std::arch::x86_64::*;
+        let dyv = _mm512_loadu_pd(dy.as_ptr());
+        let fy = smoothstep_v512(dyv);
+        let fxv = _mm512_set1_pd(st.fx);
+        let fzv = _mm512_set1_pd(st.fz);
+        let one = _mm512_set1_pd(1.0);
+        let mut vc = [_mm512_setzero_pd(); 8];
+        for c in 0..8 {
+            let g = (st.grads[c] & 15) as usize;
+            let gy = GRADIENT[g][1] as f64;
+            let yv = if c & 2 != 0 { _mm512_sub_pd(dyv, one) } else { dyv };
+            let t1 = _mm512_mul_pd(_mm512_set1_pd(gy), yv);
+            vc[c] = _mm512_add_pd(
+                _mm512_add_pd(_mm512_set1_pd(st.t0[c]), t1),
+                _mm512_set1_pd(st.t2[c]),
+            );
+        }
+        let r0 = lerp_v512(fxv, vc[0], vc[1]);
+        let r1 = lerp_v512(fxv, vc[2], vc[3]);
+        let r01 = lerp_v512(fy, r0, r1);
+        let r2 = lerp_v512(fxv, vc[4], vc[5]);
+        let r3 = lerp_v512(fxv, vc[6], vc[7]);
+        let r23 = lerp_v512(fy, r2, r3);
+        let res = lerp_v512(fzv, r01, r23);
+        let mut out = [0f64; 8];
+        _mm512_storeu_pd(out.as_mut_ptr(), res);
+        out
+    }
+
+    /// Mixed y-cells (AVX-512): per-lane walks with consecutive-yi dedup,
+    /// then the per-corner-gradient 8-wide kernel with broadcast x/z state.
+    /// Lane-identical to noise_col4_mixed_avx2.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f")]
+    unsafe fn noise_col8_mixed_avx512(
+        &self,
+        st: &OctColState,
+        yi: &[i32; 8],
+        dy: &[f64; 8],
+    ) -> [f64; 8] {
+        use std::arch::x86_64::*;
+        let mut grad = [[0u8; 8]; 8];
+        grad[0] = self.walk_y_cell(st, yi[0]);
+        for l in 1..8 {
+            grad[l] = if yi[l] == yi[l - 1] {
+                grad[l - 1]
+            } else {
+                self.walk_y_cell(st, yi[l])
+            };
+        }
+        let dyv = _mm512_loadu_pd(dy.as_ptr());
+        let fy = smoothstep_v512(dyv);
+        let fxv = _mm512_set1_pd(st.fx);
+        let fzv = _mm512_set1_pd(st.fz);
+        let dxv = _mm512_set1_pd(st.dx);
+        let dzv = _mm512_set1_pd(st.dz);
+        let one = _mm512_set1_pd(1.0);
+        let mut vc = [_mm512_setzero_pd(); 8];
+        for c in 0..8 {
+            let mut gxs = [0i32; 8];
+            let mut gys = [0i32; 8];
+            let mut gzs = [0i32; 8];
+            for l in 0..8 {
+                let gv = &GRADIENT[(grad[l][c] & 15) as usize];
+                gxs[l] = gv[0];
+                gys[l] = gv[1];
+                gzs[l] = gv[2];
+            }
+            let gx = _mm512_cvtepi32_pd(_mm256_loadu_si256(gxs.as_ptr() as *const __m256i));
+            let gy = _mm512_cvtepi32_pd(_mm256_loadu_si256(gys.as_ptr() as *const __m256i));
+            let gz = _mm512_cvtepi32_pd(_mm256_loadu_si256(gzs.as_ptr() as *const __m256i));
+            let xv = if c & 1 != 0 { _mm512_sub_pd(dxv, one) } else { dxv };
+            let yv = if c & 2 != 0 { _mm512_sub_pd(dyv, one) } else { dyv };
+            let zv = if c & 4 != 0 { _mm512_sub_pd(dzv, one) } else { dzv };
+            let t0 = _mm512_mul_pd(gx, xv);
+            let t1 = _mm512_mul_pd(gy, yv);
+            let t2 = _mm512_mul_pd(gz, zv);
+            vc[c] = _mm512_add_pd(_mm512_add_pd(t0, t1), t2);
+        }
+        let r0 = lerp_v512(fxv, vc[0], vc[1]);
+        let r1 = lerp_v512(fxv, vc[2], vc[3]);
+        let r01 = lerp_v512(fy, r0, r1);
+        let r2 = lerp_v512(fxv, vc[4], vc[5]);
+        let r3 = lerp_v512(fxv, vc[6], vc[7]);
+        let r23 = lerp_v512(fy, r2, r3);
+        let res = lerp_v512(fzv, r01, r23);
+        let mut out = [0f64; 8];
+        _mm512_storeu_pd(out.as_mut_ptr(), res);
         out
     }
 }
@@ -688,12 +953,13 @@ impl ImprovedNoise {
         y_scale: f64,
         y_max: &[f64; 8],
     ) -> [f64; 8] {
-        // AVX-512 is opt-in (CRUS_AVX512=1): on several x86 parts (SKX/CLX)
-        // 512-bit f64 downclocks and measured SLOWER than 2x AVX2; the
-        // 2x-256-bit path below is the safe default. Both are bit-exact.
+        // AVX-512 when probed as the winner (CRUS_AVX512=1/0 forces it):
+        // on SKX/CLX 512-bit f64 downclocks and measured SLOWER than 2x
+        // AVX2; the 2x-256-bit path below is the safe default. Both are
+        // bit-exact.
         #[cfg(target_arch = "x86_64")]
         {
-            if std::env::var("CRUS_AVX512").as_deref() == Ok("1")
+            if crate::noise::avx512_selected()
                 && std::arch::is_x86_feature_detected!("avx512f")
             {
                 return unsafe { self.noise_5_batch_avx512(xin, yin, zin, y_scale, y_max) };
@@ -865,6 +1131,133 @@ impl ImprovedNoise {
             }
         }
         unsafe { self.noise_5_col_avx2(st, &yi, &dy, &wdy) }
+    }
+
+    /// 8-lane column variant of noise_5_batch_col (see it for the semantics).
+    /// Dispatches to the AVX-512 8-wide kernel when selected, else 2x 4-wide
+    /// (bit-identical per lane either way).
+    pub fn noise_5_batch_col8(
+        &self,
+        st: &mut OctColState,
+        kx: f64,
+        kz: f64,
+        wy: &[f64; 8],
+        y_scale: f64,
+        y_max: &[f64; 8],
+    ) -> [f64; 8] {
+        if !st.valid || st.key_x != kx.to_bits() || st.key_z != kz.to_bits() {
+            let wx = wrap(kx);
+            let wz = wrap(kz);
+            self.col_init(st, wx, wz);
+            st.valid = true;
+            st.key_x = kx.to_bits();
+            st.key_z = kz.to_bits();
+        }
+        let mut yi = [0i32; 8];
+        let mut dy = [0f64; 8];
+        let mut wdy = [0f64; 8];
+        for l in 0..8 {
+            let yv = wy[l] + self.yo;
+            let b = mth_floor(yv);
+            yi[l] = b;
+            let d = yv - b as f64;
+            dy[l] = d;
+            if y_scale != 0.0 {
+                let ym = y_max[l];
+                let d6 = if ym >= 0.0 && ym < d { ym } else { d };
+                let d7 = (d6 / y_scale + 1.0000000116860974e-07).floor() * y_scale;
+                wdy[l] = d - d7;
+            } else {
+                wdy[l] = d;
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::noise::avx512_selected() {
+                unsafe { return self.noise_5_col8_avx512(st, &yi, &dy, &wdy) };
+            }
+        }
+        let mut lo_yi = [0i32; 4];
+        let mut lo_dy = [0f64; 4];
+        let mut lo_wdy = [0f64; 4];
+        let mut hi_yi = [0i32; 4];
+        let mut hi_dy = [0f64; 4];
+        let mut hi_wdy = [0f64; 4];
+        lo_yi.copy_from_slice(&yi[..4]);
+        lo_dy.copy_from_slice(&dy[..4]);
+        lo_wdy.copy_from_slice(&wdy[..4]);
+        hi_yi.copy_from_slice(&yi[4..]);
+        hi_dy.copy_from_slice(&dy[4..]);
+        hi_wdy.copy_from_slice(&wdy[4..]);
+        let a = unsafe { self.noise_5_col_avx2(st, &lo_yi, &lo_dy, &lo_wdy) };
+        let b = unsafe { self.noise_5_col_avx2(st, &hi_yi, &hi_dy, &hi_wdy) };
+        let mut out = [0f64; 8];
+        out[..4].copy_from_slice(&a);
+        out[4..].copy_from_slice(&b);
+        out
+    }
+
+    /// 8-wide column kernel for noise_5_batch_col8. Lane-identical to
+    /// noise_5_col_avx2 (same op order, no FMA, no reassociation).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f")]
+    unsafe fn noise_5_col8_avx512(
+        &self,
+        st: &OctColState,
+        yi: &[i32; 8],
+        dy: &[f64; 8],
+        wdy: &[f64; 8],
+    ) -> [f64; 8] {
+        use std::arch::x86_64::*;
+        let mut grad = [[0u8; 8]; 8];
+        grad[0] = self.walk_y_cell(st, yi[0]);
+        for l in 1..8 {
+            grad[l] = if yi[l] == yi[l - 1] {
+                grad[l - 1]
+            } else {
+                self.walk_y_cell(st, yi[l])
+            };
+        }
+        let dyv = _mm512_loadu_pd(dy.as_ptr());
+        let wdyv = _mm512_loadu_pd(wdy.as_ptr());
+        let fy = smoothstep_v512(dyv); // RAW dy (smear quirk: corner uses wdy)
+        let fxv = _mm512_set1_pd(st.fx);
+        let fzv = _mm512_set1_pd(st.fz);
+        let dxv = _mm512_set1_pd(st.dx);
+        let dzv = _mm512_set1_pd(st.dz);
+        let one = _mm512_set1_pd(1.0);
+        let mut vc = [_mm512_setzero_pd(); 8];
+        for c in 0..8 {
+            let mut gxs = [0i32; 8];
+            let mut gys = [0i32; 8];
+            let mut gzs = [0i32; 8];
+            for l in 0..8 {
+                let gv = &GRADIENT[(grad[l][c] & 15) as usize];
+                gxs[l] = gv[0];
+                gys[l] = gv[1];
+                gzs[l] = gv[2];
+            }
+            let gx = _mm512_cvtepi32_pd(_mm256_loadu_si256(gxs.as_ptr() as *const __m256i));
+            let gy = _mm512_cvtepi32_pd(_mm256_loadu_si256(gys.as_ptr() as *const __m256i));
+            let gz = _mm512_cvtepi32_pd(_mm256_loadu_si256(gzs.as_ptr() as *const __m256i));
+            let xv = if c & 1 != 0 { _mm512_sub_pd(dxv, one) } else { dxv };
+            let yv = if c & 2 != 0 { _mm512_sub_pd(wdyv, one) } else { wdyv };
+            let zv = if c & 4 != 0 { _mm512_sub_pd(dzv, one) } else { dzv };
+            let t0 = _mm512_mul_pd(gx, xv);
+            let t1 = _mm512_mul_pd(gy, yv);
+            let t2 = _mm512_mul_pd(gz, zv);
+            vc[c] = _mm512_add_pd(_mm512_add_pd(t0, t1), t2);
+        }
+        let r0 = lerp_v512(fxv, vc[0], vc[1]);
+        let r1 = lerp_v512(fxv, vc[2], vc[3]);
+        let r01 = lerp_v512(fy, r0, r1);
+        let r2 = lerp_v512(fxv, vc[4], vc[5]);
+        let r3 = lerp_v512(fxv, vc[6], vc[7]);
+        let r23 = lerp_v512(fy, r2, r3);
+        let res = lerp_v512(fzv, r01, r23);
+        let mut out = [0f64; 8];
+        _mm512_storeu_pd(out.as_mut_ptr(), res);
+        out
     }
 
     /// Permutation walk for one y-cell within a hoisted column (x/z state
@@ -1185,24 +1578,50 @@ impl PerlinNoise {
                         wy[l] = wrap(y[l] * input_factor);
                     }
                     let mut v = [0f64; N];
-                    let mut g = 0;
-                    while g < N {
-                        let mut wy4 = [0f64; 4];
-                        let rem = N - g;
-                        if rem >= 4 {
-                            wy4.copy_from_slice(&wy[g..g + 4]);
-                        } else {
-                            // Tail: replicate the last real lane (the stride
-                            // batches pad out-of-range lanes the same way;
-                            // the kernel is a pure function of its inputs).
-                            for k in 0..4 {
-                                wy4[k] = wy[g + (rem - 1).min(k)];
+                    // Width dispatch: AVX-512 col8 (probed winner) or the
+                    // classic 4-wide AVX2 path. Lanes are width-independent
+                    // (per-lane op order identical), so tails can mix.
+                    #[cfg(target_arch = "x86_64")]
+                    let use8 = crate::noise::avx512_selected();
+                    #[cfg(not(target_arch = "x86_64"))]
+                    let use8 = false;
+                    if use8 {
+                        let mut g = 0;
+                        while g < N {
+                            let rem = N - g;
+                            let mut wy8 = [0f64; 8];
+                            if rem >= 8 {
+                                wy8.copy_from_slice(&wy[g..g + 8]);
+                            } else {
+                                for k in 0..8 {
+                                    wy8[k] = wy[g + (rem - 1).min(k)];
+                                }
                             }
+                            let r = nl.noise_col8(st, &wy8);
+                            let n8 = rem.min(8);
+                            v[g..g + n8].copy_from_slice(&r[..n8]);
+                            g += 8;
                         }
-                        let r = nl.noise_col4(st, &wy4);
-                        let n4 = rem.min(4);
-                        v[g..g + n4].copy_from_slice(&r[..n4]);
-                        g += 4;
+                    } else {
+                        let mut g = 0;
+                        while g < N {
+                            let mut wy4 = [0f64; 4];
+                            let rem = N - g;
+                            if rem >= 4 {
+                                wy4.copy_from_slice(&wy[g..g + 4]);
+                            } else {
+                                // Tail: replicate the last real lane (the stride
+                                // batches pad out-of-range lanes the same way;
+                                // the kernel is a pure function of its inputs).
+                                for k in 0..4 {
+                                    wy4[k] = wy[g + (rem - 1).min(k)];
+                                }
+                            }
+                            let r = nl.noise_col4(st, &wy4);
+                            let n4 = rem.min(4);
+                            v[g..g + n4].copy_from_slice(&r[..n4]);
+                            g += 4;
+                        }
                     }
                     for l in 0..N {
                         d[l] += self.amplitudes[i] * v[l] * value_factor;
@@ -1950,9 +2369,11 @@ impl BlendedNoise {
         })
     }
 
-    /// 8-wide column-uniform compute: two independent 4-wide column halves
-    /// sharing the same TLS column state (identical keys -> second half
-    /// hits). Per-half skip mirrors compute_batch8.
+    /// 8-wide column-uniform compute. AVX-512 selected: ONE 8-wide half
+    /// (main loop on the generic 8-wide kernel, min/max octaves on the
+    /// 8-wide column kernel). Otherwise: two independent 4-wide column
+    /// halves sharing the same TLS column state (identical keys -> second
+    /// half hits). Per-half skip mirrors compute_batch8.
     pub fn compute_batch8_col(
         &self,
         bx: i32,
@@ -1960,6 +2381,12 @@ impl BlendedNoise {
         bz: i32,
         col_base: usize,
     ) -> [f64; 8] {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::noise::avx512_selected() {
+                return self.compute_batch8_col512(bx, by, bz, col_base);
+            }
+        }
         let mut lo = [0i32; 4];
         let mut hi = [0i32; 4];
         lo.copy_from_slice(&by[..4]);
@@ -1970,6 +2397,121 @@ impl BlendedNoise {
         out[..4].copy_from_slice(&a);
         out[4..].copy_from_slice(&b);
         out
+    }
+
+    /// AVX-512 single-half 8-wide column compute. Lane-identical to
+    /// compute_batch_col (same per-lane op order; the y_scale quantization
+    /// and skip decisions are per lane exactly as the 4-wide paths).
+    #[cfg(target_arch = "x86_64")]
+    fn compute_batch8_col512(
+        &self,
+        bx: i32,
+        by: &[i32; 8],
+        bz: i32,
+        col_base: usize,
+    ) -> [f64; 8] {
+        let d0 = bx as f64 * self.xz_multiplier;
+        let d2 = bz as f64 * self.xz_multiplier;
+        let d3 = d0 / self.xz_factor;
+        let d5 = d2 / self.xz_factor;
+        let d6 = self.y_multiplier * self.smear_scale_multiplier;
+        let d7 = d6 / self.y_factor;
+        let mut d1 = [0f64; 8];
+        let mut d4 = [0f64; 8];
+        for l in 0..8 {
+            d1[l] = by[l] as f64 * self.y_multiplier;
+            d4[l] = d1[l] / self.y_factor;
+        }
+
+        // main noise loop, octaves 0..8 (REVERSED lookup [7-i]); x/z are
+        // column-constant, y is per lane: generic 8-wide kernel.
+        let mut d10 = [0f64; 8];
+        let mut amp = 1.0f64;
+        for i in 0..8usize {
+            if let Some(oct) = self.main_noise.get_octave_noise(i) {
+                let mut wy = [0f64; 8];
+                let mut ymax = [0f64; 8];
+                for l in 0..8 {
+                    wy[l] = wrap(d4[l] * amp);
+                    ymax[l] = d4[l] * amp;
+                }
+                let wx = wrap(d3 * amp);
+                let wz = wrap(d5 * amp);
+                let v = oct.noise_5_batch8(&[wx; 8], &wy, &[wz; 8], d7 * amp, &ymax);
+                for l in 0..8 {
+                    d10[l] += v[l] / amp;
+                }
+            }
+            amp /= 2.0;
+        }
+        let mut d11b = [0f64; 8];
+        let mut skip_min = [false; 8];
+        let mut skip_max = [false; 8];
+        for l in 0..8 {
+            d11b[l] = (d10[l] / 10.0 + 1.0) / 2.0;
+            skip_min[l] = d11b[l] >= 1.0;
+            skip_max[l] = d11b[l] <= 0.0;
+        }
+
+        BLEND_COL_CACHE.with(|m| {
+            let mut m = m.borrow_mut();
+            let need = col_base + BLEND_COL_STRIDE;
+            if m.len() < need {
+                m.resize(need, OctColState::INVALID);
+            }
+            let mut d8 = [0f64; 8];
+            let mut d9 = [0f64; 8];
+            let mut amp = 1.0f64;
+            for i in 0..16usize {
+                // column-constant wrapped inputs (shared by min and max)
+                let kx = wrap(d0 * amp);
+                let kz = wrap(d2 * amp);
+                let dyy = d6 * amp;
+                let mut dy = [0f64; 8];
+                let mut ymax = [0f64; 8];
+                for l in 0..8 {
+                    dy[l] = wrap(d1[l] * amp);
+                    ymax[l] = d1[l] * amp;
+                }
+                if !skip_min.iter().all(|s| *s) {
+                    if let Some(oct) = self.min_noise.get_octave_noise(i) {
+                        let st = &mut m[col_base + i];
+                        let v = oct.noise_5_batch_col8(st, kx, kz, &dy, dyy, &ymax);
+                        for l in 0..8 {
+                            if !skip_min[l] {
+                                d8[l] += v[l] / amp;
+                            }
+                        }
+                    }
+                }
+                if !skip_max.iter().all(|s| *s) {
+                    if let Some(oct) = self.max_noise.get_octave_noise(i) {
+                        let st = &mut m[col_base + 16 + i];
+                        let v = oct.noise_5_batch_col8(st, kx, kz, &dy, dyy, &ymax);
+                        for l in 0..8 {
+                            if !skip_max[l] {
+                                d9[l] += v[l] / amp;
+                            }
+                        }
+                    }
+                }
+                amp /= 2.0;
+            }
+            let mut out = [0f64; 8];
+            for l in 0..8 {
+                let t = d11b[l];
+                let (a, b) = (d8[l] / 512.0, d9[l] / 512.0);
+                let v = if t < 0.0 {
+                    a
+                } else if t > 1.0 {
+                    b
+                } else {
+                    a + t * (b - a)
+                };
+                out[l] = v / 128.0;
+            }
+            out
+        })
     }
 }
 
@@ -2069,6 +2611,131 @@ mod simd_tests {
                 for l in 0..4 {
                     assert_eq!(got[l].to_bits(), bn.compute(bx[l], by[l], bz[l]).to_bits(), "blended inst {inst}");
                 }
+            }
+        }
+    }
+
+    /// AVX-512 col8 kernels must be bit-identical to the scalar eval AND to
+    /// the AVX2 4-wide col path, across same-cell / mixed-cell / tail lane
+    /// patterns. Runs both forced modes (512 on, 512 off) on the same inputs.
+    #[test]
+    fn col8_avx512_matches_scalar_and_col4() {
+        let mut sm = SplitMix(0xC0512);
+        for inst in 0..4 {
+            let seed = sm.next();
+            let mut rng = XoroshiroRandomSource::new(seed as i64);
+            let amps: Vec<f64> = (0..6).map(|_| if sm.next() % 5 == 0 { 0.0 } else { sm.f64_pm1() }).collect();
+            let nn = NormalNoise::create(&mut rng, -5, amps.clone());
+            let pn = PerlinNoise::create(&mut rng, -5, amps);
+            let x: f64 = 64.0 + sm.f64_pm1() * 1024.0;
+            let z: f64 = -128.0 + sm.f64_pm1() * 1024.0;
+            for pat in 0..5 {
+                // 0: step 8 (slice-like, mixed cells for high octaves)
+                // 1: step 0.05 (all lanes same octave cell for low octaves)
+                // 2: step 8 with duplicate tail lanes (tail semantics)
+                // 3: negative y descending
+                // 4: random y (chaotic same/mixed mix)
+                let mut y8 = [0f64; 8];
+                for l in 0..8 {
+                    y8[l] = match pat {
+                        0 => (l as f64) * 8.0,
+                        1 => (l as f64) * 0.05,
+                        2 => {
+                            if l < 3 {
+                                (l as f64) * 8.0
+                            } else {
+                                16.0
+                            }
+                        }
+                        3 => -64.0 + (7 - l) as f64 * 8.0,
+                        _ => sm.f64() * 0.25,
+                    };
+                }
+                // scalar truth (per lane) — the SAME instance as the batch call
+                let mut want = [0f64; 8];
+                for l in 0..8 {
+                    want[l] = nn.first.get_value(x, y8[l], z);
+                }
+                // forced OFF (AVX2 4-wide col path)
+                set_avx512_selected(false);
+                let off8 = nn.first.get_value_batch_col::<8>(x, z, &y8, nn.col_base);
+                // forced ON (AVX-512 col8) — only meaningful when the part
+                // supports it; the AVX2 fallback is still exercised above.
+                let on8 = if std::arch::is_x86_feature_detected!("avx512f") {
+                    set_avx512_selected(true);
+                    let v = nn.first.get_value_batch_col::<8>(x, z, &y8, nn.col_base);
+                    set_avx512_selected(false);
+                    v
+                } else {
+                    off8
+                };
+                for l in 0..8 {
+                    assert_eq!(off8[l].to_bits(), want[l].to_bits(), "pn col8-off inst {inst} pat {pat} lane {l}");
+                    assert_eq!(on8[l].to_bits(), want[l].to_bits(), "pn col8-on inst {inst} pat {pat} lane {l}");
+                }
+                // NormalNoise (first+second) through the 8-wide get_value path
+                let mut full_off = [0f64; 8];
+                let mut full_on = [0f64; 8];
+                set_avx512_selected(false);
+                for l in 0..8 {
+                    full_off[l] = nn.get_value(x, y8[l], z);
+                }
+                if std::arch::is_x86_feature_detected!("avx512f") {
+                    set_avx512_selected(true);
+                    let v = nn.get_value_batch8(&[x; 8], &y8, &[z; 8]);
+                    full_on.copy_from_slice(&v);
+                    set_avx512_selected(false);
+                } else {
+                    full_on.copy_from_slice(&full_off);
+                }
+                for l in 0..8 {
+                    assert_eq!(full_on[l].to_bits(), full_off[l].to_bits(), "nn 8-wide inst {inst} pat {pat} lane {l}");
+                }
+            }
+        }
+    }
+
+    /// BlendedNoise col path: AVX-512 single-half 8-wide vs 2x AVX2 halves,
+    /// both vs the generic (non-column) 8-wide compute.
+    #[test]
+    fn blended_col8_avx512_matches_halves() {
+        let mut sm = SplitMix(0xB1E8D);
+        for inst in 0..3 {
+            let seed = sm.next();
+            let mut rng = XoroshiroRandomSource::new(seed as i64);
+            let bn = BlendedNoise::create(
+                &mut rng,
+                0.14 + sm.f64_pm1().abs() * 0.1,
+                0.4,
+                1.0 + sm.f64_pm1().abs(),
+                2.0,
+                1.0 + (inst % 3) as f64,
+            );
+            let bx: i32 = (sm.next() as i32 % 200000) - 100000;
+            let bz: i32 = (sm.next() as i32 % 200000) - 100000;
+            let mut by = [0i32; 8];
+            for l in 0..8 {
+                by[l] = -64 + l as i32 * 8; // slice-like spacing
+            }
+            let mut want = [0f64; 8];
+            for l in 0..8 {
+                want[l] = bn.compute(bx, by[l], bz);
+            }
+            let generic = bn.compute_batch8(&[bx; 8], &by, &[bz; 8]);
+            set_avx512_selected(false);
+            let off = bn.compute_batch8_col(bx, &by, bz, bn.col_base);
+            let on = if std::arch::is_x86_feature_detected!("avx512f") {
+                set_avx512_selected(true);
+                let v = bn.compute_batch8_col(bx, &by, bz, bn.col_base);
+                set_avx512_selected(false);
+                v
+            } else {
+                off
+            };
+            for l in 0..8 {
+                assert_eq!(off[l].to_bits(), want[l].to_bits(), "blended col-off inst {inst} lane {l}");
+                assert_eq!(generic[l].to_bits(), want[l].to_bits(), "blended generic inst {inst} lane {l}");
+                assert_eq!(on[l].to_bits(), want[l].to_bits(), "blended col-on inst {inst} lane {l}");
             }
         }
     }
