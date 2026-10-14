@@ -833,3 +833,45 @@ Stage Summary:
 - Далее: CI 6aefead (prefetch off + hmap fix + lay-разбивка) -> решающий
   пункт: layout после hmap-fix, native под контенцией; AVX-512 решение пробы
   на GR-раннере.
+
+---
+Task ID: cont-32 (2026-10-14, slot-consts + ГЛАВНОЕ: swap-пути мертвы с v3 — починено)
+Agent: Super Z (main)
+Task: y-range константные слоты; разбор layout-загадки; починка Data-swap
+
+Work Log:
+- РАННЕРЫ: пул GitHub неоднороден (AMD EPYC 7763 Milan / Intel 8573C Granite
+  Rapids / AMD EPYC 9V45 Turin) — один и тот же бинарь: par-2t bench p50
+  1.70 / 1.59 / 0.92ms соответственно. Дисперсия окна судьи на идентичном
+  коде 2.1x (6aefead vs 81cc88f). Вывод: сравнивать прогоны можно только
+  внутри одного CPU-типа; целиться в худший.
+- AVX-512 проба на всех трёх CPU выбирает AVX2 (4-широкий) — 512-бит f64 не
+  даёт >=3% на этой нагрузке нигде; правильное решение, механизм оставлен.
+- slot-consts (bf39dd5): Compiled::interp_slot_y_const — RangeChoice над
+  vanilla 'minecraft:y' (identity-градиент, y.json [-4064,4062]) с константной
+  out-веткой: ore-слоты (vein_toggle/ridged/gap, [-60,51), out 0.0) = 0.0
+  выше y=51 → 34/49 углов x 3 слота без шума. Skip во всех трёх plane-путях.
+  planes 1.65 -> 1.58 serial; golden 8x4 ок.
+- ГЛАВНОЕ (d4414c0 lay-разбивка): [lay setup=0.00 sec=0.78 hmap=0.09 | uni=0
+  lin=0 glob=0 pb=8.00/чанк] — СВОП-ПУТИ НИКОГДА НЕ АКТИВИРОВАЛИСЬ: все ~8
+  не-air секций/чанк шли через per-block рефлекс-фоллбек (~95мкс/секция).
+  v3/v3.5 выигрыш layout не выходил вообще (bulk=ok + verifyChunk проходили
+  и так — фоллбек маскировал).
+- КОРЕНЬ (статический аудит NMS Paper 1.21.8-60 через javap):
+  Palette$Factory.create(int bits, IdMap, PaletteResize, List) — 4 аргумента,
+  плагин звал с 3-мя (reg, container-как-resize, values) →
+  IllegalArgumentException на каждом вызове → catch → per-block. Чинено
+  (026786a): singletonBits/linearBits кэшируются в initBulk из Configuration.
+- Heightmap fused (9bdb973) подтверждён CI: hmap 0.9 -> 0.09ms.
+- swapfail= диагностика (747b0a8): первый Throwable свопа с классом/сайтом в
+  GenStats — страховка от немых деградаций.
+- jni_prof в окне (d4414c0): material=1.25ms (0.5 локально) — контенция
+  2-ядерника бьёт по Java-стороне; layout 0.87.
+
+Stage Summary:
+- Окно судьи (тихий Intel 8573C): p50 2.83-3.11 = native 2.04-2.40 + layout
+  0.87. С починенным свопом ожидание layout ~0.4 → окно ~2.4.
+- par-2t bench: 1.59 (Intel) / 0.92 (Turin) — изолированный native уже близок
+  к 1ms на новых раннерах пула.
+- Кандидаты дальше: slot0-const при y>=256 (нулевая ветка top_grad, нужен
+  sign-of-zero-safe анализ, ~0.13ms wall), material/cellfill в окне.
