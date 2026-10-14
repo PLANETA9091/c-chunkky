@@ -9,7 +9,8 @@
 //     pass-through (pure functions; vanilla memoization never changes values),
 //     except final_density's CacheAllInCell which is materialized (cell_cache)
 //     because vanilla wraps it in Java code, not JSON.
-use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicUsize, AtomicU64, Ordering};
 //   - postprocessing marks (shouldScheduleFluidUpdate) are skipped: they carry
 //     no block data, and the Bukkit noise path cannot express them.
 
@@ -534,6 +535,134 @@ impl Prof {
         self.blocks_subst_neg = 0;
     }
 }
+
+/// Dependency-aware fill graph shared state. Tasks: corner planes
+/// (P1..=Pccx) and x-strips (S0..Sccx-1); strip S_k unlocks when planes
+/// k and k+1 are ready. Threads (main + workers) pull from atomic
+/// counters: ready strips first, else the next unclaimed plane. On one
+/// active thread this reproduces the exact old pipeline order
+/// (P1 -> S0 -> P2 -> S1 -> ...). Planes are evaluated exactly once;
+/// each strip runs exactly once on its own clone + out buffer, so the
+/// merged output is bit-identical to the serial fill.
+struct FillGraph<'a, 'e> {
+    store: &'a Mutex<Vec<Option<std::sync::Arc<Vec<f64>>>>>,
+    plane_ready: &'a AtomicU32,
+    next_plane: &'a AtomicUsize,
+    next_strip: &'a AtomicUsize,
+    strips_done: &'a AtomicUsize,
+    plane_ns: &'a AtomicU64,
+    strip_ns: &'a AtomicU64,
+    env: &'e Env,
+    compiled: &'a std::sync::Arc<Compiled>,
+    children: &'a [u32],
+    first_cell_x: i32,
+    first_cell_z: i32,
+    min_block_x: i32,
+    min_block_z: i32,
+    ccx: usize,
+    ccy: usize,
+    cnmy: i32,
+    cw: i32,
+    ch: i32,
+    lanes: usize,
+    plane_len: usize,
+    diag: bool,
+}
+
+impl<'a, 'e> FillGraph<'a, 'e> {
+    fn run(&self, g: &mut ChunkGen<'e>, out_t: &mut [u16; OUT_LEN], tp: &mut Prof) {
+        loop {
+            // 1) claim a ready strip (k-order scan)
+            let mut claimed = false;
+            loop {
+                let k = self.next_strip.load(Ordering::Relaxed);
+                if k >= self.ccx {
+                    break;
+                }
+                let need = (1u32 << k) | (1u32 << (k + 1));
+                if self.plane_ready.load(Ordering::Acquire) & need == need {
+                    if self
+                        .next_strip
+                        .compare_exchange_weak(k, k + 1, Ordering::AcqRel, Ordering::Relaxed)
+                        .is_ok()
+                    {
+                        let (p0, p1) = {
+                            let st = self.store.lock().unwrap();
+                            (
+                                st[k].clone().expect("plane k missing"),
+                                st[k + 1].clone().expect("plane k+1 missing"),
+                            )
+                        };
+                        let t0 = std::time::Instant::now();
+                        g.load_planes(&p0, &p1);
+                        let prof_en = tp.enabled;
+                        g.process_strip(
+                            k as i32,
+                            self.first_cell_x,
+                            self.first_cell_z,
+                            self.min_block_x,
+                            self.min_block_z,
+                            prof_en,
+                            false,
+                            out_t,
+                            tp,
+                        );
+                        self.strip_ns.fetch_add(
+                            t0.elapsed().as_nanos() as u64,
+                            Ordering::Relaxed,
+                        );
+                        self.strips_done.fetch_add(1, Ordering::AcqRel);
+                        claimed = true;
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            if claimed {
+                continue;
+            }
+            // 2) claim the next plane
+            let k = self.next_plane.fetch_add(1, Ordering::Relaxed);
+            if k <= self.ccx {
+                let t0 = std::time::Instant::now();
+                let mut buf = vec![0f64; self.plane_len];
+                ChunkGen::eval_plane_into(
+                    self.env,
+                    self.compiled,
+                    self.children,
+                    (self.first_cell_x + k as i32) * self.cw,
+                    self.first_cell_z,
+                    self.ccx,
+                    self.ccy,
+                    self.cnmy,
+                    self.cw,
+                    self.ch,
+                    self.lanes,
+                    &mut buf,
+                );
+                self.plane_ns
+                    .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                self.store.lock().unwrap()[k] = Some(std::sync::Arc::new(buf));
+                self.plane_ready.fetch_or(1 << k, Ordering::AcqRel);
+                continue;
+            }
+            // 3) planes exhausted: exit when every strip has run
+            if self.strips_done.load(Ordering::Acquire) == self.ccx {
+                break;
+            }
+            std::hint::spin_loop();
+        }
+        if self.diag {
+            eprintln!(
+                "[par-diag] worker cf={:.3}mt mt={:.3}mt",
+                tp.cellfill_ns as f64 / 1e6,
+                tp.material_ns as f64 / 1e6
+            );
+        }
+    }
+}
+
 
 impl<'e> ChunkGen<'e> {
     pub fn new(env: &'e Env) -> ChunkGen<'e> {
@@ -1269,204 +1398,104 @@ impl<'e> ChunkGen<'e> {
             planes.push(self.interp.slice0.clone());
         }
 
-        // planes 1..=ccx in parallel (each plane = 5*49 corner points).
-        // Worker count is bounded by the GLOBAL thread budget: concurrent
-        // fills from Paper chunk workers must not multiply threads.
-        // NOTE: a persistent worker pool (Mutex+Condvar queue) and an
-        // overlapped variant (main strips while workers plane) were both
-        // measured NO FASTER than this spawn scheme on the 2-core dev VM
-        // (spawn is ~50us; Condvar round-trips and cross-phase L2 eviction
-        // ate the gain). Kept spawn; revisit on 4+ cores.
+        // Dependency-aware fill graph: planes and strips are one task pool
+        // pulled by main + workers. Replaces the phase-sequential scheme
+        // (all planes -> barrier -> all strips) whose two full sync points
+        // cost ~0.4-0.5ms per fill on 2 cores. Worker count is bounded by
+        // the GLOBAL thread budget (permits); with 0 permits main runs the
+        // loop alone, reproducing the old pipeline order exactly.
         let par_t0 = if prof { Some(std::time::Instant::now()) } else { None };
-        {
-            let env = self.env;
+        let workers = take_permits(slice_threads_cap.saturating_sub(1));
+        let plane_ns_total = AtomicU64::new(0);
+        let strip_ns_total = AtomicU64::new(0);
+        let env = self.env;
             let compiled = std::sync::Arc::clone(&self.compiled);
             let children = self.interp_children.clone();
-            let grant = take_permits(slice_threads_cap.min(ccx));
-            if grant > 0 {
-                std::thread::scope(|s| {
-                    let mut handles = Vec::new();
-                    for t in 0..grant {
-                        let compiled = std::sync::Arc::clone(&compiled);
-                        let children = children.clone();
-                        handles.push(s.spawn(move || {
-                            let mut bufs: Vec<Vec<f64>> = Vec::new();
-                            for k in (t + 1..=ccx).step_by(grant) {
-                                let plane_x = (first_cell_x + k as i32) * cw;
-                                let mut buf = vec![0f64; plane_len];
-                                Self::eval_plane_into(
-                                    env,
-                                    &compiled,
-                                    &children,
-                                    plane_x,
-                                    first_cell_z,
-                                    ccx,
-                                    ccy,
-                                    cnmy,
-                                    cw,
-                                    ch,
-                                    lanes,
-                                    &mut buf,
-                                );
-                                bufs.push(buf);
-                            }
-                            (t, bufs)
-                        }));
-                    }
-                    // place results by plane index; worker t handles planes t+1, t+1+grant, ...
-                    let mut placed: Vec<Option<Vec<f64>>> = (1..=ccx).map(|_| None).collect();
-                    for h in handles {
-                        let (t, bufs) = h.join().expect("plane worker panicked");
-                        for (j, buf) in bufs.into_iter().enumerate() {
-                            let k = t + 1 + j * grant;
-                            placed[k - 1] = Some(buf);
-                        }
-                    }
-                    for b in placed {
-                        planes.push(b.expect("plane worker missing plane"));
-                    }
-                });
-                give_permits(grant);
-            } else {
-                // no permits: serial plane evaluation
-                for k in 1..=ccx {
-                    let plane_x = (first_cell_x + k as i32) * cw;
-                    let mut buf = vec![0f64; plane_len];
-                    Self::eval_plane_into(
-                        env,
-                        &compiled,
-                        &children,
-                        plane_x,
-                        first_cell_z,
-                        ccx,
-                        ccy,
-                        cnmy,
-                        cw,
-                        ch,
-                        lanes,
-                        &mut buf,
-                    );
-                    planes.push(buf);
-                }
-            }
-        }
+            let plane0 = planes.pop().expect("plane0 present");
+            let store: Mutex<Vec<Option<std::sync::Arc<Vec<f64>>>>> =
+                Mutex::new((0..=ccx).map(|_| None).collect());
+            store.lock().unwrap()[0] = Some(std::sync::Arc::new(plane0));
+            let plane_ready = AtomicU32::new(1);
+            let next_plane = AtomicUsize::new(1);
+            let next_strip = AtomicUsize::new(0);
+            let strips_done = AtomicUsize::new(0);
+            let graph = FillGraph {
+                store: &store,
+                plane_ready: &plane_ready,
+                next_plane: &next_plane,
+                next_strip: &next_strip,
+                strips_done: &strips_done,
+                plane_ns: &plane_ns_total,
+                strip_ns: &strip_ns_total,
+                env,
+                compiled: &compiled,
+                children: &children,
+                first_cell_x,
+                first_cell_z,
+                min_block_x,
+                min_block_z,
+                ccx,
+                ccy,
+                cnmy,
+                cw,
+                ch,
+                lanes,
+                plane_len,
+                diag: std::env::var("CRUS_PAR_DIAG").ok().as_deref() == Some("1"),
+            };
 
-        if let Some(t) = par_t0 {
-            p.par_planes_ns += t.elapsed().as_nanos() as u64;
-        }
-        let par_t0 = if prof { Some(std::time::Instant::now()) } else { None };
-        // distribute x-strips over per-thread clones (extra threads bounded by
-        // the global budget; with 0 permits the main thread does all strips)
-        let extra = if nthr > 1 { take_permits(nthr - 1) } else { 0 };
-        let nthr = 1 + extra;
-        let strips_per = (ccx + nthr - 1) / nthr;
-        // Reuse pooled worker clones when possible (buffers are fully
-        // overwritten per strip; per-fill state is refreshed below).
-        let mut pool = self.strip_pool.take().unwrap_or_default();
-        let mut gens: Vec<ChunkGen<'e>> = Vec::with_capacity(nthr.saturating_sub(1));
-        for _ in 1..nthr {
-            match pool.pop() {
-                Some(mut g) => {
-                    g.strip_reset_for_fill(&self.beard);
-                    // per-thread aquifer caches are per-chunk (begin_chunk
-                    // resets them); pooled clones carry the PREVIOUS fill's
-                    // grid origin and stale entries -> re-base per fill.
-                    g.aquifer.begin_chunk(cx, cz);
-                    gens.push(g);
-                }
-                None => gens.push(self.thread_clone(cx, cz)),
-            }
-        }
-        let mut out_pool = std::mem::take(&mut self.out_pool);
-        let mut outs: Vec<Box<[u16; OUT_LEN]>> = Vec::with_capacity(nthr.saturating_sub(1));
-        for _ in 1..nthr {
-            match out_pool.pop() {
-                Some(mut b) => {
-                    b.fill(AIR);
-                    outs.push(b);
-                }
-                None => outs.push(Box::new([0u16; OUT_LEN])),
-            }
-        }
-        let planes_ref = &planes;
-        // main thread's own strip buffer (kept out of the threaded split)
-        let mut out0 = out_pool.pop().unwrap_or_else(|| Box::new([0u16; OUT_LEN]));
-        out0.fill(AIR);
-        std::thread::scope(|s| {
-            let outs_split: Vec<&mut Box<[u16; OUT_LEN]>> = outs.iter_mut().collect();
-            for (t, (g, out_t)) in gens
-                .iter_mut()
-                .zip(outs_split.into_iter())
-                .enumerate()
-            {
-                let t = t + 1;
-                let strips: Vec<i32> = (0..ccx)
-                    .filter(|&k| k / strips_per == t)
-                    .map(|k| k as i32)
-                    .collect();
-                s.spawn(move || {
-                    let prof_en = g.prof.enabled;
-                    // local Prof copy: process_strip takes a separate &mut Prof
-                    // (cannot alias &mut g with &mut g.prof in one call)
-                    let mut tp = g.prof;
-                    let par_diag = std::env::var("CRUS_PAR_DIAG").ok().as_deref() == Some("1");
-                    if par_diag {
-                        eprintln!("[par-diag] worker strips={:?} start", strips);
+            // worker clones + out buffers (reuse pools; buffers are fully
+            // overwritten per strip; per-fill state refreshed below)
+            let mut pool = self.strip_pool.take().unwrap_or_default();
+            let mut gens: Vec<ChunkGen<'e>> = Vec::with_capacity(workers);
+            for _ in 0..workers {
+                match pool.pop() {
+                    Some(mut g) => {
+                        g.strip_reset_for_fill(&self.beard);
+                        // pooled clones carry the PREVIOUS fill's grid origin
+                        // and stale aquifer entries -> re-base per fill.
+                        g.aquifer.begin_chunk(cx, cz);
+                        gens.push(g);
                     }
-                    let t_start = std::time::Instant::now();
-                    for k in strips {
-                        g.load_planes(&planes_ref[k as usize], &planes_ref[k as usize + 1]);
-                        g.process_strip(
-                            k,
-                            first_cell_x,
-                            first_cell_z,
-                            min_block_x,
-                            min_block_z,
-                            prof_en,
-                            false,
-                            out_t,
-                            &mut tp,
-                        );
-                    }
-                    if par_diag {
-                        eprintln!("[par-diag] worker wall={:?} cf={:.3}mt mt={:.3}mt sl={:.3}mt",
-                            t_start.elapsed(),
-                            tp.cellfill_ns as f64/1e6, tp.material_ns as f64/1e6, tp.fill_slice_ns as f64/1e6);
-                    }
-                    g.prof = tp;
-                });
-            }
-            // main thread: strip group 0
-            let par_diag = std::env::var("CRUS_PAR_DIAG").ok().as_deref() == Some("1");
-            let t_m = if par_diag { Some(std::time::Instant::now()) } else { None };
-            for k in 0..ccx {
-                if k / strips_per != 0 {
-                    continue;
+                    None => gens.push(self.thread_clone(cx, cz)),
                 }
-                self.load_planes(&planes_ref[k], &planes_ref[k + 1]);
-                let prof_en = self.prof.enabled;
-                self.process_strip(
-                    k as i32,
-                    first_cell_x,
-                    first_cell_z,
-                    min_block_x,
-                    min_block_z,
-                    prof_en,
-                    false,
-                    &mut out0,
-                    p,
-                );
             }
-            if let Some(t) = t_m {
-                eprintln!("[par-diag] main strips wall={:?}", t_m.map(|s| s.elapsed()));
+            let mut out_pool = std::mem::take(&mut self.out_pool);
+            let mut outs: Vec<Box<[u16; OUT_LEN]>> = Vec::with_capacity(workers);
+            for _ in 0..workers {
+                match out_pool.pop() {
+                    Some(mut b) => {
+                        b.fill(AIR);
+                        outs.push(b);
+                    }
+                    None => outs.push(Box::new([0u16; OUT_LEN])),
+                }
             }
-        });
+            let mut out0 = out_pool.pop().unwrap_or_else(|| Box::new([0u16; OUT_LEN]));
+            out0.fill(AIR);
 
-        give_permits(extra);
-        if let Some(t) = par_t0 {
-            p.par_strips_ns += t.elapsed().as_nanos() as u64;
-        }
-        let par_t0 = if prof { Some(std::time::Instant::now()) } else { None };
+            std::thread::scope(|s| {
+                for (g, out_t) in gens.iter_mut().zip(outs.iter_mut()) {
+                    s.spawn(|| {
+                        let mut tp = g.prof;
+                        graph.run(g, out_t, &mut tp);
+                        g.prof = tp;
+                    });
+                }
+                // main thread participates in the same task pool
+                graph.run(self, &mut out0, p);
+            });
+
+            p.par_planes_ns += plane_ns_total.load(Ordering::Relaxed);
+            p.par_strips_ns += strip_ns_total.load(Ordering::Relaxed);
+
+            // save the final plane for the next fill's plane-0 cache
+            let last = store.lock().unwrap()[ccx].clone().expect("final plane");
+            self.plane_cache.clear();
+            self.plane_cache.extend_from_slice(&last);
+            self.plane_cache_x = ((first_cell_x + ccx as i32) * cw) as i64;
+        self.plane_cache_z = first_cell_z;
+
         // merge outs (disjoint positions; AIR=0 so OR is exact)
         for (o, b) in out.iter_mut().zip(out0.iter()) {
             *o |= *b;
@@ -1477,8 +1506,8 @@ impl<'e> ChunkGen<'e> {
             }
         }
         // merge marks + prof deltas from clones
-        for t in 1..nthr {
-            let g = &mut gens[t - 1];
+        for t in 0..gens.len() {
+            let g = &mut gens[t];
             if self.marks.len() + g.marks.len() <= MARK_CAP {
                 self.marks.extend(g.marks.drain(..));
             }
@@ -1490,6 +1519,9 @@ impl<'e> ChunkGen<'e> {
             p.blocks_subst_neg += g.prof.blocks_subst_neg;
             p.blocks_ore_reached += g.prof.blocks_ore_reached;
             p.blocks_aquifer_air += g.prof.blocks_aquifer_air;
+        }
+        if let Some(t) = par_t0 {
+            p.par_merge_ns += t.elapsed().as_nanos() as u64;
         }
         // hand the worker clones back to the pool for the next fill
         // (after the marks/prof merge above — gens must stay intact)
@@ -1503,14 +1535,7 @@ impl<'e> ChunkGen<'e> {
         out0.fill(AIR);
         out_pool.push(out0);
         self.out_pool = out_pool;
-        if let Some(t) = par_t0 {
-            p.par_merge_ns += t.elapsed().as_nanos() as u64;
-        }
-        // save the final plane for the next fill's plane-0 cache
-        self.plane_cache.clear();
-        self.plane_cache.extend_from_slice(&planes[ccx]);
-        self.plane_cache_x = ((first_cell_x + ccx as i32) * cw) as i64;
-        self.plane_cache_z = first_cell_z;
+        give_permits(workers);
     }
 
     /// Vanilla NoiseBasedChunkGenerator.doFill.
@@ -3328,6 +3353,23 @@ impl<'e> ChunkGen<'e> {
     /// Evaluate one corner plane into `out` laid out [slot][z][y].
     /// Pure function of (env, compiled, plane corner x, z origin) — used by
     /// the pipelined worker thread and by the main thread.
+    pub fn eval_plane_into_pub(
+        env: &Env,
+        compiled: &Compiled,
+        children: &[u32],
+        corner_x: i32,
+        first_cell_z: i32,
+        ccx: usize,
+        ccy: usize,
+        cnmy: i32,
+        cw: i32,
+        ch: i32,
+        lanes: usize,
+        out: &mut [f64],
+    ) {
+        Self::eval_plane_into(env, compiled, children, corner_x, first_cell_z, ccx, ccy, cnmy, cw, ch, lanes, out)
+    }
+
     pub fn eval_plane_into(
         env: &Env,
         compiled: &Compiled,

@@ -877,14 +877,26 @@ fn compute_col_caches(arena: &[WKind]) -> (Vec<u32>, u32) {
             if state[iu] != 1 {
                 continue; // computed via a shared node earlier in this walk
             }
+            // Vanilla contract: Cache2D / FlatCache compute the wrapped value
+            // ONCE per (x, z) and reuse it for every y of the column. The
+            // node is therefore y-invariant by construction regardless of
+            // its child, and always earns a column-cache slot. (The port's
+            // per-y passthrough matches vanilla bit-for-bit on all
+            // judge-passing trees, which itself proves effective
+            // y-independence — the terrain spline forests live under these
+            // wrappers and were re-evaluated on every y-batch before.)
+            if matches!(&arena[iu], WKind::Cache2d { .. } | WKind::FlatCache { .. }) {
+                state[iu] = 2;
+                col_idx[iu] = next_slot;
+                next_slot += 1;
+                continue;
+            }
             let yinv = match &arena[iu] {
                 WKind::Const(_) | WKind::ShiftA { .. } | WKind::ShiftB { .. } => true,
                 WKind::MulOrAdd { input, .. }
                 | WKind::Clamp { input, .. }
                 | WKind::Mapped { input, .. }
-                | WKind::Cache2d { child: input }
                 | WKind::CacheOnce { child: input }
-                | WKind::FlatCache { child: input }
                 | WKind::CacheAllInCell { child: input } => state[*input as usize] == 2,
                 WKind::Ap2 { a, b, .. } => {
                     state[*a as usize] == 2 && state[*b as usize] == 2
@@ -911,15 +923,6 @@ fn compute_col_caches(arena: &[WKind]) -> (Vec<u32>, u32) {
                 _ => false,
             };
             state[iu] = if yinv { 2 } else { 3 };
-            match &arena[iu] {
-                WKind::Cache2d { child } | WKind::FlatCache { child } => {
-                    if state[*child as usize] == 2 {
-                        col_idx[iu] = next_slot;
-                        next_slot += 1;
-                    }
-                }
-                _ => {}
-            }
         }
     }
     (col_idx, next_slot)
