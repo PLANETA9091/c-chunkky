@@ -40,7 +40,7 @@ jobs:
           # p50s is the honest noise-free estimate (p50 alone swings ~15%).
           echo "=== parallel-2t bench perf 64 (real seed) x3 ==="
           for i in 1 2 3; do
-            CRUS_FILL_THREADS=2 CRUS_BENCH_SEED=3257840388504953787 cargo run --release --bin bench -- perf 64
+            CRUS_PROBE_PRINT=1 CRUS_FILL_THREADS=2 CRUS_BENCH_SEED=3257840388504953787 cargo run --release --bin bench -- perf 64
           done
       - name: Clippy (non-blocking)
         working-directory: native
