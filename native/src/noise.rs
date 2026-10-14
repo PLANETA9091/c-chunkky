@@ -916,27 +916,45 @@ impl ImprovedNoise {
         // ---- 8 grad_dots across the 4 lanes ----
         let one = _mm256_set1_pd(1.0);
         let mut vc = [_mm256_setzero_pd(); 8];
-        for c in 0..8 {
-            let mut gxs = [0i32; 4];
-            let mut gys = [0i32; 4];
-            let mut gzs = [0i32; 4];
-            for l in 0..4 {
-                let gv = &GRADIENT[(grad[l][c] & 15) as usize];
-                gxs[l] = gv[0];
-                gys[l] = gv[1];
-                gzs[l] = gv[2];
+        // All-lanes-same-cell fast path (see noise_5_col_avx2): one gradient
+        // broadcast per corner instead of 12 scalar gathers. Bit-exact.
+        if grad[0] == grad[1] && grad[1] == grad[2] && grad[2] == grad[3] {
+            for c in 0..8 {
+                let gv = &GRADIENT[(grad[0][c] & 15) as usize];
+                let gx = _mm256_set1_pd(gv[0] as f64);
+                let gy = _mm256_set1_pd(gv[1] as f64);
+                let gz = _mm256_set1_pd(gv[2] as f64);
+                let xv = if c & 1 != 0 { _mm256_sub_pd(dxv, one) } else { dxv };
+                let yv = if c & 2 != 0 { _mm256_sub_pd(wdyv, one) } else { wdyv };
+                let zv = if c & 4 != 0 { _mm256_sub_pd(dzv, one) } else { dzv };
+                let t0 = _mm256_mul_pd(gx, xv);
+                let t1 = _mm256_mul_pd(gy, yv);
+                let t2 = _mm256_mul_pd(gz, zv);
+                vc[c] = _mm256_add_pd(_mm256_add_pd(t0, t1), t2);
             }
-            let gx = _mm256_cvtepi32_pd(_mm_loadu_si128(gxs.as_ptr() as *const __m128i));
-            let gy = _mm256_cvtepi32_pd(_mm_loadu_si128(gys.as_ptr() as *const __m128i));
-            let gz = _mm256_cvtepi32_pd(_mm_loadu_si128(gzs.as_ptr() as *const __m128i));
-            let xv = if c & 1 != 0 { _mm256_sub_pd(dxv, one) } else { dxv };
-            let yv = if c & 2 != 0 { _mm256_sub_pd(wdyv, one) } else { wdyv };
-            let zv = if c & 4 != 0 { _mm256_sub_pd(dzv, one) } else { dzv };
-            // gradDot: (gx*x + gy*y) + gz*z — same association as the scalar path
-            let t0 = _mm256_mul_pd(gx, xv);
-            let t1 = _mm256_mul_pd(gy, yv);
-            let t2 = _mm256_mul_pd(gz, zv);
-            vc[c] = _mm256_add_pd(_mm256_add_pd(t0, t1), t2);
+        } else {
+            for c in 0..8 {
+                let mut gxs = [0i32; 4];
+                let mut gys = [0i32; 4];
+                let mut gzs = [0i32; 4];
+                for l in 0..4 {
+                    let gv = &GRADIENT[(grad[l][c] & 15) as usize];
+                    gxs[l] = gv[0];
+                    gys[l] = gv[1];
+                    gzs[l] = gv[2];
+                }
+                let gx = _mm256_cvtepi32_pd(_mm_loadu_si128(gxs.as_ptr() as *const __m128i));
+                let gy = _mm256_cvtepi32_pd(_mm_loadu_si128(gys.as_ptr() as *const __m128i));
+                let gz = _mm256_cvtepi32_pd(_mm_loadu_si128(gzs.as_ptr() as *const __m128i));
+                let xv = if c & 1 != 0 { _mm256_sub_pd(dxv, one) } else { dxv };
+                let yv = if c & 2 != 0 { _mm256_sub_pd(wdyv, one) } else { wdyv };
+                let zv = if c & 4 != 0 { _mm256_sub_pd(dzv, one) } else { dzv };
+                // gradDot: (gx*x + gy*y) + gz*z — same association as the scalar path
+                let t0 = _mm256_mul_pd(gx, xv);
+                let t1 = _mm256_mul_pd(gy, yv);
+                let t2 = _mm256_mul_pd(gz, zv);
+                vc[c] = _mm256_add_pd(_mm256_add_pd(t0, t1), t2);
+            }
         }
 
         // ---- Mth.lerp3 across corners ----
@@ -1321,26 +1339,46 @@ impl ImprovedNoise {
         let dzv = _mm256_set1_pd(st.dz);
         let one = _mm256_set1_pd(1.0);
         let mut vc = [_mm256_setzero_pd(); 8];
-        for c in 0..8 {
-            let mut gxs = [0i32; 4];
-            let mut gys = [0i32; 4];
-            let mut gzs = [0i32; 4];
-            for l in 0..4 {
-                let gv = &GRADIENT[(grad[l][c] & 15) as usize];
-                gxs[l] = gv[0];
-                gys[l] = gv[1];
-                gzs[l] = gv[2];
+        // All-lanes-same-cell fast path: the walk dedup already collapsed the
+        // per-lane walks when the batch landed in one lattice cell — reuse
+        // that verdict and broadcast ONE gradient per corner (3 loads instead
+        // of 12 scalar gathers). Values and op order identical -> bit-exact.
+        if grad[0] == grad[1] && grad[1] == grad[2] && grad[2] == grad[3] {
+            for c in 0..8 {
+                let gv = &GRADIENT[(grad[0][c] & 15) as usize];
+                let gx = _mm256_set1_pd(gv[0] as f64);
+                let gy = _mm256_set1_pd(gv[1] as f64);
+                let gz = _mm256_set1_pd(gv[2] as f64);
+                let xv = if c & 1 != 0 { _mm256_sub_pd(dxv, one) } else { dxv };
+                let yv = if c & 2 != 0 { _mm256_sub_pd(wdyv, one) } else { wdyv };
+                let zv = if c & 4 != 0 { _mm256_sub_pd(dzv, one) } else { dzv };
+                let t0 = _mm256_mul_pd(gx, xv);
+                let t1 = _mm256_mul_pd(gy, yv);
+                let t2 = _mm256_mul_pd(gz, zv);
+                vc[c] = _mm256_add_pd(_mm256_add_pd(t0, t1), t2);
             }
-            let gx = _mm256_cvtepi32_pd(_mm_loadu_si128(gxs.as_ptr() as *const __m128i));
-            let gy = _mm256_cvtepi32_pd(_mm_loadu_si128(gys.as_ptr() as *const __m128i));
-            let gz = _mm256_cvtepi32_pd(_mm_loadu_si128(gzs.as_ptr() as *const __m128i));
-            let xv = if c & 1 != 0 { _mm256_sub_pd(dxv, one) } else { dxv };
-            let yv = if c & 2 != 0 { _mm256_sub_pd(wdyv, one) } else { wdyv };
-            let zv = if c & 4 != 0 { _mm256_sub_pd(dzv, one) } else { dzv };
-            let t0 = _mm256_mul_pd(gx, xv);
-            let t1 = _mm256_mul_pd(gy, yv);
-            let t2 = _mm256_mul_pd(gz, zv);
-            vc[c] = _mm256_add_pd(_mm256_add_pd(t0, t1), t2);
+        } else {
+            for c in 0..8 {
+                let mut gxs = [0i32; 4];
+                let mut gys = [0i32; 4];
+                let mut gzs = [0i32; 4];
+                for l in 0..4 {
+                    let gv = &GRADIENT[(grad[l][c] & 15) as usize];
+                    gxs[l] = gv[0];
+                    gys[l] = gv[1];
+                    gzs[l] = gv[2];
+                }
+                let gx = _mm256_cvtepi32_pd(_mm_loadu_si128(gxs.as_ptr() as *const __m128i));
+                let gy = _mm256_cvtepi32_pd(_mm_loadu_si128(gys.as_ptr() as *const __m128i));
+                let gz = _mm256_cvtepi32_pd(_mm_loadu_si128(gzs.as_ptr() as *const __m128i));
+                let xv = if c & 1 != 0 { _mm256_sub_pd(dxv, one) } else { dxv };
+                let yv = if c & 2 != 0 { _mm256_sub_pd(wdyv, one) } else { wdyv };
+                let zv = if c & 4 != 0 { _mm256_sub_pd(dzv, one) } else { dzv };
+                let t0 = _mm256_mul_pd(gx, xv);
+                let t1 = _mm256_mul_pd(gy, yv);
+                let t2 = _mm256_mul_pd(gz, zv);
+                vc[c] = _mm256_add_pd(_mm256_add_pd(t0, t1), t2);
+            }
         }
         let r0 = lerp_v(fxv, vc[0], vc[1]);
         let r1 = lerp_v(fxv, vc[2], vc[3]);
