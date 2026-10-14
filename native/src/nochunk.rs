@@ -2702,15 +2702,30 @@ impl<'e> ChunkGen<'e> {
             // 4-wide vein_toggle batch: one AVX2 NormalNoise sample for the
             // whole row (bit-exact lane-identical arithmetic).
             let ds = self.ore_toggle_row4(block_x, block_y, block_z0);
+            // dx/dy are row-constant (the row shares the block x/y); dz is
+            // the in-cell z fraction — block_z0 IS the cell start (the
+            // material loop passes cell_start_block_z), so dz = iz * step.
+            let row_frac = if self.ore_interp.is_some() {
+                let cw = self.cell_width as i32;
+                let ch = self.cell_height as i32;
+                let x0 = floor_div(block_x, cw) * cw;
+                let y0 = floor_div(block_y, ch) * ch;
+                Some((
+                    (block_x - x0) as f64 * (1.0f64 / cw as f64),
+                    (block_y - y0) as f64 * (1.0f64 / ch as f64),
+                    1.0f64 / cw as f64,
+                ))
+            } else {
+                None
+            };
             for iz in 0..4i32 {
                 let block_z = block_z0 + iz;
                 let block = match ds[iz as usize] {
                     Some(d) => {
                         let pt = Pt { x: block_x, y: block_y, z: block_z };
-                        let (fx, fy, fz) = if self.ore_interp.is_some() {
-                            self.ore_frac(pt)
-                        } else {
-                            (0.0, 0.0, 0.0)
+                        let (fx, fy, fz) = match row_frac {
+                            Some((dx, dy, dz_step)) => (dx, dy, iz as f64 * dz_step),
+                            None => (0.0, 0.0, 0.0),
                         };
                         self.ore_finish(pt, d, fx, fy, fz).unwrap_or(STONE)
                     }
