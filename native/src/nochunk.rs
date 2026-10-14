@@ -2751,13 +2751,18 @@ impl<'e> ChunkGen<'e> {
                     z: (first_cell_z + i as i32) * cw,
                 };
             }
-            // slot-0 upper-y constant (top slide: y >= 256 -> -0.078125): the
-            // corner ys rise monotonically, so the FIRST corner decides for
-            // the whole group
+            // slot-0 upper-y constant (top slide: y >= 256 -> -0.078125).
+            // Groups advance over the FLAT p index (i = p/ny, y = p%ny), so a
+            // group can straddle a z-row restart (ny=49 is not a multiple of
+            // G): later lanes can DROP back to the world bottom. The const
+            // region is upward-closed, so the fill is valid only when EVERY
+            // real lane (tail lanes duplicate the last corner) is >= y0 — a
+            // first-corner-only rule poisoned bottom corners with -0.078125
+            // (judge diff 0.151%, fixed by checking all lanes).
             if let Some((y0, YUpperConst::Val(v))) =
                 compiled.node_y_upper_const[child0 as usize]
             {
-                if !yconst_off() && (pts[0].y as f64) >= y0 {
+                if !yconst_off() && pts[..n].iter().all(|pt| (pt.y as f64) >= y0) {
                     SLOT0_CONST_HITS.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     for k in 0..n {
                         out[p - lo + k] = v;
