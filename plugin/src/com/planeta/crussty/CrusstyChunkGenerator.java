@@ -430,6 +430,11 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 Method mCfgFactory = cfgSingleton.getClass().getMethod("factory");
                 mCfgFactory.setAccessible(true);
                 mCfg.setAccessible(true);
+                // Palette$Factory.create(bits, idMap, resize, values) needs the
+                // config's bit count — cache it per captured configuration.
+                Method mBitsCfg = cfgSingleton.getClass().getMethod("bits");
+                mBitsCfg.setAccessible(true);
+                singletonBits = (Integer) mBitsCfg.invoke(cfgSingleton);
                 mPalCreate = Class.forName(
                         "net.minecraft.world.level.chunk.Palette$Factory").getMethod("create",
                         int.class,
@@ -443,6 +448,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 Object d1 = fPalData.get(tpl);
                 cfgLinear = mCfg.invoke(d1);
                 factoryLinear = mCfgFactory.invoke(cfgLinear);
+                linearBits = (Integer) mBitsCfg.invoke(cfgLinear);
                 // ---- v3.5: GLOBAL configuration capture (for >15-distinct
                 // mixed sections) — force the template through 17 distinct
                 // registry states; the container resizes to the global
@@ -568,6 +574,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static Method mPalCreate;   // Palette$Factory.create(bits, registry, resize, List)
     private static Object factorySingleton; // Palette$Factory from cfgSingleton
     private static Object factoryLinear;    // Palette$Factory from cfgLinear
+    private static Integer singletonBits, linearBits; // Palette$Factory.create bits arg
     private static java.lang.reflect.Constructor<?> ctorSimpleBit; // SimpleBitStorage(int,int,long[])
     private static java.lang.reflect.Constructor<?> ctorZeroBit;   // ZeroBitStorage(int)
     private static final Object[] valuesScratch = new Object[17];  // palette values (slot 0 = air)
@@ -730,8 +737,8 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                     swapped = false;
                                 } else {
                                     cfg = cfgSingleton;
-                                    palette = mPalCreate.invoke(factorySingleton, reg, pal,
-                                            java.util.List.of(st0));
+                                    palette = mPalCreate.invoke(factorySingleton, singletonBits,
+                                            reg, pal, java.util.List.of(st0));
                                     storage = ctorZeroBit.newInstance(4096);
                                     swapped = true;
                                     path = 1;
@@ -756,7 +763,8 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                 for (int v = 1; v < vn; v++) {
                                     vals.add(valuesScratch[v]);
                                 }
-                                palette = mPalCreate.invoke(factoryLinear, reg, pal, vals);
+                                palette = mPalCreate.invoke(factoryLinear, linearBits,
+                                        reg, pal, vals);
                                 long[] raw = new long[256]; // 4096 * 4 bits
                                 for (int k = 0; k < 4096; k++) {
                                     short id = out[base + k];
