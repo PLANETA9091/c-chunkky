@@ -1515,6 +1515,12 @@ fn fake_fluid_mode() -> bool {
     *F.get_or_init(|| std::env::var("CRUS_FAKE_FLUID").is_ok())
 }
 
+/// Perf-experiment kill-switch for the row-4 ore AVX2 pre-gate.
+fn no_oregate() -> bool {
+    static G: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *G.get_or_init(|| std::env::var("CRUS_NO_OREGATE").is_ok())
+}
+
 #[inline]
 fn slot_corner_const(
     compiled: &Compiled,
@@ -3048,6 +3054,47 @@ impl<'e> ChunkGen<'e> {
             // 4-wide vein_toggle batch: one AVX2 NormalNoise sample for the
             // whole row (bit-exact lane-identical arithmetic).
             let ds = self.ore_toggle_row4(block_x, block_y, block_z0);
+            // cont-35: 4-lane AVX2 pre-gate of the vanilla ore_finish kill
+            // branch (the abs + d1 < 0.4 test that eliminates nearly every
+            // block): ore/iron tuple select by d sign, y-range check, and
+            // the clamped_map(min_edge; 0..20 -> -0.2..0) — all lane-exact
+            // integer/float ops. When ALL four lanes die the row is STONE
+            // with zero per-block work; surviving lanes re-enter ore_finish
+            // which re-checks everything (bit-exact by construction).
+            if !no_oregate()
+                && ds[0].is_some()
+                && ds[1].is_some()
+                && ds[2].is_some()
+                && ds[3].is_some()
+            {
+                // Scalar 4-lane pre-gate (the AVX2 variant measured 3x WORSE:
+                // mixing 256-bit ops into the mostly-SSE row-4/material code
+                // costs AVX-SSE transition penalties per row). Same exact
+                // float ops as ore_finish's kill branch, lane by lane.
+                let mut all_die = true;
+                for l in 0..4 {
+                    let d = unsafe { (*ds.as_ptr().add(l)).unwrap_unchecked() };
+                    let (ty_min_y, ty_max_y) =
+                        if d > 0.0 { (0i32, 50i32) } else { (-60i32, -8i32) };
+                    let i1 = ty_max_y - block_y;
+                    let i2 = block_y - ty_min_y;
+                    if i2 < 0 || i1 < 0 {
+                        continue;
+                    }
+                    let min_edge = i1.min(i2);
+                    let d1 = mth_clamped_map(min_edge as f64, 0.0, 20.0, -0.2, 0.0);
+                    if d.abs() + d1 >= (0.4f32 as f64) {
+                        all_die = false;
+                        break;
+                    }
+                }
+                if all_die {
+                    for iz in 0..4i32 {
+                        out[base_out + (iz * 16) as usize] = STONE;
+                    }
+                    return true;
+                }
+            }
             // dx/dy are row-constant (the row shares the block x/y); dz is
             // the in-cell z fraction — block_z0 IS the cell start (the
             // material loop passes cell_start_block_z), so dz = iz * step.

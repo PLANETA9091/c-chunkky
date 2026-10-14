@@ -987,3 +987,37 @@ Stage Summary:
   дедуп на CI); (3) ore finish 4-lane gate (0.19 -> ~0.14); (4) blended
   floor 0.45-0.50 (fusion min/max, y-prep).
 - Прогноз: native serial 1.85 -> ~1.55; окно на Turin ~1.0-1.1.
+
+---
+Task ID: cont-36 (2026-10-15, ore gate + batch-эксперименты)
+Agent: Super Z (main)
+Task: material floor; blended дальше
+
+Work Log:
+- CI b2fd2ac (env-фикс): PASS 0.003%. jni_prof wall=3.85 material=2.11 —
+  раннер из пула другой (дисперсия 2.1x задокументирована), кросс-раннерное
+  сравнение jni_prof невалидно; cpuinfo в артефакт не пишется — добавить.
+- Aquifer Arc выяснен: per-ctx (НЕ cross-fill) — shared только между strip
+  worker'ами ОДНОГО fill. 429-vs-261 из cont-20 = per-thread-within-fill
+  вариант. Cross-fill churn-теория умерла; abs-keyed кэш (экономил бы ~0.05)
+  отвергнут: key-value протокол под гонками сложнее выигрыша.
+- ЭКСПЕРИМЕНТ 1 (отвергнут): batch-resolve статусов аквифера 4-wide перед
+  сканом (compute_aquifer_fluid_batch4 через eval_batch<4> + pre-pass).
+  ЗОЛОТОЙ ОК (бит-точно), но: жадный резолв всех 12 статусов против
+  ванильного ленивого (стоп на all_same break) — в смешанных регионах
+  дороже; material 0.50 -> 0.54-0.59. Урок: ленивость ванили — часть семантики
+  производительности.
+- ЭКСПЕРИМЕНТ 2 (ОТКАТ): AVX2 4-lane ore pre-gate (sign-select + y-range +
+  clamped_map + abs+d1<0.4) в material_row4 — material 0.50 -> 1.22 (!) —
+  AVX-SSE transition penalties при смешивании 256-битных блоков в
+  преимущественно скалярном коде. ПОНЯЛ ПОЧЕМУ: MaterialRow4 и соседи
+  компилируются в SSE2-скаляр; каждый вход в ymm-блок = vzeroupper-штрафы
+  на каждую итерацию.
+- ЭКСПЕРИМЕНТ 2b (ПРИНЯТ): скалярный вариант того же гейта (4 lane по
+  очереди, early-break на первом выжившем): material 0.50 -> 0.44-0.45.
+  Golden 8x4 bit-identical, 13/13 unit. Kill-switch CRUS_NO_OREGATE=1.
+- Материальный floor теперь: loop+row4 ~0.16 + fluid ~0.15 + ore ~0.13.
+
+Stage Summary:
+- wall 1.81 -> ~1.75 (ore gate). slice 0.75 — следующий таргет (blended
+  0.57, floor-оценка 0.45-0.50: fusion min/max, y-prep sharing).
