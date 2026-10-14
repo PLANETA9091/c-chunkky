@@ -414,7 +414,12 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 Object d0 = fPalData.get(tpl);
                 Method mCfg = d0.getClass().getMethod("configuration");
                 cfgSingleton = mCfg.invoke(d0);
+                // Configuration is a package-private class: its public members
+                // are still unreachable via reflection without setAccessible
+                // (invoke checks the declaring class's modifiers).
                 Method mCfgFactory = cfgSingleton.getClass().getMethod("factory");
+                mCfgFactory.setAccessible(true);
+                mCfg.setAccessible(true);
                 mPalCreate = Class.forName(
                         "net.minecraft.world.level.chunk.Palette$Factory").getMethod("create",
                         int.class,
