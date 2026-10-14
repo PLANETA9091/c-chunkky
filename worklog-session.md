@@ -781,3 +781,55 @@ Stage Summary:
 - Локальный phases wall: 2.44 (начало сессии) -> 1.92; par-2t на раннере 2.15 -> 1.68-1.78.
 - Паритет не тронут ни одним шагом: 3 зелёных CI-прогона, PASS 0.001-0.002% (гейт 0.05).
 - Устранена латентная дивергенция ore-вен (chain_value всегда 0.0).
+
+---
+Task ID: cont-31 (2026-10-14, шумодав + AVX-512 col8 + prefetch (выключен) + layout hmap)
+Agent: Super Z (main)
+Task: steady-state замеры на 2-ядерном раннере + дальнейший перф до 1ms
+
+Work Log:
+- ШУМОДАВ (1b57aa9): GenStats.reset + RCON 'crusgenstats reset'; plugin_bench.sh —
+  JIT-прогрев отдельным 8x8 регионом (+8..15) ДО замеряемого, forceload remove
+  all, reset окна; GenStats: колонка min (аддитивный шум только завышает);
+  server_up.sh judge: -Xms1G (фикс. коммит, без ресайзов); bench.rs min=; CI:
+  par-2t bench x3. Результат: par-2t p50 на раннере 1.593/1.618/1.592 (разброс
+  1.5% против исторических ~15%) — замеры чистые. Судья: chunks=229 (8x8 +
+  каскад соседей), окно steady-state.
+- CPU раннера: Intel Xeon Platinum 8573C (Granite Rapids, полный AVX-512).
+- AVX-512 col8 (51a13f5): 8-широкие колоночные кернелы ImprovedNoise
+  (same/mixed) + PerlinNoise::get_value_batch_col dispatch + BlendedNoise
+  compute_batch8_col512 (единая 8-широкая половина: main через noise_5_batch8,
+  min/max через noise_5_batch_col8/noise_5_col8_avx512). probe_avx512_width:
+  перемежающийся min-of-3 микробенч на реальном NormalNoise (turbo-безопасно;
+  история: SKX/CLX даунклочат 512-бит), CRUS_AVX512=1/0 форсирует. Бит-паритет:
+  2 новых теста (same/mixed/tail, оба режима) — 13/13, golden 8x4 в обоих
+  режимах. Локально проба стабильно выбирает AVX2 (512 медленней на этом
+  Xeon), на GR-раннере решает проба.
+- PREFETCH (63f1ec9 -> 804af42 -> 6aefead): PrefetchWorker считал плоскости
+  СЛЕДУЮЩЕГО чанка в паузе между филлами (Java layout/beard/SURFACE); гэп-гейт
+  >=1ms; per-plane деградация (что успело — забираем, остальное граф).
+  Локально с CRUS_GAP_US=3000: got=4/4 каждый филл, 1.4 -> 0.6-0.9ms.
+  НО CI (804af42): изолированный bench не изменился (1.59), а окно судьи
+  ДЕГРАДИРОВАЛО native 2.06 -> 4.11, p50 2.93 -> 5.6: на насыщенном 2-ядернике
+  паузы НЕ простаивают (Paper gen pipeline/lighting), prefetch-поток крадёт
+  циклы и переливается в филлы. ВЫВОД: prefetch default OFF (6aefead),
+  CRUS_PREFETCH=1 для экспериментов.
+- LAYOUT (9bdb973): rebuildHeightmaps был ПО ОДНОМУ полному проходу
+  384x256 НА КАЖДЫЙ тип heightmap (4-6 типов) — недостающий член layout
+  1.03ms. Fused: один проход на колонку через per-id биту-маску (глубина =
+  самый глубокий тип, не сумма). Значения бит-идентичны. verifyChunk:
+  burn-in 256 чанков + 1/64 сэмплирование (систематический баг портит >>10%
+  блоков — редкие пробы ловят; судья — главный гейт). GenStats: [lay
+  setup/sec/hmap/verify] разбивка в окне судьи.
+- CI-вердикты: 51a13f5 PASS (vanilla 0.001% / datapack 0.001%); окно 51a13f5:
+  native 2.06-2.48 + layout 0.9-1.03, p50 2.93-3.20 (было 4.4-4.9); par-2t
+  bench 1.59 стабильный. 804af42 PASS (prefetch регрессия окна — задокументирована
+  и выключена). 63f1ec9 PASS.
+
+Stage Summary:
+- Окно судьи: 8.26 (старт) -> 4.4-4.9 -> 2.93-3.20 (51a13f5, чистые замеры).
+- par-2t изолированный: 2.15 -> 1.59 (раннер), локально 1.42-1.46.
+- Замеры теперь steady-state (JIT-прогрев + reset окна + min-колонка + x3).
+- Далее: CI 6aefead (prefetch off + hmap fix + lay-разбивка) -> решающий
+  пункт: layout после hmap-fix, native под контенцией; AVX-512 решение пробы
+  на GR-раннере.
