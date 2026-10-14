@@ -177,6 +177,200 @@ impl ImprovedNoise {
         }
         grads
     }
+
+    // ---- plane-major column state (see NormalNoise::get_value_batch) ----
+
+    /// Rebuild the column state for the wrapped octave inputs (wx, wz).
+    /// Pure function of immutable state — bit-identical to the inline setup
+    /// in the AVX2 batch kernel for uniform lanes.
+    #[inline]
+    pub fn col_init(&self, st: &mut OctColState, wx: f64, wz: f64) {
+        let x = wx + self.xo;
+        let xi = mth_floor(x);
+        let z = wz + self.zo;
+        let zi = mth_floor(z);
+        st.xi = xi;
+        st.zi = zi;
+        st.dx = x - xi as f64;
+        st.dz = z - zi as f64;
+        st.fx = smoothstep(st.dx);
+        st.fz = smoothstep(st.dz);
+        st.p0 = self.p(xi);
+        st.p1 = self.p(xi + 1);
+        st.cell_yi = i32::MIN;
+    }
+
+    /// Walk the permutation chain for the y-cell `yi` (the x/z cells come
+    /// from the column state) and precompute the per-corner X/Z dot partials
+    /// (gx*xv, gz*zv — the t0/t2 terms of the AVX2 corner kernel).
+    #[inline]
+    pub fn col_walk(&self, st: &mut OctColState, yi: i32) {
+        let i0 = self.p(st.p0 + yi);
+        let i1 = self.p(st.p0 + yi + 1);
+        let j0 = self.p(st.p1 + yi);
+        let j1 = self.p(st.p1 + yi + 1);
+        let zc = st.zi;
+        let bases = [i0 + zc, j0 + zc, i1 + zc, j1 + zc]; // [X + 2*Y]
+        let mut grads = [0u8; 8];
+        let mut t0 = [0f64; 8];
+        let mut t2 = [0f64; 8];
+        for c in 0..8 {
+            let xbit = c & 1;
+            let ybit = (c >> 1) & 1;
+            let zbit = (c >> 2) & 1;
+            let g = self.p(bases[ybit * 2 + xbit] + zbit as i32) as usize;
+            grads[c] = g as u8;
+            let gv = &GRADIENT[g & 15];
+            let xv = if xbit != 0 { st.dx - 1.0 } else { st.dx };
+            let zv = if zbit != 0 { st.dz - 1.0 } else { st.dz };
+            t0[c] = gv[0] as f64 * xv;
+            t2[c] = gv[2] as f64 * zv;
+        }
+        st.grads = grads;
+        st.t0 = t0;
+        st.t2 = t2;
+        st.cell_yi = yi;
+    }
+
+    /// 4-lane noise(x, y, z) (y_scale = 0) sharing the column state `st`;
+    /// lanes are already column-uniform (checked by the caller). The y-cell
+    /// walk and the per-corner X/Z partials are memoized in `st` — on a hit
+    /// the whole batch needs zero walks and zero gradient gathers.
+    #[inline]
+    pub fn noise_col4(&self, st: &mut OctColState, wy: &[f64; 4]) -> [f64; 4] {
+        let mut yi = [0i32; 4];
+        let mut dy = [0f64; 4];
+        for l in 0..4 {
+            let yv = wy[l] + self.yo;
+            let b = mth_floor(yv);
+            yi[l] = b;
+            dy[l] = yv - b as f64;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if yi[0] == yi[1] && yi[1] == yi[2] && yi[2] == yi[3] {
+                if yi[0] != st.cell_yi {
+                    self.col_walk(st, yi[0]);
+                }
+                unsafe {
+                    return self.noise_col4_same_avx2(st, &dy);
+                }
+            }
+            // mixed y-cells: per-lane walks; the y-cell memo is invalidated
+            // (any cell is a valid pure cache, but the grads/t0/t2 slots are
+            // single-entry and the mixed kernel does not rebuild them).
+            st.cell_yi = i32::MIN;
+            unsafe {
+                return self.noise_col4_mixed_avx2(st, &yi, &dy);
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        unreachable!("column path requires AVX2 (x86_64)")
+    }
+
+    /// All-lanes-same-cell kernel: gradients and X/Z dot partials come from
+    /// the column state (one walk serves the whole batch); per lane only the
+    /// Y dot term and the lerp3 run. Lane-identical to the AVX2 batch kernel
+    /// (same op order, no FMA, no reassociation).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn noise_col4_same_avx2(&self, st: &OctColState, dy: &[f64; 4]) -> [f64; 4] {
+        use std::arch::x86_64::*;
+        let dyv = _mm256_loadu_pd(dy.as_ptr());
+        let fy = smoothstep_v(dyv);
+        let fxv = _mm256_set1_pd(st.fx);
+        let fzv = _mm256_set1_pd(st.fz);
+        let one = _mm256_set1_pd(1.0);
+        let mut vc = [_mm256_setzero_pd(); 8];
+        for c in 0..8 {
+            let g = (st.grads[c] & 15) as usize;
+            let gy = GRADIENT[g][1] as f64;
+            let yv = if c & 2 != 0 { _mm256_sub_pd(dyv, one) } else { dyv };
+            let t1 = _mm256_mul_pd(_mm256_set1_pd(gy), yv);
+            vc[c] = _mm256_add_pd(
+                _mm256_add_pd(_mm256_set1_pd(st.t0[c]), t1),
+                _mm256_set1_pd(st.t2[c]),
+            );
+        }
+        let r0 = lerp_v(fxv, vc[0], vc[1]);
+        let r1 = lerp_v(fxv, vc[2], vc[3]);
+        let r01 = lerp_v(fy, r0, r1);
+        let r2 = lerp_v(fxv, vc[4], vc[5]);
+        let r3 = lerp_v(fxv, vc[6], vc[7]);
+        let r23 = lerp_v(fy, r2, r3);
+        let res = lerp_v(fzv, r01, r23);
+        let mut out = [0f64; 4];
+        _mm256_storeu_pd(out.as_mut_ptr(), res);
+        out
+    }
+
+    /// Mixed y-cells: per-lane walks (the x/z part comes from the column
+    /// state), then the generic per-lane-gradient kernel with broadcast
+    /// x/z state. Lane-identical to the AVX2 batch kernel.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn noise_col4_mixed_avx2(
+        &self,
+        st: &OctColState,
+        yi: &[i32; 4],
+        dy: &[f64; 4],
+    ) -> [f64; 4] {
+        use std::arch::x86_64::*;
+        let mut grad = [[0u8; 8]; 4];
+        for l in 0..4 {
+            let i0 = self.p(st.p0 + yi[l]);
+            let i1 = self.p(st.p0 + yi[l] + 1);
+            let j0 = self.p(st.p1 + yi[l]);
+            let j1 = self.p(st.p1 + yi[l] + 1);
+            let zc = st.zi;
+            let bases = [i0 + zc, j0 + zc, i1 + zc, j1 + zc]; // [X + 2*Y]
+            for c in 0..8 {
+                let xbit = c & 1;
+                let ybit = (c >> 1) & 1;
+                let zbit = (c >> 2) & 1;
+                grad[l][c] = self.p(bases[ybit * 2 + xbit] + zbit as i32) as u8;
+            }
+        }
+        let dyv = _mm256_loadu_pd(dy.as_ptr());
+        let fy = smoothstep_v(dyv);
+        let fxv = _mm256_set1_pd(st.fx);
+        let fzv = _mm256_set1_pd(st.fz);
+        let dxv = _mm256_set1_pd(st.dx);
+        let dzv = _mm256_set1_pd(st.dz);
+        let one = _mm256_set1_pd(1.0);
+        let mut vc = [_mm256_setzero_pd(); 8];
+        for c in 0..8 {
+            let mut gxs = [0i32; 4];
+            let mut gys = [0i32; 4];
+            let mut gzs = [0i32; 4];
+            for l in 0..4 {
+                let gv = &GRADIENT[(grad[l][c] & 15) as usize];
+                gxs[l] = gv[0];
+                gys[l] = gv[1];
+                gzs[l] = gv[2];
+            }
+            let gx = _mm256_cvtepi32_pd(_mm_loadu_si128(gxs.as_ptr() as *const __m128i));
+            let gy = _mm256_cvtepi32_pd(_mm_loadu_si128(gys.as_ptr() as *const __m128i));
+            let gz = _mm256_cvtepi32_pd(_mm_loadu_si128(gzs.as_ptr() as *const __m128i));
+            let xv = if c & 1 != 0 { _mm256_sub_pd(dxv, one) } else { dxv };
+            let yv = if c & 2 != 0 { _mm256_sub_pd(dyv, one) } else { dyv };
+            let zv = if c & 4 != 0 { _mm256_sub_pd(dzv, one) } else { dzv };
+            let t0 = _mm256_mul_pd(gx, xv);
+            let t1 = _mm256_mul_pd(gy, yv);
+            let t2 = _mm256_mul_pd(gz, zv);
+            vc[c] = _mm256_add_pd(_mm256_add_pd(t0, t1), t2);
+        }
+        let r0 = lerp_v(fxv, vc[0], vc[1]);
+        let r1 = lerp_v(fxv, vc[2], vc[3]);
+        let r01 = lerp_v(fy, r0, r1);
+        let r2 = lerp_v(fxv, vc[4], vc[5]);
+        let r3 = lerp_v(fxv, vc[6], vc[7]);
+        let r23 = lerp_v(fy, r2, r3);
+        let res = lerp_v(fzv, r01, r23);
+        let mut out = [0f64; 4];
+        _mm256_storeu_pd(out.as_mut_ptr(), res);
+        out
+    }
 }
 
 impl ImprovedNoise {
@@ -818,6 +1012,76 @@ impl PerlinNoise {
         }
         d
     }
+
+    /// Column-uniform octave loop: all lanes share the octave x/z inputs
+    /// (checked by the caller). Per-octave state lives in the thread-local
+    /// cache at (col_base + octave); the x/z setup, fx/fz smoothsteps and —
+    /// for y-persistent octaves — the walks and X/Z dot partials are reused
+    /// across consecutive batches of the same column. Every cached value is
+    /// a pure function of immutable state, so hits are bit-identical.
+    pub fn get_value_batch_col<const N: usize>(
+        &self,
+        x_in: f64,
+        z_in: f64,
+        y: &[f64; N],
+        col_base: usize,
+    ) -> [f64; N] {
+        let mut d = [0f64; N];
+        let mut input_factor = self.lowest_freq_input_factor;
+        let mut value_factor = self.lowest_freq_value_factor;
+        COL_CACHE.with(|m| {
+            let mut m = m.borrow_mut();
+            let need = col_base + COL_MAX_OCTAVES;
+            if m.len() < need {
+                m.resize(need, OctColState::INVALID);
+            }
+            for i in 0..self.noise_levels.len() {
+                if let Some(nl) = &self.noise_levels[i] {
+                    let st = &mut m[col_base + i];
+                    let kx = x_in * input_factor;
+                    let kz = z_in * input_factor;
+                    if !st.valid || st.key_x != kx.to_bits() || st.key_z != kz.to_bits() {
+                        let wx = wrap(kx);
+                        let wz = wrap(kz);
+                        nl.col_init(st, wx, wz);
+                        st.valid = true;
+                        st.key_x = kx.to_bits();
+                        st.key_z = kz.to_bits();
+                    }
+                    let mut wy = [0f64; N];
+                    for l in 0..N {
+                        wy[l] = wrap(y[l] * input_factor);
+                    }
+                    let mut v = [0f64; N];
+                    let mut g = 0;
+                    while g < N {
+                        let mut wy4 = [0f64; 4];
+                        let rem = N - g;
+                        if rem >= 4 {
+                            wy4.copy_from_slice(&wy[g..g + 4]);
+                        } else {
+                            // Tail: replicate the last real lane (the stride
+                            // batches pad out-of-range lanes the same way;
+                            // the kernel is a pure function of its inputs).
+                            for k in 0..4 {
+                                wy4[k] = wy[g + (rem - 1).min(k)];
+                            }
+                        }
+                        let r = nl.noise_col4(st, &wy4);
+                        let n4 = rem.min(4);
+                        v[g..g + n4].copy_from_slice(&r[..n4]);
+                        g += 4;
+                    }
+                    for l in 0..N {
+                        d[l] += self.amplitudes[i] * v[l] * value_factor;
+                    }
+                }
+                input_factor *= 2.0;
+                value_factor /= 2.0;
+            }
+        });
+        d
+    }
 }
 
 // ---------------- NormalNoise ----------------
@@ -826,6 +1090,86 @@ pub struct NormalNoise {
     pub second: PerlinNoise,
     pub value_factor: f64,
     pub max_value: f64,
+    /// Unique per construction; indexes the per-thread column cache.
+    /// Clones share the id (identical tables -> identical pure function).
+    pub col_base: usize,
+    /// Octave count fits the column cache (else the col path is bypassed).
+    pub col_ok: bool,
+}
+
+// ---- plane-major column cache (bit-exact pure-function memo) ----
+// Slice batches fill lanes with corners at ONE (x, z) column stepping y by
+// cell_height (8): every octave's x/z inputs are column CONSTANTS. The
+// per-octave work therefore splits into a column part (wrap, floor/frac,
+// smoothstep fx/fz, p0/p1) and a y part. For low octaves the y-cell also
+// persists across up to ~48 consecutive corners (cell >= 96 blocks vs 8-block
+// corner pitch), so the permutation walk and the per-corner X/Z dot partials
+// are memoized per (noise instance, octave) in a per-thread slot. Every
+// cached value is a pure function of immutable state (p-table and offsets
+// never change after init) and the key compare is exact (bit-compare of the
+// pre-image), so a hit returns bit-identical bytes by construction. The
+// per-thread storage needs no locks and no API plumbing (the uniformity
+// check is done inside get_value_batch).
+pub const COL_MAX_OCTAVES: usize = 20;
+
+static NEXT_NORMAL_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[derive(Clone, Copy)]
+pub struct OctColState {
+    pub valid: bool,
+    pub key_x: u64,
+    pub key_z: u64,
+    // ImprovedNoise column state (pure f(wx, wz; xo, zo, p)):
+    pub xi: i32,
+    pub zi: i32,
+    pub dx: f64,
+    pub dz: f64,
+    pub fx: f64,
+    pub fz: f64,
+    pub p0: i32,
+    pub p1: i32,
+    // y-cell memo: grads + per-corner X/Z dot partials (pure per column+cell)
+    pub cell_yi: i32,
+    pub grads: [u8; 8],
+    pub t0: [f64; 8],
+    pub t2: [f64; 8],
+}
+
+impl OctColState {
+    pub const INVALID: OctColState = OctColState {
+        valid: false,
+        key_x: 0,
+        key_z: 0,
+        xi: 0,
+        zi: 0,
+        dx: 0.0,
+        dz: 0.0,
+        fx: 0.0,
+        fz: 0.0,
+        p0: 0,
+        p1: 0,
+        cell_yi: i32::MIN,
+        grads: [0; 8],
+        t0: [0.0; 8],
+        t2: [0.0; 8],
+    };
+}
+
+thread_local! {
+    static COL_CACHE: std::cell::RefCell<Vec<OctColState>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[inline]
+fn lanes_uniform<const N: usize>(x: &[f64; N], z: &[f64; N]) -> bool {
+    let x0 = x[0].to_bits();
+    let z0 = z[0].to_bits();
+    for l in 1..N {
+        if x[l].to_bits() != x0 || z[l].to_bits() != z0 {
+            return false;
+        }
+    }
+    true
 }
 
 impl NormalNoise {
@@ -848,11 +1192,18 @@ impl NormalNoise {
         let expected_deviation = |i: i32| -> f64 { 0.1 * (1.0 + 1.0 / (i as f64 + 1.0)) };
         let value_factor = 0.16666666666666666 / expected_deviation(max_idx - min_idx);
         let max_value = (first.max_value + second.max_value) * value_factor;
+        let col_ok = amps.len() <= COL_MAX_OCTAVES;
         NormalNoise {
             first,
             second,
             value_factor,
             max_value,
+            // stride 2*COL_MAX_OCTAVES: first and second each own 20 slots,
+            // so the NEXT instance can never alias this one's `second` slots
+            // (aliasing would be a stale-hit across different p-tables).
+            col_base: NEXT_NORMAL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize
+                * (2 * COL_MAX_OCTAVES),
+            col_ok,
         }
     }
 
@@ -868,6 +1219,31 @@ impl NormalNoise {
 
     /// 4-wide get_value (bit-exact per lane).
     pub fn get_value_batch(&self, x: &[f64; 4], y: &[f64; 4], z: &[f64; 4]) -> [f64; 4] {
+        // Column-uniform fast path (plane-major perm-dedup): slice batches
+        // share one (x, z) column, so the per-octave x/z state is memoized
+        // per thread. Bit-exact: every cached value is a pure function and
+        // the per-lane op order matches the generic path below.
+        #[cfg(target_arch = "x86_64")]
+        {
+            if self.col_ok
+                && lanes_uniform(x, z)
+                && std::arch::is_x86_feature_detected!("avx2")
+            {
+                let a = self.first.get_value_batch_col::<4>(x[0], z[0], y, self.col_base);
+                let x2 = x[0] * 1.0181268882175227;
+                let z2 = z[0] * 1.0181268882175227;
+                let mut y2 = [0f64; 4];
+                for l in 0..4 {
+                    y2[l] = y[l] * 1.0181268882175227;
+                }
+                let b = self.second.get_value_batch_col::<4>(x2, z2, &y2, self.col_base + COL_MAX_OCTAVES);
+                let mut out = [0f64; 4];
+                for l in 0..4 {
+                    out[l] = (a[l] + b[l]) * self.value_factor;
+                }
+                return out;
+            }
+        }
         let a = self.first.get_value_batch(x, y, z);
         let mut x2 = [0f64; 4];
         let mut y2 = [0f64; 4];
@@ -887,6 +1263,28 @@ impl NormalNoise {
 
     /// 8-wide get_value (bit-exact per lane).
     pub fn get_value_batch8(&self, x: &[f64; 8], y: &[f64; 8], z: &[f64; 8]) -> [f64; 8] {
+        // Column-uniform fast path (see get_value_batch).
+        #[cfg(target_arch = "x86_64")]
+        {
+            if self.col_ok
+                && lanes_uniform(x, z)
+                && std::arch::is_x86_feature_detected!("avx2")
+            {
+                let a = self.first.get_value_batch_col::<8>(x[0], z[0], y, self.col_base);
+                let x2 = x[0] * 1.0181268882175227;
+                let z2 = z[0] * 1.0181268882175227;
+                let mut y2 = [0f64; 8];
+                for l in 0..8 {
+                    y2[l] = y[l] * 1.0181268882175227;
+                }
+                let b = self.second.get_value_batch_col::<8>(x2, z2, &y2, self.col_base + COL_MAX_OCTAVES);
+                let mut out = [0f64; 8];
+                for l in 0..8 {
+                    out[l] = (a[l] + b[l]) * self.value_factor;
+                }
+                return out;
+            }
+        }
         let a = self.first.get_value_batch8(x, y, z);
         let mut x2 = [0f64; 8];
         let mut y2 = [0f64; 8];

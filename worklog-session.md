@@ -615,3 +615,30 @@ Stage Summary:
 - Паритет генерации не тронут ни одним шагом: PASS на всех 6 прогонах сессии (0.001-0.005%, гейт 0.05% = 10-50x запас), marks_seen бит-в-бит.
 - 11/11 тестов; золотые out_hash 8/8 (serial, parallel-2t, wide8=1 принудительно).
 - До 1ms на окне судьи: нужен native ~0.6 (сейчас 2.9) — фронт: plane-major perm-дедуп NormalNoise (2-4x на noise-часть slice), blended same-x hoist (~10%), material prelim; layout ~0.15 (сейчас 1.2-1.6). Это отдельные крупные итерации.
+
+---
+Task ID: cont-25 (2026-10-14, plane-major perm-дедуп NormalNoise — ГОТОВО)
+Agent: Super Z (main)
+Task: plane-major кэш решётки (perm-дедуп) — прямо одобренная пользователем итерация
+
+Work Log:
+- Реализован plane-major column cache: слайс-батчи имеют ОДНУ (x,z)-колонку на батч,
+  поэтому на октаву колонка-часть (wrap, floor/frac, smoothstep fx/fz, p0/p1) вынесена
+  в слот потоко-локального кэша (per-thread TLS, ключ — бит-сравнение пре-образа kx/kz).
+- y-ячейковая мемоизация: для октав с шагом входа < 1 ячейки (8f<1: 6 из 10 октав)
+  пермутационная цепочка + X/Z dot-партиалы (t0/t2) кэшируются по cell_yi — до 12x
+  переиспользование walk'а на низких октавах. Mixed-y и same-y AVX2-кернелы добавлены
+  (nois_col4_same/mixed_avx2), порядок операций lane-идентичен общему пути.
+- БАГ ПОЙМАН golden-скриптом: col_base = id*COL_MAX_OCTAVES — слоты second инстанса N
+  алиасились с first инстанса N+1 (ключ не содержал идентичность шума -> stale-hit из
+  чужого p-table). Фикс: stride 2*COL_MAX_OCTAVES. Урок: кэш-ключ обязан покрывать
+  ВСЁ пре-образ значения.
+- Верификация: 11/11 тестов; golden 8/8 чанков x 4 режима бит-в-бит (serial,
+  parallel-2t, lanes=8, обе сразу) — scripts/verify_hashes.sh check.
+- A/B на этой машине (phases, исторический сид 3257840388504953787):
+  OLD wall 2.41-2.47 (slice 0.67-0.71) -> NEW wall 2.26-2.32 (slice 0.54-0.58):
+  slice -20%, wall -6.5%.
+
+Stage Summary:
+- Plane-major perm-дедуп готов и верифицирован; локальный phases wall 2.25-2.32.
+- Далее по плану: blended same-x hoist -> prelim-скан -> layout (1.2 -> 0.15).
