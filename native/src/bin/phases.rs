@@ -63,6 +63,17 @@ fn main() {
         g(crussty_chunkgen::nochunk::PRELIM_SCANS.load(std::sync::atomic::Ordering::Relaxed)),
         g(crussty_chunkgen::nochunk::PRELIM_SCAN_STEPS.load(std::sync::atomic::Ordering::Relaxed)),
     );
+    let gm = |v: u64| v as f64 / n as f64 / 1e6;
+    println!(
+        "ore: toggle {:.3}ms ({} calls) | finish {} | ridged {:.3}ms ({}) | gap {:.3}ms ({})",
+        gm(crussty_chunkgen::nochunk::ORE_TOGGLE_NS.load(std::sync::atomic::Ordering::Relaxed)),
+        g(crussty_chunkgen::nochunk::ORE_TOGGLE_CALLS.load(std::sync::atomic::Ordering::Relaxed)),
+        g(crussty_chunkgen::nochunk::ORE_FINISH_CALLS.load(std::sync::atomic::Ordering::Relaxed)),
+        gm(crussty_chunkgen::nochunk::ORE_RIDGED_NS.load(std::sync::atomic::Ordering::Relaxed)),
+        g(crussty_chunkgen::nochunk::ORE_RIDGED_CALLS.load(std::sync::atomic::Ordering::Relaxed)),
+        gm(crussty_chunkgen::nochunk::ORE_GAP_NS.load(std::sync::atomic::Ordering::Relaxed)),
+        g(crussty_chunkgen::nochunk::ORE_GAP_CALLS.load(std::sync::atomic::Ordering::Relaxed)),
+    );
     print_slot_anatomy(&gen);
 }
 

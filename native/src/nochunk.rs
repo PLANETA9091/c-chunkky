@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicUsize, AtomicU64,
 //   - postprocessing marks (shouldScheduleFluidUpdate) are skipped: they carry
 //     no block data, and the Bukkit noise path cannot express them.
 
-use crate::density::{compile_cellfill, flatten_cellfill, BatchMemo, CellOp, Compiled, Env, FlatOp, FlatProg, InterpState, MemoCtx, Mode, Pt, V4Memo, V8Memo, WKind};
+use crate::density::{compile_cellfill, flatten_cellfill, Ap2Kind, BatchMemo, CellOp, Compiled, Env, FlatOp, FlatProg, InterpState, MapKind, MemoCtx, Mode, Pt, V4Memo, V8Memo, WKind};
 
 #[cfg(target_arch = "x86_64")]
 #[cfg(target_arch = "x86_64")]
@@ -417,6 +417,14 @@ pub struct ChunkGen<'e> {
     /// sample it through one AVX2 batch (lane-identical arithmetic,
     /// bit-exact vs the per-block scalar eval).
     ore_toggle_fast: Option<OreToggleFast>,
+    /// Vanilla-shaped vein trees resolved for the interpolated fast path:
+    /// toggle = Interpolated(slot7)(...) and ridged = Add(Const(c),
+    /// Max(Abs(Interp5), Abs(Interp6))). The vein interpolated nodes are part
+    /// of the compiled slot list, so their 8 cell-corner values are ALREADY
+    /// evaluated per corner by the slice phase and selected per cell by
+    /// selectCellYZ — the per-block value is the vanilla NoiseInterpolator
+    /// lerp3 over those corners (no extra corner work).
+    ore_interp: Option<OreVeinInterp>,
     /// Env-gated diagnostics, resolved ONCE at construction (getenv in the
     /// hot path costs several us per fill at 5+ call sites).
     dbg_slice: bool,
@@ -430,6 +438,15 @@ struct OreToggleFast {
     noise_idx: usize,
     xz_scale: f64,
     y_scale: f64,
+}
+
+/// Resolved vanilla-shaped vein trees (see the ore_interp field doc).
+#[derive(Clone, Copy)]
+struct OreVeinInterp {
+    t_slot: u16,
+    r5: u16,
+    r6: u16,
+    r_const: f64,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -467,6 +484,14 @@ pub static PRELIM_SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 pub static PRELIM_SCAN_STEPS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub static AQ_FLUID_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+// Ore-path breakdown (CRUS_DIAG=1): localize the per-block ore cost.
+pub static ORE_TOGGLE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ORE_TOGGLE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ORE_FINISH_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ORE_RIDGED_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ORE_RIDGED_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ORE_GAP_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ORE_GAP_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // Global per-fill phase accumulators (JNI diagnostics under Paper): the
 // plugin reads them via profStatsGlobal() to see the fill's phase split
@@ -703,6 +728,52 @@ impl<'e> ChunkGen<'e> {
                 _ => None,
             }
         };
+        // Vanilla-shaped vein trees (toggle/ridged behind Interpolated nodes):
+        // their slots are part of compiled.interp_children, so the slice
+        // phase evaluates their corner planes and selectCellYZ selects the
+        // per-cell corners — the per-block value is a plain lerp3.
+        let ore_interp = {
+            let vt = compiled.router["vein_toggle"] as usize;
+            let vr = compiled.router["vein_ridged"] as usize;
+            let t = match &compiled.arena[vt] {
+                WKind::Interpolated { slot, .. } => Some(*slot),
+                _ => None,
+            };
+            let side_interp = |n: u32| -> Option<u16> {
+                match &compiled.arena[n as usize] {
+                    WKind::Mapped { kind: MapKind::Abs, input } => {
+                        match &compiled.arena[*input as usize] {
+                            WKind::Interpolated { slot, .. } => Some(*slot),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            };
+            let r = match &compiled.arena[vr] {
+                WKind::Ap2 { kind: Ap2Kind::Add, a, b } => {
+                    match (&compiled.arena[*a as usize], &compiled.arena[*b as usize]) {
+                        (WKind::Const(c), WKind::Ap2 { kind: Ap2Kind::Max, a: a5, b: b5 }) => {
+                            match (side_interp(*a5), side_interp(*b5)) {
+                                (Some(r5), Some(r6)) => Some((c, r5, r6)),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            match (t, r) {
+                (Some(t_slot), Some((r_const, r5, r6))) => Some(OreVeinInterp {
+                    t_slot,
+                    r5,
+                    r6,
+                    r_const: *r_const,
+                }),
+                _ => None,
+            }
+        };
         let pipeline_forced = if std::env::var("CRUS_NO_PIPELINE").is_ok() {
             Some(false)
         } else if std::env::var("CRUS_PIPELINE").ok().as_deref() == Some("1") {
@@ -776,6 +847,7 @@ impl<'e> ChunkGen<'e> {
             vein_ridged: router("vein_ridged"),
             vein_gap: router("vein_gap"),
             ore_toggle_fast,
+            ore_interp,
             dbg_slice: std::env::var("CRUS_DBG_SLICE").is_ok(),
             dbg_plane: std::env::var("CRUS_DBG_PLANE").is_ok(),
             dump_planes_want: std::env::var("CRUS_DUMP_PLANES")
@@ -1318,6 +1390,7 @@ impl<'e> ChunkGen<'e> {
             vein_ridged: self.vein_ridged,
             vein_gap: self.vein_gap,
             ore_toggle_fast: self.ore_toggle_fast,
+            ore_interp: self.ore_interp,
             dbg_slice: self.dbg_slice,
             dbg_plane: self.dbg_plane,
             dump_planes_want: self.dump_planes_want,
@@ -2632,9 +2705,15 @@ impl<'e> ChunkGen<'e> {
             for iz in 0..4i32 {
                 let block_z = block_z0 + iz;
                 let block = match ds[iz as usize] {
-                    Some(d) => self
-                        .ore_finish(Pt { x: block_x, y: block_y, z: block_z }, d)
-                        .unwrap_or(STONE),
+                    Some(d) => {
+                        let pt = Pt { x: block_x, y: block_y, z: block_z };
+                        let (fx, fy, fz) = if self.ore_interp.is_some() {
+                            self.ore_frac(pt)
+                        } else {
+                            (0.0, 0.0, 0.0)
+                        };
+                        self.ore_finish(pt, d, fx, fy, fz).unwrap_or(STONE)
+                    }
                     None => self.ore_row_block(block_x, block_y, block_z),
                 };
                 if block != AIR {
@@ -3291,7 +3370,7 @@ impl<'e> ChunkGen<'e> {
     }
 
     /// Vanilla OreVeinifier.create closure.
-    fn ore_vein(&self, pt: Pt) -> Option<u16> {
+    fn ore_vein(&mut self, pt: Pt) -> Option<u16> {
         // Both vein tuples' y-ranges (copper [0,50], iron [-60,-8]) fail
         // outside [-60, 50] REGARDLESS of toggle sign -> result is None
         // either way; the toggle noise need not be sampled.
@@ -3299,14 +3378,76 @@ impl<'e> ChunkGen<'e> {
         if y0 > 50 || y0 < -60 {
             return None;
         }
-        self.memo.next_serial(); // fresh pt context (block coords)
-        let d = self.eval(self.vein_toggle, pt, Mode::Block);
-        self.ore_finish(pt, d)
+        let (fx, fy, fz) = if self.ore_interp.is_some() {
+            self.ore_frac(pt)
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+        let d = match self.ore_interp {
+            Some(oi) => self.ore_slot_lerp3(oi.t_slot, fx, fy, fz),
+            None => {
+                self.memo.next_serial(); // fresh pt context (block coords)
+                self.eval(self.vein_toggle, pt, Mode::Block)
+            }
+        };
+        let diag = crate::density::PROF_ON.load(std::sync::atomic::Ordering::Relaxed);
+        let t0 = if diag { Some(std::time::Instant::now()) } else { None };
+        let r = self.ore_finish(pt, d, fx, fy, fz);
+        if diag {
+            ORE_TOGGLE_NS.fetch_add(t0.unwrap().elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            ORE_TOGGLE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        r
+    }
+
+    /// Cell-start fractions for the ore interpolation (the cell grid is
+    /// aligned to multiples of cell_width/height in block space, so
+    /// floor-div recovers it from any block coordinate).
+    #[inline]
+    fn ore_frac(&self, pt: Pt) -> (f64, f64, f64) {
+        let cw = self.cell_width as i32;
+        let ch = self.cell_height as i32;
+        let x0 = floor_div(pt.x, cw) * cw;
+        let y0 = floor_div(pt.y, ch) * ch;
+        let z0 = floor_div(pt.z, cw) * cw;
+        (
+            (pt.x - x0) as f64 * (1.0f64 / cw as f64),
+            (pt.y - y0) as f64 * (1.0f64 / ch as f64),
+            (pt.z - z0) as f64 * (1.0f64 / cw as f64),
+        )
+    }
+
+    /// NoiseInterpolator lerp3 over the given slot corners (bit-identical
+    /// formula to InterpState::cellfill_value).
+    #[inline]
+    fn ore_slot_lerp3(&self, slot: u16, dx: f64, dy: f64, dz: f64) -> f64 {
+        let n = self.interp.corners_pub(slot);
+        let row1 = lerp_local(dy, lerp_local(dx, n[0], n[1]), lerp_local(dx, n[2], n[3]));
+        let row2 = lerp_local(dy, lerp_local(dx, n[4], n[5]), lerp_local(dx, n[6], n[7]));
+        lerp_local(dz, row1, row2)
+    }
+
+    /// vein_ridged per block: r_const + max(|lerp3(c5)|, |lerp3(c6)|) over
+    /// the slice-phase corners; non-interp shapes keep the full scalar eval.
+    fn ore_ridged_value(&self, pt: Pt, fx: f64, fy: f64, fz: f64) -> f64 {
+        match self.ore_interp {
+            Some(oi) => {
+                let v5 = self.ore_slot_lerp3(oi.r5, fx, fy, fz).abs();
+                let v6 = self.ore_slot_lerp3(oi.r6, fx, fy, fz).abs();
+                let m = if v5 > v6 { v5 } else { v6 };
+                oi.r_const + m
+            }
+            None => self.eval(self.vein_ridged, pt, Mode::Block),
+        }
     }
 
     /// Continuation of ore_vein after the toggle sample (shared by the
     /// scalar path and the 4-wide batch toggle path in material_row4).
-    fn ore_finish(&self, pt: Pt, d: f64) -> Option<u16> {
+    fn ore_finish(&mut self, pt: Pt, d: f64, fx: f64, fy: f64, fz: f64) -> Option<u16> {
+        let diag = crate::density::PROF_ON.load(std::sync::atomic::Ordering::Relaxed);
+        if diag {
+            ORE_FINISH_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let y = pt.y;
         let (ore, raw, filler, ty_min_y, ty_max_y) = if d > 0.0 {
             (COPPER_ORE, RAW_COPPER_BLOCK, GRANITE, 0, 50)
@@ -3332,7 +3473,12 @@ impl<'e> ChunkGen<'e> {
         // this evaluation context must not inherit the previous block's
         // stamps (scalar path re-bumps too — harmless serial bump).
         self.memo.next_serial();
-        let ridged = self.eval(self.vein_ridged, pt, Mode::Block);
+        let t_r = if diag { Some(std::time::Instant::now()) } else { None };
+        let ridged = self.ore_ridged_value(pt, fx, fy, fz);
+        if diag {
+            ORE_RIDGED_NS.fetch_add(t_r.unwrap().elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            ORE_RIDGED_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         if ridged >= 0.0 {
             return None;
         }
@@ -3344,7 +3490,12 @@ impl<'e> ChunkGen<'e> {
             0.3f32 as f64,
         );
         if (rng.next_f32() as f64) < d2 {
+            let t_g = if diag { Some(std::time::Instant::now()) } else { None };
             let gap = self.eval(self.vein_gap, pt, Mode::Block);
+            if diag {
+                ORE_GAP_NS.fetch_add(t_g.unwrap().elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                ORE_GAP_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             if gap > (-0.3f32 as f64) {
                 return if rng.next_f32() < 0.02f32 {
                     Some(raw)
@@ -3359,10 +3510,13 @@ impl<'e> ChunkGen<'e> {
     /// 4-wide vein_toggle batch for an all-solid row (x, y fixed, z0..z0+4).
     /// Bit-exact: mirrors the WKind::Noise node exactly (coordinate scales,
     /// then NormalNoise::get_value_batch — lane-identical arithmetic to the
-    /// scalar eval). None entries (fast path unavailable) fall back to the
+    /// scalar eval). Interpolated toggle (vanilla shape): the vanilla
+    /// NoiseInterpolator per-block lerp3 over the lazily cached cell corners,
+    /// with the per-row (dx, dy) hoisted exactly like the CellFill rows.
+    /// None entries (fast path unavailable) fall back to the
     /// per-block scalar eval in the caller.
     #[inline]
-    fn ore_toggle_row4(&self, x: i32, y: i32, z0: i32) -> [Option<f64>; 4] {
+    fn ore_toggle_row4(&mut self, x: i32, y: i32, z0: i32) -> [Option<f64>; 4] {
         let mut out = [None; 4];
         if let Some(f) = &self.ore_toggle_fast {
             let mut xi = [0f64; 4];
@@ -3377,6 +3531,22 @@ impl<'e> ChunkGen<'e> {
             let v = n.get_value_batch(&xi, &yi, &zi);
             for l in 0..4 {
                 out[l] = Some(v[l]);
+            }
+        } else if self.ore_interp.is_some() {
+            let cw = self.cell_width as i32;
+            let ch = self.cell_height as i32;
+            let x0 = floor_div(x, cw) * cw;
+            let y0 = floor_div(y, ch) * ch;
+            let z00 = floor_div(z0, cw) * cw;
+            let t_slot = self.ore_interp.as_ref().unwrap().t_slot;
+            let n = self.interp.corners_pub(t_slot);
+            let dx = (x - x0) as f64 * (1.0f64 / cw as f64);
+            let dy = (y - y0) as f64 * (1.0f64 / ch as f64);
+            let row1 = lerp_local(dy, lerp_local(dx, n[0], n[1]), lerp_local(dx, n[2], n[3]));
+            let row2 = lerp_local(dy, lerp_local(dx, n[4], n[5]), lerp_local(dx, n[6], n[7]));
+            for l in 0..4i32 {
+                let dz = (z0 + l - z00) as f64 * (1.0f64 / cw as f64);
+                out[l as usize] = Some(lerp_local(dz, row1, row2));
             }
         }
         out

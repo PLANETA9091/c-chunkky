@@ -698,3 +698,33 @@ Stage Summary:
 - Локальный serial wall 2.02 (slice 0.73* | cellfill 0.39 | material 0.65 | other 0.24).
 - (*slice включает простои ожидания плоскостей — узкое место сместилось в пайплайн.)
 - Далее: ore-путь (батчинг ridged/gap), затем layout и CI-прогон.
+
+---
+Task ID: cont-28 (2026-10-14, ore-vein интерполяция — ЛАТЕНТНАЯ ДИВЕРГЕНЦИЯ УСТРАНЕНА)
+Agent: Super Z (main)
+Task: корректность vein_toggle/vein_ridged (Block-mode Interpolated) + ore-диагностика
+
+Work Log:
+- Ore-диагностика (CRUS_DIAG): toggle 34175 вызовов/чанк, ridged/gap — 0 (rng-гейт
+  не проходит ни разу на эталонном сидe — вены не срабатывают и в ванилле).
+- ОБНАРУЖЕНО: update_for_y/x/z никогда не вызываются -> chain_value(slot) = 0.0
+  всегда -> Block-mode Interpolated (vein_toggle) возвращал 0.0 -> все вены
+  подавлены на корню. Судья проходил, т.к. в эталонных дампах вены не срабатывают
+  и в ванилле; на других сидах/датапаках — ГАРАНТИРОВАННАЯ дивергенция (руды
+  отсутствовали бы).
+- ФИКС: vein-интерполированные узлы УЖЕ входят в compiled.interp_children (слоты
+  5/6/7) — их угловые плоскости УЖЕ считает slice-фаза, selectCellYZ уже выбирает
+  их углы per cell. Per-block значение = ванильный NoiseInterpolator lerp3 по этим
+  углам (ore_slot_lerp3 — формула cellfill_value). toggle = lerp3(slot7),
+  ridged = r_const + max(|lerp3(slot5)|, |lerp3(slot6)|), gap — без изменений.
+  ore_toggle_row4 получил interp-ветку (ряды с hoisted dx/dy). Не-ванильные формы
+  деревьев (датапаки) — фоллбек на старый путь (без регрессии).
+- Промежуточный вариант с lazy per-cell corner-кэшем дал material 1.26 (углы
+  дублировались) — заменён чтением corners_pub: material 0.64 -> 0.61.
+- Верификация: 11/11 тестов; golden 8/8 x 4 режима — РЕАЛЬНЫЕ значения toggle не
+  меняют вывод на эталонных чанках (подтверждение паритета).
+
+Stage Summary:
+- Локальный serial wall 1.96-1.98 (slice 0.71-0.76 | cellfill 0.38-0.39 | material
+  0.61-0.62 | other 0.23-0.25). С начала сессии: 2.25-2.44 -> 1.96.
+- Корректность: устранена латентная дивергенция ore-вен (Block-mode Interpolated).
