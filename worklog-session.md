@@ -574,3 +574,25 @@ Stage Summary:
 - Для 1ms на окне судьи нужно: (1) срезать ~4-5 CPU-ms натива (material в parallel
   3.05 CPU — главная цель), (2) убрать остаточную контенцию (персистентные strip-воркеры).
 - Все 14 коммитов сессии зелёные на CI; 11/11 тестов, serial==parallel бит-в-бит на каждом шаге.
+
+---
+Task ID: cont-23 (2026-10-14, task-graph + col-контракт + 512-cellfill + layout Data-swap)
+Agent: Super Z (main)
+Task: продолжение к 1ms/чанк на 2-ядерном CI; замеры на исторических тест-кейсах
+
+Work Log:
+- Среда: re-clone c-chunkky (репо переименован), rustup 1.99, remote с токеном только в URL.
+- Базлайн (4c2af4c): локально wall 2.50 (slice 0.74 | cellfill 0.80 | material 0.79); CI-судья mean 8259us (native 6.24 + layout 1.61).
+- ОТКРЫТИЕ 1 (col-контракт): compute_col_caches помечал Spline y-ВАРИАНТНЫМ -> сплайн-леса под Cache2D/FlatCache не получали col-слоты. Фикс: Cache2D/FlatCache y-инвариантны ПО КОНТРАКТУ ваниллы (сама ванилла кэширует раз на колонку) -> 13 слотов вместо 7. На текущем дереве слайс уже выжат — эффекта ~0, но анализ корректен. (Моя сессия параллельно реализовала то же самое независимо — дубликат удалён.)
+- ОТКРЫТИЕ 2 (скейлинг): изолированно плоскости скейлятся 2.18x, но fill_parallel был фазовым (все плоскости -> барьер -> все стрипы) = 2 полных синхрона на филл (~0.4-0.5мс на 2 ядрах).
+- ФИКС: dependency-aware task graph (FillGraph): плоскости+стрипы — один пул задач, стрип S_k открывается когда готовы плоскости k,k+1; main+воркеры тянут из атомарных счётчиков; 1 пермит = точный старый pipeline-порядок. Локально: par-2t 2.25 -> 1.96-2.07; serial 2.51 -> 2.38. Хэши serial==parallel бит-в-бит.
+- ФИКС 3: AVX-512 фьюз 2-row cellfill (программа ОДИН раз на ix, A в лейнах 0-3, B в 4-7). БАГ: Lerp3 грузил 4 подряд f64 вместо скаляра rows8[slot*16+ix] — хэши разошлись, поймал, исправил (broadcast скаляра в 4 z-лейна половины). wide8=1 хэши 8/8 золотые; калибровка pick_cellfill_wide (dev VM выбирает 4 — 512 там медленнее; Zen4-раннер выберет сам).
+- ФИКС 4 (layout v3 Data-swap): PalettedContainer.data — public volatile тройка (Configuration, BitStorage, Palette). На секцию строим тройку целиком (singleton/linear по distinct-скану; >15 distinct -> per-block) и меняем ОДНИМ volatile write вместо ~19.5k Method.invoke на чанк. Конфиги+airState из шаблона-контейнера; self-check 256 сэмплов + v1-ремонт сохранены.
+- CI-инфра: cpuinfo-принт в калибровку; SerialGC A/B (CRUS_SERIAL_GC=1) на judge-джобе (хвост max=163мс — сигнатура GC-пауз).
+- CI 390650d (task-graph + col-контракт): судья PASS 0.002%, **окно 8259 -> 6044us (-27%)**: native 6.24 -> 4.05, layout 1.61 -> 1.59. Калибровка раннера: par-2t bench perf real seed p50 2.36 (раннерная лотерея 1.8-2.4).
+- Верификация каждого шага: 11/11 тестов, 8/8 золотых out_hash (e06a3b56dfaf4237...) serial И parallel И wide8=1.
+
+Stage Summary:
+- Судья: 8.26 -> 6.04ms на 390650d; 378a0ba (Data-swap + SerialGC A/B + 512-cellfill) — CI в прогрессе.
+- Локально: serial 2.38 | par-2t 1.96-2.07 | phases: slice 0.66 | cellfill 0.79 | material 0.77.
+- Next: вердикт 378a0ba (Data-swap на живом judge + SerialGC + wide8-калибровка на Zen4), затем material-prelim/ore, slice-кернелы (plane-major perm-дедуп), layout-остаток.
