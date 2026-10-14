@@ -52,9 +52,16 @@ fi
 # Lean JVM for the judge box (2 cores): the native fill threads and the
 # measured GenStats window compete with JIT compiler / GC threads. Fewer
 # background JVM threads = less interference with the parallel fill.
+# GC: SerialGC removes the parallel GC threads that steal both cores from
+# the native fill during young collections (the judge tail max=163ms is a
+# GC pause signature). CRUS_SERIAL_GC=1 opts in; default kept for A/B.
+GC_FLAGS="-XX:CICompilerCount=2 -XX:ParallelGCThreads=2 -XX:ConcGCThreads=1"
+if [ "${CRUS_SERIAL_GC:-0}" = "1" ]; then
+  GC_FLAGS="-XX:CICompilerCount=2 -XX:+UseSerialGC"
+fi
 java -Xms512M -Xmx1536M $JAVA_LIB_PATH_ARGS \
   -Dpaper.chunk-system.gen-parallelism=false \
-  -XX:CICompilerCount=2 -XX:ParallelGCThreads=2 -XX:ConcGCThreads=1 \
+  $GC_FLAGS \
   -XX:NonProfiledCodeHeapSize=64m \
   -jar paper.jar nogui < run.in > run.out 2>&1 &
 echo $! > server.pid

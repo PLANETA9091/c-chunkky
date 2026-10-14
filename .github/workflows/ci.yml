@@ -26,6 +26,9 @@ jobs:
       - name: Perf calibration on the target 2-core runner (same suite as local)
         working-directory: native
         run: |
+          echo "=== runner CPU ==="
+          grep -m1 "model name" /proc/cpuinfo || true
+          nproc
           echo "=== bench perf 64 (seed 0) ==="
           cargo run --release --bin bench -- perf 64
           echo "=== bench perf 64 (real seed, CRUS_BENCH_SEED) ==="
@@ -127,7 +130,7 @@ jobs:
       - name: Judge world=vanilla
         run: |
           set -o pipefail
-          timeout 900 env CRUS_FRESH=1 bash harness/plugin_bench.sh vanilla 2>&1 | tee judge_vanilla.log || true
+          timeout 900 env CRUS_FRESH=1 CRUS_SERIAL_GC=1 bash harness/plugin_bench.sh vanilla 2>&1 | tee judge_vanilla.log || true
           D=$(grep -oP 'OVERALL: \d+/\d+ blocks differ = \K[0-9.]+' judge_vanilla.log | tail -1)
           echo "vanilla diff% = $D"
           python3 harness/judge_gate.py "${D:-999}" "${CRUS_GATE_VANILLA:-35.0}" vanilla
@@ -137,7 +140,7 @@ jobs:
       - name: Judge world=datapack
         run: |
           set -o pipefail
-          timeout 900 env CRUS_FRESH=1 bash harness/plugin_bench.sh datapack 2>&1 | tee judge_datapack.log || true
+          timeout 900 env CRUS_FRESH=1 CRUS_SERIAL_GC=1 bash harness/plugin_bench.sh datapack 2>&1 | tee judge_datapack.log || true
           D=$(grep -oP 'OVERALL: \d+/\d+ blocks differ = \K[0-9.]+' judge_datapack.log | tail -1)
           echo "datapack diff% = $D"
           python3 harness/judge_gate.py "${D:-999}" "${CRUS_GATE_DATAPACK:-35.0}" datapack

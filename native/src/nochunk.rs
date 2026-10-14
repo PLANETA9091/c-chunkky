@@ -17,6 +17,13 @@ use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicUsize, AtomicU64,
 use crate::density::{compile_cellfill, flatten_cellfill, BatchMemo, CellOp, Compiled, Env, FlatOp, FlatProg, InterpState, MemoCtx, Mode, Pt, V4Memo, V8Memo, WKind};
 
 #[cfg(target_arch = "x86_64")]
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::_mm512_castpd512_pd256;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::_mm512_extractf64x4_pd;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::_mm512_setr_pd;
+#[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::_mm256_loadu_pd;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::_mm256_setzero_pd;
@@ -336,6 +343,8 @@ pub struct ChunkGen<'e> {
     final_density_slot: Option<u16>,
     /// Compiled CellFill program (None -> interpreter fallback).
     cellfill_prog: Option<Vec<CellOp>>,
+    /// Fused 8-lane AVX-512 2-row cellfill runner (calibrated at startup).
+    cellfill_wide8: bool,
     /// Static-stack-slot form of cellfill_prog (preferred by the AVX2 runners).
     cellfill_flat: Option<FlatProg>,
     /// Reusable strip-worker clones (fill_parallel): avoids re-allocating
@@ -725,6 +734,11 @@ impl<'e> ChunkGen<'e> {
                 _ => None,
             },
             cellfill_prog: cellfill_prog_opt.clone(),
+            cellfill_wide8: cellfill_prog_opt
+                .as_ref()
+                .and_then(|p| flatten_cellfill(p))
+                .map(|flat| cellfill_simd::pick_cellfill_wide(&flat))
+                .unwrap_or(false),
             cellfill_flat: cellfill_prog_opt
                 .as_ref()
                 .and_then(|p| flatten_cellfill(p)),
@@ -1279,6 +1293,7 @@ impl<'e> ChunkGen<'e> {
             sched: false,
             marks: Vec::with_capacity(1024),
             beard: self.beard.clone(),
+            cellfill_wide8: self.cellfill_wide8,
             env: self.env,
             compiled: std::sync::Arc::clone(&self.compiled),
             interp_children: self.interp_children.clone(),
@@ -1877,6 +1892,48 @@ impl<'e> ChunkGen<'e> {
                             let dzv = cellfill_simd::dz_vec(dx_step);
                             let (mut vstack_a, mut vstack_b, mut vsp) =
                                 cellfill_simd::fresh_stacks();
+                            // fused 8-lane path (AVX-512, calibrated): the
+                            // program runs ONCE per ix with row A in lanes
+                            // 0..3 and row B in lanes 4..7.
+                            if self.cellfill_wide8 && cellfill_simd::avx512_ok() {
+                                if let Some(flat) = prog_flat {
+                                    let dzv8 = unsafe {
+                                        _mm512_setr_pd(0.0, dx_step, dx_step + dx_step, dx_step + dx_step + dx_step,
+                                                       0.0, dx_step, dx_step + dx_step, dx_step + dx_step + dx_step)
+                                    };
+                                    let mut reg8 = cellfill_simd::fresh_stack512();
+                                    let mut ix = 0i32;
+                                    while ix < cw_i {
+                                        let res = unsafe {
+                                            cellfill_simd::run_cellfill_2rows_wide512(
+                                                flat,
+                                                &self.cellfill_rows8,
+                                                block_y_a,
+                                                block_y_b,
+                                                dzv8,
+                                                &ix,
+                                                &mut reg8,
+                                            )
+                                        };
+                                        unsafe {
+                                            let lo = _mm512_castpd512_pd256(res);
+                                            let hi = _mm512_extractf64x4_pd(res, 1);
+                                            _mm256_storeu_pd(
+                                                self.cell_cache.as_mut_ptr().add(idx_base + (ix * 4) as usize),
+                                                lo,
+                                            );
+                                            _mm256_storeu_pd(
+                                                self.cell_cache.as_mut_ptr().add(idx_base + 16 + (ix * 4) as usize),
+                                                hi,
+                                            );
+                                        }
+                                        ix += 1;
+                                    }
+                                    idx = idx_base + 32;
+                                    iy -= 2;
+                                    continue;
+                                }
+                            }
                             let mut ix = 0i32;
                             while ix < cw_i {
                                 let (res_a, res_b) = if let Some(flat) = prog_flat {
@@ -3519,6 +3576,220 @@ mod cellfill_simd {
         *OK.get_or_init(|| std::arch::is_x86_feature_detected!("avx2"))
     }
 
+    pub fn avx512_ok() -> bool {
+        static OK: OnceLock<bool> = OnceLock::new();
+        *OK.get_or_init(|| std::arch::is_x86_feature_detected!("avx512f"))
+    }
+
+    /// One-time micro-calibration: run the actual CellFill flat program in
+    /// the fused 8-lane AVX-512 2-row runner vs the 4-lane AVX2 one and pick
+    /// the winner for this CPU. Bit-neutral (both are lane-identical to the
+    /// scalar eval); costs a few ms once per process.
+    pub fn pick_cellfill_wide(prog: &FlatProg) -> bool {
+        if !avx512_ok() || !avx2_ok() {
+            return false;
+        }
+        match std::env::var("CRUS_CELLFILL_WIDE").ok().as_deref() {
+            Some("0") => return false,
+            Some("1") => return true,
+            _ => {}
+        }
+        // synthetic rows: any values work — the timing is what matters.
+        let rows8 = vec![0.375f64; 8 * 16];
+        let reps = 2000usize;
+        let time4 = |sink: &mut u64| -> f64 {
+            let (mut reg_a, mut reg_b, _) = fresh_stacks();
+            let dzv = unsafe { _mm256_setr_pd(0.0, 0.25, 0.5, 0.75) };
+            let t0 = std::time::Instant::now();
+            for i in 0..reps {
+                let ix = (i & 3) as i32;
+                let (ra, rb) = unsafe {
+                    run_cellfill_2rows_flat(prog, &rows8, i as i32, i as i32 + 1, dzv, &ix, &mut reg_a, &mut reg_b)
+                };
+                let mut t4 = [0f64; 4];
+                unsafe { _mm256_storeu_pd(t4.as_mut_ptr(), ra) };
+                *sink ^= t4[0].to_bits();
+                unsafe { _mm256_storeu_pd(t4.as_mut_ptr(), rb) };
+                *sink ^= t4[0].to_bits();
+            }
+            t0.elapsed().as_nanos() as f64
+        };
+        let time8 = |sink: &mut u64| -> f64 {
+            let mut reg = unsafe { [_mm512_setzero_pd(); 16] };
+            let dzv8 = unsafe { _mm512_setr_pd(0.0, 0.25, 0.5, 0.75, 0.0, 0.25, 0.5, 0.75) };
+            let t0 = std::time::Instant::now();
+            for i in 0..reps {
+                let ix = (i & 3) as i32;
+                let r = unsafe {
+                    run_cellfill_2rows_wide512(prog, &rows8, i as i32, i as i32 + 1, dzv8, &ix, &mut reg)
+                };
+                let mut tmp8 = [0f64; 8];
+                unsafe { _mm512_storeu_pd(tmp8.as_mut_ptr(), r) };
+                *sink ^= tmp8[0].to_bits();
+            }
+            t0.elapsed().as_nanos() as f64
+        };
+        let mut s1 = 0u64;
+        let mut s2 = 0u64;
+        let _ = time4(&mut s1);
+        let _ = time8(&mut s2);
+        let d4 = time4(&mut s1);
+        let d8 = time8(&mut s2);
+        let pick = d8 < d4 * 0.97;
+        if std::env::var("CRUS_DEBUG_LANES").is_ok() {
+            eprintln!("[crussty] cellfill width calibration: 4={d4:.0}ns 8={d8:.0}ns -> wide8={pick}");
+        }
+        pick
+    }
+
+    /// Fused 8-lane 2-row runner: lanes 0..3 = row A z-blocks, lanes 4..7 =
+    /// row B z-blocks. The flat program executes ONCE (the 4-lane runner
+    /// executes it twice — once per row). Lane-identical arithmetic keeps
+    /// every lane bit-identical to the scalar path.
+    #[target_feature(enable = "avx512f")]
+    pub unsafe fn run_cellfill_2rows_wide512(
+        prog: &FlatProg,
+        rows8: &[f64],
+        block_y_a: i32,
+        block_y_b: i32,
+        dzv8: __m512d,
+        ixp: &i32,
+        reg: &mut [__m512d; 16],
+    ) -> __m512d {
+        let zero = _mm512_setzero_pd();
+        let sign_abs = _mm512_set1_pd(-0.0);
+        for op in &prog.ops {
+            match *op {
+                FlatOp::Const { dst, v } => {
+                    *reg.get_unchecked_mut(dst as usize) = _mm512_set1_pd(v);
+                }
+                FlatOp::Lerp3 { dst, slot } => {
+                    // rows8[slot]: [r1a(4 ix lanes) | r2a(4) | r1b(4) | r2b(4)].
+                    // For this ix the row values are SCALARS broadcast to the
+                    // 4 z-lanes of each row half: lanes 0..3 = row A (r1a/r2a
+                    // at index slot*16+ix), lanes 4..7 = row B (+8).
+                    let base = slot as usize * 16 + *ixp as usize;
+                    let r1 = _mm512_insertf64x4(
+                        _mm512_castpd256_pd512(_mm256_set1_pd(*rows8.get_unchecked(base))),
+                        _mm256_set1_pd(*rows8.get_unchecked(base + 8)),
+                        1,
+                    );
+                    let r2 = _mm512_insertf64x4(
+                        _mm512_castpd256_pd512(_mm256_set1_pd(*rows8.get_unchecked(base + 4))),
+                        _mm256_set1_pd(*rows8.get_unchecked(base + 12)),
+                        1,
+                    );
+                    *reg.get_unchecked_mut(dst as usize) =
+                        _mm512_add_pd(r1, _mm512_mul_pd(dzv8, _mm512_sub_pd(r2, r1)));
+                }
+                FlatOp::YGrad { dst, from_y, to_y, from_value, to_value } => {
+                    let grad = |by: i32| -> f64 {
+                        let t = (by as f64 - from_y as f64) / (to_y as f64 - from_y as f64);
+                        if t < 0.0 {
+                            from_value
+                        } else if t > 1.0 {
+                            to_value
+                        } else {
+                            from_value + t * (to_value - from_value)
+                        }
+                    };
+                    *reg.get_unchecked_mut(dst as usize) = _mm512_setr_pd(
+                        grad(block_y_a), grad(block_y_a), grad(block_y_a), grad(block_y_a),
+                        grad(block_y_b), grad(block_y_b), grad(block_y_b), grad(block_y_b),
+                    );
+                }
+                FlatOp::Add { dst, a, b } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    let bv = *reg.get_unchecked(b as usize);
+                    *reg.get_unchecked_mut(dst as usize) = _mm512_add_pd(av, bv);
+                }
+                FlatOp::Mul { dst, a, b } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    let bv = *reg.get_unchecked(b as usize);
+                    *reg.get_unchecked_mut(dst as usize) =
+                        _mm512_maskz_mov_pd(_mm512_cmpneq_pd_mask(av, zero), _mm512_mul_pd(av, bv));
+                }
+                FlatOp::Min { dst, a, b } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    let bv = *reg.get_unchecked(b as usize);
+                    *reg.get_unchecked_mut(dst as usize) =
+                        _mm512_mask_mov_pd(bv, _mm512_cmplt_pd_mask(av, bv), av);
+                }
+                FlatOp::Max { dst, a, b } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    let bv = *reg.get_unchecked(b as usize);
+                    *reg.get_unchecked_mut(dst as usize) =
+                        _mm512_mask_mov_pd(bv, _mm512_cmplt_pd_mask(bv, av), av);
+                }
+                FlatOp::Abs { dst, a } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    *reg.get_unchecked_mut(dst as usize) = _mm512_andnot_pd(sign_abs, av);
+                }
+                FlatOp::Square { dst, a } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    *reg.get_unchecked_mut(dst as usize) = _mm512_mul_pd(av, av);
+                }
+                FlatOp::Cube { dst, a } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    let a2 = _mm512_mul_pd(av, av);
+                    *reg.get_unchecked_mut(dst as usize) = _mm512_mul_pd(a2, av);
+                }
+                FlatOp::HalfNeg { dst, a } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    *reg.get_unchecked_mut(dst as usize) = _mm512_mask_mov_pd(
+                        _mm512_mul_pd(av, _mm512_set1_pd(0.5)),
+                        _mm512_cmplt_pd_mask(zero, av),
+                        av,
+                    );
+                }
+                FlatOp::QuarterNeg { dst, a } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    *reg.get_unchecked_mut(dst as usize) = _mm512_mask_mov_pd(
+                        _mm512_mul_pd(av, _mm512_set1_pd(0.25)),
+                        _mm512_cmplt_pd_mask(zero, av),
+                        av,
+                    );
+                }
+                FlatOp::Squeeze { dst, a } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    let d = _mm512_min_pd(_mm512_max_pd(av, _mm512_set1_pd(-1.0)), _mm512_set1_pd(1.0));
+                    let d3 = _mm512_mul_pd(_mm512_mul_pd(d, d), d);
+                    *reg.get_unchecked_mut(dst as usize) = _mm512_sub_pd(
+                        _mm512_div_pd(d, _mm512_set1_pd(2.0)),
+                        _mm512_div_pd(d3, _mm512_set1_pd(24.0)),
+                    );
+                }
+                FlatOp::Clamp { dst, a, min, max } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    *reg.get_unchecked_mut(dst as usize) = _mm512_min_pd(
+                        _mm512_max_pd(av, _mm512_set1_pd(min)),
+                        _mm512_set1_pd(max),
+                    );
+                }
+                FlatOp::RangeChoice { dst, a, min_inclusive, max_exclusive } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    let inr_v = *reg.get_unchecked(a as usize + 1);
+                    let out_v = *reg.get_unchecked(a as usize + 2);
+                    let inr = _mm512_cmple_pd_mask(_mm512_set1_pd(min_inclusive), av)
+                        & _mm512_cmplt_pd_mask(av, _mm512_set1_pd(max_exclusive));
+                    *reg.get_unchecked_mut(dst as usize) =
+                        _mm512_mask_mov_pd(out_v, inr, inr_v);
+                }
+                FlatOp::MulOrAdd { dst, a, is_add, argument } => {
+                    let av = *reg.get_unchecked(a as usize);
+                    *reg.get_unchecked_mut(dst as usize) = if is_add {
+                        _mm512_add_pd(av, _mm512_set1_pd(argument))
+                    } else if argument == 0.0 {
+                        zero
+                    } else {
+                        _mm512_mul_pd(av, _mm512_set1_pd(argument))
+                    };
+                }
+            }
+        }
+        *reg.get_unchecked(prog.result as usize)
+    }
+
     /// dz vector [0, s, s+s, s+s+s] (replicates scalar `dz += dx_step`)
     /// plus a zeroed stack.
     pub fn make_row_state(dx_step: f64) -> (__m256d, [__m256d; 16], usize) {
@@ -4321,6 +4592,10 @@ mod cellfill_simd {
     /// Uninitialized-equivalent stacks (zeroed once per iy-pair, reused
     /// across the 4 ix runs; the topologically-ordered program overwrites
     /// every register before it is read).
+    pub fn fresh_stack512() -> [__m512d; 16] {
+        unsafe { [_mm512_setzero_pd(); 16] }
+    }
+
     pub fn fresh_stacks() -> ([__m256d; 16], [__m256d; 16], usize) {
         unsafe {
             (
