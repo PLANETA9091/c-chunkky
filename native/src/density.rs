@@ -271,6 +271,23 @@ pub struct Compiled {
     /// in-place eval takes the same constant branch there). Ore-vein slots
     /// (range [-60, 51), out 0.0) collapse to a constant for y >= 51.
     pub interp_slot_y_const: Vec<Option<(f64, f64, f64)>>,
+    /// Per-node upper-y constant: Some((y0, v)) — the node evaluates to
+    /// EXACTLY v for every corner y >= y0. Compile-time propagation with
+    /// sign-of-zero safety: Mul(0, x) yields an UNKNOWN-sign zero, which is
+    /// only absorbed by Add with a nonzero constant (x + (-0.0) == x + 0.0
+    /// for x != 0); it bails on Min/Max/Mul with other non-consts. Slot 0
+    /// (vanilla final_density argument) collapses above the top slide
+    /// (y >= 256) to -0.078125 exactly.
+    pub node_y_upper_const: Vec<Option<(f64, YUpperConst)>>,
+}
+
+/// Upper-y constant value kind: an exact f64, or an unknown-sign zero
+/// (0.0*|x|) — safe to absorb ONLY into adds with nonzero constants
+/// (a + 0.0 == a + (-0.0) == a for a != 0); bails on Min/Max.
+#[derive(Clone, Copy, PartialEq)]
+pub enum YUpperConst {
+    Val(f64),
+    ZeroU,
 }
 
 // ---------------------------------------------------------------------------
@@ -802,6 +819,8 @@ impl Env {
             .iter()
             .map(|&child| slot_y_const_meta(&c.arena, child))
             .collect();
+        // per-node upper-y constants (top-slide collapse for slot 0 etc.)
+        let node_y_upper_const = compute_y_upper_consts(&c.arena);
         Compiled {
             arena: c.arena,
             noise_ids: c.noise_ids,
@@ -813,6 +832,7 @@ impl Env {
             col_idx,
             col_count,
             interp_slot_y_const,
+            node_y_upper_const,
         }
     }
 
@@ -867,6 +887,133 @@ fn slot_y_const_meta(arena: &[WKind], child: u32) -> Option<(f64, f64, f64)> {
 
 fn seed_unused() -> i64 {
     0
+}
+
+/// Compile-time "constant for y >= y0" propagation (DAG-safe, iterative).
+/// Rules are EXACT: every rule's value at y >= y0 equals the f64 result the
+/// interpreter would produce, including zero signs. Mul(0, x) produces an
+/// unknown-sign zero (ZeroU) that only Add with a NONZERO constant absorbs
+/// (a + 0.0 == a + (-0.0) == a for a != 0); anything else touching ZeroU
+/// bails. Noise-ish nodes have no meta.
+fn compute_y_upper_consts(arena: &[WKind]) -> Vec<Option<(f64, YUpperConst)>> {
+    let mut state = vec![0u8; arena.len()]; // 0 unknown, 1 in progress, 2 done
+    let mut out: Vec<Option<(f64, YUpperConst)>> = vec![None; arena.len()];
+
+    let children2 = |i: usize| -> (Option<u32>, Option<u32>) {
+        match &arena[i] {
+            WKind::Clamp { input, .. } | WKind::Mapped { input, .. } | WKind::MulOrAdd { input, .. } => {
+                (Some(*input), None)
+            }
+            WKind::Ap2 { a, b, .. } => (Some(*a), Some(*b)),
+            _ => (None, None),
+        }
+    };
+
+    for root in 0..arena.len() {
+        if state[root] != 0 {
+            continue;
+        }
+        let mut stack = vec![(root as u32, false)];
+        while let Some((i, expanded)) = stack.pop() {
+            let iu = i as usize;
+            if !expanded {
+                if state[iu] != 0 {
+                    continue;
+                }
+                state[iu] = 1;
+                let (a, b) = children2(iu);
+                stack.push((i, true));
+                for c in [a, b].into_iter().flatten() {
+                    if state[c as usize] == 0 {
+                        stack.push((c, false));
+                    }
+                }
+                continue;
+            }
+            if state[iu] == 2 {
+                continue;
+            }
+            state[iu] = 2;
+            out[iu] = match &arena[iu] {
+                WKind::Const(v) => Some((f64::NEG_INFINITY, YUpperConst::Val(*v))),
+                WKind::YClampedGradient {
+                    to_y,
+                    to_value,
+                    from_y,
+                    from_value,
+                } => {
+                    // upper clamp region: y >= to_y -> to_value; require the
+                    // gradient to be non-degenerate so the clamp is exact
+                    if to_y > from_y {
+                        Some((*to_y as f64, YUpperConst::Val(*to_value)))
+                    } else {
+                        None
+                    }
+                }
+                WKind::Clamp { input, min, max } => out[*input as usize].and_then(|(y0, k)| {
+                    match k {
+                        YUpperConst::Val(v) => {
+                            let c = if v < *min {
+                                *min
+                            } else if v > *max {
+                                *max
+                            } else {
+                                v
+                            };
+                            Some((y0, YUpperConst::Val(c)))
+                        }
+                        YUpperConst::ZeroU => None,
+                    }
+                }),
+                WKind::Ap2 { kind, a, b } => {
+                    let ma = out[*a as usize];
+                    let mb = out[*b as usize];
+                    match kind {
+                        Ap2Kind::Add => match (ma, mb) {
+                            (Some((y0a, YUpperConst::Val(va))), Some((y0b, YUpperConst::Val(vb)))) => {
+                                Some((y0a.max(y0b), YUpperConst::Val(va + vb)))
+                            }
+                            (Some((y0a, YUpperConst::Val(va))), Some((y0b, YUpperConst::ZeroU))) => {
+                                if va != 0.0 {
+                                    Some((y0a.max(y0b), YUpperConst::Val(va)))
+                                } else {
+                                    None
+                                }
+                            }
+                            (Some((y0a, YUpperConst::ZeroU)), Some((y0b, YUpperConst::Val(vb)))) => {
+                                if vb != 0.0 {
+                                    Some((y0a.max(y0b), YUpperConst::Val(vb)))
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        },
+                        Ap2Kind::Mul => match (ma, mb) {
+                            (Some((y0a, YUpperConst::Val(va))), Some((y0b, YUpperConst::Val(vb)))) => {
+                                Some((y0a.max(y0b), YUpperConst::Val(va * vb)))
+                            }
+                            (Some((y0a, YUpperConst::Val(v))), other) | (other, Some((y0a, YUpperConst::Val(v)))) => {
+                                if v == 1.0 {
+                                    other // identity: 1.0 * x == x exactly
+                                } else if v == 0.0 {
+                                    // 0.0 * x = +/-0 (x finite) — unknown sign
+                                    Some((y0a, YUpperConst::ZeroU))
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        },
+                        // Min/Max are sign-of-zero sensitive (Java Math.min(-0.0, 0.0) = -0.0)
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+        }
+    }
+    out
 }
 
 /// Compile-time y-invariance analysis over the compiled arena (DAG-safe,

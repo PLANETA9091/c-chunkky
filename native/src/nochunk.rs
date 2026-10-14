@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicUsize, AtomicU64,
 //   - postprocessing marks (shouldScheduleFluidUpdate) are skipped: they carry
 //     no block data, and the Bukkit noise path cannot express them.
 
-use crate::density::{compile_cellfill, flatten_cellfill, Ap2Kind, BatchMemo, CellOp, Compiled, Env, FlatOp, FlatProg, InterpState, MapKind, MemoCtx, Mode, Pt, V4Memo, V8Memo, WKind};
+use crate::density::{compile_cellfill, flatten_cellfill, Ap2Kind, BatchMemo, CellOp, Compiled, Env, FlatOp, FlatProg, InterpState, MapKind, MemoCtx, Mode, Pt, V4Memo, V8Memo, WKind, YUpperConst};
 
 #[cfg(target_arch = "x86_64")]
 #[cfg(target_arch = "x86_64")]
@@ -1486,6 +1486,37 @@ impl PrefetchWorker {
     }
 }
 
+// slot corner value fast path: y-range const (ore slots above 51) or the
+// upper-y constant (slot 0 above the top slide at y>=256)
+pub static SLOT0_CONST_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn yconst_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var("CRUS_NO_YCONST").ok().as_deref() == Some("1"))
+}
+
+#[inline]
+fn slot_corner_const(
+    compiled: &Compiled,
+    slot: usize,
+    child: u32,
+    corner_y: i32,
+) -> Option<f64> {
+    let cy = corner_y as f64;
+    if let Some((lo, hi, c)) = compiled.interp_slot_y_const[slot] {
+        if cy < lo || cy >= hi {
+            return Some(c);
+        }
+    }
+    if let Some((y0, YUpperConst::Val(v))) = compiled.node_y_upper_const[child as usize] {
+        if cy >= y0 {
+            return Some(v);
+        }
+    }
+    None
+}
+
+
 impl<'e> Drop for ChunkGen<'e> {
     fn drop(&mut self) {
         if let Some(w) = self.plane_worker.take() {
@@ -2720,6 +2751,21 @@ impl<'e> ChunkGen<'e> {
                     z: (first_cell_z + i as i32) * cw,
                 };
             }
+            // slot-0 upper-y constant (top slide: y >= 256 -> -0.078125): the
+            // corner ys rise monotonically, so the FIRST corner decides for
+            // the whole group
+            if let Some((y0, YUpperConst::Val(v))) =
+                compiled.node_y_upper_const[child0 as usize]
+            {
+                if !yconst_off() && (pts[0].y as f64) >= y0 {
+                    SLOT0_CONST_HITS.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    for k in 0..n {
+                        out[p - lo + k] = v;
+                    }
+                    p += G;
+                    continue;
+                }
+            }
             let v = env.eval_batch::<G>(compiled, child0, &pts, Mode::Slice, interp, &memo);
             out[p - lo..p - lo + n].copy_from_slice(&v[..n]);
             p += G;
@@ -2807,9 +2853,9 @@ impl<'e> ChunkGen<'e> {
                                 // y-range constant slots (ore veins above y=51):
                                 // the in-place eval would take the same constant
                                 // branch — bit-exact skip of the noise subtree.
-                                let v = match compiled.interp_slot_y_const[slot] {
-                                    Some((lo, hi, c)) if (corner_y as f64) < lo || (corner_y as f64) >= hi => c,
-                                    _ => env.eval(compiled, child, pt, Mode::Slice, interp, Some(&memo)),
+                                let v = match slot_corner_const(compiled, slot, child, corner_y) {
+                                    Some(c) => c,
+                                    None => env.eval(compiled, child, pt, Mode::Slice, interp, Some(&memo)),
                                 };
                                 out[(p - lo) * nslots + slot] = v;
                             }
@@ -2880,9 +2926,9 @@ impl<'e> ChunkGen<'e> {
                 for slot in 1..nslots {
                     let child = self.interp_children[slot];
                     // y-range constant slots (see the parallel path note)
-                    let v = match self.compiled.interp_slot_y_const[slot] {
-                        Some((lo, hi, c)) if (corner_y as f64) < lo || (corner_y as f64) >= hi => c,
-                        _ => self.eval(child, pt, Mode::Slice),
+                    let v = match slot_corner_const(&self.compiled, slot, child, corner_y) {
+                        Some(c) => c,
+                        None => self.eval(child, pt, Mode::Slice),
                     };
                     let slot = slot as u16;
                     if is_first {
@@ -4128,13 +4174,34 @@ impl<'e> ChunkGen<'e> {
                     // outside the range, fill the constant (bit-exact — the
                     // in-place eval takes the same branch); mixed groups
                     // evaluate normally.
-                    if let Some((lo, hi, c)) = compiled.interp_slot_y_const.get(slot).and_then(|m| *m) {
-                        let all_out = pts.iter().all(|pt| (pt.y as f64) < lo || (pt.y as f64) >= hi);
-                        if all_out {
-                            let base = slot * (cell_count_xz + 1) * cols + i * cols + y;
-                            out[base..base + G].fill(c);
-                            continue;
+                    // group const fill: corner ys rise monotonically through
+                    // the plane, so the FIRST corner decides for the whole
+                    // group ONLY when the const region is upward-closed:
+                    // upper-const (y >= y0) or the range's upper side (y >= hi).
+                    // A first corner BELOW lo is NOT safe (later corners can
+                    // enter the range) and evaluates normally.
+                    let fy = if yconst_off() { f64::NAN } else { pts[0].y as f64 };
+                    let group_c = if let Some((lo, hi, c)) =
+                        compiled.interp_slot_y_const.get(slot).and_then(|m| *m)
+                    {
+                        if fy >= hi {
+                            Some(c)
+                        } else {
+                            None
                         }
+                    } else {
+                        None
+                    }
+                    .or_else(|| {
+                        match compiled.node_y_upper_const.get(child as usize).and_then(|m| *m) {
+                            Some((y0, YUpperConst::Val(v))) if fy >= y0 => Some(v),
+                            _ => None,
+                        }
+                    });
+                    if let Some(c) = group_c {
+                        let base = slot * (cell_count_xz + 1) * cols + i * cols + y;
+                        out[base..base + G].fill(c);
+                        continue;
                     }
                     // G-wide batch: lane-identical arithmetic (bit-exact)
                     let v = env.eval_batch::<G>(compiled, child, &pts, Mode::Slice, interp, &memo);
@@ -4147,9 +4214,9 @@ impl<'e> ChunkGen<'e> {
                 let corner_y = (y as i32 + cell_noise_min_y) * ch;
                 let pt = Pt { x: corner_x, y: corner_y, z: corner_z };
                 for (slot, &child) in children.iter().enumerate() {
-                    let v = match compiled.interp_slot_y_const.get(slot).and_then(|m| *m) {
-                        Some((lo, hi, c)) if (corner_y as f64) < lo || (corner_y as f64) >= hi => c,
-                        _ => env.eval(compiled, child, pt, Mode::Slice, interp, None),
+                    let v = match slot_corner_const(compiled, slot, child, corner_y) {
+                        Some(c) => c,
+                        None => env.eval(compiled, child, pt, Mode::Slice, interp, None),
                     };
                     out[slot * (cell_count_xz + 1) * cols + i * cols + y] = v;
                 }
