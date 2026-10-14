@@ -799,7 +799,7 @@ impl<'e> ChunkGen<'e> {
         };
         ChunkGen {
             sched: false,
-            marks: Vec::with_capacity(1024),
+            marks: Vec::with_capacity(16384),
             beard: crate::beard::Beard::default(),
             interp_children,
             cell_width,
@@ -1566,7 +1566,7 @@ impl<'e> ChunkGen<'e> {
     fn thread_clone(&self, cx: i32, cz: i32) -> ChunkGen<'e> {
         ChunkGen {
             sched: false,
-            marks: Vec::with_capacity(1024),
+            marks: Vec::with_capacity(16384),
             beard: self.beard.clone(),
             cellfill_wide8: self.cellfill_wide8,
             env: self.env,
