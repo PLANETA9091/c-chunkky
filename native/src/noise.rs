@@ -1407,6 +1407,22 @@ fn wrap(d: f64) -> f64 {
     d - (d / 33554432.0 + 0.5).floor() * 33554432.0
 }
 
+/// Lane-exact vectorized wrap: wrap(d) = d - (d/2^25 + 0.5).floor() * 2^25.
+/// Every op is the same lane-wise IEEE operation as the scalar version
+/// (mul/add/floor; the 2^25 scalings are exact powers of two, so the
+/// multiply form of the division is bit-identical).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn wrap_v(d: std::arch::x86_64::__m256d) -> std::arch::x86_64::__m256d {
+    use std::arch::x86_64::*;
+    let q = _mm256_add_pd(
+        _mm256_mul_pd(d, _mm256_set1_pd(2.98023223876953125e-8)),
+        _mm256_set1_pd(0.5),
+    );
+    let f = _mm256_floor_pd(q);
+    _mm256_sub_pd(d, _mm256_mul_pd(f, _mm256_set1_pd(33554432.0)))
+}
+
 impl PerlinNoise {
     /// Modern construction (useNewFactory=true): octaves seeded via
     /// factory.fromHashOf("octave_" + (firstOctave + i)).
@@ -1934,6 +1950,137 @@ pub struct BlendedNoise {
     pub col_base: usize,
 }
 
+fn blend_noprobe() -> bool {
+    static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *P.get_or_init(|| std::env::var("CRUS_BLEND_NOPROBE").is_ok())
+}
+
+/// cont-36: crate-visible TF entry into the AVX2 5-arg kernel — callers
+/// inside their own #[target_feature] context skip the runtime detection
+/// to keep the whole octave loop in one vzeroupper domain.
+#[cfg(target_arch = "x86_64")]
+impl ImprovedNoise {
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn noise_5_batch_avx2_direct(
+        &self,
+        xin: &[f64; 4],
+        yin: &[f64; 4],
+        zin: &[f64; 4],
+        y_scale: f64,
+        y_max: &[f64; 4],
+    ) -> [f64; 4] {
+        self.noise_5_batch_avx2(xin, yin, zin, y_scale, y_max)
+    }
+}
+
+/// cont-36: the blended MAIN octave loop (8 octaves) with the vectorized
+/// wrap/mul prep — the ENTIRE loop lives inside one #[target_feature]
+/// function. Mixing inline ymm ops into the non-TF compute_batch body
+/// measured 3.70 -> 6.02us/call (AVX-SSE transition penalties on every
+/// scalar op between ymm blocks); contained TF loops keep one transition
+/// pair per call. Lane-identical to the scalar loop (exact 2^k scalings;
+/// wrap_v matches wrap lane-wise), scalar fallback kept for non-AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn blend_main_loop_avx2(
+    main_noise: &PerlinNoise,
+    d3: &[f64; 4],
+    d4: &[f64; 4],
+    d5: &[f64; 4],
+    d7: f64,
+    d10: &mut [f64; 4],
+) {
+    use std::arch::x86_64::*;
+    let d3v = _mm256_loadu_pd(d3.as_ptr());
+    let d4v = _mm256_loadu_pd(d4.as_ptr());
+    let d5v = _mm256_loadu_pd(d5.as_ptr());
+    let mut wx = [0f64; 4];
+    let mut wy = [0f64; 4];
+    let mut wz = [0f64; 4];
+    let mut ymax = [0f64; 4];
+    let mut amp = 1.0f64;
+    let mut scale = 1.0f64;
+    for i in 0..8usize {
+        if let Some(oct) = main_noise.get_octave_noise(i) {
+            let av = _mm256_set1_pd(amp);
+            let xmv = _mm256_mul_pd(d3v, av);
+            _mm256_storeu_pd(wx.as_mut_ptr(), wrap_v(xmv));
+            let ymv = _mm256_mul_pd(d4v, av);
+            _mm256_storeu_pd(wy.as_mut_ptr(), wrap_v(ymv));
+            let zmv = _mm256_mul_pd(d5v, av);
+            _mm256_storeu_pd(wz.as_mut_ptr(), wrap_v(zmv));
+            _mm256_storeu_pd(ymax.as_mut_ptr(), ymv);
+            let v = oct.noise_5_batch_avx2_direct(&wx, &wy, &wz, d7 * amp, &ymax);
+            for l in 0..4 {
+                d10[l] += v[l] * scale;
+            }
+        }
+        amp /= 2.0;
+        scale *= 2.0;
+    }
+}
+
+/// cont-36: the blended MIN/MAX octave loop (16 octaves, shared vectorized
+/// prep, per-lane skips) — see blend_main_loop_avx2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn blend_minmax_loop_avx2(
+    min_noise: &PerlinNoise,
+    max_noise: &PerlinNoise,
+    d0: &[f64; 4],
+    d1: &[f64; 4],
+    d2: &[f64; 4],
+    d6: f64,
+    skip_min: &[bool; 4],
+    skip_max: &[bool; 4],
+    d8: &mut [f64; 4],
+    d9: &mut [f64; 4],
+) {
+    use std::arch::x86_64::*;
+    let d0v = _mm256_loadu_pd(d0.as_ptr());
+    let d1v = _mm256_loadu_pd(d1.as_ptr());
+    let d2v = _mm256_loadu_pd(d2.as_ptr());
+    let mut dx = [0f64; 4];
+    let mut dy = [0f64; 4];
+    let mut dz = [0f64; 4];
+    let mut ymax = [0f64; 4];
+    let skip_min_all = skip_min.iter().all(|s| *s);
+    let skip_max_all = skip_max.iter().all(|s| *s);
+    let mut amp = 1.0f64;
+    let mut scale = 1.0f64;
+    for i in 0..16usize {
+        let av = _mm256_set1_pd(amp);
+        _mm256_storeu_pd(dx.as_mut_ptr(), wrap_v(_mm256_mul_pd(d0v, av)));
+        let ymv = _mm256_mul_pd(d1v, av);
+        _mm256_storeu_pd(dy.as_mut_ptr(), wrap_v(ymv));
+        _mm256_storeu_pd(dz.as_mut_ptr(), wrap_v(_mm256_mul_pd(d2v, av)));
+        _mm256_storeu_pd(ymax.as_mut_ptr(), ymv);
+        let dyy = d6 * amp;
+        if !skip_min_all {
+            if let Some(oct) = min_noise.get_octave_noise(i) {
+                let v = oct.noise_5_batch_avx2_direct(&dx, &dy, &dz, dyy, &ymax);
+                for l in 0..4 {
+                    if !skip_min[l] {
+                        d8[l] += v[l] * scale;
+                    }
+                }
+            }
+        }
+        if !skip_max_all {
+            if let Some(oct) = max_noise.get_octave_noise(i) {
+                let v = oct.noise_5_batch_avx2_direct(&dx, &dy, &dz, dyy, &ymax);
+                for l in 0..4 {
+                    if !skip_max[l] {
+                        d9[l] += v[l] * scale;
+                    }
+                }
+            }
+        }
+        amp /= 2.0;
+        scale *= 2.0;
+    }
+}
+
 impl BlendedNoise {
     pub fn create(
         rng: &mut XoroshiroRandomSource,
@@ -2081,26 +2228,37 @@ impl BlendedNoise {
         let d7 = d6 / self.y_factor;
 
         // main noise loop, octaves 0..8 (REVERSED lookup [7-i])
+        // cont-36: the per-octave wrap/mul prep was ~2/3 of compute_batch
+        // (prep 2.45us vs kernels 1.25us of 3.70). The vectorized loop lives
+        // in a dedicated #[target_feature] fn (inline ymm in the non-TF body
+        // measured 3.70 -> 6.02us — AVX-SSE transition penalties).
         let mut d10 = [0f64; 4];
-        let mut amp = 1.0f64;
-        for i in 0..8usize {
-            if let Some(oct) = self.main_noise.get_octave_noise(i) {
-                let mut wx = [0f64; 4];
-                let mut wy = [0f64; 4];
-                let mut wz = [0f64; 4];
-                let mut ymax = [0f64; 4];
-                for l in 0..4 {
-                    wx[l] = wrap(d3[l] * amp);
-                    wy[l] = wrap(d4[l] * amp);
-                    wz[l] = wrap(d5[l] * amp);
-                    ymax[l] = d4[l] * amp;
-                }
-                let v = oct.noise_5_batch(&wx, &wy, &wz, d7 * amp, &ymax);
-                for l in 0..4 {
-                    d10[l] += v[l] / amp;
-                }
+        if avx2_available() {
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                blend_main_loop_avx2(&self.main_noise, &d3, &d4, &d5, d7, &mut d10);
             }
-            amp /= 2.0;
+        } else {
+            let mut amp = 1.0f64;
+            for i in 0..8usize {
+                if let Some(oct) = self.main_noise.get_octave_noise(i) {
+                    let mut wx = [0f64; 4];
+                    let mut wy = [0f64; 4];
+                    let mut wz = [0f64; 4];
+                    let mut ymax = [0f64; 4];
+                    for l in 0..4 {
+                        wx[l] = wrap(d3[l] * amp);
+                        wy[l] = wrap(d4[l] * amp);
+                        wz[l] = wrap(d5[l] * amp);
+                        ymax[l] = d4[l] * amp;
+                    }
+                    let v = oct.noise_5_batch(&wx, &wy, &wz, d7 * amp, &ymax);
+                    for l in 0..4 {
+                        d10[l] += v[l] / amp;
+                    }
+                }
+                amp /= 2.0;
+            }
         }
         let mut d11b = [0f64; 4];
         let mut skip_min = [false; 4];
@@ -2113,41 +2271,59 @@ impl BlendedNoise {
 
         let mut d8 = [0f64; 4];
         let mut d9 = [0f64; 4];
-        let mut amp = 1.0f64;
-        for i in 0..16usize {
-            let mut dx = [0f64; 4];
-            let mut dy = [0f64; 4];
-            let mut dz = [0f64; 4];
-            let mut dyy = [0f64; 4];
-            let mut ymax = [0f64; 4];
-            for l in 0..4 {
-                dx[l] = wrap(d0[l] * amp);
-                dy[l] = wrap(d1[l] * amp);
-                dz[l] = wrap(d2[l] * amp);
-                dyy[l] = d6 * amp;
-                ymax[l] = d1[l] * amp;
+        if avx2_available() {
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                blend_minmax_loop_avx2(
+                    &self.min_noise,
+                    &self.max_noise,
+                    &d0,
+                    &d1,
+                    &d2,
+                    d6,
+                    &skip_min,
+                    &skip_max,
+                    &mut d8,
+                    &mut d9,
+                );
             }
-            if !skip_min.iter().all(|s| *s) {
-                if let Some(oct) = self.min_noise.get_octave_noise(i) {
-                    let v = oct.noise_5_batch(&dx, &dy, &dz, dyy[0], &ymax);
-                    for l in 0..4 {
-                        if !skip_min[l] {
-                            d8[l] += v[l] / amp;
+        } else {
+            let mut amp = 1.0f64;
+            for i in 0..16usize {
+                let mut dx = [0f64; 4];
+                let mut dy = [0f64; 4];
+                let mut dz = [0f64; 4];
+                let mut dyy = [0f64; 4];
+                let mut ymax = [0f64; 4];
+                for l in 0..4 {
+                    dx[l] = wrap(d0[l] * amp);
+                    dy[l] = wrap(d1[l] * amp);
+                    dz[l] = wrap(d2[l] * amp);
+                    dyy[l] = d6 * amp;
+                    ymax[l] = d1[l] * amp;
+                }
+                if !skip_min.iter().all(|s| *s) {
+                    if let Some(oct) = self.min_noise.get_octave_noise(i) {
+                        let v = oct.noise_5_batch(&dx, &dy, &dz, dyy[0], &ymax);
+                        for l in 0..4 {
+                            if !skip_min[l] {
+                                d8[l] += v[l] / amp;
+                            }
                         }
                     }
                 }
-            }
-            if !skip_max.iter().all(|s| *s) {
-                if let Some(oct) = self.max_noise.get_octave_noise(i) {
-                    let v = oct.noise_5_batch(&dx, &dy, &dz, dyy[0], &ymax);
-                    for l in 0..4 {
-                        if !skip_max[l] {
-                            d9[l] += v[l] / amp;
+                if !skip_max.iter().all(|s| *s) {
+                    if let Some(oct) = self.max_noise.get_octave_noise(i) {
+                        let v = oct.noise_5_batch(&dx, &dy, &dz, dyy[0], &ymax);
+                        for l in 0..4 {
+                            if !skip_max[l] {
+                                d9[l] += v[l] / amp;
+                            }
                         }
                     }
                 }
+                amp /= 2.0;
             }
-            amp /= 2.0;
         }
         let mut out = [0f64; 4];
         for l in 0..4 {

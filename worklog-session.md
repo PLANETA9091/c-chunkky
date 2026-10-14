@@ -1021,3 +1021,34 @@ Work Log:
 Stage Summary:
 - wall 1.81 -> ~1.75 (ore gate). slice 0.75 — следующий таргет (blended
   0.57, floor-оценка 0.45-0.50: fusion min/max, y-prep sharing).
+
+---
+Task ID: cont-37 (2026-10-15, blended prep vectorization + TF-домены)
+Agent: Super Z (main)
+Task: slice/blended floor
+
+Work Log:
+- ПРОФАЙЛ prep-vs-kernel: первый probe (CRUS_BLEND_NOPROBE в скалярной
+  ветке) показал "prep 66%" — ОКАЗАЛОСЬ неверно (probe мерил скалярный
+  fallback, а горячий путь — AVX2-ядро). Реальный split: ядро noise_5
+  доминирует (40 октав-вызовов x ~88нс), prep даёт лишь ~4%.
+- Векторизация wrap-подготовки (wrap_v = d - floor(d*2^-25 + 0.5)*2^25,
+  vroundpd; v/amp -> v*2^k — точные степени двойки, бит-эквивалент):
+  - ВАРИАНТ inline в non-TF compute_batch: 3.70 -> 6.02us — КАТАСТРОФА
+    (AVX-SSE transition penalties на каждой скалярной операции между
+    ymm-блоками; второй случай за день — см. ore-gate AVX2).
+  - ВАРИАНТ в #[target_feature] функциях (blend_main_loop_avx2 +
+    blend_minmax_loop_avx2, прямой вызов noise_5_batch_avx2_direct): 
+    3.70 -> 3.56us (-4%), acc бит-идентичен. ПРИНЯТ.
+- УРОК ДНЯ (дважды): весь ymm-код — только внутри target_feature-функций;
+  inline ymm между скалярными блоками в общем коде = transition-штрафы,
+  превышающие выгоду векторизации в разы.
+- compute_batch8/col-варианты не тронуты (та же схема при необходимости).
+- Golden 8x4 bit-identical, 13/13 unit, phases wall ~1.84 (slice ~0.79).
+
+Stage Summary:
+- Blended floor подтверждён: ядро noise_5_batch_avx2 (walk+dots+setup) —
+  88нс/октаву-батч — дальнейший скепсис только через pipelining walk'ов
+  (убывающая отдача). blended ~0.55 локально.
+- wall 1.80-1.84: slice 0.78 + cellfill 0.36 + material 0.45-0.47 + other
+  0.22. С начала сессии: material 0.53 -> 0.46, blended -4%, env-фикс для CI.
