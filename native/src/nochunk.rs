@@ -492,6 +492,7 @@ pub static PRELIM_SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 pub static PRELIM_SCAN_STEPS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub static AQ_FLUID_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static AQ_FLUID_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 // Ore-path breakdown (CRUS_DIAG=1): localize the per-block ore cost.
 pub static ORE_TOGGLE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static ORE_TOGGLE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1117,7 +1118,7 @@ impl<'e> ChunkGen<'e> {
             PRELIM_SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let ch = self.cell_height as i32;
-        if std::env::var("CRUS_PRELIM_SCALAR").is_ok() {
+        if prelim_scalar_mode() {
             while y >= self.min_y {
                 let d = self.eval_fresh(
                     self.initial_density,
@@ -1493,6 +1494,25 @@ pub static SLOT0_CONST_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 pub fn yconst_off() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| std::env::var("CRUS_NO_YCONST").ok().as_deref() == Some("1"))
+}
+
+/// TEMP DEBUG switches cached ONCE (cont-35): env::var takes the process
+/// environ lock — calling it per cell / per scan serializes parallel fill
+/// workers against each other and against Paper's own threads (on the CI
+/// judge that measured material 1.88ms vs 0.53 local).
+pub fn gate_debug() -> bool {
+    static G: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *G.get_or_init(|| std::env::var("CRUS_GATE_DEBUG").is_ok())
+}
+
+fn prelim_scalar_mode() -> bool {
+    static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *P.get_or_init(|| std::env::var("CRUS_PRELIM_SCALAR").is_ok())
+}
+
+fn fake_fluid_mode() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var("CRUS_FAKE_FLUID").is_ok())
 }
 
 #[inline]
@@ -2616,7 +2636,7 @@ impl<'e> ChunkGen<'e> {
                     }
                     // TEMP DEBUG: verify interval soundness against the real
                     // cellfill values (verdict==0 cells only).
-                    if std::env::var("CRUS_GATE_DEBUG").is_ok() && verdict == 0 {
+                    if gate_debug() && verdict == 0 {
                         if let Some(prog) = self.cellfill_prog.as_deref() {
                             if let Some((ilo, ihi)) = crate::density::cell_interval(
                                 prog,
@@ -2637,7 +2657,8 @@ impl<'e> ChunkGen<'e> {
                                         "INTERVAL VIOLATION cell(i2={i2},i3={i3},i5={i5}): real [{rmin:.6}, {rmax:.6}] interval [{ilo:.6}, {ihi:.6}]"
                                     );
                                 }
-                                if std::env::var("CRUS_GATE_DEBUG").as_deref() == Ok("2")
+                                if gate_debug()
+                                    && std::env::var("CRUS_GATE_DEBUG").as_deref() == Ok("2")
                                     && (40..48).contains(&cell_start_block_y)
                                 {
                                     eprintln!(
@@ -3583,6 +3604,23 @@ impl<'e> ChunkGen<'e> {
     fn compute_aquifer_fluid(&mut self, x: i32, y: i32, z: i32) -> FluidStatus {
         if crate::density::PROF_ON.load(std::sync::atomic::Ordering::Relaxed) {
             AQ_FLUID_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let t0 = std::time::Instant::now();
+            let r = self.compute_aquifer_fluid_inner(x, y, z);
+            AQ_FLUID_NS.fetch_add(
+                t0.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            r
+        } else {
+            self.compute_aquifer_fluid_inner(x, y, z)
+        }
+    }
+
+    fn compute_aquifer_fluid_inner(&mut self, x: i32, y: i32, z: i32) -> FluidStatus {
+        if fake_fluid_mode() {
+            // PERF-PROBE ONLY (wrong results): measure the ceiling of the
+            // fluid-resolution win. Never shipped.
+            return self.global_fluid(y);
         }
         let fluid_status = self.global_fluid(y);
         let mut min_surface = i32::MAX;

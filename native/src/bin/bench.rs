@@ -351,11 +351,13 @@ fn cmd_perf(n: usize) {
         PRELIM_SCAN_STEPS.load(std::sync::atomic::Ordering::Relaxed),
     );
     println!(
-        "aq3: prelim_ns {:.3}ms (12scan-only {:.3}ms)",
+        "aq3: prelim_ns {:.3}ms (12scan-only {:.3}ms) | fluid_ns {:.3}ms/{} calls",
         g(crussty_chunkgen::nochunk::PRELIM_NS.load(std::sync::atomic::Ordering::Relaxed)) / 1e6,
         (AQ_SCAN_NS.load(std::sync::atomic::Ordering::Relaxed)
             - crussty_chunkgen::nochunk::PRELIM_NS.load(std::sync::atomic::Ordering::Relaxed)) as f64
             / n as f64 / 1e6,
+        g(crussty_chunkgen::nochunk::AQ_FLUID_NS.load(std::sync::atomic::Ordering::Relaxed)) / 1e6,
+        g(AQ_FLUID_CALLS.load(std::sync::atomic::Ordering::Relaxed)),
     );
     println!(
         "aq2: scan_ns {:.3}ms post_ns {:.3}ms (post = substance - hits - scan)",

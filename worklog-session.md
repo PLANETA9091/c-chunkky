@@ -955,3 +955,35 @@ Stage Summary:
   проекция окна на Turin ~1.5-1.7; (3) fusion min/max — мелочь.
 - 1ms end-to-end на СЕГОДНЯШНЕМ пуле недостижим (нужен Turin-класс +
   ещё ~35% среза native). Плато ~2.4-2.5 на Intel подтверждено данными.
+
+---
+Task ID: cont-35 (2026-10-15, env-lock fix + material decomposition)
+Agent: Super Z (main)
+Task: "Продолжи до 1мс" — атака material-фазы (последняя крупная)
+
+Work Log:
+- CI вердикт HEAD 3278012: судья PASS 0.002%/0.002%, но на этом раннере
+  native=3.31 (par_planes=2.37, material=1.88) — контенция. Изолированный
+  par-2t: 1.59 Intel / 0.92 Turin.
+- ЛОКАЛЬНАЯ ДЕКОМПОЗИЦИЯ (phases, медианы из 5): wall 1.85 = slice 0.75
+  (blended ~0.57 floor) + cellfill 0.36 + material 0.51 + other 0.23.
+  Material разобран probe-ами: loop+row4 = 0.16 НЕИЗБЕЖНО, fluid-резолвы =
+  0.15-0.16 (242-319 вызовов, ~0.5us каждый), ore = 0.19 (34k finish по ~5ns).
+- ГЛАВНОЕ: найден env::var("CRUS_GATE_DEBUG") в per-cell цикле cellfill —
+  768 вызовов/fill на процессе-environ локе! На CI параллельные fill-воркеры
+  сериализовались на glibc environ-мьютексе => material 1.88 на CI vs 0.53
+  локально. Это и был главный разрыв CI-vs-local. Заодно CRUS_PRELIM_SCALAR
+  (per prelim scan) и CRUS_FAKE_FLUID (probe) — все через OnceLock теперь.
+  Урок cont-32 ("env::var стоил 3%") применим тут в 10x большем масштабе.
+- Оценка fluid-батчинга (prewarm 4-wide через eval_batch<4>, lane-identical):
+  потолок 0.15 локально + устранение дубликатов резолвов на CI (429 vs 306).
+- Локально после фикса: cellfill 0.40 -> 0.36; golden 8x4 bit-identical;
+  13/13 unit.
+
+Stage Summary:
+- Коммит: env-lock fix (критично для CI-окна при параллельных fill).
+- Далее: (1) CI-проверка окна после фикса; (2) fluid batch-resolve в
+  12-cell скане (319 scalar eval -> ~80 4-wide, экономия ~0.10 локально и
+  дедуп на CI); (3) ore finish 4-lane gate (0.19 -> ~0.14); (4) blended
+  floor 0.45-0.50 (fusion min/max, y-prep).
+- Прогноз: native serial 1.85 -> ~1.55; окно на Turin ~1.0-1.1.
