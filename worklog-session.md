@@ -1168,3 +1168,48 @@ Stage Summary:
 - Реалистичный путь к 1ms: выделенные Turin/GR раннеры (self-hosted) без
   контенции — bench parallel-2t p50 уже 1.29 (Turin); останется срезать
   ~0.3ms native (cellfill/material хвосты) и ~0.3 plugin/layout.
+
+---
+Task ID: cont-40 (2026-10-15, ПРОФИЛЬ С ДАТАПАКАМИ: Terralith+Tectonic vs vanilla)
+Agent: Super Z (main)
+Task: снять профиль генерации с датапаками (без их изменения), увидеть что оптимизировать до 1ms
+
+Work Log:
+- Инфраструктура профилирования: harness/prof_session.sh (fresh world + warmup + окно 12x12 +
+  spark), harness/sampler_session.sh (JFR через jcmd attach ПОСЛЕ прогрева, ExecutionSample 10ms /
+  NativeMethodSample 20ms), scripts/analyze_jfr.py (атрибуция leaf->root по пайплайну), rcon.py —
+  drain multi-packet (Paper режет многострочные ответы crusgenstats -> терялись [cpu]/jni_prof).
+- ЛОВУШКА: Paper RCON доставляет только ОДИН sendMessage команды — три строки crusgenstats
+  склеены в одну в плагине (plugin rebuilt; CI собирает из исходников, grep'ы харнесса целы).
+- ЛОВУШКА: jstack/jcmd отсутствуют в JRE-боксе — найден полный JDK в /home/z/tools/jdk-21.0.12.1+1.
+  'jfr print' без --stack-depth режет стеки до 5 кадров — всегда --stack-depth 64.
+- Замеры (2-core sandbox, Xeon, avx512f=true; окно 144 чанка, JIT-прогрев вне окна):
+  * END-TO-END: dp 167.58 ms/chunk vs vanilla 167.76 ms/chunk — РАВНЫ. Выигрыш нативной
+    noise-стадии полностью съеден Java-стадиями датапака.
+  * NATIVE FILL (dp, под нагрузкой): mean 16.27ms p50 11.34 (290 fills); jni_prof wall 13.45
+    par_planes 2.50 par_strips 4.01; layout 1.73. Изолированный fill ~1.8ms -> ~13ms = контенция
+    2 ядер (2 Rust-потока fill + Paper worker + JFR).
+  * JFR-раскладка воркера: dp — biomes(+surface-biome-cond) 43.4% (~63ms/чанк), buildSurface
+    25.1% (~36ms), features 7.8%, noise-eval-other 6.7% (getBaseHeight->NoiseChunk density
+    eval), sched 5.2%, codec_deser 1.7%, ZIP-чтения датапака в structures; fillFromNoise(JNI)
+    0.6%. van — fillFromNoise(Java) 66.1% (~77ms/чанк) — то, что натив убивает на ваниле.
+- ВЕРДИКТ: на датапаках ядро шума больше НЕ бутылочное горлышко. Топ: (1) биомы ~43%
+  (MultiNoise по списку биомов Tectonic + biome-условия surface-правил Terralith + ленивый
+  codec/tag churn), (2) surface-правила датапака ~25% (Java), (3) height-запросы фич/структур
+  ~12% суммарно, (4) codec/ZIP-ресурс-чурн.
+- КРИТИЧЕСКИЙ КОНСТАТ: нативный движок строит рельеф из ВСТРОЕННЫХ ванильных JSON — из датапака
+  берётся только sea_level (63). Tectonic несёт свой noise_settings/overworld.json (100KB, 218
+  density-функций) — натив его игнорирует => dp5k-мир «химера»: форма ванильная, биомы/сурфейс/
+  фичи датапакные. Бит-паритет с настоящим Terralith+Tectonic НИКОГДА не проверялся (CI-judge
+  datapack = crussty-custom sea-level pack).
+- Дорога к 1ms с датапаками: A) нативный парсинг датапак-JSON (машина json.rs/worldgen.rs/
+  density.rs уже generic; нужен загрузчик паков + бит-парити харнесс против Java-eval), B)
+  нативный biome/climate takeover, C) нативные surface-правила для датапак-деревьев, D) нативный
+  height-сервис для placement'а, E) пре-резолв датапак-объектов на буте.
+
+Stage Summary:
+- Профиль снят и разобран; директория артефактов: reference/prof_analysis_dp.txt,
+  prof_session_{dp_prof,van_prof}.txt, sampler_{dp_samp,van_samp}.txt, jfr_{dp,van}_samp.jfr
+  (бинарники локально, ~23MB, в git не идут). spark: dp 518fd8Iu1W, van sWZknWKDUU.
+- Плановая скорость с датапаками сейчас: ~168ms/чанк end-to-end (2-core sandbox); нативная
+  стадия p50 ~11-13ms под нагрузкой. Следующий фронт — A (натив-датапак JSON), затем B (биомы).

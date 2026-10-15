@@ -59,7 +59,22 @@ def command(sock: socket.socket, cmd: str, req_id: int = 2) -> str:
     rid, rtype, body = read_packet(sock)
     if rtype != SERVERDATA_RESPONSE_VALUE:
         raise ProtocolError(f"unexpected response type {rtype}")
-    return body
+    out = body
+    # Paper may split multi-line command output (e.g. crusgenstats' three
+    # sendMessage lines) across several RESPONSE_VALUE packets — drain them
+    # with a short idle timeout instead of dropping everything after packet 1.
+    sock.settimeout(0.3)
+    while True:
+        try:
+            rid, rtype, more = read_packet(sock)
+        except (socket.timeout, TimeoutError):
+            break
+        if rtype == SERVERDATA_RESPONSE_VALUE and more:
+            out += "\n" + more
+        else:
+            break
+    sock.settimeout(600.0)
+    return out
 
 
 class ProtocolError(RuntimeError):

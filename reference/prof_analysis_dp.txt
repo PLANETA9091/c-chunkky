@@ -1,0 +1,87 @@
+profile analysis — Terralith 2.5.13 + Tectonic 3.0.25 (datapacks unchanged) vs vanilla Paper 1.21.8
+====================================================================================================
+date: 2026-10-15  box: local 2-core sandbox, "Intel(R) Xeon(R) Processor", avx2=1 avx512f=1
+seed 3257840388504953787; CRUS_ALLOW_PARALLEL=1 CRUS_FILL_THREADS=2 heap 1-2G; gen-parallelism true
+protocol: fresh world, JIT warmup 8x8 (outside window), steady window 12x12 chunks (144),
+          Paper Common Worker = the single gen-worker thread that runs the pipeline.
+tooling: harness/prof_session.sh (wall + crusgenstats) + harness/sampler_session.sh
+         (JFR via jcmd, ExecutionSample 10ms / NativeMethodSample 20ms, stack-depth 64)
+note: JFR inflates walls ~2.2x; attribution shares unaffected. Non-JFR walls are canonical.
+
+1) END-TO-END (no JFR, fresh 144-chunk windows)
+---------------------------------------------------------------------
+datapack (dp5k, CrusstyGen native noise): window 24131ms/144 = 167.58 ms/chunk
+                                          steady batches: 101.3 / 148.4 / 113.3 ms/chunk
+vanilla control (vanprof, Paper gen):     window 24157ms/144 = 167.76 ms/chunk
+=> EQUAL. The native noise-stage win is fully offset by datapack Java-side stages.
+
+2) NATIVE STAGE (datapack world, under load)
+---------------------------------------------------------------------
+crusgenstats: fills=290 (144 full + ring) mean=16.27ms p50=11.34ms p99=54.5ms
+jni_prof:     wall=13.45ms/fill  par_planes=2.50  par_strips=4.01  (slice/cellfill/material
+              unmeasured in this run: CRUS_PROFILE not set; par buckets unconditional)
+GenStats:     layout=1.73ms marks=0.03ms beard=0.06ms; marks_seen=landed, bridge_err=0
+Reference:    isolated fill on vanilla configs ~1.8ms -> here ~13ms = 2-core contention
+              (2 Rust fill threads + Paper worker + JFR). On CI 4-core fills ran ~2.5-3.6ms.
+
+3) JAVA WORKER TIME SPLIT (JFR, first-match leaf->root attribution)
+---------------------------------------------------------------------
+dp world (2082 exec samples = 20.8s worker CPU, ~145ms/chunk):
+  fillBiomes*              43.4%  (~63ms/chunk)  *incl. Terralith surface-rule biome
+                                                conditions + MultiNoise (Tectonic biome
+                                                list) + codec/tag lazy-resolution churn
+  buildSurface             25.1%  (~36ms/chunk)  Terralith surface rule trees (Java)
+  features                  7.8%  (~11ms/chunk)
+  noise_eval_other          6.7%  (~10ms/chunk)  getBaseHeight->NoiseChunk density evals
+  chunk_sched_io            5.2%
+  hQuery_getBaseHeight      4.8%
+  carver                    2.7%
+  codec_deser               1.7%   com.mojang.serialization leaves inside noise/surface
+  structures_jigsaw         1.4%   + FilePackResources.getResource (datapack ZIP reads
+                                   DURING generation)
+  fillFromNoise (JNI)       0.6%   <- native takeover works
+van world (1689 samples = 16.9s, ~117ms/chunk):
+  fillFromNoise (Java)     66.1%  (~77ms/chunk)  <- what the native stage kills on vanilla
+  buildSurface              8.6%
+  features                  5.9%   fillBiomes 5.4%   sched 3.9%
+
+4) VERDICT — what stands between "datapacks" and 1ms
+---------------------------------------------------------------------
+The noise kernel is no longer the bottleneck on datapack worlds. Java stages dominate:
+  (1) BIOME RESOLUTION ~43% of worker CPU. MultiNoise RTree over Tectonic's biome
+      parameter list per quart + Terralith surface-rule biome conditions + lazy
+      codec/tag resolution under them.
+  (2) SURFACE RULES ~25%. Datapack rule trees evaluated in Java NoiseBasedChunkGenerator.
+  (3) FEATURE/STRUCTURE HEIGHT QUERIES ~12% combined. Each getBaseHeight evaluates the
+      (datapack) density function in Java; features add placement overhead.
+  (4) Resource churn: codec deserialization + datapack ZIP reads mid-generation.
+
+5) CRITICAL CAVEAT — current datapack world is a chimera
+---------------------------------------------------------------------
+The native engine generates from EMBEDDED vanilla worldgen JSONs (worldgen.rs
+WorldGen::load -> crate::asset()); from the datapack it honors ONLY the resolved
+sea level (63 here). Tectonic ships its own noise_settings/overworld.json (100KB,
+218 density_function files); Terralith adds its own DFs/noise_settings/surface rules.
+=> dp5k terrain SHAPE is vanilla; biomes/surface-rules/features are datapack.
+   Speed profile above is representative of the Java-side pipeline cost, but
+   bit-parity vs real Terralith/Tectonic vanilla output has NEVER been verified
+   (CI judge datapack parity = crussty-custom sea-level pack only).
+
+6) ROADMAP to 1ms with datapacks (datapacks not modified)
+---------------------------------------------------------------------
+  A. Native datapack-JSON worldgen: parse the pack's noise_settings + density_function +
+     noise assets in the Rust engine (json.rs/worldgen.rs/density.rs machinery is already
+     generic; missing piece is loading pack assets + bit-parity harness vs Paper Java
+     eval of the same JSONs). Without this the world is not the datapack's world.
+  B. Native biome/climate takeover (fillBiomesFromNoise + surface biome conditions) —
+     biggest single Java line item (~63ms/chunk here).
+  C. Native surface-rule engine extended to datapack rule trees (~36ms/chunk).
+  D. Native height-query service for feature/structure placement (kill Java
+     getBaseHeight density evals).
+  E. Pre-resolve datapack objects at boot (no per-chunk codec decode / ZIP reads).
+  F. Native fill contention: keep fill threads <= cores-1 on 2-core boxes; measure
+     with CRUS_PROFILE=1 for slice/cellfill/material split under load.
+
+artifacts: reference/prof_session_{dp_prof,van_prof}.txt, reference/sampler_{dp_samp,van_samp}.txt,
+           reference/jfr_{dp_samp,van_samp}.jfr (+ .txt printouts, local-only, ~23MB)
+spark (independent): dp https://spark.lucko.me/518fd8Iu1W  vanilla https://spark.lucko.me/sWZknWKDUU

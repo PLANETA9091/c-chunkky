@@ -1,0 +1,6 @@
+# sampler session van_samp 2026-10-15T13:57:55Z world=vanprof gen=vanilla
+bukkit
+window_ms=37360
+--- crusgenstats (final) ---
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: no chunks generated yet | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00]
+

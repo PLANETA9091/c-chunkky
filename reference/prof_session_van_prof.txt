@@ -1,0 +1,16 @@
+# prof session van_prof 2026-10-15T13:25:48Z
+world=vanprof datapacks_dir=none fill_threads=2 parallel=1 heap=-Xms1G -Xmx2G
+052b8c9b5415f660127ef31fa1382b8e  server/paper.jar
+80757d73b5656b0c072b2c22d351e2c6  server/plugins/CrusstyGen.jar
+e9105b6ee420ea5365ab7da313f9e1e7  native/target/release/libcrussty_chunkgen.so
+--- measured window: 12x12 cx 32..43 cz 32..43 ---
+batch cz 32..34: 36 chunks in 10206 ms -> 283.5 ms/chunk
+batch cz 35..37: 36 chunks in 3843 ms -> 106.7 ms/chunk
+batch cz 38..40: 36 chunks in 5246 ms -> 145.7 ms/chunk
+batch cz 41..43: 36 chunks in 4844 ms -> 134.5 ms/chunk
+window_ms=24157 chunks=144 ms_per_chunk=167.76
+--- crusgenstats (final) ---
+[CrusstyGen] native noise stage: no chunks generated yet
+
+--- spark links in console ---
+https://spark.lucko.me/sWZknWKDUU

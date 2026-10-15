@@ -1,0 +1,18 @@
+# prof session dp_prof 2026-10-15T13:15:51Z
+world=dp5k datapacks_dir=server_datapacks fill_threads=2 parallel=1 heap=-Xms1G -Xmx2G
+18c29f1c871f71a96961af2664d7ae2e  01_tectonic.zip
+ee7f451a8d1a13b29090a08543bda46a  02_terralith.zip
+052b8c9b5415f660127ef31fa1382b8e  server/paper.jar
+80757d73b5656b0c072b2c22d351e2c6  server/plugins/CrusstyGen.jar
+e9105b6ee420ea5365ab7da313f9e1e7  native/target/release/libcrussty_chunkgen.so
+--- measured window: 12x12 cx 32..43 cz 32..43 ---
+batch cz 32..34: 36 chunks in 11037 ms -> 306.5 ms/chunk
+batch cz 35..37: 36 chunks in 3647 ms -> 101.3 ms/chunk
+batch cz 38..40: 36 chunks in 5345 ms -> 148.4 ms/chunk
+batch cz 41..43: 36 chunks in 4082 ms -> 113.3 ms/chunk
+window_ms=24131 chunks=144 ms_per_chunk=167.58
+--- crusgenstats (final) ---
+[CrusstyGen] native noise stage: chunks=637  mean=15249.7us  p50=9495.3us  p99=54059.7us  max=398652.2us  marks_seen=45279 marks_landed=45279 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0
+
+--- spark links in console ---
+https://spark.lucko.me/518fd8Iu1W

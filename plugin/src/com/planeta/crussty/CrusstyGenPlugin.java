@@ -48,12 +48,16 @@ public final class CrusstyGenPlugin extends JavaPlugin {
                 sender.sendMessage("[CrusstyGen] stats window reset");
                 return true;
             }
-            sender.sendMessage(cpuLine());
-            sender.sendMessage("[CrusstyGen] native noise stage: " + GenStats.snapshot());
+            // Paper RCON delivers only ONE sendMessage per command — join the
+            // three diagnostic lines into a single message or rcon consumers
+            // lose [cpu] and jni_prof (observed 2026-10-15, prof sessions).
+            StringBuilder sb = new StringBuilder(cpuLine())
+                    .append(" | [CrusstyGen] native noise stage: ").append(GenStats.snapshot());
             try {
-                sender.sendMessage("[CrusstyGen] " + ChunkGenNative.profStatsGlobal());
+                sb.append(" | [CrusstyGen] ").append(ChunkGenNative.profStatsGlobal());
             } catch (Throwable ignored) {
             }
+            sender.sendMessage(sb.toString());
             return true;
         }
         return false;
