@@ -1,0 +1,93 @@
+name: bench5k
+# One-off big-radius pregen benchmark with Terralith + Tectonic datapacks.
+# Manual dispatch only — this is a SPEED measurement (end-to-end wall per
+# chunk on a fresh world); block-for-block parity does not apply (the worlds
+# intentionally differ from vanilla reference dumps).
+on:
+  workflow_dispatch:
+    inputs:
+      radius_blocks:
+        description: "pregen square radius in blocks (5000 => 626x626 chunks)"
+        default: "5000"
+        required: false
+      wave_rows:
+        description: "chunk rows per forceload batch"
+        default: "16"
+        required: false
+
+jobs:
+  bench5k:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: native/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('native/Cargo.lock') }}
+      - name: Cache paper server (paperclip extraction)
+        uses: actions/cache@v4
+        with:
+          path: |
+            server/versions
+            server/libraries
+            server/paper.jar
+          key: paper-1.21.8-b60
+
+      - name: Build native (release)
+        working-directory: native
+        run: cargo build --release --locked || cargo build --release
+      - name: Build plugin + probe
+        run: |
+          chmod +x plugin/build.sh probe/build.sh
+          ./plugin/build.sh
+          ./probe/build.sh
+      - name: Bootstrap server dir (paper.jar + eula + props)
+        run: |
+          chmod +x harness/bootstrap_server.sh
+          bash harness/bootstrap_server.sh 60
+
+      - name: Fetch Terralith + Tectonic (Modrinth, MC 1.21.8)
+        run: python3 scripts/fetch_datapacks.py server_datapacks 1.21.8
+
+      - name: Runner CPU
+        run: |
+          grep -m1 "model name" /proc/cpuinfo || true
+          nproc; df -h . | tail -1
+
+      - name: Pregen radius bench (end-to-end, Terralith + Tectonic)
+        run: |
+          set -o pipefail
+          R="${{ inputs.radius_blocks || '5000' }}"
+          W="${{ inputs.world || 'dp5k' }}"
+          W="${W//\//_}"
+          CRUS_ALLOW_PARALLEL=1 CRUS_FRESH=1 \
+          CRUS_HEAP="-Xms1G -Xmx4G" \
+          CRUS_FILL_THREADS=2 \
+          CRUS_WAVE_ROWS="${{ inputs.wave_rows || '16' }}" \
+          CRUS_PREGEN_MAX_MIN=320 \
+          DATAPACKS_DIR=server_datapacks \
+            bash harness/pregen_radius.sh "$W" "$R" 2>&1 | tee pregen_${W}_r${R}.log
+          echo "=== summary ==="
+          grep -E "PREGEN RESULT|boot pregen done|batch0 \(" pregen_${W}_r${R}.log | tail -5
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pregen5k-${{ github.run_id }}
+          path: |
+            pregen_*.log
+            reference/pregen_*.txt
+            server/rss.log
+            server/run.out
+            server_datapacks/versions.txt
+          retention-days: 14
+          if-no-files-found: warn

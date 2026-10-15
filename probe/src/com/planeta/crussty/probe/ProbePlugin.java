@@ -49,10 +49,46 @@ public final class ProbePlugin extends JavaPlugin {
     public boolean onCommand(CommandSender sender, Command cmd, String label, String[] args) {
         switch (cmd.getName()) {
             case "crusstatus": return status(sender);
+            case "crusfull": return fullCount(sender, args);
             case "crusstydump": return dumpOne(sender, args);
             case "crusstydumpregion": return dumpRegion(sender, args);
             default: return false;
         }
+    }
+
+    /** crusfull <blockX1> <blockZ1> <blockX2> <blockZ2> [world] — exact count of
+     *  FULLY loaded chunks inside the rect. Completion signal for the big-radius
+     *  pregen: the global /crusgenstats chunks= counter also ticks for partial
+     *  neighbour chunks (noise stage runs on ring chunks), so it cannot be used
+     *  for per-batch completion arithmetic. */
+    private boolean fullCount(CommandSender sender, String[] args) {
+        if (args.length < 4) {
+            sender.sendMessage("usage: crusfull <x1> <z1> <x2> <z2> [world]");
+            return true;
+        }
+        int x1, z1, x2, z2;
+        try {
+            x1 = Integer.parseInt(args[0]);
+            z1 = Integer.parseInt(args[1]);
+            x2 = Integer.parseInt(args[2]);
+            z2 = Integer.parseInt(args[3]);
+        } catch (NumberFormatException e) {
+            sender.sendMessage("BAD_COORDS");
+            return true;
+        }
+        World w = resolveWorld(sender, args.length >= 5 ? args[4] : null);
+        if (w == null) return true;
+        int cxMin = Math.min(x1, x2) >> 4, cxMax = Math.max(x1, x2) >> 4;
+        int czMin = Math.min(z1, z2) >> 4, czMax = Math.max(z1, z2) >> 4;
+        int expect = (cxMax - cxMin + 1) * (czMax - czMin + 1);
+        int count = 0;
+        for (Chunk c : w.getLoadedChunks()) {
+            int cx = c.getX(), cz = c.getZ();
+            if (cx >= cxMin && cx <= cxMax && cz >= czMin && cz <= czMax) count++;
+        }
+        sender.sendMessage("FULL=" + count + "/" + expect
+                + " cx[" + cxMin + ".." + cxMax + "] cz[" + czMin + ".." + czMax + "]");
+        return true;
     }
 
     private World resolveWorld(CommandSender sender, String name) {

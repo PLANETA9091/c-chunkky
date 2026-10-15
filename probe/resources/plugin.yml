@@ -14,3 +14,6 @@ commands:
   crusstatus:
     description: Report loaded chunk count + test region summary
     usage: /<command>
+  crusfull:
+    description: Count fully loaded chunks inside a block rect (pregen completion signal)
+    usage: /<command> <x1> <z1> <x2> <z2> [world]

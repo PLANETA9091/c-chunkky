@@ -44,8 +44,17 @@ fi
 # that order => ~6k block diffs at chunk edges that are NOT parity bugs.
 # Forcing single-threaded generation makes decoration order strictly
 # forceload-order on BOTH sides (vanilla capture and judge) => deterministic.
+# CRUS_ALLOW_PARALLEL=1 opts OUT (big pregen benchmarks: determinism is
+# irrelevant there, and the single-worker path can wedge boot-edge chunks).
+PGEN_FLAG="-Dpaper.chunk-system.gen-parallelism=false"
 PGEN_YML="$ROOT/server/config/paper-global.yml"
-if [ -f "$PGEN_YML" ]; then
+if [ "${CRUS_ALLOW_PARALLEL:-0}" = "1" ]; then
+  PGEN_FLAG=""
+  if [ -f "$PGEN_YML" ]; then
+    # Paper writes the value quoted ('false') — replace the whole value token.
+    sed -i -E "s/^([[:space:]]*gen-parallelism:[[:space:]]*).*$/\1'true'/" "$PGEN_YML" || true
+  fi
+elif [ -f "$PGEN_YML" ]; then
   sed -i -E 's/^([[:space:]]*gen-parallelism:[[:space:]]*)(default|true)[[:space:]]*$/\1false/' "$PGEN_YML"
 fi
 
@@ -56,16 +65,17 @@ fi
 # the native fill during young collections (the judge tail max=163ms is a
 # GC pause signature). CRUS_SERIAL_GC=1 opts in; default kept for A/B.
 GC_FLAGS="-XX:CICompilerCount=2 -XX:ParallelGCThreads=2 -XX:ConcGCThreads=1"
-HEAP_ARGS="-Xms512M -Xmx1536M"
+# CRUS_HEAP lets big pregen runs size the heap up (judge default unchanged).
+HEAP_ARGS="${CRUS_HEAP:--Xms512M -Xmx1536M}"
 if [ "${CRUS_SERIAL_GC:-0}" = "1" ]; then
   # judge mode: SerialGC (no parallel GC threads stealing cores) + fixed heap
   # commit (Xms=Xmx-ish): heap resize during the measured window shows up as
   # multi-ms layout spikes on the 2-core box.
   GC_FLAGS="-XX:CICompilerCount=2 -XX:+UseSerialGC"
-  HEAP_ARGS="-Xms1G -Xmx1536M"
+  HEAP_ARGS="${CRUS_HEAP:--Xms1G -Xmx1536M}"
 fi
 java $HEAP_ARGS $JAVA_LIB_PATH_ARGS \
-  -Dpaper.chunk-system.gen-parallelism=false \
+  $PGEN_FLAG \
   $GC_FLAGS \
   -XX:NonProfiledCodeHeapSize=64m \
   -jar paper.jar nogui < run.in > run.out 2>&1 &
