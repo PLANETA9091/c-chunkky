@@ -1052,3 +1052,22 @@ Stage Summary:
   (убывающая отдача). blended ~0.55 локально.
 - wall 1.80-1.84: slice 0.78 + cellfill 0.36 + material 0.45-0.47 + other
   0.22. С начала сессии: material 0.53 -> 0.46, blended -4%, env-фикс для CI.
+
+---
+Task ID: cont-15 (2026-10-15, noise_5 pipelining + fluid lazy-fill experiment)
+Agent: Super Z (main)
+Task: (а) ядро noise_5 — pipelining walk'ов октав; (б) fluid — ленивый групповой rebatch; (в) долю Turin следить по [cpu]-лейблам
+
+Work Log:
+- (а) РЕАЛИЗОВАНО, бит-точно: (1) single AVX2-ядро — прямая запись градиентных компонент (byte round-trip через grad[][] удалён); (2) noise_5_batch_x2 — кросс-инстансный спаренный walk: два ImprovedNoise с независимыми входами (per-side cell setup + y_scale) в одном interleaved теле → 8 независимых perm-цепей вместо 2x4 последовательных; dual = обёртка над x2 с общими входами; (3) min/max в blended объединены: min и max октавы едят ИДЕНТИЧНЫЕ точки → один dual вместо двух singles на октаву/половину; (4) main-петля октав спарена (i, i+1) через x2 (порядок аккумуляции per-lane не тронут, amp — степень двойки, /2 и /4 точны). CRUS_PAIR_MAIN=0 — A/B-выключатель (дефолт on).
+- ЛОВУШКА №1: первый вариант dual разделял scalar setup между min/max — НЕВЕРНО: xo/yo/zo у октав РАЗНЫЕ. Исправлено до per-side setup.
+- ЛОВУШКА №2: первые замеры после main-pairing казались регрессией (5.26 vs 5.03) — оказался шум VM; A/B x7: paired slice ~2.49 vs seq ~2.52 — pairing оставлен.
+- (б) ЭКСПЕРИМЕНТ, ИЗМЕРЕН КАК ОТРИЦАТЕЛЬНЫЙ, ОТКАЧЕН: aquifer_fill_summary (12-ячеечный status-scan без дистанций) в material_row4 при sv==0 вместо bail. Инструментация (счётчики в worktree-OLD): fills=1868/16чанков (3989ns/call!), same=1852/notsame=16, fluid_resolves OLD==NEW (5105 — чистые функции, кэш), полные сканы OLD 11156 == NEW 9304+1868 (работа 1:1). Итог: material 1.31 -> 1.47 (+0.18); #[cold]+inline(never) вернул 0.07; чистый A/B: +0.05ms net. ПРИЧИНА: per-block путь УЖЕ ленив (first-touch scan ровно один на ячейку), row4-fill лишь добавлял вызов+layout-давление на горячие 21.5k быстрых рядов. Вывод: «ленивость» fluid уже достигнута архитектурой кэшей; группировка на уровне ряда не даёт нового dedup.
+- Верификация (а): 10 filldump-чанков побайтно == pre-change; НОВЫЙ ТЕСТ noise_5_dual_matches_two_singles (16 инстансов x 2500 итераций, dual-vs-singles по битам); lib-сюит 12/12.
+- Перф локально (median): slice 2.68 -> 2.46ms (-8%), wall 5.21 -> 4.96ms (-4.8%); noisemicro8 4-wide 18.4 -> 15.0 ns/sample; bench perf 12.62 -> ~12.5ms (в шуме).
+- (в) CI: [cpu]-лейблы пула проверяются при трекинге прогона (см. след. запись).
+
+Stage Summary:
+- Запушено b146a6a «perf(noise): pipelined octave walks». Ожидание CI: bench лучше на ~4-8% slice-доминации, judge без изменений (127/5 — паритет не тронут, бит-точность).
+- (б) закрыт как отрицательный результат с полной доказательной базой (счётчики в обоих билдах).
+- Следующие фронт1: NormalNoise/PerlinNoise octave-pairing тем же x2 (slot1-7 всё ещё скалярные с memo — вот где осталось много), фронт2: material 1.28ms (ore_vein 28.6k eval/чанк), фронт3: cellfill 1.05ms.
