@@ -1,0 +1,25 @@
+pregen report — CrusstyGen end-to-end square-radius pregen
+world=dp5k radius=320 blocks  chunk_square=[-20..19]  total_chunks=1600
+seed=3257840388504953787  datapacks=server_datapacks
+pack versions: tectonic	3.0.25-datapack	mc=1.21.8	https://cdn.modrinth.com/data/lWDHr9jE/versions/CmzMQNDL/tectonic-datapack-3.0.25.zip terralith	2.5.13	mc=1.21.8	https://cdn.modrinth.com/data/8oi3bsk5/versions/RFNry3l0/Terralith_1.21.5_v2.5.13.zip 
+date: 2026-10-15T13:01:08Z
+boot_full_chunks_in_spawn_square=121 (excluded from unique count)
+wall_ms=152858  chunks_generated=1479  ms_per_chunk=103.35226504394862  chunks_per_sec=9.675646678616754
+timeout_hit=0
+
+--- final crusgenstats (last 4096-chunk ring + [cpu]) ---
+[CrusstyGen] native noise stage: chunks=2179  mean=13294.5us  p50=8254.4us  p99=51798.9us  max=587161.3us  marks_seen=102035 marks_landed=102035 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0
+
+--- per-batch rates ---
+batch   1/10 rows cz= -20.. -17:    160/   160 chunks in    34.4s -> 214.80 ms/chunk (    4.7 chunks/s)
+batch   2/10 rows cz= -16.. -13:    160/   160 chunks in    14.4s ->  90.06 ms/chunk (   11.1 chunks/s)
+batch   3/10 rows cz= -12..  -9:    160/   160 chunks in    12.6s ->  78.84 ms/chunk (   12.7 chunks/s)
+batch   4/10 rows cz=  -8..  -5:    160/   160 chunks in    13.4s ->  83.99 ms/chunk (   11.9 chunks/s)
+batch   5/10 rows cz=  -4..  -1:    160/   160 chunks in    14.2s ->  88.86 ms/chunk (   11.3 chunks/s)
+batch   6/10 rows cz=   0..   3:    160/   160 chunks in    13.2s ->  82.46 ms/chunk (   12.1 chunks/s)
+batch   7/10 rows cz=   4..   7:    160/   160 chunks in    10.0s ->  62.24 ms/chunk (   16.1 chunks/s)
+batch   8/10 rows cz=   8..  11:    160/   160 chunks in    10.4s ->  65.00 ms/chunk (   15.4 chunks/s)
+batch   9/10 rows cz=  12..  15:    160/   160 chunks in    12.6s ->  78.96 ms/chunk (   12.7 chunks/s)
+batch  10/10 rows cz=  16..  19:    160/   160 chunks in    13.1s ->  82.16 ms/chunk (   12.2 chunks/s)
+
+world_size_on_disk=28M  disk: 7.4G free
