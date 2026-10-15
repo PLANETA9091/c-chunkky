@@ -970,6 +970,254 @@ impl ImprovedNoise {
         out
     }
 
+    /// Dual-instance 4-wide walk: `self` and `other` are evaluated on the SAME
+    /// input points with two interleaved permutation walks (8 independent load
+    /// chains instead of 2x4 exposed sequentially). Bit-exact vs two separate
+    /// noise_5_batch calls: each instance's own op sequence is unchanged.
+    pub fn noise_5_batch_dual(
+        &self,
+        other: &ImprovedNoise,
+        xin: &[f64; 4],
+        yin: &[f64; 4],
+        zin: &[f64; 4],
+        y_scale: f64,
+        y_max: &[f64; 4],
+    ) -> ([f64; 4], [f64; 4]) {
+        Self::noise_5_batch_x2(
+            self, xin, yin, zin, y_scale, y_max,
+            other, xin, yin, zin, y_scale, y_max,
+        )
+    }
+
+    /// Cross-instance paired walk: evaluates (a @ ptsA) and (b @ ptsB) with
+    /// fully independent inputs (and per-side y_scale) in ONE interleaved
+    /// body — the generalization of noise_5_batch_dual used to pipeline
+    /// consecutive octave walks. Bit-exact vs two separate noise_5_batch
+    /// calls.
+    #[allow(clippy::too_many_arguments)]
+    pub fn noise_5_batch_x2(
+        a: &ImprovedNoise,
+        xa: &[f64; 4],
+        ya: &[f64; 4],
+        za: &[f64; 4],
+        y_scale_a: f64,
+        y_max_a: &[f64; 4],
+        b: &ImprovedNoise,
+        xb: &[f64; 4],
+        yb: &[f64; 4],
+        zb: &[f64; 4],
+        y_scale_b: f64,
+        y_max_b: &[f64; 4],
+    ) -> ([f64; 4], [f64; 4]) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::arch::is_x86_feature_detected!("avx2") {
+                return unsafe {
+                    ImprovedNoise::noise_5_batch_x2_avx2(
+                        a, xa, ya, za, y_scale_a, y_max_a,
+                        b, xb, yb, zb, y_scale_b, y_max_b,
+                    )
+                };
+            }
+        }
+        (
+            a.noise_5_batch_scalar(xa, ya, za, y_scale_a, y_max_a),
+            b.noise_5_batch_scalar(xb, yb, zb, y_scale_b, y_max_b),
+        )
+    }
+
+    /// AVX2 core of the cross-instance paired walk. The cell setup is
+    /// PER-SIDE (xo/yo/zo differ between the two noise objects) but the two
+    /// setups and the two permutation walks are interleaved, exposing 8
+    /// independent load chains instead of 2x4 sequentially. Per-side op
+    /// sequences are identical to the single kernel — bit-exact.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn noise_5_batch_x2_avx2(
+        a: &ImprovedNoise,
+        xina: &[f64; 4],
+        yina: &[f64; 4],
+        zina: &[f64; 4],
+        y_scale_a: f64,
+        y_max_a: &[f64; 4],
+        b: &ImprovedNoise,
+        xinb: &[f64; 4],
+        yinb: &[f64; 4],
+        zinb: &[f64; 4],
+        y_scale_b: f64,
+        y_max_b: &[f64; 4],
+    ) -> ([f64; 4], [f64; 4]) {
+        use std::arch::x86_64::*;
+        // ---- two interleaved scalar cell setups (A and B) ----
+        let mut xia = [0i32; 4];
+        let mut yia = [0i32; 4];
+        let mut zia = [0i32; 4];
+        let mut dxa = [0f64; 4];
+        let mut dya = [0f64; 4];
+        let mut dza = [0f64; 4];
+        let mut d7a = [0f64; 4];
+        let mut xib = [0i32; 4];
+        let mut yib = [0i32; 4];
+        let mut zib = [0i32; 4];
+        let mut dxb = [0f64; 4];
+        let mut dyb = [0f64; 4];
+        let mut dzb = [0f64; 4];
+        let mut d7b = [0f64; 4];
+        for l in 0..4 {
+            // A: identical arithmetic to noise_5_batch_avx2 for a
+            {
+                let x = xina[l] + a.xo;
+                let y = yina[l] + a.yo;
+                let z = zina[l] + a.zo;
+                let c0 = mth_floor(x);
+                let c1 = mth_floor(y);
+                let c2 = mth_floor(z);
+                xia[l] = c0;
+                yia[l] = c1;
+                zia[l] = c2;
+                dxa[l] = x - c0 as f64;
+                dya[l] = y - c1 as f64;
+                dza[l] = z - c2 as f64;
+                if y_scale_a != 0.0 {
+                    let ym = y_max_a[l];
+                    let d6 = if ym >= 0.0 && ym < dya[l] { ym } else { dya[l] };
+                    d7a[l] = (d6 / y_scale_a + 1.0000000116860974e-07).floor() * y_scale_a;
+                }
+            }
+            // B: identical arithmetic for b (interleaved with A)
+            {
+                let x = xinb[l] + b.xo;
+                let y = yinb[l] + b.yo;
+                let z = zinb[l] + b.zo;
+                let c0 = mth_floor(x);
+                let c1 = mth_floor(y);
+                let c2 = mth_floor(z);
+                xib[l] = c0;
+                yib[l] = c1;
+                zib[l] = c2;
+                dxb[l] = x - c0 as f64;
+                dyb[l] = y - c1 as f64;
+                dzb[l] = z - c2 as f64;
+                if y_scale_b != 0.0 {
+                    let ym = y_max_b[l];
+                    let d6 = if ym >= 0.0 && ym < dyb[l] { ym } else { dyb[l] };
+                    d7b[l] = (d6 / y_scale_b + 1.0000000116860974e-07).floor() * y_scale_b;
+                }
+            }
+        }
+        let dxva = _mm256_loadu_pd(dxa.as_ptr());
+        let dyva = _mm256_loadu_pd(dya.as_ptr());
+        let dzva = _mm256_loadu_pd(dza.as_ptr());
+        let d7va = _mm256_loadu_pd(d7a.as_ptr());
+        let wdyva = _mm256_sub_pd(dyva, d7va);
+        let fxa = smoothstep_v(dxva);
+        let fya = smoothstep_v(dyva);
+        let fza = smoothstep_v(dzva);
+        let dxvb = _mm256_loadu_pd(dxb.as_ptr());
+        let dyvb = _mm256_loadu_pd(dyb.as_ptr());
+        let dzvb = _mm256_loadu_pd(dzb.as_ptr());
+        let d7vb = _mm256_loadu_pd(d7b.as_ptr());
+        let wdyvb = _mm256_sub_pd(dyvb, d7vb);
+        let fxb = smoothstep_v(dxvb);
+        let fyb = smoothstep_v(dyvb);
+        let fzb = smoothstep_v(dzvb);
+
+        // ---- interleaved perm walks: both instances in one lane loop ----
+        // Corner bit mapping matches the single kernel:
+        //   bit0 = X, bit1 = Y (weird_dy), bit2 = Z
+        let mut gxa = [[0i32; 4]; 8];
+        let mut gya = [[0i32; 4]; 8];
+        let mut gza = [[0i32; 4]; 8];
+        let mut gxb = [[0i32; 4]; 8];
+        let mut gyb = [[0i32; 4]; 8];
+        let mut gzb = [[0i32; 4]; 8];
+        for l in 0..4 {
+            // side A: independent 3-level chain
+            let pa0 = a.p(xia[l]);
+            let pa1 = a.p(xia[l] + 1);
+            let ia0 = a.p(pa0 + yia[l]);
+            let ia1 = a.p(pa0 + yia[l] + 1);
+            let ja0 = a.p(pa1 + yia[l]);
+            let ja1 = a.p(pa1 + yia[l] + 1);
+            let zca = zia[l];
+            let bases_a = [ia0 + zca, ja0 + zca, ia1 + zca, ja1 + zca];
+            // side B: independent chain interleaved with A's
+            let pb0 = b.p(xib[l]);
+            let pb1 = b.p(xib[l] + 1);
+            let ib0 = b.p(pb0 + yib[l]);
+            let ib1 = b.p(pb0 + yib[l] + 1);
+            let jb0 = b.p(pb1 + yib[l]);
+            let jb1 = b.p(pb1 + yib[l] + 1);
+            let zcb = zib[l];
+            let bases_b = [ib0 + zcb, jb0 + zcb, ib1 + zcb, jb1 + zcb];
+            for c in 0..8 {
+                let xbit = c & 1;
+                let ybit = (c >> 1) & 1;
+                let zbit = (c >> 2) & 1;
+                let idx = bases_a[ybit * 2 + xbit] + zbit as i32;
+                let gv = &GRADIENT[(a.p(idx) & 15) as usize];
+                gxa[c][l] = gv[0];
+                gya[c][l] = gv[1];
+                gza[c][l] = gv[2];
+                let jdx = bases_b[ybit * 2 + xbit] + zbit as i32;
+                let gw = &GRADIENT[(b.p(jdx) & 15) as usize];
+                gxb[c][l] = gw[0];
+                gyb[c][l] = gw[1];
+                gzb[c][l] = gw[2];
+            }
+        }
+
+        // ---- per-instance grad dots + lerp3 (register-friendly) ----
+        let one = _mm256_set1_pd(1.0);
+        let mut vc = [_mm256_setzero_pd(); 8];
+        for c in 0..8 {
+            let gx = _mm256_cvtepi32_pd(_mm_loadu_si128(gxa[c].as_ptr() as *const __m128i));
+            let gy = _mm256_cvtepi32_pd(_mm_loadu_si128(gya[c].as_ptr() as *const __m128i));
+            let gz = _mm256_cvtepi32_pd(_mm_loadu_si128(gza[c].as_ptr() as *const __m128i));
+            let xv = if c & 1 != 0 { _mm256_sub_pd(dxva, one) } else { dxva };
+            let yv = if c & 2 != 0 { _mm256_sub_pd(wdyva, one) } else { wdyva };
+            let zv = if c & 4 != 0 { _mm256_sub_pd(dzva, one) } else { dzva };
+            let t0 = _mm256_mul_pd(gx, xv);
+            let t1 = _mm256_mul_pd(gy, yv);
+            let t2 = _mm256_mul_pd(gz, zv);
+            vc[c] = _mm256_add_pd(_mm256_add_pd(t0, t1), t2);
+        }
+        let r0 = lerp_v(fxa, vc[0], vc[1]);
+        let r1 = lerp_v(fxa, vc[2], vc[3]);
+        let r01 = lerp_v(fya, r0, r1);
+        let r2 = lerp_v(fxa, vc[4], vc[5]);
+        let r3 = lerp_v(fxa, vc[6], vc[7]);
+        let r23 = lerp_v(fya, r2, r3);
+        let res_a = lerp_v(fza, r01, r23);
+
+        for c in 0..8 {
+            let gx = _mm256_cvtepi32_pd(_mm_loadu_si128(gxb[c].as_ptr() as *const __m128i));
+            let gy = _mm256_cvtepi32_pd(_mm_loadu_si128(gyb[c].as_ptr() as *const __m128i));
+            let gz = _mm256_cvtepi32_pd(_mm_loadu_si128(gzb[c].as_ptr() as *const __m128i));
+            let xv = if c & 1 != 0 { _mm256_sub_pd(dxvb, one) } else { dxvb };
+            let yv = if c & 2 != 0 { _mm256_sub_pd(wdyvb, one) } else { wdyvb };
+            let zv = if c & 4 != 0 { _mm256_sub_pd(dzvb, one) } else { dzvb };
+            let t0 = _mm256_mul_pd(gx, xv);
+            let t1 = _mm256_mul_pd(gy, yv);
+            let t2 = _mm256_mul_pd(gz, zv);
+            vc[c] = _mm256_add_pd(_mm256_add_pd(t0, t1), t2);
+        }
+        let r0 = lerp_v(fxb, vc[0], vc[1]);
+        let r1 = lerp_v(fxb, vc[2], vc[3]);
+        let r01 = lerp_v(fyb, r0, r1);
+        let r2 = lerp_v(fxb, vc[4], vc[5]);
+        let r3 = lerp_v(fxb, vc[6], vc[7]);
+        let r23 = lerp_v(fyb, r2, r3);
+        let res_b = lerp_v(fzb, r01, r23);
+
+        let mut outa = [0f64; 4];
+        let mut outb = [0f64; 4];
+        _mm256_storeu_pd(outa.as_mut_ptr(), res_a);
+        _mm256_storeu_pd(outb.as_mut_ptr(), res_b);
+        (outa, outb)
+    }
+
     /// 8-wide batch: AVX-512 native when available, otherwise two 4-wide
     /// AVX2 halves (lane-identical arithmetic in both — bit-exact vs noise_5).
     pub fn noise_5_batch8(
@@ -1421,6 +1669,15 @@ unsafe fn wrap_v(d: std::arch::x86_64::__m256d) -> std::arch::x86_64::__m256d {
     );
     let f = _mm256_floor_pd(q);
     _mm256_sub_pd(d, _mm256_mul_pd(f, _mm256_set1_pd(33554432.0)))
+}
+
+/// A/B switch for the octave-walk pairing (perf experiment; default on,
+/// CRUS_PAIR_MAIN=0 restores fully sequential octave walks — both the
+/// paired main walk and the min/max dual).
+fn pair_main_enabled() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var("CRUS_PAIR_MAIN").as_deref() != Ok("0"))
 }
 
 impl PerlinNoise {
@@ -1989,34 +2246,114 @@ unsafe fn blend_main_loop_avx2(
     d5: &[f64; 4],
     d7: f64,
     d10: &mut [f64; 4],
+    paired: bool,
 ) {
     use std::arch::x86_64::*;
     let d3v = _mm256_loadu_pd(d3.as_ptr());
     let d4v = _mm256_loadu_pd(d4.as_ptr());
     let d5v = _mm256_loadu_pd(d5.as_ptr());
-    let mut wx = [0f64; 4];
-    let mut wy = [0f64; 4];
-    let mut wz = [0f64; 4];
-    let mut ymax = [0f64; 4];
+    if !paired {
+        let mut wx = [0f64; 4];
+        let mut wy = [0f64; 4];
+        let mut wz = [0f64; 4];
+        let mut ymax = [0f64; 4];
+        let mut amp = 1.0f64;
+        let mut scale = 1.0f64;
+        for i in 0..8usize {
+            if let Some(oct) = main_noise.get_octave_noise(i) {
+                let av = _mm256_set1_pd(amp);
+                let xmv = _mm256_mul_pd(d3v, av);
+                _mm256_storeu_pd(wx.as_mut_ptr(), wrap_v(xmv));
+                let ymv = _mm256_mul_pd(d4v, av);
+                _mm256_storeu_pd(wy.as_mut_ptr(), wrap_v(ymv));
+                let zmv = _mm256_mul_pd(d5v, av);
+                _mm256_storeu_pd(wz.as_mut_ptr(), wrap_v(zmv));
+                _mm256_storeu_pd(ymax.as_mut_ptr(), ymv);
+                let v = oct.noise_5_batch_avx2_direct(&wx, &wy, &wz, d7 * amp, &ymax);
+                for l in 0..4 {
+                    d10[l] += v[l] * scale;
+                }
+            }
+            amp /= 2.0;
+            scale *= 2.0;
+        }
+        return;
+    }
+    // cont-38: consecutive octave pairs (i, i+1) run through one interleaved
+    // x2 walk (8 independent perm load chains instead of 2x4 sequential).
+    // Bit-exact: per-lane accumulation order is unchanged (octave i then
+    // i+1); v/amp stays an exact 2^k multiply. Missing amplitudes fall back
+    // to the single kernel for the surviving octave of the pair.
+    let mut wx1 = [0f64; 4];
+    let mut wy1 = [0f64; 4];
+    let mut wz1 = [0f64; 4];
+    let mut ymax1 = [0f64; 4];
+    let mut wx2 = [0f64; 4];
+    let mut wy2 = [0f64; 4];
+    let mut wz2 = [0f64; 4];
+    let mut ymax2 = [0f64; 4];
     let mut amp = 1.0f64;
     let mut scale = 1.0f64;
-    for i in 0..8usize {
-        if let Some(oct) = main_noise.get_octave_noise(i) {
-            let av = _mm256_set1_pd(amp);
-            let xmv = _mm256_mul_pd(d3v, av);
-            _mm256_storeu_pd(wx.as_mut_ptr(), wrap_v(xmv));
-            let ymv = _mm256_mul_pd(d4v, av);
-            _mm256_storeu_pd(wy.as_mut_ptr(), wrap_v(ymv));
-            let zmv = _mm256_mul_pd(d5v, av);
-            _mm256_storeu_pd(wz.as_mut_ptr(), wrap_v(zmv));
-            _mm256_storeu_pd(ymax.as_mut_ptr(), ymv);
-            let v = oct.noise_5_batch_avx2_direct(&wx, &wy, &wz, d7 * amp, &ymax);
-            for l in 0..4 {
-                d10[l] += v[l] * scale;
+    let mut i = 0usize;
+    while i < 8usize {
+        let amp_i = amp;
+        let amp_j = amp / 2.0; // exact: amp stays a power of two
+        let scale_i = scale;
+        let scale_j = scale * 2.0; // exact
+        let o1 = main_noise.get_octave_noise(i);
+        let o2 = if i + 1 < 8 { main_noise.get_octave_noise(i + 1) } else { None };
+        match (o1, o2) {
+            (Some(a), Some(b)) => {
+                let avi = _mm256_set1_pd(amp_i);
+                _mm256_storeu_pd(wx1.as_mut_ptr(), wrap_v(_mm256_mul_pd(d3v, avi)));
+                let ymvi = _mm256_mul_pd(d4v, avi);
+                _mm256_storeu_pd(wy1.as_mut_ptr(), wrap_v(ymvi));
+                _mm256_storeu_pd(wz1.as_mut_ptr(), wrap_v(_mm256_mul_pd(d5v, avi)));
+                _mm256_storeu_pd(ymax1.as_mut_ptr(), ymvi);
+                let avj = _mm256_set1_pd(amp_j);
+                _mm256_storeu_pd(wx2.as_mut_ptr(), wrap_v(_mm256_mul_pd(d3v, avj)));
+                let ymvj = _mm256_mul_pd(d4v, avj);
+                _mm256_storeu_pd(wy2.as_mut_ptr(), wrap_v(ymvj));
+                _mm256_storeu_pd(wz2.as_mut_ptr(), wrap_v(_mm256_mul_pd(d5v, avj)));
+                _mm256_storeu_pd(ymax2.as_mut_ptr(), ymvj);
+                let (v1, v2) = ImprovedNoise::noise_5_batch_x2_avx2(
+                    a, &wx1, &wy1, &wz1, d7 * amp_i, &ymax1,
+                    b, &wx2, &wy2, &wz2, d7 * amp_j, &ymax2,
+                );
+                for l in 0..4 {
+                    d10[l] += v1[l] * scale_i;
+                    d10[l] += v2[l] * scale_j;
+                }
             }
+            (Some(a), None) => {
+                let avi = _mm256_set1_pd(amp_i);
+                _mm256_storeu_pd(wx1.as_mut_ptr(), wrap_v(_mm256_mul_pd(d3v, avi)));
+                let ymvi = _mm256_mul_pd(d4v, avi);
+                _mm256_storeu_pd(wy1.as_mut_ptr(), wrap_v(ymvi));
+                _mm256_storeu_pd(wz1.as_mut_ptr(), wrap_v(_mm256_mul_pd(d5v, avi)));
+                _mm256_storeu_pd(ymax1.as_mut_ptr(), ymvi);
+                let v = a.noise_5_batch_avx2_direct(&wx1, &wy1, &wz1, d7 * amp_i, &ymax1);
+                for l in 0..4 {
+                    d10[l] += v[l] * scale_i;
+                }
+            }
+            (None, Some(b)) => {
+                let avj = _mm256_set1_pd(amp_j);
+                _mm256_storeu_pd(wx2.as_mut_ptr(), wrap_v(_mm256_mul_pd(d3v, avj)));
+                let ymvj = _mm256_mul_pd(d4v, avj);
+                _mm256_storeu_pd(wy2.as_mut_ptr(), wrap_v(ymvj));
+                _mm256_storeu_pd(wz2.as_mut_ptr(), wrap_v(_mm256_mul_pd(d5v, avj)));
+                _mm256_storeu_pd(ymax2.as_mut_ptr(), ymvj);
+                let v = b.noise_5_batch_avx2_direct(&wx2, &wy2, &wz2, d7 * amp_j, &ymax2);
+                for l in 0..4 {
+                    d10[l] += v[l] * scale_j;
+                }
+            }
+            (None, None) => {}
         }
-        amp /= 2.0;
-        scale *= 2.0;
+        amp /= 4.0; // exact: two halvings of a power of two
+        scale *= 4.0;
+        i += 2;
     }
 }
 
@@ -2056,25 +2393,44 @@ unsafe fn blend_minmax_loop_avx2(
         _mm256_storeu_pd(dz.as_mut_ptr(), wrap_v(_mm256_mul_pd(d2v, av)));
         _mm256_storeu_pd(ymax.as_mut_ptr(), ymv);
         let dyy = d6 * amp;
-        if !skip_min_all {
-            if let Some(oct) = min_noise.get_octave_noise(i) {
-                let v = oct.noise_5_batch_avx2_direct(&dx, &dy, &dz, dyy, &ymax);
+        // min/max share the same input points: when both sides are live for
+        // this octave, one dual walk replaces two singles (interleaved perm
+        // chains, bit-exact per lane — d8/d9 are separate accumulators, so
+        // each lane's per-side accumulation order is unchanged).
+        let mn = if !skip_min_all { min_noise.get_octave_noise(i) } else { None };
+        let mx = if !skip_max_all { max_noise.get_octave_noise(i) } else { None };
+        match (mn, mx) {
+            (Some(mn), Some(mx)) => {
+                let (vmin, vmax) = ImprovedNoise::noise_5_batch_x2_avx2(
+                    mn, &dx, &dy, &dz, dyy, &ymax,
+                    mx, &dx, &dy, &dz, dyy, &ymax,
+                );
+                for l in 0..4 {
+                    if !skip_min[l] {
+                        d8[l] += vmin[l] * scale;
+                    }
+                    if !skip_max[l] {
+                        d9[l] += vmax[l] * scale;
+                    }
+                }
+            }
+            (Some(mn), None) => {
+                let v = mn.noise_5_batch_avx2_direct(&dx, &dy, &dz, dyy, &ymax);
                 for l in 0..4 {
                     if !skip_min[l] {
                         d8[l] += v[l] * scale;
                     }
                 }
             }
-        }
-        if !skip_max_all {
-            if let Some(oct) = max_noise.get_octave_noise(i) {
-                let v = oct.noise_5_batch_avx2_direct(&dx, &dy, &dz, dyy, &ymax);
+            (None, Some(mx)) => {
+                let v = mx.noise_5_batch_avx2_direct(&dx, &dy, &dz, dyy, &ymax);
                 for l in 0..4 {
                     if !skip_max[l] {
                         d9[l] += v[l] * scale;
                     }
                 }
             }
+            (None, None) => {}
         }
         amp /= 2.0;
         scale *= 2.0;
@@ -2227,37 +2583,116 @@ impl BlendedNoise {
         let d6 = self.y_multiplier * self.smear_scale_multiplier;
         let d7 = d6 / self.y_factor;
 
-        // main noise loop, octaves 0..8 (REVERSED lookup [7-i])
-        // cont-36: the per-octave wrap/mul prep was ~2/3 of compute_batch
-        // (prep 2.45us vs kernels 1.25us of 3.70). The vectorized loop lives
-        // in a dedicated #[target_feature] fn (inline ymm in the non-TF body
-        // measured 3.70 -> 6.02us — AVX-SSE transition penalties).
+        // main noise loop, octaves 0..8 (REVERSED lookup [7-i]).
+        // cont-36: the vectorized wrap/mul prep lives in a dedicated
+        // #[target_feature] loop fn (inline ymm in the non-TF body measured
+        // 3.70 -> 6.02us — AVX-SSE transition penalties).
+        // cont-38: consecutive octave pairs (i, i+1) run through one
+        // interleaved x2 walk (pipelined perm chains, bit-exact per lane —
+        // each lane's accumulation order is unchanged: i then i+1).
+        // CRUS_PAIR_MAIN=0 falls back to sequential singles (A/B switch).
         let mut d10 = [0f64; 4];
+        let paired = pair_main_enabled();
         if avx2_available() {
             #[cfg(target_arch = "x86_64")]
             unsafe {
-                blend_main_loop_avx2(&self.main_noise, &d3, &d4, &d5, d7, &mut d10);
+                blend_main_loop_avx2(&self.main_noise, &d3, &d4, &d5, d7, &mut d10, paired);
             }
         } else {
             let mut amp = 1.0f64;
-            for i in 0..8usize {
-                if let Some(oct) = self.main_noise.get_octave_noise(i) {
-                    let mut wx = [0f64; 4];
-                    let mut wy = [0f64; 4];
-                    let mut wz = [0f64; 4];
-                    let mut ymax = [0f64; 4];
-                    for l in 0..4 {
-                        wx[l] = wrap(d3[l] * amp);
-                        wy[l] = wrap(d4[l] * amp);
-                        wz[l] = wrap(d5[l] * amp);
-                        ymax[l] = d4[l] * amp;
+            let mut i = 0usize;
+            while i < 8usize {
+                if !paired {
+                    // sequential fallback (original code path)
+                    if let Some(oct) = self.main_noise.get_octave_noise(i) {
+                        let mut wx = [0f64; 4];
+                        let mut wy = [0f64; 4];
+                        let mut wz = [0f64; 4];
+                        let mut ymax = [0f64; 4];
+                        for l in 0..4 {
+                            wx[l] = wrap(d3[l] * amp);
+                            wy[l] = wrap(d4[l] * amp);
+                            wz[l] = wrap(d5[l] * amp);
+                            ymax[l] = d4[l] * amp;
+                        }
+                        let v = oct.noise_5_batch(&wx, &wy, &wz, d7 * amp, &ymax);
+                        for l in 0..4 {
+                            d10[l] += v[l] / amp;
+                        }
                     }
-                    let v = oct.noise_5_batch(&wx, &wy, &wz, d7 * amp, &ymax);
-                    for l in 0..4 {
-                        d10[l] += v[l] / amp;
-                    }
+                    amp /= 2.0;
+                    i += 1;
+                    continue;
                 }
-                amp /= 2.0;
+                let amp_i = amp;
+                let amp_j = amp / 2.0; // exact: amp stays a power of two
+                let o1 = self.main_noise.get_octave_noise(i);
+                let o2 = if i + 1 < 8 { self.main_noise.get_octave_noise(i + 1) } else { None };
+                match (o1, o2) {
+                    (Some(a), Some(b)) => {
+                        let mut wx1 = [0f64; 4];
+                        let mut wy1 = [0f64; 4];
+                        let mut wz1 = [0f64; 4];
+                        let mut ymax1 = [0f64; 4];
+                        let mut wx2 = [0f64; 4];
+                        let mut wy2 = [0f64; 4];
+                        let mut wz2 = [0f64; 4];
+                        let mut ymax2 = [0f64; 4];
+                        for l in 0..4 {
+                            wx1[l] = wrap(d3[l] * amp_i);
+                            wy1[l] = wrap(d4[l] * amp_i);
+                            wz1[l] = wrap(d5[l] * amp_i);
+                            ymax1[l] = d4[l] * amp_i;
+                            wx2[l] = wrap(d3[l] * amp_j);
+                            wy2[l] = wrap(d4[l] * amp_j);
+                            wz2[l] = wrap(d5[l] * amp_j);
+                            ymax2[l] = d4[l] * amp_j;
+                        }
+                        let (v1, v2) = ImprovedNoise::noise_5_batch_x2(
+                            a, &wx1, &wy1, &wz1, d7 * amp_i, &ymax1,
+                            b, &wx2, &wy2, &wz2, d7 * amp_j, &ymax2,
+                        );
+                        for l in 0..4 {
+                            d10[l] += v1[l] / amp_i;
+                            d10[l] += v2[l] / amp_j;
+                        }
+                    }
+                    (Some(a), None) => {
+                        let mut wx = [0f64; 4];
+                        let mut wy = [0f64; 4];
+                        let mut wz = [0f64; 4];
+                        let mut ymax = [0f64; 4];
+                        for l in 0..4 {
+                            wx[l] = wrap(d3[l] * amp_i);
+                            wy[l] = wrap(d4[l] * amp_i);
+                            wz[l] = wrap(d5[l] * amp_i);
+                            ymax[l] = d4[l] * amp_i;
+                        }
+                        let v = a.noise_5_batch(&wx, &wy, &wz, d7 * amp_i, &ymax);
+                        for l in 0..4 {
+                            d10[l] += v[l] / amp_i;
+                        }
+                    }
+                    (None, Some(b)) => {
+                        let mut wx = [0f64; 4];
+                        let mut wy = [0f64; 4];
+                        let mut wz = [0f64; 4];
+                        let mut ymax = [0f64; 4];
+                        for l in 0..4 {
+                            wx[l] = wrap(d3[l] * amp_j);
+                            wy[l] = wrap(d4[l] * amp_j);
+                            wz[l] = wrap(d5[l] * amp_j);
+                            ymax[l] = d4[l] * amp_j;
+                        }
+                        let v = b.noise_5_batch(&wx, &wy, &wz, d7 * amp_j, &ymax);
+                        for l in 0..4 {
+                            d10[l] += v[l] / amp_j;
+                        }
+                    }
+                    (None, None) => {}
+                }
+                amp /= 4.0; // exact: two halvings of a power of two
+                i += 2;
             }
         }
         let mut d11b = [0f64; 4];
@@ -2302,25 +2737,42 @@ impl BlendedNoise {
                     dyy[l] = d6 * amp;
                     ymax[l] = d1[l] * amp;
                 }
-                if !skip_min.iter().all(|s| *s) {
-                    if let Some(oct) = self.min_noise.get_octave_noise(i) {
-                        let v = oct.noise_5_batch(&dx, &dy, &dz, dyy[0], &ymax);
+                // min/max share the same input points: when both sides are
+                // live for this octave, one dual walk replaces two singles
+                // (interleaved perm chains, bit-exact per lane).
+                let min_run = !skip_min.iter().all(|s| *s);
+                let max_run = !skip_max.iter().all(|s| *s);
+                let mn = if min_run { self.min_noise.get_octave_noise(i) } else { None };
+                let mx = if max_run { self.max_noise.get_octave_noise(i) } else { None };
+                match (mn, mx) {
+                    (Some(mn), Some(mx)) => {
+                        let (vmin, vmax) = mn.noise_5_batch_dual(mx, &dx, &dy, &dz, dyy[0], &ymax);
+                        for l in 0..4 {
+                            if !skip_min[l] {
+                                d8[l] += vmin[l] / amp;
+                            }
+                            if !skip_max[l] {
+                                d9[l] += vmax[l] / amp;
+                            }
+                        }
+                    }
+                    (Some(mn), None) => {
+                        let v = mn.noise_5_batch(&dx, &dy, &dz, dyy[0], &ymax);
                         for l in 0..4 {
                             if !skip_min[l] {
                                 d8[l] += v[l] / amp;
                             }
                         }
                     }
-                }
-                if !skip_max.iter().all(|s| *s) {
-                    if let Some(oct) = self.max_noise.get_octave_noise(i) {
-                        let v = oct.noise_5_batch(&dx, &dy, &dz, dyy[0], &ymax);
+                    (None, Some(mx)) => {
+                        let v = mx.noise_5_batch(&dx, &dy, &dz, dyy[0], &ymax);
                         for l in 0..4 {
                             if !skip_max[l] {
                                 d9[l] += v[l] / amp;
                             }
                         }
                     }
+                    (None, None) => {}
                 }
                 amp /= 2.0;
             }
@@ -2369,24 +2821,133 @@ impl BlendedNoise {
 
         let mut d10 = [0f64; 8];
         let mut amp = 1.0f64;
-        for i in 0..8usize {
-            if let Some(oct) = self.main_noise.get_octave_noise(i) {
-                let mut wx = [0f64; 8];
-                let mut wy = [0f64; 8];
-                let mut wz = [0f64; 8];
-                let mut ymax = [0f64; 8];
-                for l in 0..8 {
-                    wx[l] = wrap(d3[l] * amp);
-                    wy[l] = wrap(d4[l] * amp);
-                    wz[l] = wrap(d5[l] * amp);
-                    ymax[l] = d4[l] * amp;
+        // Octave pairs (i, i+1) through interleaved x2 walks, per 4-lane half.
+        // Bit-exact: per lane the accumulation order (i then i+1) and each
+        // walk's op sequence are unchanged; amp stays a power of two so the
+        // /2 and /4 steps are exact.
+        let mut i = 0usize;
+        while i < 8usize {
+            if !pair_main_enabled() {
+                // sequential fallback (original code path)
+                if let Some(oct) = self.main_noise.get_octave_noise(i) {
+                    let mut wx = [0f64; 8];
+                    let mut wy = [0f64; 8];
+                    let mut wz = [0f64; 8];
+                    let mut ymax = [0f64; 8];
+                    for l in 0..8 {
+                        wx[l] = wrap(d3[l] * amp);
+                        wy[l] = wrap(d4[l] * amp);
+                        wz[l] = wrap(d5[l] * amp);
+                        ymax[l] = d4[l] * amp;
+                    }
+                    let v = oct.noise_5_batch8(&wx, &wy, &wz, d7 * amp, &ymax);
+                    for l in 0..8 {
+                        d10[l] += v[l] / amp;
+                    }
                 }
-                let v = oct.noise_5_batch8(&wx, &wy, &wz, d7 * amp, &ymax);
-                for l in 0..8 {
-                    d10[l] += v[l] / amp;
-                }
+                amp /= 2.0;
+                i += 1;
+                continue;
             }
-            amp /= 2.0;
+            let amp_i = amp;
+            let amp_j = amp / 2.0;
+            let o1 = self.main_noise.get_octave_noise(i);
+            let o2 = if i + 1 < 8 { self.main_noise.get_octave_noise(i + 1) } else { None };
+            match (o1, o2) {
+                (Some(a), Some(b)) => {
+                    // half a: lanes 0-3 of both octaves
+                    let (va1, va2) = {
+                        let mut wx1 = [0f64; 4];
+                        let mut wy1 = [0f64; 4];
+                        let mut wz1 = [0f64; 4];
+                        let mut ymax1 = [0f64; 4];
+                        let mut wx2 = [0f64; 4];
+                        let mut wy2 = [0f64; 4];
+                        let mut wz2 = [0f64; 4];
+                        let mut ymax2 = [0f64; 4];
+                        for l in 0..4 {
+                            wx1[l] = wrap(d3[l] * amp_i);
+                            wy1[l] = wrap(d4[l] * amp_i);
+                            wz1[l] = wrap(d5[l] * amp_i);
+                            ymax1[l] = d4[l] * amp_i;
+                            wx2[l] = wrap(d3[l] * amp_j);
+                            wy2[l] = wrap(d4[l] * amp_j);
+                            wz2[l] = wrap(d5[l] * amp_j);
+                            ymax2[l] = d4[l] * amp_j;
+                        }
+                        ImprovedNoise::noise_5_batch_x2(
+                            a, &wx1, &wy1, &wz1, d7 * amp_i, &ymax1,
+                            b, &wx2, &wy2, &wz2, d7 * amp_j, &ymax2,
+                        )
+                    };
+                    // half b: lanes 4-7 of both octaves
+                    let (vb1, vb2) = {
+                        let mut wx1 = [0f64; 4];
+                        let mut wy1 = [0f64; 4];
+                        let mut wz1 = [0f64; 4];
+                        let mut ymax1 = [0f64; 4];
+                        let mut wx2 = [0f64; 4];
+                        let mut wy2 = [0f64; 4];
+                        let mut wz2 = [0f64; 4];
+                        let mut ymax2 = [0f64; 4];
+                        for l in 4..8 {
+                            wx1[l - 4] = wrap(d3[l] * amp_i);
+                            wy1[l - 4] = wrap(d4[l] * amp_i);
+                            wz1[l - 4] = wrap(d5[l] * amp_i);
+                            ymax1[l - 4] = d4[l] * amp_i;
+                            wx2[l - 4] = wrap(d3[l] * amp_j);
+                            wy2[l - 4] = wrap(d4[l] * amp_j);
+                            wz2[l - 4] = wrap(d5[l] * amp_j);
+                            ymax2[l - 4] = d4[l] * amp_j;
+                        }
+                        ImprovedNoise::noise_5_batch_x2(
+                            a, &wx1, &wy1, &wz1, d7 * amp_i, &ymax1,
+                            b, &wx2, &wy2, &wz2, d7 * amp_j, &ymax2,
+                        )
+                    };
+                    for l in 0..4 {
+                        d10[l] += va1[l] / amp_i;
+                        d10[l] += va2[l] / amp_j;
+                        d10[l + 4] += vb1[l] / amp_i;
+                        d10[l + 4] += vb2[l] / amp_j;
+                    }
+                }
+                (Some(a), None) => {
+                    let mut wx = [0f64; 8];
+                    let mut wy = [0f64; 8];
+                    let mut wz = [0f64; 8];
+                    let mut ymax = [0f64; 8];
+                    for l in 0..8 {
+                        wx[l] = wrap(d3[l] * amp_i);
+                        wy[l] = wrap(d4[l] * amp_i);
+                        wz[l] = wrap(d5[l] * amp_i);
+                        ymax[l] = d4[l] * amp_i;
+                    }
+                    let v = a.noise_5_batch8(&wx, &wy, &wz, d7 * amp_i, &ymax);
+                    for l in 0..8 {
+                        d10[l] += v[l] / amp_i;
+                    }
+                }
+                (None, Some(b)) => {
+                    let mut wx = [0f64; 8];
+                    let mut wy = [0f64; 8];
+                    let mut wz = [0f64; 8];
+                    let mut ymax = [0f64; 8];
+                    for l in 0..8 {
+                        wx[l] = wrap(d3[l] * amp_j);
+                        wy[l] = wrap(d4[l] * amp_j);
+                        wz[l] = wrap(d5[l] * amp_j);
+                        ymax[l] = d4[l] * amp_j;
+                    }
+                    let v = b.noise_5_batch8(&wx, &wy, &wz, d7 * amp_j, &ymax);
+                    for l in 0..8 {
+                        d10[l] += v[l] / amp_j;
+                    }
+                }
+                (None, None) => {}
+            }
+            amp /= 4.0;
+            i += 2;
         }
         let mut d11b = [0f64; 8];
         let mut skip_min = [false; 8];
@@ -2415,46 +2976,107 @@ impl BlendedNoise {
             }
             // per-half skip: halves are independent 4-wide batches, and an
             // all-skipped half keeps its accumulator at 0.0 exactly like the
-            // never-run vanilla loop (mirrors compute_batch's group skip).
-            if !skip_min.iter().take(4).all(|s| *s) {
-                if let Some(oct) = self.min_noise.get_octave_noise(i) {
-                    let va = oct.noise_5_batch(split8(&dx).0, split8(&dy).0, split8(&dz).0, dyy[0], split8(&ymax).0);
-                    for l in 0..4 {
-                        if !skip_min[l] {
-                            d8[l] += va[l] / amp;
+            // never-run vanilla loop. min/max share the same input points —
+            // when both are live for a half, one dual walk replaces two
+            // singles (interleaved perm chains, bit-exact per lane).
+            let min_run_a = !skip_min.iter().take(4).all(|s| *s);
+            let min_run_b = !skip_min.iter().skip(4).all(|s| *s);
+            let max_run_a = !skip_max.iter().take(4).all(|s| *s);
+            let max_run_b = !skip_max.iter().skip(4).all(|s| *s);
+            let mn = if min_run_a || min_run_b { self.min_noise.get_octave_noise(i) } else { None };
+            let mx = if max_run_a || max_run_b { self.max_noise.get_octave_noise(i) } else { None };
+            match (mn, mx) {
+                (Some(mn), Some(mx)) => {
+                    if min_run_a && max_run_a {
+                        let (va, vb) =
+                            mn.noise_5_batch_dual(mx, split8(&dx).0, split8(&dy).0, split8(&dz).0, dyy[0], split8(&ymax).0);
+                        for l in 0..4 {
+                            if !skip_min[l] {
+                                d8[l] += va[l] / amp;
+                            }
+                            if !skip_max[l] {
+                                d9[l] += vb[l] / amp;
+                            }
+                        }
+                    } else if min_run_a {
+                        let va = mn.noise_5_batch(split8(&dx).0, split8(&dy).0, split8(&dz).0, dyy[0], split8(&ymax).0);
+                        for l in 0..4 {
+                            if !skip_min[l] {
+                                d8[l] += va[l] / amp;
+                            }
+                        }
+                    } else if max_run_a {
+                        let va = mx.noise_5_batch(split8(&dx).0, split8(&dy).0, split8(&dz).0, dyy[0], split8(&ymax).0);
+                        for l in 0..4 {
+                            if !skip_max[l] {
+                                d9[l] += va[l] / amp;
+                            }
+                        }
+                    }
+                    if min_run_b && max_run_b {
+                        let (vb, vb2) =
+                            mn.noise_5_batch_dual(mx, split8(&dx).1, split8(&dy).1, split8(&dz).1, dyy[0], split8(&ymax).1);
+                        for l in 4..8 {
+                            if !skip_min[l] {
+                                d8[l] += vb[l - 4] / amp;
+                            }
+                            if !skip_max[l] {
+                                d9[l] += vb2[l - 4] / amp;
+                            }
+                        }
+                    } else if min_run_b {
+                        let vb = mn.noise_5_batch(split8(&dx).1, split8(&dy).1, split8(&dz).1, dyy[0], split8(&ymax).1);
+                        for l in 4..8 {
+                            if !skip_min[l] {
+                                d8[l] += vb[l - 4] / amp;
+                            }
+                        }
+                    } else if max_run_b {
+                        let vb = mx.noise_5_batch(split8(&dx).1, split8(&dy).1, split8(&dz).1, dyy[0], split8(&ymax).1);
+                        for l in 4..8 {
+                            if !skip_max[l] {
+                                d9[l] += vb[l - 4] / amp;
+                            }
                         }
                     }
                 }
-            }
-            if !skip_min.iter().skip(4).all(|s| *s) {
-                if let Some(oct) = self.min_noise.get_octave_noise(i) {
-                    let vb = oct.noise_5_batch(split8(&dx).1, split8(&dy).1, split8(&dz).1, dyy[0], split8(&ymax).1);
-                    for l in 4..8 {
-                        if !skip_min[l] {
-                            d8[l] += vb[l - 4] / amp;
+                (Some(mn), None) => {
+                    if min_run_a {
+                        let va = mn.noise_5_batch(split8(&dx).0, split8(&dy).0, split8(&dz).0, dyy[0], split8(&ymax).0);
+                        for l in 0..4 {
+                            if !skip_min[l] {
+                                d8[l] += va[l] / amp;
+                            }
+                        }
+                    }
+                    if min_run_b {
+                        let vb = mn.noise_5_batch(split8(&dx).1, split8(&dy).1, split8(&dz).1, dyy[0], split8(&ymax).1);
+                        for l in 4..8 {
+                            if !skip_min[l] {
+                                d8[l] += vb[l - 4] / amp;
+                            }
                         }
                     }
                 }
-            }
-            if !skip_max.iter().take(4).all(|s| *s) {
-                if let Some(oct) = self.max_noise.get_octave_noise(i) {
-                    let va = oct.noise_5_batch(split8(&dx).0, split8(&dy).0, split8(&dz).0, dyy[0], split8(&ymax).0);
-                    for l in 0..4 {
-                        if !skip_max[l] {
-                            d9[l] += va[l] / amp;
+                (None, Some(mx)) => {
+                    if max_run_a {
+                        let va = mx.noise_5_batch(split8(&dx).0, split8(&dy).0, split8(&dz).0, dyy[0], split8(&ymax).0);
+                        for l in 0..4 {
+                            if !skip_max[l] {
+                                d9[l] += va[l] / amp;
+                            }
+                        }
+                    }
+                    if max_run_b {
+                        let vb = mx.noise_5_batch(split8(&dx).1, split8(&dy).1, split8(&dz).1, dyy[0], split8(&ymax).1);
+                        for l in 4..8 {
+                            if !skip_max[l] {
+                                d9[l] += vb[l - 4] / amp;
+                            }
                         }
                     }
                 }
-            }
-            if !skip_max.iter().skip(4).all(|s| *s) {
-                if let Some(oct) = self.max_noise.get_octave_noise(i) {
-                    let vb = oct.noise_5_batch(split8(&dx).1, split8(&dy).1, split8(&dz).1, dyy[0], split8(&ymax).1);
-                    for l in 4..8 {
-                        if !skip_max[l] {
-                            d9[l] += vb[l - 4] / amp;
-                        }
-                    }
-                }
+                (None, None) => {}
             }
             amp /= 2.0;
         }
@@ -2921,6 +3543,62 @@ mod simd_tests {
                 }
                 for l in 0..8 {
                     assert_eq!(full_on[l].to_bits(), full_off[l].to_bits(), "nn 8-wide inst {inst} pat {pat} lane {l}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn noise_5_dual_matches_two_singles() {
+        let mut sm = SplitMix(0xD0A1 ^ 0xF00D);
+        for inst in 0..16 {
+            let na = mk_noise(&mut sm);
+            let nb = mk_noise(&mut sm);
+            for iter in 0..2500 {
+                let x = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let y = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let z = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let y_max = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let y_scale = if inst % 3 == 0 { 0.0 } else { sm.f64_pm1().abs() * 2.0 };
+                let (ra, rb) = na.noise_5_batch_dual(&nb, &x, &y, &z, y_scale, &y_max);
+                let want_a = na.noise_5_batch(&x, &y, &z, y_scale, &y_max);
+                let want_b = nb.noise_5_batch(&x, &y, &z, y_scale, &y_max);
+                for l in 0..4 {
+                    assert_eq!(ra[l].to_bits(), want_a[l].to_bits(), "dual-A inst {inst} iter {iter} lane {l}");
+                    assert_eq!(rb[l].to_bits(), want_b[l].to_bits(), "dual-B inst {inst} iter {iter} lane {l}");
+                }
+            }
+        }
+    }
+
+    /// Cross-instance x2 walk with FULLY INDEPENDENT inputs per side (the
+    /// form used by the paired main octave loop): must equal two separate
+    /// noise_5_batch calls bit-for-bit.
+    #[test]
+    fn noise_5_x2_matches_two_singles() {
+        let mut sm = SplitMix(0xD0A2 ^ 0xF00D);
+        for inst in 0..16 {
+            let na = mk_noise(&mut sm);
+            let nb = mk_noise(&mut sm);
+            for iter in 0..2500 {
+                let xa = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let ya = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let za = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let xb = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let yb = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let zb = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let ymax_a = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let ymax_b = [sm.f64(), sm.f64(), sm.f64(), sm.f64()];
+                let s_a = if inst % 4 == 0 { 0.0 } else { sm.f64_pm1().abs() * 2.0 };
+                let s_b = if inst % 5 == 0 { 0.0 } else { sm.f64_pm1().abs() * 2.0 };
+                let (ra, rb) = ImprovedNoise::noise_5_batch_x2(
+                    &na, &xa, &ya, &za, s_a, &ymax_a, &nb, &xb, &yb, &zb, s_b, &ymax_b,
+                );
+                let want_a = na.noise_5_batch(&xa, &ya, &za, s_a, &ymax_a);
+                let want_b = nb.noise_5_batch(&xb, &yb, &zb, s_b, &ymax_b);
+                for l in 0..4 {
+                    assert_eq!(ra[l].to_bits(), want_a[l].to_bits(), "x2-A inst {inst} iter {iter} lane {l}");
+                    assert_eq!(rb[l].to_bits(), want_b[l].to_bits(), "x2-B inst {inst} iter {iter} lane {l}");
                 }
             }
         }
