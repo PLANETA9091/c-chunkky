@@ -1071,3 +1071,57 @@ Stage Summary:
 - Запушено b146a6a «perf(noise): pipelined octave walks». Ожидание CI: bench лучше на ~4-8% slice-доминации, judge без изменений (127/5 — паритет не тронут, бит-точность).
 - (б) закрыт как отрицательный результат с полной доказательной базой (счётчики в обоих билдах).
 - Следующие фронт1: NormalNoise/PerlinNoise octave-pairing тем же x2 (slot1-7 всё ещё скалярные с memo — вот где осталось много), фронт2: material 1.28ms (ore_vein 28.6k eval/чанк), фронт3: cellfill 1.05ms.
+
+---
+Task ID: cont-38 (2026-10-15, rebase завершён: x2 pipelining интегрирован в горячий AVX2-путь)
+Agent: Super Z (main)
+Task: завершить прерванный rebase (b146a6a поверх 0ed0378..), интегрировать pairing в hot path, CI-вердикт
+
+Work Log:
+- Найден незавершённый interactive rebase: pick b146a6a (pipelined octave
+  walks) поверх новой истории (env-фикс, ore gate, blend wrap_v TF-лупы,
+  [cpu]-лейблы, marks prealloc) — конфликт noise.rs (6 ханков) + конфликт
+  docs-коммита на worklog.
+- Разрешение — ОБЪЕДИНЕНИЕ обеих линий: (1) scalar fallback compute_batch
+  получил спаренный main-walk (x2) и dual min/max из b146a6a; (2) ГОРЯЧИЙ
+  AVX2-путь (blend_main_loop_avx2 / blend_minmax_loop_avx2) интегрирован с
+  pairing'ом: main-октавы парами через noise_5_batch_x2_avx2 (per-side
+  setup, interleaved perm chains), min/max через тот же x2-кернел с общими
+  точками; гейт CRUS_PAIR_MAIN=0 возвращает полностью последовательные
+  пути (A/B kill-switch, OnceLock — урок cont-35 про env::var соблюдён).
+- Ханки тестов: сохранены col8-тесты новой истории + dual-тест b146a6a;
+  ДОБАВЛЕН noise_5_x2_matches_two_singles (кросс-инстансные независимые
+  входы, 16x2500 итераций, бит-паритет с двумя singles) — прямое покрытие
+  формы, используемой спаренным main-walk'ом.
+- ЛОВУШКА ребейза: разрешение docs-конфликта питон-скриптом срезало первые
+  332 строки worklog (потерян префикс s[:i_head]); поймано сверкой
+  построчных счётчиков (739 vs 1054+17), восстановлено из 0ed0378 + append
+  cont-15. Урок: при ручном merge конфликтов сверять общую длину.
+- Бит-точность: cargo test 15/15 (вкл. новые x2/dual), golden 8x4 32/32
+  hash==reference, CRUS_PAIR_MAIN=0 на 4 чанках — тоже golden.
+- CI 38720376949 (022edad): ВСЁ ЗЕЛЁНОЕ (native/plugin/integration),
+  judge vanilla 145/6291456 = 0.002% PASS (gate 0.05%).
+- (в) [cpu]-опрос пула (новые лейблы): GR 8573C 4c (avx512f=true) и Turin
+  EPYC 9V74 4c (avx512f=false!) и Milan 7763 (avx512f=false) — пул
+  гетерогенный, как и предполагалось. Turin и GR дают ~одинаковые окна
+  (3.67 vs 3.71 mean) — надежда на Turin-рывок окном умерила; НО avx512f
+ =false на AMD: если гипервизор маскирует AVX-512 на AMD-раннерах, col512
+  путь там никогда не выбирается (probe) — это объясняет отсутствие
+  Turin-выигрыша от 512-бит на Zen5. Стоит проверить XCR0/osxsave флаги.
+- Локальный A/B (fixed CPU): paired wall ~1.84 vs seq ~1.88 (медианы 3) —
+  скромно, ожидаемо: 4-wide compute_batch НЕ горячий путь слайса (col
+  ядро). Реальный фронт pipelining — col-x2 (8-wide спаренный кернел для
+  compute_batch8_col512 / compute_batch_col).
+
+Stage Summary:
+- Rebase закрыт: main = 0ed0378 + 9a44125 (perf x2+hot path) + 022edad
+  (docs). Направление (а) из плана — ядро готово и в hot generic-пути;
+  (б) fluid lazy-fill закрыт отрицательным результатом ранее (cont-15,
+  полная доказательная база); (в) [cpu]-мониторинг работает, пул:
+  GR/Turin/Milan.
+- CI-окна сейчас: judge p50 ~3.6-3.7ms (min 2.0-2.5) на 4-ядерных
+  shared-раннерах; bench perf parallel-2t (2-ядерный режим) p50 1.29-1.61
+  (Turin vs Milan). До 1ms end-to-end нужен срез ещё ~2.5-3x.
+- Следующий фронт: col-x2 — спаренные 8-wide кернелы для слайса (главный
+  объём noise), затем NormalNoise/PerlinNoise octave-pairing (slot1-7
+  всё ещё скалярные с memo).
