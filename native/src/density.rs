@@ -1501,6 +1501,18 @@ fn noise_batch_n<const N: usize>(
     out
 }
 
+/// cont-39 A/B: the slice N==8 lane dispatches to the column-memo path
+/// (per-octave col state, BLEND_COL_CACHE). blendcolmicro plane-scan showed
+/// generic -11% (6057 vs 6764 ns/call), but the production-faithful phases
+/// A/B says NEUTRAL (slice 0.80 generic vs 0.77 col, within noise) — the
+/// micro pattern overstates generic's dedup. Col stays the default;
+/// CRUS_SLICE_GENERIC=1 forces the generic dispatch for CI A/B (bit-
+/// identical either way, covered by blended_col8 tests).
+fn slice_colpath_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("CRUS_SLICE_GENERIC").as_deref() != Ok("1"))
+}
+
 #[inline]
 fn blended_batch_n<const N: usize>(
     blended: &[crate::noise::BlendedNoise],
@@ -1516,7 +1528,10 @@ fn blended_batch_n<const N: usize>(
         None
     };
     if N == 8 {
-        let v = if crate::noise::avx2_available() && lanes_uniform_i32(bx, bz) {
+        let v = if crate::noise::avx2_available()
+            && lanes_uniform_i32(bx, bz)
+            && slice_colpath_enabled()
+        {
             blended[instance].compute_batch8_col(
                 bx[0],
                 narrow_ref(by),

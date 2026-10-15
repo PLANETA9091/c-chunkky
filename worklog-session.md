@@ -1125,3 +1125,46 @@ Stage Summary:
 - Следующий фронт: col-x2 — спаренные 8-wide кернелы для слайса (главный
   объём noise), затем NormalNoise/PerlinNoise octave-pairing (slot1-7
   всё ещё скалярные с memo).
+
+---
+Task ID: cont-39 (2026-10-15, A/B-эксперименты: col-vs-generic, NN pairing; пул CPU)
+Agent: Super Z (main)
+Task: col-x2 подготовка; проверить гипотезы «generic быстрее col» и «NormalNoise x2-pairing»
+
+Work Log:
+- blendcolmicro (новый bin): скан плоскости 16 колонок x 6 batch8 (y снизу
+  вверх, шаг 8), TLS col-кэш как в продакшне. Микрорезультат: generic
+  compute_batch8 6057 ns/call против col-halves 6764 (-11%) и col512 8511
+  (512 медленней и локально). НО production-faithful phases A/B (7 репл):
+  NEUTRAL (slice 0.80 generic vs 0.77 col, wall 1.84 vs 1.82 — в шуме).
+  Микропаттерн переоценивает дедуп generic'а; col остаётся дефолтом,
+  добавлен A/B-рубильник CRUS_SLICE_GENERIC=1 (бит-идентично, покрыто
+  blended_col8-тестами).
+- NormalNoise x2-pairing (cont-15 «фронт1»): реализован парный octave-walk
+  (first.oct[i] @ xyz + second.oct[i] @ scaled-xyz через noise_5_batch_x2,
+  y_scale=0; amp*v*vf — порядок сохранён; 15/15 тестов, golden 32/32).
+  ЗАМЕР: wall 1.86-1.91 vs базлайн 1.82-1.86 — НЕЙТРАЛЬНО-ЧУТЬ-ХУЖЕ.
+  Причина: cellfill-корнерные walk'и короткие и L1-горячие, interleave не
+  даёт MLP-выигрыша, а x2-диспетч (feature-detect на пару) добавляет
+  оверхед. 8-wide generic на AVX-512 машинах защищён (нативный 512-битный
+  путь сохранён). ОТКАЧЕНО полностью — честный отрицательный результат.
+- Диагностика judge-окна (Milan 7763, run 38720376949): jni_prof wall=3.65
+  [cellfill=0.47 material=1.87 par_planes=2.69]. PROF_ON в judge ВЫКЛЮЧЕН
+  (только bench `prof` его ставит) — material=1.87 это РЕАЛЬНАЯ работа под
+  контенцией (2 fill-воркера + Paper-сервер + GC на 4 ядрах), а не
+  методология. Инфляция vs bench parallel-2t p50 1.59 (тот же Milan) = 2.3x
+  чистой контенции. Вывод: окно judges упирается в шаред-раннер, не в код.
+- (в) Пул CPU (последние прогоны): GR 8573C (avx512f=TRUE), Turin EPYC 9V74
+  (avx512f=FALSE!), Milan 7763 (avx512f=false). Проверка CrusstyGenPlugin:
+  лейбл читает /proc/cpuinfo flags — маскировка гипервизором на AMD-хостах.
+  Turin НЕ даст 512-бит; окна Turin≈GR (3.71 vs 3.67 mean) — «Turin-рывок»
+  умер. col512 остаётся GR-эксклюзивом.
+
+Stage Summary:
+- Два честных отрицательных результата закрыты (col→generic, NN pairing) —
+  оба с полной измерительной базой, код откачен, A/B-рубильники оставлены.
+- Попытки выжать noise-ядро дальше упёрлись: blended на архитектурном полу,
+  NN на полу, material/cellfill на полу. Контенция шаред-раннера доминирует.
+- Реалистичный путь к 1ms: выделенные Turin/GR раннеры (self-hosted) без
+  контенции — bench parallel-2t p50 уже 1.29 (Turin); останется срезать
+  ~0.3ms native (cellfill/material хвосты) и ~0.3 plugin/layout.
