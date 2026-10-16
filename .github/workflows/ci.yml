@@ -152,6 +152,18 @@ jobs:
         env:
           CRUS_GATE_DATAPACK: 0.05
 
+      - name: Judge world=dptt (Terralith+Tectonic real packs, unmodified)
+        run: |
+          set -o pipefail
+          python3 scripts/fetch_datapacks.py server_datapacks 1.21.8
+          timeout 1500 env CRUS_FRESH=1 CRUS_SERIAL_GC=1 DATAPACKS_DIR=server_datapacks \
+            bash harness/plugin_bench.sh dptt 2>&1 | tee judge_dptt.log || true
+          D=$(grep -oP 'OVERALL: \d+/\d+ blocks differ = \K[0-9.]+' judge_dptt.log | tail -1)
+          echo "dptt diff% = $D"
+          python3 harness/judge_gate.py "${D:-999}" "${CRUS_GATE_DPTT:-35.0}" dptt
+        env:
+          CRUS_GATE_DPTT: 0.05
+
       - name: Timing summary
         if: always()
         run: |
@@ -165,6 +177,7 @@ jobs:
           path: |
             judge_vanilla.log
             judge_datapack.log
+            judge_dptt.log
             oracle_marks.log
             oracle_xref.log
             oracle_marks_out/

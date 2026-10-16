@@ -48,10 +48,19 @@ jobs:
           cp -r probe/datapacks/crussty-custom server/datapack/datapacks/
           CRUS_FRESH=1 bash harness/bench.sh datapack datapack 2>&1 | tee recapture_datapack.log
 
+      - name: Fetch Terralith + Tectonic (unmodified)
+        run: python3 scripts/fetch_datapacks.py server_datapacks 1.21.8
+
+      - name: Capture dptt reference (Terralith+Tectonic vanilla, steady state)
+        run: |
+          set -o pipefail
+          CRUS_FRESH=1 DATAPACKS_DIR=server_datapacks bash harness/bench.sh dptt dptt 2>&1 | tee recapture_dptt.log
+
       - name: Verify dumps
         run: |
           python3 harness/verify_dumps.py reference/dumps/vanilla 64
           python3 harness/verify_dumps.py reference/dumps/datapack 64
+          python3 harness/verify_dumps.py reference/dumps/dptt 64
 
       - name: Upload reference dumps
         uses: actions/upload-artifact@v4
