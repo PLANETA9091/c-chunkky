@@ -697,6 +697,13 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         // nondeterminism, not the beard bridge. CRUS_NO_BEARD=1 disables.
         int[] beard = java.util.Arrays.copyOf(BEARD_EMPTY, BEARD_EMPTY.length);
         long tBeard = 0;
+        if (!bridgeReady && !bridgeBroken) {
+            // init BEFORE collectBeard: the beard bridge reads weakChunkField
+            // (set by initBridge); the old order init'd it only in
+            // markFluidUpdates — later in this method — so the first fill
+            // permanently disabled the beardifier with "weakChunkField null".
+            initBridge(chunkData);
+        }
         if (BEARD_ENABLED) {
             long tb0 = System.nanoTime();
             beard = collectBeard(worldInfo, chunkX, chunkZ, chunkData);
