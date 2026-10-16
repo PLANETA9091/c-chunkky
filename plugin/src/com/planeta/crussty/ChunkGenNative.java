@@ -21,6 +21,16 @@ public final class ChunkGenNative {
 
     public static native long newCtx(long seed, int minY, int height, int seaLevel);
 
+    /**
+     * newCtxAssets(seed, seaLevel, paths, blobs) -> ctx id (0 on parse
+     * failure). Builds the worldgen registry from world-datapack asset
+     * overrides: paths are repo-relative "<ns>/worldgen/..." (the leading
+     * "data/" of datapack entries is stripped by the caller), later entries
+     * must already be merged (last write wins by the caller). On 0 the caller
+     * falls back to newCtx (embedded vanilla).
+     */
+    public static native long newCtxAssets(long seed, int seaLevel, String[] paths, byte[][] blobs);
+
     public static native void freeCtx(long ctx);
 
     public static native void fill(long ctx, int chunkX, int chunkZ, short[] out);

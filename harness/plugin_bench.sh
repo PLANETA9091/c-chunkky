@@ -76,7 +76,14 @@ if [ "${CRUS_FRESH:-0}" = "1" ]; then
 fi
 
 # --- datapack wiring (world datapacks; applies at world load, wiped with CRUS_FRESH)
-if [ "$WORLD" = "datapack" ]; then
+if [ "${DATAPACKS_DIR:-}" != "" ]; then
+  mkdir -p "$SRV/$WORLD/datapacks"
+  rm -rf "$SRV/$WORLD/datapacks"
+  mkdir -p "$SRV/$WORLD/datapacks"
+  cp -r "$DATAPACKS_DIR"/"." "$SRV/$WORLD/datapacks/"
+  echo "datapacks wired from DATAPACKS_DIR=$DATAPACKS_DIR:"
+  ls "$SRV/$WORLD/datapacks"
+elif [ "$WORLD" = "datapack" ]; then
   mkdir -p "$SRV/$WORLD/datapacks"
   rm -rf "$SRV/$WORLD/datapacks/crussty-custom"
   cp -r "$ROOT/probe/datapacks/crussty-custom" "$SRV/$WORLD/datapacks/"

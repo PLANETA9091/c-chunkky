@@ -14,6 +14,22 @@ WORLD="$1"; TAG="$2"
 
 rcon() { python3 "$ROOT/harness/rcon.py" localhost 25575 crussty "$1"; }
 
+# --- optional fresh-world wipe (deterministic parity runs) ------------------
+if [ "${CRUS_FRESH:-0}" = "1" ]; then
+  echo "[bench] wiping world dirs ($WORLD)"
+  rm -rf "$ROOT/server/$WORLD" "$ROOT/server/${WORLD}_nether" "$ROOT/server/${WORLD}_the_end"
+fi
+
+# --- optional datapack wiring (world datapacks, enabled automatically on a
+# fresh world). DATAPACKS_DIR=*: wipe + copy pack zips/dirs into the world.
+if [ "${DATAPACKS_DIR:-}" != "" ]; then
+  DP="$ROOT/server/$WORLD/datapacks"
+  rm -rf "$DP"
+  mkdir -p "$DP"
+  cp -r "$DATAPACKS_DIR"/"." "$DP"/
+  echo "[bench] datapacks installed from $DATAPACKS_DIR:"; ls "$DP"
+fi
+
 # --- point level-name at the target world ---------------------------------
 sed -i "s/^level-name=.*/level-name=$WORLD/" "$ROOT/server/server.properties"
 
@@ -82,6 +98,7 @@ DUMP_MS=$(printf '%s\n' "$DUMP_OUT" | sed 's/.*ms=\([0-9]*\).*/\1/')
 {
   echo "baseline ($TAG) — vanilla Paper server chunk generation, region 8x8 chunks (cx,cz in [-4..3])"
   echo "seed=3257840388504953787  min_y=-64 height=384  sea_level=63"
+  echo "datapacks: ${DATAPACKS_DIR:-none}"
   echo "method: single server invocation; wall-clock from 'forceload add -64 -64 63 63' until"
   echo "  crusstatus reports 64/64 chunks of the region loaded (coarse; includes settle/poll"
   echo "  granularity of 2s); wall_ms=$WALL_MS; ms/chunk=$MS_PER_CHUNK"

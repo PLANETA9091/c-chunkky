@@ -36,6 +36,39 @@ pub fn ctx_new(seed: i64, _min_y: i32, _height: i32, sea_level: i32) -> i64 {
     id
 }
 
+/// Create a context whose worldgen comes from world-datapack asset overrides.
+/// Parse failures are reported as Err (never panic across the FFI boundary);
+/// the plugin falls back to ctx_new (embedded vanilla) on Err/0.
+pub fn ctx_new_assets(
+    seed: i64,
+    sea_level: i32,
+    assets: crate::worldgen::Assets,
+) -> Result<i64, String> {
+    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let result = std::panic::catch_unwind(move || {
+        let mut env: Box<DEnv> = Box::new(DEnv::new_assets(seed, &assets));
+        env.wg.sea_level = sea_level as i64;
+        let env: &'static DEnv = Box::leak(env);
+        ChunkGen::new(env)
+    });
+    let gen = match result {
+        Ok(gen) => gen,
+        Err(p) => {
+            let msg = if let Some(s) = p.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = p.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else {
+                "unknown worldgen parse panic".to_string()
+            };
+            return Err(msg);
+        }
+    };
+    let mut map = SESSIONS.lock().unwrap();
+    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen });
+    Ok(id)
+}
+
 pub fn ctx_free(id: i64) {
     if let Some(map) = SESSIONS.lock().unwrap().as_mut() {
         map.remove(&id);
@@ -118,6 +151,79 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_freeCtx(
     ctx: jni_sys::jlong,
 ) {
     ctx_free(ctx as i64)
+}
+
+/// newCtxAssets(long seed, int seaLevel, String[] paths, byte[][] blobs) -> long.
+/// Builds a worldgen registry from world-datapack asset overrides
+/// (paths are repo-relative "<ns>/worldgen/..."). Returns the ctx id, or 0 on
+/// parse failure (the caller falls back to newCtx).
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_newCtxAssets(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    seed: jni_sys::jlong,
+    sea_level: jni_sys::jint,
+    paths: jni_sys::jobjectArray,
+    blobs: jni_sys::jobjectArray,
+) -> jni_sys::jlong {
+    let tbl = *env;
+    let n = ((*tbl).v1_1.GetArrayLength)(env, paths as jni_sys::jarray) as usize;
+    let nb = ((*tbl).v1_1.GetArrayLength)(env, blobs as jni_sys::jarray) as usize;
+    if n != nb {
+        return 0;
+    }
+    let mut assets = crate::worldgen::Assets::new();
+    for i in 0..n {
+        // path string
+        let jpath = ((*tbl).v1_1.GetObjectArrayElement)(env, paths, i as jni_sys::jsize);
+        if jpath.is_null() {
+            return 0;
+        }
+        let cstr = ((*tbl).v1_1.GetStringUTFChars)(
+            env,
+            jpath as jni_sys::jstring,
+            std::ptr::null_mut(),
+        );
+        if cstr.is_null() {
+            return 0;
+        }
+        let path = std::ffi::CStr::from_ptr(cstr).to_string_lossy().into_owned();
+        ((*tbl).v1_1.ReleaseStringUTFChars)(env, jpath as jni_sys::jstring, cstr);
+        // blob bytes
+        let jblob = ((*tbl).v1_1.GetObjectArrayElement)(env, blobs, i as jni_sys::jsize)
+            as jni_sys::jbyteArray;
+        if jblob.is_null() {
+            return 0;
+        }
+        let blen = ((*tbl).v1_1.GetArrayLength)(env, jblob as jni_sys::jarray) as usize;
+        if blen == 0 {
+            continue;
+        }
+        let bptr = ((*tbl).v1_1.GetByteArrayElements)(
+            env,
+            jblob,
+            std::ptr::null_mut(),
+        );
+        if bptr.is_null() {
+            return 0;
+        }
+        let bytes = std::slice::from_raw_parts(bptr as *const u8, blen).to_vec();
+        ((*tbl).v1_1.ReleaseByteArrayElements)(
+            env,
+            jblob,
+            bptr,
+            0,
+        );
+        assets.insert(path, bytes);
+    }
+    match ctx_new_assets(seed as i64, sea_level as i32, assets) {
+        Ok(id) => id,
+        Err(msg) => {
+            // surface the reason in the server log once per failure
+            eprintln!("[crussty] newCtxAssets failed, falling back to embedded vanilla: {msg}");
+            0
+        }
+    }
 }
 
 /// fill(long ctx, int chunkX, int chunkZ, short[] out) — writes block ids

@@ -238,7 +238,41 @@ pub enum WKind {
         input: u32,
         argument: f64,
     },
+    /// Argument-less end-island density (vanilla DensityFunctions::EndIslands).
     EndIslands,
+}
+
+impl WKind {
+    /// Child arena indices (order matters only for walks).
+    pub fn children(&self) -> Vec<u32> {
+        match self {
+            WKind::Const(_)
+            | WKind::ShiftA { .. }
+            | WKind::ShiftB { .. }
+            | WKind::OldBlendedNoise { .. }
+            | WKind::YClampedGradient { .. }
+            | WKind::EndIslands
+            | WKind::Noise { .. }
+            | WKind::Interpolated { .. }
+            | WKind::WeirdScaledSampler { .. }
+            | WKind::Spline { .. } => Vec::new(),
+            WKind::Clamp { input, .. }
+            | WKind::Mapped { input, .. }
+            | WKind::MulOrAdd { input, .. }
+            | WKind::Cache2d { child: input }
+            | WKind::CacheOnce { child: input }
+            | WKind::FlatCache { child: input }
+            | WKind::CacheAllInCell { child: input } => vec![*input],
+            WKind::Ap2 { a, b, .. } => vec![*a, *b],
+            WKind::RangeChoice {
+                input,
+                when_in_range,
+                when_out_of_range,
+                ..
+            } => vec![*input, *when_in_range, *when_out_of_range],
+            WKind::ShiftedNoise { sx, sy, sz, .. } => vec![*sx, *sy, *sz],
+        }
+    }
 }
 
 pub struct Compiled {
@@ -742,6 +776,13 @@ impl Env {
     /// Build the environment for one seed (vanilla RandomState semantics).
     pub fn new(seed: i64) -> Env {
         let wg = WorldGen::load_default("");
+        Self::with_worldgen(wg, seed)
+    }
+
+    /// Build the environment from world-datapack asset overrides (the
+    /// noise_settings to load is resolved from the pack dimension override).
+    pub fn new_assets(seed: i64, assets: &crate::worldgen::Assets) -> Env {
+        let wg = WorldGen::load_with(assets);
         Self::with_worldgen(wg, seed)
     }
 
@@ -1262,6 +1303,14 @@ impl InterpState {
     #[inline]
     pub fn chain_value(&self, slot: u16) -> f64 {
         self.chain[slot as usize][6]
+    }
+
+    /// Directly set the final chain value (`value`) of one slot — used by the
+    /// semantic reference model (batchref) to inject externally computed
+    /// lerp3 chains.
+    #[inline]
+    pub fn set_chain_value(&mut self, slot: usize, v: f64) {
+        self.chain[slot][6] = v;
     }
 
     /// Vanilla NoiseInterpolator.compute with fillingCell=true:

@@ -725,8 +725,11 @@ impl<'e> ChunkGen<'e> {
                 .get(name)
                 .unwrap_or_else(|| panic!("router field '{name}' missing"))
         };
-        let cell_width = 4usize;
-        let cell_height = 8usize;
+        // NoiseChunk cell dims come from the noise settings
+        // (noise.size_horizontal/size_vertical * 4): vanilla overworld 4x8,
+        // Tectonic/Terralith 4x4, end/floating_islands 8x4.
+        let cell_width = env.wg.cell_width as usize;
+        let cell_height = env.wg.cell_height as usize;
         let cell_count_xz = 16 / cell_width;
         let cell_count_y = (env.wg.height as usize) / cell_height;
         let cell_noise_min_y = floor_div(env.wg.min_y, cell_height as i32);

@@ -9,6 +9,7 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.StructureManager;
 import net.minecraft.world.level.levelgen.Aquifer;
 import net.minecraft.world.level.levelgen.Beardifier;
+import net.minecraft.world.level.levelgen.DensityFunction;
 import net.minecraft.world.level.levelgen.DensityFunctions;
 import net.minecraft.world.level.levelgen.structure.StructurePiece;
 import net.minecraft.world.level.levelgen.structure.StructureStart;
@@ -375,6 +376,53 @@ public final class OracleNoiseStagePlugin extends JavaPlugin {
         Path dir = Path.of("oracle_noisestage");
         Files.createDirectories(dir);
 
+        // DF probe mode: -Doracledfprobe="x,y,z;x,y,z;..." evaluates every
+        // noise_router density function at the given block positions and
+        // writes dfprobe.txt ("x y z field <bits> <decimal>").
+        String dfSpec = System.getProperty("oracledfprobe", "");
+        if (!dfSpec.isBlank()) {
+            Field nrF = RandomState.class.getDeclaredField("router");
+            nrF.setAccessible(true);
+            Object router = nrF.get(state);
+            Class<?> noiseRouterCls = Class.forName("net.minecraft.world.level.levelgen.NoiseRouter");
+            String[] fields = {"barrierNoise", "fluidLevelFloodednessNoise", "fluidLevelSpreadNoise",
+                    "lavaNoise", "temperature", "vegetation", "continents", "erosion", "depth",
+                    "ridges", "initialDensityWithoutJaggedness", "finalDensity",
+                    "veinToggle", "veinRidged", "veinGap"};
+            java.util.Map<String, Object> fns = new java.util.HashMap<>();
+            for (String f : fields) {
+                try {
+                    fns.put(f, noiseRouterCls.getMethod(f).invoke(router));
+                } catch (Exception e) {
+                    getLogger().warning("router field missing: " + f + " (" + e + ")");
+                }
+            }
+            Class<?> spc = Class.forName(
+                    "net.minecraft.world.level.levelgen.DensityFunction$SinglePointContext");
+            java.lang.reflect.Constructor<?> ctor = spc.getConstructors()[0];
+            Class<?> dfIface = Class.forName("net.minecraft.world.level.levelgen.DensityFunction");
+            Class<?> fcCtx = Class.forName(
+                    "net.minecraft.world.level.levelgen.DensityFunction$FunctionContext");
+            java.lang.reflect.Method sampleM = dfIface.getMethod("compute", fcCtx);
+            try (BufferedWriter wp = Files.newBufferedWriter(dir.resolve("dfprobe.txt"))) {
+                for (String part : dfSpec.split(";")) {
+                    String[] c = part.trim().split(",");
+                    int px = Integer.parseInt(c[0].trim());
+                    int py = Integer.parseInt(c[1].trim());
+                    int pz = Integer.parseInt(c[2].trim());
+                    Object ctx = ctor.newInstance(px, py, pz);
+                    for (java.util.Map.Entry<String, Object> e : fns.entrySet()) {
+                        Object df = e.getValue();
+                        double v = (double) sampleM.invoke(df, ctx);
+                        wp.write(px + " " + py + " " + pz + " " + e.getKey()
+                                + " " + Double.doubleToRawLongBits(v) + " " + v + "\n");
+                    }
+                }
+            }
+            getLogger().info("dfprobe done: " + dfSpec);
+            return;
+        }
+
         // chunk list: ORACLE_MARKS mode uses -Doraclemarks.chunklist="cx:cz,cx:cz,..."
         List<int[]> chunkList = new ArrayList<>();
         if (MARKS) {
@@ -415,9 +463,27 @@ public final class OracleNoiseStagePlugin extends JavaPlugin {
 
                 Path out = dir.resolve(String.format("chunk_%d_%d.txt", cx, cz));
                 Path outM = dir.resolve(String.format("chunk_%d_%d_marks.txt", cx, cz));
+                Path outFd = dir.resolve(String.format("fd_%d_%d.txt", cx, cz));
+                boolean fdMode = Boolean.getBoolean("oraclefd");
+                DensityFunction finalDensity = null;
+                if (fdMode) {
+                    Field nrF = RandomState.class.getDeclaredField("router");
+                    nrF.setAccessible(true);
+                    Object router = nrF.get(state);
+                    finalDensity = (DensityFunction) Class.forName(
+                            "net.minecraft.world.level.levelgen.NoiseRouter")
+                            .getMethod("finalDensity").invoke(router);
+                }
                 try (BufferedWriter w = Files.newBufferedWriter(out);
-                     BufferedWriter wm = MARKS ? Files.newBufferedWriter(outM) : null) {
-                    fillLoop(w, wm, nc, settings, cx, cz);
+                     BufferedWriter wm = MARKS ? Files.newBufferedWriter(outM) : null;
+                     BufferedWriter wf = fdMode ? Files.newBufferedWriter(outFd) : null) {
+                    fillLoop(w, wm, nc, settings, cx, cz, finalDensity, wf);
+                }
+                if (Boolean.getBoolean("oraclecells")) {
+                    Path outC = dir.resolve(String.format("cells_%d_%d.txt", cx, cz));
+                    try (BufferedWriter wc = Files.newBufferedWriter(outC)) {
+                        dumpCells(nc, wc);
+                    }
                 }
                 try (BufferedWriter wi = Files.newBufferedWriter(dir.resolve(String.format("ncinfo_%d_%d.txt", cx, cz)))) {
                     wi.write("NCINFO blender=" + blenderInfo(nc)
@@ -498,8 +564,86 @@ public final class OracleNoiseStagePlugin extends JavaPlugin {
     }
 
     /** Decompiled doFill block loop (no sections/heightmaps — text dump). */
+    /** Re-drive the vanilla loop and snapshot every interpolator's slice0/slice1
+     *  after each advanceCellX — the full 5 x-plane corner grids per slot.
+     *  Format: "SLICE <interpIdx> <xPlane> <z> <y> <bits>" per corner value
+     *  (xPlane = the plane this slice array currently holds), plus CELLINFO
+     *  header with the interpolator count and per-interp wrapped class name. */
+    private void dumpCells(NoiseChunk nc, BufferedWriter wc) throws Exception {
+        Field interpsF = NoiseChunk.class.getDeclaredField("interpolators");
+        interpsF.setAccessible(true);
+        List<?> interps = (List<?>) interpsF.get(nc);
+        Class<?> interpCls = Class.forName("net.minecraft.world.level.levelgen.NoiseChunk$NoiseInterpolator");
+        Field s0F = interpCls.getDeclaredField("slice0");
+        Field s1F = interpCls.getDeclaredField("slice1");
+        s0F.setAccessible(true);
+        s1F.setAccessible(true);
+        Method cellWidth = NoiseChunk.class.getDeclaredMethod("cellWidth");
+        cellWidth.setAccessible(true);
+        Method cellHeight = NoiseChunk.class.getDeclaredMethod("cellHeight");
+        cellHeight.setAccessible(true);
+        int cw = (int) cellWidth.invoke(nc);
+        int ch = (int) cellHeight.invoke(nc);
+        int minCellY = (int) intField(nc, "cellNoiseMinY");
+        int cellCountY = (int) intField(nc, "cellCountY");
+        int firstCellX = (int) intField(nc, "firstCellX");
+        int firstCellZ = (int) intField(nc, "firstCellZ");
+        wc.write("CELLS interps=" + interps.size() + " cw=" + cw + " ch=" + ch
+                + " minCellY=" + minCellY + " cellCountY=" + cellCountY
+                + " firstCellX=" + firstCellX + " firstCellZ=" + firstCellZ + "\n");
+        Method stopInterp = NoiseChunk.class.getDeclaredMethod("stopInterpolation");
+        stopInterp.setAccessible(true);
+        Field interpFlagF = NoiseChunk.class.getDeclaredField("interpolating");
+        interpFlagF.setAccessible(true);
+        if (interpFlagF.getBoolean(nc)) {
+            stopInterp.invoke(nc);
+        }
+        nc.initializeForFirstCellX();
+        int n = 16 / cw;
+        for (int i2 = 0; i2 < n; i2++) {
+            nc.advanceCellX(i2);
+            // slice0 holds plane (firstCellX+i2), slice1 holds plane (firstCellX+i2+1)
+            for (int j = 0; j < interps.size(); j++) {
+                Object ip = interps.get(j);
+                double[][] s0 = (double[][]) s0F.get(ip);
+                double[][] s1 = (double[][]) s1F.get(ip);
+                int plane0 = firstCellX + i2;
+                int plane1 = firstCellX + i2 + 1;
+                for (int z = 0; z < s0.length; z++) {
+                    for (int y = 0; y < s0[z].length; y++) {
+                        int cornerZ = (firstCellZ + z) * cw;
+                        int cornerY = (y + minCellY) * ch;
+                        wc.write("SLICE " + j + " " + plane0 + " " + cornerZ + " " + cornerY
+                                + " " + Double.doubleToRawLongBits(s0[z][y]) + "\n");
+                        wc.write("SLICE " + j + " " + plane1 + " " + cornerZ + " " + cornerY
+                                + " " + Double.doubleToRawLongBits(s1[z][y]) + "\n");
+                    }
+                }
+            }
+            for (int i3 = 0; i3 < n; i3++) {
+                for (int i5 = cellCountY - 1; i5 >= 0; i5--) {
+                    nc.selectCellYZ(i5, i3);
+                    for (int i6 = ch - 1; i6 >= 0; i6--) {
+                        int yR = (minCellY + i5) * ch + i6;
+                        nc.updateForY(yR, (double) i6 / ch);
+                        for (int i9 = 0; i9 < cw; i9++) {
+                            int xR = firstCellX * cw + i2 * cw + i9;
+                            nc.updateForX(xR, (double) i9 / cw);
+                            for (int i12 = 0; i12 < cw; i12++) {
+                                nc.updateForZ(firstCellZ * cw + i3 * cw + i12, (double) i12 / cw);
+                            }
+                        }
+                    }
+                }
+            }
+            nc.swapSlices();
+        }
+        nc.stopInterpolation();
+    }
+
     private void fillLoop(BufferedWriter w, BufferedWriter wm, NoiseChunk noiseChunk,
-                          NoiseGeneratorSettings settings, int cx, int cz) throws Exception {
+                          NoiseGeneratorSettings settings, int cx, int cz,
+                          DensityFunction finalDensity, BufferedWriter wf) throws Exception {
         Method getInterpolatedState = NoiseChunk.class.getDeclaredMethod("getInterpolatedState");
         getInterpolatedState.setAccessible(true);
         Method cellWidth = NoiseChunk.class.getDeclaredMethod("cellWidth");
@@ -545,6 +689,14 @@ public final class OracleNoiseStagePlugin extends JavaPlugin {
                                 noiseChunk.updateForZ(i13, d2);
                                 BlockState st = (BlockState) getInterpolatedState.invoke(noiseChunk);
                                 boolean flag = (boolean) shouldSched.invoke(aquifer);
+                                if (finalDensity != null && wf != null) {
+                                    // extra compute is cache-served (same ctx,
+                                    // same interpolationCounter) -> identical to
+                                    // the value getInterpolatedState just used
+                                    double fdv = finalDensity.compute(noiseChunk);
+                                    wf.write(i10 + " " + i7 + " " + i13 + " "
+                                            + Double.doubleToRawLongBits(fdv) + " " + fdv + "\n");
+                                }
                                 if (st == null) {
                                     st = defaultBlock;
                                 }

@@ -38,9 +38,20 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static final ThreadLocal<long[]> MARK_BUF =
             ThreadLocal.withInitial(() -> new long[MARK_CAP]);
 
-    /** world key: seed + resolved sea level (same seed, different datapacks -> different ctx). */
-    private record WorldKey(long seed, int seaLevel) {
+    /** world key: seed + resolved sea level + datapack asset fingerprint
+     *  (same seed, different datapacks -> different ctx). */
+    private record WorldKey(long seed, int seaLevel, int packHash) {
     }
+
+    /** World datapack worldgen assets, extracted once per world.
+     *  null = no packs (or CRUS_DP_NATIVE=0) -> embedded-vanilla ctx. */
+    private record PackData(String[] paths, byte[][] blobs, int hash) {
+    }
+
+    private static final Map<String, PackData> PACK_CACHE = new ConcurrentHashMap<>();
+    /** A/B escape hatch: CRUS_DP_NATIVE=0 restores the embedded-vanilla ctx
+     *  (chimera mode) even when datapacks are present. */
+    private static final boolean DP_NATIVE = !"0".equals(System.getenv("CRUS_DP_NATIVE"));
 
     private static final Map<WorldKey, CtxPool> POOLS = new ConcurrentHashMap<>();
     private static final Map<String, Integer> SEA_CACHE = new ConcurrentHashMap<>();
@@ -61,11 +72,24 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         private final java.util.concurrent.atomic.AtomicInteger rr =
                 new java.util.concurrent.atomic.AtomicInteger();
 
-        CtxPool(int n, long seed, int minY, int height, int sea) {
+        CtxPool(int n, long seed, int minY, int height, int sea, PackData packs) {
             this.ctxs = new long[n];
             this.locks = new ReentrantLock[n];
             for (int i = 0; i < n; i++) {
-                long ctx = ChunkGenNative.newCtx(seed, minY, height, sea);
+                long ctx;
+                if (packs != null) {
+                    ctx = ChunkGenNative.newCtxAssets(seed, sea, packs.paths(), packs.blobs());
+                    if (ctx == 0) {
+                        Logger.getLogger("CrusstyGen").warning(
+                                "native datapack worldgen failed to parse; using embedded vanilla "
+                                + "(CHIMERA MODE - terrain will NOT match the packs)");
+                    }
+                } else {
+                    ctx = 0;
+                }
+                if (ctx == 0) {
+                    ctx = ChunkGenNative.newCtx(seed, minY, height, sea);
+                }
                 if (ctx == 0) {
                     // free the ones already created
                     for (int j = 0; j < i; j++) {
@@ -148,8 +172,257 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
 
     static CtxPool poolFor(WorldInfo worldInfo, long seed, int minY, int height) {
         int sea = resolveSeaLevel(worldInfo);
-        WorldKey key = new WorldKey(seed, sea);
-        return POOLS.computeIfAbsent(key, k -> new CtxPool(POOL_SIZE, seed, minY, height, sea));
+        PackData packs = packDataFor(worldInfo);
+        WorldKey key = new WorldKey(seed, sea, packs == null ? 0 : packs.hash());
+        return POOLS.computeIfAbsent(key, k -> {
+            Logger.getLogger("CrusstyGen").info(
+                    "ctx pool: seed=" + seed + " sea=" + sea + " packs="
+                    + (packs == null ? "none (embedded vanilla)" : packs.paths().length + " assets hash=" + packs.hash()));
+            return new CtxPool(POOL_SIZE, seed, minY, height, sea, packs);
+        });
+    }
+
+    /**
+     * World-datapack worldgen assets for this world, extracted once per world
+     * name. Scans <world>/datapacks/ (zips + directories) in name order;
+     * LATER packs override earlier ones (vanilla pack merge order). Only the
+     * worldgen-relevant subtrees are collected (noise_settings,
+     * density_function, noise, and the overworld dimension override that
+     * carries the biome source + settings reference).
+     */
+    private static PackData packDataFor(WorldInfo worldInfo) {
+        if (!DP_NATIVE) {
+            return null;
+        }
+        return PACK_CACHE.computeIfAbsent(worldInfo.getName(), n -> extractPackData(n));
+    }
+
+    private static PackData extractPackData(String worldName) {
+        java.io.File worldDir;
+        try {
+            worldDir = new java.io.File(Bukkit.getWorldContainer(), worldName);
+        } catch (Throwable t) {
+            return null;
+        }
+        java.io.File dpDir = new java.io.File(worldDir, "datapacks");
+        if (!dpDir.isDirectory()) {
+            return null;
+        }
+        java.io.File[] packs = dpDir.listFiles();
+        if (packs == null || packs.length == 0) {
+            return null;
+        }
+        java.util.Arrays.sort(packs, java.util.Comparator.comparing(java.io.File::getName));
+        // merged map, later packs overwrite earlier ones
+        java.util.Map<String, byte[]> merged = new java.util.TreeMap<>();
+        try {
+            for (java.io.File pack : packs) {
+                if (pack.getName().startsWith("disabled_")) {
+                    continue;
+                }
+                if (pack.isFile() && pack.getName().endsWith(".zip")) {
+                    try (java.util.zip.ZipFile zf = new java.util.zip.ZipFile(pack)) {
+                        java.util.List<? extends java.util.zip.ZipEntry> entries =
+                                java.util.Collections.list(zf.entries());
+                        entries.sort(java.util.Comparator.comparing(java.util.zip.ZipEntry::getName));
+                        // pack.mcmeta overlays (e.g. Tectonic's overlay.datapack):
+                        // overlay dirs whose format range covers the current
+                        // pack format are merged ON TOP of the pack root.
+                        java.util.List<String> overlays = activeOverlays(zf, entries);
+                        // 1) pack root data/
+                        for (java.util.zip.ZipEntry e : entries) {
+                            if (e.isDirectory()) {
+                                continue;
+                            }
+                            String rel = packRel(e.getName());
+                            if (rel != null) {
+                                merged.put(rel, zf.getInputStream(e).readAllBytes());
+                            }
+                        }
+                        // 2) active overlays (override the root)
+                        for (String ov : overlays) {
+                            String prefix = ov + "/data/";
+                            for (java.util.zip.ZipEntry e : entries) {
+                                if (e.isDirectory() || !e.getName().startsWith(prefix)) {
+                                    continue;
+                                }
+                                String rel = packRel(e.getName().substring(ov.length() + 1));
+                                if (rel != null) {
+                                    merged.put(rel, zf.getInputStream(e).readAllBytes());
+                                }
+                            }
+                        }
+                    }
+                } else if (pack.isDirectory()) {
+                    java.nio.file.Path root = pack.toPath();
+                    java.util.List<String> overlays = activeOverlaysDir(root);
+                    try (java.util.stream.Stream<java.nio.file.Path> walk = java.nio.file.Files.walk(root)) {
+                        walk.filter(java.nio.file.Files::isRegularFile)
+                            .sorted()
+                            .forEach(p -> {
+                                String relPath = root.relativize(p).toString().replace('\\', '/');
+                                String rel = packRel(relPath);
+                                if (rel != null) {
+                                    try {
+                                        merged.put(rel, java.nio.file.Files.readAllBytes(p));
+                                    } catch (java.io.IOException ignored) {
+                                    }
+                                }
+                            });
+                    }
+                    for (String ov : overlays) {
+                        java.nio.file.Path odir = root.resolve(ov);
+                        if (!java.nio.file.Files.isDirectory(odir)) {
+                            continue;
+                        }
+                        try (java.util.stream.Stream<java.nio.file.Path> walk = java.nio.file.Files.walk(odir)) {
+                            walk.filter(java.nio.file.Files::isRegularFile)
+                                .sorted()
+                                .forEach(p -> {
+                                    String relPath = odir.relativize(p).toString().replace('\\', '/');
+                                    String full = ov + "/" + relPath;
+                                    String rel = packRel(full);
+                                    if (rel != null) {
+                                        try {
+                                            merged.put(rel, java.nio.file.Files.readAllBytes(p));
+                                        } catch (java.io.IOException ignored) {
+                                        }
+                                    }
+                                });
+                        }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Logger.getLogger("CrusstyGen").warning(
+                    "datapack asset scan failed; embedded vanilla in use: " + t);
+            return null;
+        }
+        if (merged.isEmpty()) {
+            return null;
+        }
+        String[] paths = merged.keySet().toArray(new String[0]);
+        byte[][] blobs = new byte[paths.length][];
+        for (int i = 0; i < paths.length; i++) {
+            blobs[i] = merged.get(paths[i]);
+        }
+        // stable fingerprint so a different pack set gets a fresh ctx pool
+        int h = 0;
+        for (int i = 0; i < paths.length; i++) {
+            h = 31 * h + paths[i].hashCode();
+            h = 31 * h + blobs[i].length;
+        }
+        Logger.getLogger("CrusstyGen").info(
+                "datapack worldgen assets: " + paths.length + " files from " + dpDir);
+        return new PackData(paths, blobs, h);
+    }
+
+    /** "data/<ns>/worldgen/<...>.json" (or the overworld dimension override)
+     *  -> "<ns>/worldgen/<...>.json"; null for irrelevant entries. */
+    private static String packRel(String entry) {
+        if (!entry.startsWith("data/") || !entry.endsWith(".json")) {
+            return null;
+        }
+        String rel = entry.substring("data/".length());
+        boolean keep = rel.contains("/worldgen/noise_settings/")
+                || rel.contains("/worldgen/density_function/")
+                || rel.contains("/worldgen/noise/")
+                || rel.endsWith("/dimension/overworld.json");
+        return keep ? rel : null;
+    }
+
+    /** Resource-pack format of this server (Paper 1.21.8 = 81). Overridable
+     *  via CRUS_PACK_FORMAT for other server versions. */
+    private static final int PACK_FORMAT;
+    static {
+        int f = 81;
+        try {
+            String env = System.getenv("CRUS_PACK_FORMAT");
+            if (env != null) {
+                f = Integer.parseInt(env.trim());
+            }
+        } catch (Throwable ignored) {
+        }
+        PACK_FORMAT = f;
+    }
+
+    /** Active overlay directories of a zip pack (pack.mcmeta "overlays"
+     *  entries whose format range covers PACK_FORMAT). */
+    private static java.util.List<String> activeOverlays(
+            java.util.zip.ZipFile zf, java.util.List<? extends java.util.zip.ZipEntry> entries) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        try {
+            for (java.util.zip.ZipEntry e : entries) {
+                if (e.getName().equals("pack.mcmeta")) {
+                    String text = new String(zf.getInputStream(e).readAllBytes(),
+                            java.nio.charset.StandardCharsets.UTF_8);
+                    return parseOverlays(text, out);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return out;
+    }
+
+    /** Active overlay directories of a directory pack. */
+    private static java.util.List<String> activeOverlaysDir(java.nio.file.Path root) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        try {
+            java.nio.file.Path mc = root.resolve("pack.mcmeta");
+            if (java.nio.file.Files.isRegularFile(mc)) {
+                String text = java.nio.file.Files.readString(mc);
+                return parseOverlays(text, out);
+            }
+        } catch (Throwable ignored) {
+        }
+        return out;
+    }
+
+    /** Minimal pack.mcmeta "overlays" reader: an entry is active when
+     *  formats=[min,max] (or min_format/max_format) covers PACK_FORMAT.
+     *  Only simple [a,b] two-int arrays are understood (covers all known
+     *  packs); anything else is skipped. */
+    private static java.util.List<String> parseOverlays(String text, java.util.List<String> out) {
+        try {
+            com.google.gson.JsonObject root = com.google.gson.JsonParser
+                    .parseString(text).getAsJsonObject();
+            if (!root.has("overlays")) {
+                return out;
+            }
+            com.google.gson.JsonArray entries = root.getAsJsonObject("overlays")
+                    .getAsJsonArray("entries");
+            for (var el : entries) {
+                if (!el.isJsonObject()) {
+                    continue;
+                }
+                com.google.gson.JsonObject en = el.getAsJsonObject();
+                if (!en.has("directory")) {
+                    continue;
+                }
+                Integer lo = null;
+                Integer hi = null;
+                if (en.has("formats") && en.get("formats").isJsonArray()
+                        && en.getAsJsonArray("formats").size() == 2) {
+                    lo = en.getAsJsonArray("formats").get(0).isJsonPrimitive()
+                            ? en.getAsJsonArray("formats").get(0).getAsInt() : null;
+                    hi = en.getAsJsonArray("formats").get(1).isJsonPrimitive()
+                            ? en.getAsJsonArray("formats").get(1).getAsInt() : null;
+                }
+                if (lo == null || hi == null) {
+                    lo = en.has("min_format") && en.get("min_format").isJsonPrimitive()
+                            ? en.get("min_format").getAsInt() : null;
+                    hi = en.has("max_format") && en.get("max_format").isJsonPrimitive()
+                            ? en.get("max_format").getAsInt() : null;
+                }
+                if (lo != null && hi != null && PACK_FORMAT >= lo && PACK_FORMAT <= hi) {
+                    out.add(en.get("directory").getAsString());
+                }
+            }
+        } catch (Throwable t) {
+            Logger.getLogger("CrusstyGen").warning(
+                    "pack.mcmeta overlay parse failed (root data/ only): " + t);
+        }
+        return out;
     }
 
     /**

@@ -1,0 +1,2 @@
+tectonic	3.0.25-datapack	mc=1.21.8	https://cdn.modrinth.com/data/lWDHr9jE/versions/CmzMQNDL/tectonic-datapack-3.0.25.zip
+terralith	2.5.13	mc=1.21.8	https://cdn.modrinth.com/data/8oi3bsk5/versions/RFNry3l0/Terralith_1.21.5_v2.5.13.zip

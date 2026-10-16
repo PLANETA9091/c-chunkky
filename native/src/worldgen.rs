@@ -36,8 +36,123 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::json::{parse, Json};
 
-const DF_DIR: &str = "minecraft/worldgen/density_function/";
-const NOISE_DIR: &str = "minecraft/worldgen/noise/";
+const DF_DIR: &str = "worldgen/density_function/";
+const NOISE_DIR: &str = "worldgen/noise/";
+
+// ---------------------------------------------------------------------------
+// Assets — pack overrides over the embedded vanilla manifest
+// ---------------------------------------------------------------------------
+
+/// Worldgen JSONs provided by world datapacks, keyed by repo-relative path
+/// "<namespace>/worldgen/<...>.json" (the plugin strips the leading "data/").
+/// Lookups fall back to the embedded vanilla manifest, so a partial pack
+/// (e.g. crussty-custom sea-level override) keeps resolving vanilla refs.
+#[derive(Debug, Default)]
+pub struct Assets {
+    files: HashMap<String, Vec<u8>>,
+}
+
+impl Assets {
+    pub fn new() -> Self {
+        Assets { files: HashMap::new() }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    pub fn insert(&mut self, path: impl Into<String>, bytes: Vec<u8>) {
+        self.files.insert(path.into(), bytes);
+    }
+
+    pub fn get(&self, path: &str) -> Option<&[u8]> {
+        if let Some(b) = self.files.get(path) {
+            return Some(b.as_slice());
+        }
+        crate::asset(path)
+    }
+
+    /// Number of pack-provided files (0 = embedded-vanilla mode).
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Union of embedded manifest paths and pack paths carrying
+    /// "<marker><stem>.json" (marker like "worldgen/noise/"), normalized to
+    /// "<namespace>:<stem>" ids, sorted (deterministic arena order).
+    fn ids_with(&self, marker: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for p in crate::ASSET_PATHS {
+            if let Some(id) = id_of_path(p, marker) {
+                out.push(id);
+            }
+        }
+        for p in self.files.keys() {
+            if let Some(id) = id_of_path(p, marker) {
+                out.push(id);
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Resolve the winning overworld noise_settings id ("minecraft:overworld")
+    /// from a pack-provided dimension override (generator.settings), or the
+    /// vanilla default. The plugin applies pack merge order (later wins)
+    /// before handing the map over, so at most one dimension file is present;
+    /// on the unlikely multi-namespace case the smallest path wins
+    /// deterministically.
+    pub fn resolve_noise_settings(&self) -> String {
+        let mut dim_path: Option<&String> = None;
+        for p in self.files.keys() {
+            if p.ends_with("/dimension/overworld.json") {
+                dim_path = match dim_path {
+                    Some(cur) if cur <= p => Some(cur),
+                    _ => Some(p),
+                };
+            }
+        }
+        let Some(dp) = dim_path else {
+            return "minecraft:overworld".to_string();
+        };
+        let bytes = &self.files[dp];
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return "minecraft:overworld".to_string();
+        };
+        let Ok(json) = parse(text) else {
+            return "minecraft:overworld".to_string();
+        };
+        let settings = json
+            .get("generator")
+            .and_then(|g| g.get("settings"))
+            .and_then(Json::as_str)
+            .unwrap_or("minecraft:overworld");
+        settings.to_string()
+    }
+}
+
+/// "<ns>/worldgen/noise/<stem>.json" -> "<ns>:<stem>"; None for other paths.
+fn id_of_path(path: &str, marker: &str) -> Option<String> {
+    let i = path.find(marker)?;
+    if i == 0 || !path.ends_with(".json") {
+        return None;
+    }
+    let ns = &path[..i - 1]; // path[i-1] == '/'
+    if ns.is_empty() || ns.contains('/') {
+        return None;
+    }
+    let stem = &path[i + marker.len()..path.len() - ".json".len()];
+    Some(format!("{ns}:{stem}"))
+}
+
+/// "minecraft:overworld" -> "minecraft/worldgen/noise_settings/overworld.json".
+fn noise_settings_path(id: &str) -> String {
+    let (ns, rel) = id
+        .split_once(':')
+        .unwrap_or_else(|| panic!("noise_settings id without namespace: {id}"));
+    format!("{ns}/worldgen/noise_settings/{rel}.json")
+}
 
 // ---------------------------------------------------------------------------
 // public model
@@ -265,6 +380,12 @@ pub struct WorldGen {
     pub height: i32,
     pub legacy_random_source: bool,
     pub ore_veins_enabled: bool,
+    /// NoiseChunk cell dims from noise.size_horizontal/size_vertical
+    /// (vanilla NoiseSettings.getCellWidth/getCellHeight = QuartPos.toBlock
+    /// = 4 * size). Vanilla overworld: 1/2 -> 4x8; Tectonic/Terralith:
+    /// 1/1 -> 4x4; end/floating_islands: 2/1 -> 8x4.
+    pub cell_width: i32,
+    pub cell_height: i32,
     /// Constructed node kinds -> counts (unique nodes; shared refs counted
     /// once). Built at load time, useful as a sanity surface for the
     /// interpreter milestone.
@@ -280,39 +401,54 @@ impl WorldGen {
         Self::load("minecraft/worldgen/noise_settings/overworld.json")
     }
 
-    /// Build the registry for one noise_settings asset.
+    /// Build the registry for one noise_settings asset (embedded vanilla
+    /// assets only).
     pub fn load(noise_settings_asset: &str) -> WorldGen {
-        // 1) noise parameters: worldgen/noise/*.json
+        Self::load_with_assets(&Assets::new(), noise_settings_asset)
+    }
+
+    /// Build the registry with world-datapack asset overrides. The
+    /// noise_settings to load is resolved from the pack's dimension override
+    /// when present (generator.settings), else vanilla overworld.
+    pub fn load_with(assets: &Assets) -> WorldGen {
+        let ns_id = assets.resolve_noise_settings();
+        Self::load_with_assets(assets, &noise_settings_path(&ns_id))
+    }
+
+    /// Build the registry for one noise_settings path, with pack overrides
+    /// over the embedded vanilla manifest.
+    pub fn load_with_assets(assets: &Assets, noise_settings_asset: &str) -> WorldGen {
+        // 1) noise parameters: worldgen/noise/*.json (union of embedded and
+        //    pack-provided files, ids "<namespace>:<stem>")
         let mut noise_params = HashMap::new();
-        for path in crate::ASSET_PATHS {
-            let Some(stem) = path.strip_prefix(NOISE_DIR).and_then(|r| r.strip_suffix(".json"))
-            else {
-                continue;
-            };
-            let bytes = crate::asset(path).expect("manifest path must exist");
+        for id in assets.ids_with("worldgen/noise/") {
+            let (ns, stem) = id.split_once(':').expect("ids_with yields ns:stem");
+            let path = format!("{ns}/worldgen/noise/{stem}.json");
+            let bytes = assets
+                .get(&path)
+                .unwrap_or_else(|| panic!("noise params path vanished: {path}"));
             let text = std::str::from_utf8(bytes).unwrap_or_else(|_| panic!("{path}: not utf-8"));
             let json = parse(text).unwrap_or_else(|e| panic!("{path}: json error: {e}"));
-            let id = format!("minecraft:{stem}");
-            noise_params.insert(id, parse_noise_params(&json, path));
+            noise_params.insert(id, parse_noise_params(&json, &path));
         }
 
-        // 2) every density-function file, eagerly resolved. ASSET_PATHS is
-        //    sorted, so arena order is deterministic across builds.
+        // 2) density functions are resolved LAZILY from the noise_router
+        //    trees below (vanilla codec semantics: a ref resolves on access,
+        //    so dead files with dangling refs — e.g. Tectonic's unused trees
+        //    that Terralith's overworld.json replaces — never parse). Memoized
+        //    by id in `roots`; the eager union scan is intentionally gone.
         let mut loader = Loader {
             noise_params: &noise_params,
             arena: Vec::new(),
             roots: HashMap::new(),
             building: Vec::new(),
             type_counts: BTreeMap::new(),
+            assets,
         };
-        for path in crate::ASSET_PATHS {
-            if let Some(stem) = path.strip_prefix(DF_DIR).and_then(|r| r.strip_suffix(".json")) {
-                loader.resolve(&format!("minecraft:{stem}"));
-            }
-        }
 
-        // 3) noise_settings header fields
-        let bytes = crate::asset(noise_settings_asset)
+        // 3) noise_settings header fields (pack override or embedded)
+        let bytes = assets
+            .get(noise_settings_asset)
             .unwrap_or_else(|| panic!("unknown noise settings asset: {noise_settings_asset}"));
         let text = std::str::from_utf8(bytes).unwrap_or_else(|_| panic!("{noise_settings_asset}: not utf-8"));
         let ns = parse(text).unwrap_or_else(|e| panic!("{noise_settings_asset}: json error: {e}"));
@@ -340,6 +476,21 @@ impl WorldGen {
         let legacy_random_source =
             matches!(ns.get("legacy_random_source"), Some(Json::Bool(true)));
         let ore_veins_enabled = matches!(ns.get("ore_veins_enabled"), Some(Json::Bool(true)));
+        let size_horizontal = noise_obj
+            .get("size_horizontal")
+            .and_then(Json::as_i32)
+            .unwrap_or_else(|| panic!("{noise_settings_asset}: missing noise.size_horizontal"));
+        let size_vertical = noise_obj
+            .get("size_vertical")
+            .and_then(Json::as_i32)
+            .unwrap_or_else(|| panic!("{noise_settings_asset}: missing noise.size_vertical"));
+        if !(1..=4).contains(&size_horizontal) || !(1..=4).contains(&size_vertical) {
+            panic!(
+                "{noise_settings_asset}: size_horizontal/vertical out of range 1..=4: {size_horizontal}/{size_vertical}"
+            );
+        }
+        let cell_width = size_horizontal * 4;
+        let cell_height = size_vertical * 4;
 
         // 4) inline noise_router trees (string refs hit the memoized roots)
         let router = ns
@@ -369,6 +520,8 @@ impl WorldGen {
             height,
             legacy_random_source,
             ore_veins_enabled,
+            cell_width,
+            cell_height,
             type_counts,
         }
     }
@@ -512,6 +665,8 @@ struct Loader<'a> {
     /// ids currently being expanded — a repeat means a ref cycle.
     building: Vec<String>,
     type_counts: BTreeMap<String, usize>,
+    /// pack overrides; lookup falls back to the embedded manifest
+    assets: &'a Assets,
 }
 
 impl Loader<'_> {
@@ -535,11 +690,19 @@ impl Loader<'_> {
             path.push_str(id);
             panic!("density function cycle: {path}");
         }
-        let rel = id.strip_prefix("minecraft:").unwrap_or_else(|| {
-            panic!("density function ref without namespace: {id}");
-        });
-        let path = format!("{DF_DIR}{rel}.json");
-        let bytes = crate::asset(&path)
+        // vanilla codec default: a ref without namespace is minecraft:
+        let id = if id.contains(':') {
+            id.to_string()
+        } else {
+            format!("minecraft:{id}")
+        };
+        let (ns, rel) = id
+            .split_once(':')
+            .unwrap_or_else(|| panic!("density function ref without namespace: {id}"));
+        let path = format!("{ns}/worldgen/density_function/{rel}.json");
+        let bytes = self
+            .assets
+            .get(&path)
             .unwrap_or_else(|| panic!("unknown density function ref: {id}"));
         let text = std::str::from_utf8(bytes).unwrap_or_else(|_| panic!("{path}: not utf-8"));
         let json = parse(text).unwrap_or_else(|e| panic!("{path}: json error: {e}"));
@@ -567,6 +730,14 @@ impl Loader<'_> {
     }
 
     fn build_node(&mut self, v: &Json, ty: &str) -> usize {
+        // vanilla codec default: an unnamespaced type is minecraft:*
+        let ty_owned;
+        let ty: &str = if ty.contains(':') {
+            ty
+        } else {
+            ty_owned = format!("minecraft:{ty}");
+            &ty_owned
+        };
         match ty {
             "minecraft:constant" => {
                 let n = req_num(v, "argument", ty);
@@ -773,14 +944,20 @@ impl Loader<'_> {
     }
 
     /// Noise id string (verified against the noise param set) or inline
-    /// {"firstOctave","amplitudes"} object.
-    fn noise_source(&self, v: &Json, ty: &str) -> NoiseSource {
+    /// {"firstOctave","amplitudes"} object. A bare id without namespace is
+    /// minecraft: (vanilla codec default).
+    fn noise_source(&mut self, v: &Json, ty: &str) -> NoiseSource {
         match v {
             Json::Str(s) => {
-                if !self.noise_params.contains_key(s) {
-                    panic!("{ty}: unknown noise params id: {s}");
+                let id = if s.contains(':') {
+                    s.clone()
+                } else {
+                    format!("minecraft:{s}")
+                };
+                if !self.noise_params.contains_key(&id) {
+                    panic!("{ty}: unknown noise params id: {id}");
                 }
-                NoiseSource::Id(s.clone())
+                NoiseSource::Id(id)
             }
             Json::Obj(_) => NoiseSource::Inline(parse_noise_params(v, ty)),
             other => panic!("{ty}: noise field is neither id nor object: {other:?}"),
@@ -835,8 +1012,9 @@ mod tests {
         }
         assert_eq!(wg.router_indices.len(), ROUTER_KEYS.len());
 
-        // every root index is live
-        assert_eq!(wg.root_indices.len(), 35, "density_function file count");
+        // router-reachable density-function roots are memoized (lazy
+        // resolution: only files referenced by this noise_settings load)
+        assert!(!wg.root_indices.is_empty(), "no reachable df roots");
         for (id, idx) in &wg.root_indices {
             assert!(*idx < wg.df_arena.len(), "root {id}: bad index");
         }
