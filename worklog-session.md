@@ -1243,3 +1243,74 @@ Stage Summary:
 - Roadmap B (биомы) ЗАКРЫТ: нативный RTree+climate в проде, паритет бит-точный, -41% e2e.
 - Остаток Java-стадий с датапаками (2-core): surface ~25% (~36ms->~22ms от 99), features
   ~8%, height-queries ~12%. Следующий фронт: C (нативные surface-правила датапака).
+
+---
+Task ID: cont-42 (2026-10-16, РЕСИНК С REMOTE + СЕМАНТИКА SURFACE-ДВИЖКА)
+Agent: Super Z (main)
+Task: продолжение до 1ms с датапаками; локальная ветка отстала от remote — синхронизация, верификация, старт этапа C (surface)
+
+Work Log:
+- ЛОКАЛЬНЫЙ РЕСИНК: локально был дубль работы (newCtxAssets/PackData/biomes.rs, Gson в плагине).
+  origin/main УЖЕ содержит всё это + БИОМЫ ЗАКРЫТЫ (5ead9ae BiomeSwap: бит-точный RTree 5/5 чанков,
+  fill_biomes 430us, e2e dptt 167.58 -> 99.0 ms/chunk = -41%, judge dptt 0.002%).
+  Решение: backup/local-dup-31098f5 тег, git reset --hard origin/main, локальный коммит отброшен.
+- CI на 5ead9ae = SUCCESS (run 38884465443, вкл. dptt-lane c fetch_datapacks). cargo test 15/15.
+- Быстрый smoke dptt (harness/smoke_dp.sh, 4 чанка вдали от спавна): плагин собирает native-ctx из
+  паков ("datapack worldgen assets: 379 files", "ctx pool ... packs=379"), БЕЗ CHIMERA-fallback;
+  native fill в сервере под нагрузкой ~11-13ms p50 (2-core контенция), layout sec=4.87 на dptt
+  (секции dptt почти все mixed - отдельный фронт оптимизации bulk-layout).
+- ПРОВЕРЕНА БИТ-ПАРИТЕТЬ native datapack-path vs oracle_noisestage (реальный Paper Terralith+Tectonic):
+  dpcmp merged/01 merged/02 (Tectonic root + overlay.datapack [1,999] active на pack format 81;
+  overlay.1_21_9 [82,999] НЕ активен) -> чанки (0,0) и (-1,-1): 0 divergent из 32118/32436.
+  БЕЗ оверлея: 160/250 divergent (aquifer-вода у нас где у vanilla камень) — оверлей обязателен.
+- ЭТАП C (surface-правила) — семантика ВЫЦЕПЛЕНА ИЗ ДЕКОМПИЛА (CFR, paper-1.21.8.jar из
+  server/versions/1.21.8, mojmap-классы; декомпил в workdir/mcdec/src):
+  * buildSurface-проход: topY = height(WORLD_SURFACE_WG)+1; walk y сверху вниз; air -> depth=0,
+    waterHeight=MIN; fluid -> waterHeight=y+1 (один раз); solid -> скан низа сплошного stone-рана
+    (кэш на ран, rescan когда stoneBottom >= y: от y-1 вниз до minY-1 до первого не-"stone";
+    isStone = !air && fluid empty); stoneDepthAbove=++depth, stoneDepthBelow=y-bottom+1;
+    правило применяется ТОЛЬКО где block == defaultBlock (stone); setBlock флюидов ->
+    markPosForPostprocessing.
+  * eroded_badlands_extension ПЕРЕД проходом (biome на (x, topY, z)), frozen_ocean_extension ПОСЛЕ
+    (biome.shouldMeltFrozenOceanIcebergSlightly => температура моря? -2 к min1).
+  * getSurfaceDepth(x,z) = (int)(surface_noise.value(x,0,z)*2.75 + 3.0 +
+    surfaceFactory.at(x,0,z).nextDouble()*0.25); surfaceSecondary = surface_secondary noise (x,0,z).
+  * getMinSurfaceLevel: 4x preliminarySurfaceLevel по углам 16-клетки, lerp2 по ((x&15)/16f,
+    (z&15)/16f) f32, floor, + surfaceDepth - 8.
+  * LazyXZ кэш на колонку, LazyY на y; TemperatureHelper: biome.coldEnoughToSnow(pos, seaLevel)
+    = getTemperature < 0.15f; getTemperature = modifier.modify(base); y > seaLevel+17 =>
+    f - (temperature_noise.value((float)x/8f, (float)z/8f, false)*8 + y - (seaLevel+17)) * 0.05/40.
+  * vertical_gradient: y<=trueBelow true; y>=falseAbove false; иначе map(y,trueB,falseA,1,0) double,
+    rnd=factory(random_name).at(x,y,z), rnd.nextFloat() < d. Паперовая
+    paper:optionally_flat_bedrock_condition_source == vertical_gradient при
+    generate-flat-bedrock=false (is_roof игнорировать в бенч-мирах).
+  * noise_threshold: noise.value(x,0,z) в [min,max]; stone_depth: above/below + offset +
+    (add_surface_depth? surfaceDepth) + secondaryRange*map(surfaceSecondary,-1,1,0,range) (int cast);
+    y_above: y + (addSD?stoneDepthAbove:0) >= anchorY + surfaceDepth*mult;
+    water: waterHeight==MIN -> true, иначе y+(addSD?stoneDepthAbove:0) >= waterHeight+offset+sd*mult;
+    hole: stoneDepthAbove<=0; steep: WORLD_SURFACE_WG соседние колонки >= cur+4 (z-соседи потом x).
+  * bandlands: clayBands[192] ОДИН раз на RandomState из
+    surfaceFactory.fromHashOf("minecraft:clay_bands"); generateBands: 192 TERRACOTTA, i += nextInt(5)+1
+    -> ORANGE (loop), makeBands(YELLOW size1 count 6..15, BROWN size2, RED size1, len 1+rnd(3) со
+    случайного старта), white head band: междуInclusive(9,15) вставок через nextInt(16)+4, WHITE +
+    nextBoolean соседи LIGHT_GRAY; getBand(x,y,z) = bands[(y + round(clay_bands_offset.value(x,0,z)*4)
+    + 192) % 192].
+  * Инвентарь типов (Terralith поверх Tectonic, 1463 узла): biome 97, block 305, condition 502,
+    noise_threshold 240, not 32, sequence 119, steep 27, stone_depth 70, temperature 1,
+    vertical_gradient 16, water 11, y_above 35, hole 3, above_preliminary_surface 2, bandlands 3.
+    Vanilla tree 428 узлов + paper:optionally_flat_bedrock. НИКАКИХ экзотических провайдеров
+    состояния - только minecraft:block (с Properties: grass_block[snowy], water[level], deepslate[axis]).
+  * RandomFactory: surfaceFactory = RandomState -> XoroshiroRandomSource(worldGenSeed).fork_positional()
+    (проверить точное имя/ветку в RandomState decompile - workdir/mcdec/src/.../RandomState.java);
+    у нас в rng.rs есть XoroshiroPositionalRandomFactory { at, from_hash_of(md5) } - готово.
+
+Stage Summary:
+- Этап A (натив-датапак JSON) закрыт и В КОНТЕКСТЕ CI; этап B (биомы) закрыт удалённой сессией
+  (-41% e2e, 99 ms/chunk на dptt); CI зелёный на текущем HEAD.
+- Этап C (surface): ВСЯ семантика выцеплена и записана выше; native/src/surface.rs открыт
+  (контракт-заголовок с формулами). Осталось: parse JSON->arena, интерпретатор колонок, state-таблица
+  (id>=16 -> имена через JNI ctxSurfaceStates), walk поверх fill()-выхода, plugin
+  shouldGenerateSurface=false + layout точных состояний, oracle-дамп пост-SURFACE статуса для
+  сравнения, локальный judge dptt+vanilla.
+- Ожидаемый эффект C: -25ms на dptt (99 -> ~75). Следующие фронты: height-запросы фич (12%),
+  features (8%), bulk-layout sec=4.87 на mixed-секциях dptt.
