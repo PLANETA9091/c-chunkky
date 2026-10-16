@@ -1314,3 +1314,39 @@ Stage Summary:
   сравнения, локальный judge dptt+vanilla.
 - Ожидаемый эффект C: -25ms на dptt (99 -> ~75). Следующие фронты: height-запросы фич (12%),
   features (8%), bulk-layout sec=4.87 на mixed-секциях dptt.
+
+---
+## Stage C COMPLETE + boot deadlock + pool-ctx surface fix (session cont-41)
+
+Work Log:
+- sfcmp ПАРИТЕТЬ surface-стадии: 0 divergent (0_0: 32193, -1_-1: 32431) vs oracle SURFACEBLOCKS.
+- Boot-ДЕДЛОК найден через SIGQUIT thread-dump (harness/bootdiag.sh): JNI surfaceSetIds клал
+  SESSIONS.lock() и звал surface_assign_ids_inner -> surface_assign_ids брал ТОТ ЖЕ мьютекс
+  (std Mutex нереентерабелен) -> Server thread навсегда в surfaceSetIds, "Done" не приходил.
+  Фикс: без пре-лока в JNI.
+- Второй баг: SurfaceSetup вешал ids+temps ТОЛЬКО на pool.firstCtx(); филлы берут ЛЮБОЙ ctx
+  пула, ctx без ids/temps молча пропускал surface_tail (guard в surface_tail) -> raw stone
+  вместо deepslate/bedrock/sand на ~15% чанков (8.497% всех блоков dptt!). Фикс: apply(long[]
+  ctxs) — surfaceSetIds+Temps на КАЖДЫЙ ctx пула.
+- Третий баг: bulk layout AIOOBE "Index 55 len 22" (surface-state ids >= 22 в 22-wide Material
+  map в v1-null-section/verify/repair) -> bulk перманентно отключался с первого чанка. Фикс:
+  bdataById (CraftBlockData.fromData) + guard на всех mats[]-сайтах; ChunkData-inner не имеет
+  setBlockData -> setRegion(x,y,z,x,y,z,bd).
+- Четвёртый: initBridge вызывался ПОЗЖЕ collectBeard -> "weakChunkField null" -> beardifier
+  self-disable на каждом буте. Фикс: initBridge прямо перед collectBeard в fill-пути.
+- Инструменты: native/bin/crsfout (fill+surface -> .crsf), scripts/state_census.py,
+  harness/bootdiag.sh.
+- dptt judge (локально): 8.497% -> 0.007% -> 0.005% (312/6.29M, только vegetation-order шум:
+  seagrass/kelp/sand-gravel диски). HEIGHTMAP 0/16384 всюду.
+- e2e prof_session dptt: 99.0 -> 81.2 ms/chunk (-18%, окно шумит ±20% от соседей по 2-core
+  песочнице; тёплые батчи 36-52ms). Native noise stage под нагрузкой p50 4.8-6.5ms, layout
+  0.66-0.9, bulk=ok. Изолированный native fill ~1.75-6.5ms.
+
+Stage Summary:
+- Коммиты: 4642018 (stage C + 3 фикса), b72677c (beard bridge init). Push, CI запущен (гейты
+  vanilla/datapack/dptt = 0.05%, наши 0.005% — запас 10x).
+- Натив теперь покрывает noise+surface+biomes (все три бит-точные vs ваниль+паки).
+- Остаток e2e (~81ms окно / 36-52 тёплые): Java-стадии Paper (features 8%, height-запросы 12%,
+  carvers, light, serialization) + контенция 2-core. Следующие фронты: натив height-сервис (D),
+  features — мега-проект; на 2-core shared потолок окна сильно шумит — честные сравнения только
+  CI judge (4-core) или isolated bench.
