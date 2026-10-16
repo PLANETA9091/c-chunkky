@@ -2,6 +2,25 @@
 use crussty_chunkgen::density::Env;
 use crussty_chunkgen::nochunk::{ChunkGen, OUT_LEN};
 
+fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect(root, &p, out);
+            } else if p.extension().map(|x| x == "json").unwrap_or(false) {
+                if let Ok(rel) = p.strip_prefix(root) {
+                    let rel = rel.to_string_lossy().replace('\\', "/");
+                    let Some(stripped) = rel.strip_prefix("data/") else { continue };
+                    if let Ok(bytes) = std::fs::read(&p) {
+                        out.push((stripped.to_string(), bytes));
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     std::env::set_var("CRUS_PROFILE", "1");
     // Diagnostic counters (Instant::now in the noise hot path) are opt-in:
@@ -9,8 +28,28 @@ fn main() {
     let diag = std::env::var("CRUS_DIAG").ok().as_deref() == Some("1");
     crussty_chunkgen::density::PROF_ON
         .store(diag, std::sync::atomic::Ordering::Relaxed);
-    let seed: i64 = 3257840388504953787;
-    let env: &'static Env = Box::leak(Box::new(Env::new(seed)));
+    let args: Vec<String> = std::env::args().collect();
+    let seed: i64 = std::env::var("CRUS_BENCH_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(3257840388504953787);
+    let env: &'static Env = if args.len() > 1 {
+        // pack mode: merge extraction roots in order (later wins)
+        let mut assets = crussty_chunkgen::worldgen::Assets::new();
+        for root in &args[1..] {
+            let root = std::path::Path::new(root);
+            let mut files = Vec::new();
+            collect(root, root, &mut files);
+            files.sort();
+            for (path, bytes) in files {
+                let keep = path.contains("/worldgen/noise_settings/")
+                    || path.contains("/worldgen/density_function/")
+                    || path.contains("/worldgen/noise/")
+                    || path.ends_with("/dimension/overworld.json");
+                if keep { assets.insert(path, bytes); }
+            }
+        }
+        Box::leak(Box::new(Env::new_assets(seed, &assets)))
+    } else {
+        Box::leak(Box::new(Env::new(seed)))
+    };
     let mut gen = ChunkGen::new(env);
     let mut out = [0u16; OUT_LEN];
     for cz in 0..2 {
@@ -55,6 +94,9 @@ fn main() {
         )),
         crussty_chunkgen::density::PROF_BLEND_CALLS.load(std::sync::atomic::Ordering::Relaxed) / 16,
     );
+    if std::env::var("CRUS_SLOT_PROF").ok().as_deref() == Some("1") {
+        gen.profile_slice_children(-2, -2);
+    }
     let g = |v: u64| v as f64 / n as f64;
     println!(
         "aq: substance_calls {} fluid_calls {} prelim_scans {} prelim_steps {}",

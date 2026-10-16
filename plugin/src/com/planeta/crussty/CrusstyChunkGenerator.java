@@ -380,43 +380,103 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
 
     /** Minimal pack.mcmeta "overlays" reader: an entry is active when
      *  formats=[min,max] (or min_format/max_format) covers PACK_FORMAT.
-     *  Only simple [a,b] two-int arrays are understood (covers all known
-     *  packs); anything else is skipped. */
+     *  Hand-rolled JSON scanning (no Gson dependency in the compile
+     *  classpath): we only need top-level "overlays" -> "entries" -> objects
+     *  with "directory" (string) and "formats" ([lo,hi] ints) or
+     *  "min_format"/"max_format" (ints). Anything else is skipped. */
     private static java.util.List<String> parseOverlays(String text, java.util.List<String> out) {
         try {
-            com.google.gson.JsonObject root = com.google.gson.JsonParser
-                    .parseString(text).getAsJsonObject();
-            if (!root.has("overlays")) {
+            JsonScanner js = new JsonScanner(text);
+            // locate "overlays" object at any depth, then "entries" array
+            int ov = js.findKey("overlays");
+            if (ov < 0) {
                 return out;
             }
-            com.google.gson.JsonArray entries = root.getAsJsonObject("overlays")
-                    .getAsJsonArray("entries");
-            for (var el : entries) {
-                if (!el.isJsonObject()) {
+            int entries = js.findKeyFrom("entries", ov);
+            if (entries < 0) {
+                return out;
+            }
+            // skip past '"entries"' (9 chars incl. quotes) and the ':'
+            int i = js.indexOfNonWs(entries + 9);
+            if (i < 0 || js.charAt(i) != ':') {
+                return out;
+            }
+            i = js.indexOfNonWs(i + 1);
+            if (i < 0 || js.charAt(i) != '[') {
+                return out;
+            }
+            int depth = 0;     // object depth inside the entries array
+            int inArr = 0;     // array nesting (e.g. "formats": [1, 999])
+            Integer lo = null, hi = null;
+            String directory = null;
+            String key = null;
+            StringBuilder str = new StringBuilder();
+            int k = js.indexOfNonWs(i + 1);
+            while (k >= 0 && k < js.len()) {
+                char c = js.charAt(k);
+                if (c == '"') {
+                    int close = js.findStringEnd(k);
+                    if (close < 0) break;
+                    str.setLength(0);
+                    str.append(js.slice(k + 1, close - 1));
+                    // findStringEnd returns the index PAST the closing quote
+                    k = close;
+                    if (key == null) {
+                        key = str.toString();
+                    } else if ("directory".equals(key)) {
+                        directory = str.toString();
+                    }
                     continue;
                 }
-                com.google.gson.JsonObject en = el.getAsJsonObject();
-                if (!en.has("directory")) {
+                if (c == '{') {
+                    depth++;
+                    key = null; lo = null; hi = null; directory = null;
+                    k++;
                     continue;
                 }
-                Integer lo = null;
-                Integer hi = null;
-                if (en.has("formats") && en.get("formats").isJsonArray()
-                        && en.getAsJsonArray("formats").size() == 2) {
-                    lo = en.getAsJsonArray("formats").get(0).isJsonPrimitive()
-                            ? en.getAsJsonArray("formats").get(0).getAsInt() : null;
-                    hi = en.getAsJsonArray("formats").get(1).isJsonPrimitive()
-                            ? en.getAsJsonArray("formats").get(1).getAsInt() : null;
+                if (c == '}') {
+                    if (depth == 0) {
+                        break; // end of the entries array's parent object
+                    }
+                    depth--;
+                    if (depth == 0) {
+                        // entry object closed: evaluate it
+                        if (directory != null && lo != null && hi != null
+                                && PACK_FORMAT >= lo && PACK_FORMAT <= hi) {
+                            out.add(directory);
+                        }
+                        key = null; lo = null; hi = null; directory = null;
+                    }
+                    k++;
+                    continue;
                 }
-                if (lo == null || hi == null) {
-                    lo = en.has("min_format") && en.get("min_format").isJsonPrimitive()
-                            ? en.get("min_format").getAsInt() : null;
-                    hi = en.has("max_format") && en.get("max_format").isJsonPrimitive()
-                            ? en.get("max_format").getAsInt() : null;
+                if (c == '[') { inArr++; k++; continue; }
+                if (c == ']') { if (inArr > 0) inArr--; k++; continue; }
+                if (c == ':') { k++; continue; }
+                if (c == ',') {
+                    if (inArr == 0) { key = null; }
+                    k++;
+                    continue;
                 }
-                if (lo != null && hi != null && PACK_FORMAT >= lo && PACK_FORMAT <= hi) {
-                    out.add(en.get("directory").getAsString());
+                if (Character.isDigit(c) || c == '-' || c == '+') {
+                    int j = k;
+                    while (j < js.len() && (Character.isDigit(js.charAt(j)) || "+-".indexOf(js.charAt(j)) >= 0)) j++;
+                    Integer v = null;
+                    try { v = Integer.parseInt(js.slice(k, j)); } catch (NumberFormatException ignored) {}
+                    if (v != null && key != null) {
+                        switch (key) {
+                            case "min_format" -> { if (lo == null) lo = v; }
+                            case "max_format" -> { if (hi == null) hi = v; }
+                            case "formats" -> {
+                                if (lo == null) { lo = v; } else if (hi == null) { hi = v; }
+                            }
+                            default -> { }
+                        }
+                    }
+                    k = j;
+                    continue;
                 }
+                k++;
             }
         } catch (Throwable t) {
             Logger.getLogger("CrusstyGen").warning(
@@ -425,6 +485,46 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         return out;
     }
 
+    /** Tiny JSON text scanner used by parseOverlays (finds keys, reads
+     *  string literals and integer tokens; whitespace-tolerant). */
+    private static final class JsonScanner {
+        private final String s;
+        JsonScanner(String s) { this.s = s; }
+        int len() { return s.length(); }
+        char charAt(int i) { return s.charAt(i); }
+        String slice(int a, int b) { return s.substring(a, Math.min(b, s.length())); }
+        int indexOfNonWs(int from) {
+            int i = Math.max(0, from);
+            while (i < s.length() && Character.isWhitespace(s.charAt(i))) i++;
+            return i < s.length() ? i : -1;
+        }
+        /** Index of the value start for the FIRST occurrence of "key" that is
+         *  followed by ':' (heuristic: pack.mcmeta files are small). */
+        int findKey(String key) {
+            return findKeyFrom(key, 0);
+        }
+        int findKeyFrom(String key, int from) {
+            String pat = '"' + key + '"';
+            int i = s.indexOf(pat, Math.max(0, from));
+            while (i >= 0) {
+                int c = indexOfNonWs(i + pat.length());
+                if (c >= 0 && s.charAt(c) == ':') {
+                    return i;
+                }
+                i = s.indexOf(pat, i + 1);
+            }
+            return -1;
+        }
+        /** Index just past the closing quote of the string starting at open. */
+        int findStringEnd(int open) {
+            for (int i = open + 1; i < s.length(); i++) {
+                char c = s.charAt(i);
+                if (c == '\\') { i++; continue; }
+                if (c == '"') return i + 1;
+            }
+            return -1;
+        }
+    }
     /**
      * Datapack-aware sea level: walk to the NMS NoiseBasedChunkGenerator and
      * read getSeaLevel() (NoiseGeneratorSettings from the server registry, so
