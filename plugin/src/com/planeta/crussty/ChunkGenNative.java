@@ -51,6 +51,20 @@ public final class ChunkGenNative {
      */
     public static native int fillBiomes(long ctx, int cx, int cz, int[] out);
 
+    /** surfaceStates(ctx) -> String[] — block state strings of the parsed
+     *  surface rule tree (first-appearance order), or null when the ctx has
+     *  no native surface engine. */
+    public static native String[] surfaceStates(long ctx);
+
+    /** surfaceSetIds(ctx, ids) -> 0 on success — assigns the JVM material id
+     *  for every state string (append order = string order) and builds the
+     *  native bandlands table. */
+    public static native int surfaceSetIds(long ctx, short[] ids);
+
+    /** surfaceSetTemps(ctx, temps, frozen) -> 0 on success — per native
+     *  biome index: base temperature + FROZEN modifier flag. */
+    public static native int surfaceSetTemps(long ctx, float[] temps, boolean[] frozen);
+
     public static native int fillMarked(long ctx, int chunkX, int chunkZ, short[] out, long[] marks);
 
     /**

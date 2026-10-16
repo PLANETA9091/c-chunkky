@@ -1,0 +1,18 @@
+# prof session dptt_stageC 2026-10-16T20:00:21Z
+world=dptt datapacks_dir=server_datapacks fill_threads=2 parallel=1 heap=-Xms1G -Xmx2G
+18c29f1c871f71a96961af2664d7ae2e  01_tectonic.zip
+ee7f451a8d1a13b29090a08543bda46a  02_terralith.zip
+052b8c9b5415f660127ef31fa1382b8e  server/paper.jar
+cc4d23f33a60a72ebde8b4c49c96ab79  server/plugins/CrusstyGen.jar
+4158110a5f669e4829cce2c5bbcb94ce  native/target/release/libcrussty_chunkgen.so
+--- measured window: 12x12 cx 32..43 cz 32..43 ---
+batch cz 32..34: 36 chunks in 4489 ms -> 124.6 ms/chunk
+batch cz 35..37: 36 chunks in 3674 ms -> 102.0 ms/chunk
+batch cz 38..40: 36 chunks in 2209 ms -> 61.3 ms/chunk
+batch cz 41..43: 36 chunks in 1293 ms -> 35.9 ms/chunk
+window_ms=11697 chunks=144 ms_per_chunk=81.23
+--- crusgenstats (final) ---
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=378  mean=13601.4us  min=5163.8us  p50=10684.8us  p99=43992.8us  max=49298.5us  [native=12.77ms nat_p50=9.98ms layout=0.78ms beard=0.00ms marks=0.02ms]  [lay setup=0.01 sec=0.24 hmap=0.43 verify=0.00 | uni=0.00/0.2 lin=0.00/0.0 glob=0.00/8.0 pb=0.00/0.00]  [sections filled=0 mixed=3024 air=6048 v1fallback=0 bulk=runtime ArrayIndexOutOfBoundsException: Index 55 out of bounds for length 22]  swapfail=null  marks_seen=16554 marks_landed=16554 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=655 wall=10.11ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=4.31 par_strips=2.56]
+
+--- spark links in console ---
+(no spark link)

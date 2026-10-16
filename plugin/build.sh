@@ -15,7 +15,7 @@ echo "using javac: $JAVAC"
 rm -rf classes
 mkdir -p classes
 # Main sources (paper-api only)
-SRCS_MAIN=$(find src -name '*.java' ! -name 'NativeBiomeSource.java' ! -name 'BiomeSwap.java')
+SRCS_MAIN=$(find src -name '*.java' ! -name 'NativeBiomeSource.java' ! -name 'BiomeSwap.java' ! -name 'SurfaceSetup.java')
 "$JAVAC" -encoding UTF-8 -cp "$API_JAR:$LIBS" -d classes $SRCS_MAIN
 
 # NMS companions (NativeBiomeSource/BiomeSwap) need the mojmap paper jar —
@@ -26,7 +26,7 @@ if [ -f "$SERVER_JAR" ]; then
   echo "compiling NMS biome companions against $SERVER_JAR"
   MOJANG_LIBS="$(find ../server/libraries/com/mojang ../server/libraries/it -name '*.jar' 2>/dev/null | tr '\n' ':')"
   "$JAVAC" -encoding UTF-8 -cp "classes:$SERVER_JAR:$API_JAR:$LIBS:$MOJANG_LIBS" -d classes \
-    src/com/planeta/crussty/NativeBiomeSource.java src/com/planeta/crussty/BiomeSwap.java
+    src/com/planeta/crussty/NativeBiomeSource.java src/com/planeta/crussty/BiomeSwap.java src/com/planeta/crussty/SurfaceSetup.java
 else
   echo "no server jar — NMS biome companions skipped (vanilla Java biomes)"
 fi

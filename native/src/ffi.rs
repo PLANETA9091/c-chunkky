@@ -20,6 +20,149 @@ struct Ctx {
     /// keep the vanilla Java biome path (embedded-vanilla ctx has no
     /// data-driven dimension json).
     biomes: Option<BiomeState>,
+    /// Native SurfaceRules engine (pack surface_rule). None = vanilla Java
+    /// surface stage stays active.
+    surface: Option<SurfaceState>,
+}
+
+/// Native surface engine state (config parsed from the pack noise_settings;
+/// material ids + biome temperatures arrive from the JVM at world load).
+pub struct SurfaceState {
+    pub cfg: crate::surface::SurfaceConfig,
+    pub noise_handles: [u32; 3],
+    pub temps: Vec<f32>,
+    pub frozen: Vec<bool>,
+    pub temps_noises: std::sync::Arc<crate::surface::TempNoises>,
+    pub compiled: std::sync::Arc<crate::density::Compiled>,
+    pub env: &'static DEnv,
+    /// (cx, cz) -> biome quart grid filled by fillBiomes (consumed by fill).
+    pub grid_cache: Mutex<HashMap<(i32, i32), Box<[i32]>>>,
+}
+
+static TEMP_NOISES: std::sync::OnceLock<std::sync::Arc<crate::surface::TempNoises>> =
+    std::sync::OnceLock::new();
+
+/// Noise ids referenced by the winning surface_rule (plus the three static
+/// SurfaceSystem noises). Deterministic order, deduped.
+fn surface_extra_noises(assets: &crate::worldgen::Assets) -> Vec<String> {
+    let ns_id = assets.resolve_noise_settings();
+    let path = ns_id
+        .replacen(':', "/worldgen/noise_settings/", 1)
+        + ".json";
+    let Some(bytes) = assets.get(&path) else {
+        return Vec::new();
+    };
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Vec::new();
+    };
+    let Ok(j) = crate::json::parse(text) else {
+        return Vec::new();
+    };
+    let mut out = vec![
+        "minecraft:surface".to_string(),
+        "minecraft:surface_secondary".to_string(),
+        "minecraft:clay_bands_offset".to_string(),
+        "minecraft:badlands_pillar".to_string(),
+        "minecraft:badlands_pillar_roof".to_string(),
+        "minecraft:badlands_surface".to_string(),
+        "minecraft:iceberg_pillar".to_string(),
+        "minecraft:iceberg_pillar_roof".to_string(),
+        "minecraft:iceberg_surface".to_string(),
+    ];
+    if let Some(rule) = j.get("surface_rule") {
+        crate::surface::collect_noise_refs(rule, &mut out);
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn build_surface_state(
+    assets: &crate::worldgen::Assets,
+    env: &'static DEnv,
+    biomes: Option<&BiomeState>,
+) -> Option<SurfaceState> {
+    // resolve_noise_settings yields the id ("minecraft:overworld"); map it
+    // to the asset path exactly like WorldGen::load_with does.
+    let path = assets
+        .resolve_noise_settings()
+        .replacen(':', "/worldgen/noise_settings/", 1)
+        + ".json";
+    let bytes = match assets.get(&path) {
+        Some(b) => b,
+        None => {
+            log_warn(&format!("surface: noise_settings asset missing: {path} (have {} paths)", assets.paths().count()));
+            return None;
+        }
+    };
+    let ns = match std::str::from_utf8(bytes) {
+        Ok(v) => v,
+        Err(_) => { log_warn("surface: noise_settings not utf8"); return None; }
+    };
+    let noise_idx = |id: &str| env.noise.list_idx.get(id).copied();
+    let biome_idx = |name: &str| -> Option<u32> {
+        biomes
+            .and_then(|b| b.src.biome_names.iter().position(|n| n == name))
+            .map(|i| i as u32)
+    };
+    let sb = match crate::surface::build(&env.wg, ns, &noise_idx, &biome_idx) {
+        Some(v) => v,
+        None => {
+            log_warn("surface config build returned None (parse or handle lookup)");
+            return None;
+        }
+    };
+    let compiled = match biomes {
+        Some(b) => b.compiled.clone(),
+        None => std::sync::Arc::new(env.compile()),
+    };
+    let temps_noises = TEMP_NOISES
+        .get_or_init(|| std::sync::Arc::new(crate::surface::temp_noises()))
+        .clone();
+    Some(SurfaceState {
+        cfg: sb.cfg,
+        noise_handles: sb.noise_handles,
+        temps: Vec::new(),
+        frozen: Vec::new(),
+        temps_noises,
+        compiled,
+        env,
+        grid_cache: Mutex::new(HashMap::new()),
+    })
+}
+
+/// Surface pass after the noise-stage fill (shared by fill/fillMarked/
+/// fillBeard — vanilla applies surface at the SURFACE status, right after
+/// NOISE, before carvers).
+fn surface_tail(ctx: &Ctx, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
+    let Some(s) = ctx.surface.as_ref() else { return };
+    if s.cfg.ids.len() != s.cfg.states.len() || s.cfg.bandlands.len() != 192 || s.temps.is_empty()
+    {
+        return;
+    }
+    let grid = s.grid_cache.lock().unwrap().remove(&(cx, cz));
+    let bs = ctx.biomes.as_ref().map(|b| (&b.src, &b.climate));
+    let default_names: Vec<String> = Vec::new();
+    let names: &[String] = ctx
+        .biomes
+        .as_ref()
+        .map(|b| &b.src.biome_names)
+        .unwrap_or(&default_names);
+    crate::surface_fill::apply_surface(
+        s.env,
+        &s.compiled,
+        &s.cfg,
+        s.noise_handles,
+        &s.temps,
+        &s.frozen,
+        &s.temps_noises,
+        bs,
+        names,
+        cx,
+        cz,
+        out,
+        grid.as_deref(),
+    );
 }
 
 /// Compiled biome resolution state (source tree + climate DFs + arena).
@@ -59,7 +202,7 @@ pub fn ctx_new(seed: i64, _min_y: i32, _height: i32, sea_level: i32) -> i64 {
     let env: &'static DEnv = Box::leak(env);
     let gen = ChunkGen::new(env);
     let mut map = SESSIONS.lock().unwrap();
-    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes: None });
+    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes: None, surface: None });
     id
 }
 
@@ -73,13 +216,20 @@ pub fn ctx_new_assets(
 ) -> Result<i64, String> {
     let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let result = std::panic::catch_unwind(move || {
-        let mut env: Box<DEnv> = Box::new(DEnv::new_assets(seed, &assets));
+        // Pre-scan the winning surface_rule for noise ids outside the router
+        // (pack surface rules reference their own noise defs) so the env
+        // instantiates them with the exact vanilla seeding.
+        let extra = surface_extra_noises(&assets);
+        let mut env: Box<DEnv> = Box::new(DEnv::new_assets_extra(seed, &assets, &extra));
         env.wg.sea_level = sea_level as i64;
         let env: &'static DEnv = Box::leak(env);
         let biomes = build_biome_state(&assets, env);
-        (ChunkGen::new(env), biomes)
+        let surface = biomes
+            .as_ref()
+            .and_then(|b| build_surface_state(&assets, b.env, Some(b)));
+        (ChunkGen::new(env), biomes, surface)
     });
-    let (gen, biomes) = match result {
+    let (gen, biomes, surface) = match result {
         Ok(v) => v,
         Err(p) => {
             let msg = if let Some(s) = p.downcast_ref::<String>() {
@@ -93,7 +243,7 @@ pub fn ctx_new_assets(
         }
     };
     let mut map = SESSIONS.lock().unwrap();
-    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes });
+    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes, surface });
     Ok(id)
 }
 
@@ -108,6 +258,7 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
     let map = map_guard.as_mut().expect("sessions map");
     let ctx = map.get_mut(&id).expect("ctx id");
     ctx.gen.fill(cx, cz, out);
+    surface_tail(ctx, cx, cz, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -480,8 +631,10 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fillBiomes
 ) -> jni_sys::jint {
     let tbl = *env;
     let state_guard = SESSIONS.lock().unwrap();
-    let Some(state) = state_guard.as_ref().and_then(|m| m.get(&(ctx as i64)))
-        .and_then(|c| c.biomes.as_ref()) else {
+    let Some(c) = state_guard.as_ref().and_then(|m| m.get(&(ctx as i64))) else {
+        return -1;
+    };
+    let Some(state) = c.biomes.as_ref() else {
         return -1;
     };
     let len = ((*tbl).v1_1.GetArrayLength)(env, out as jni_sys::jarray) as usize;
@@ -509,6 +662,193 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fillBiomes
         cz as i32,
         &mut slice[..n],
     );
+    if let Some(s) = c.surface.as_ref() {
+        let mut g = s.grid_cache.lock().unwrap();
+        if g.len() > 48 {
+            g.clear();
+        }
+        g.insert((cx as i32, cz as i32), Box::from(&slice[..n]));
+    }
     ((*tbl).v1_1.ReleaseIntArrayElements)(env, out, ptr, 0);
     n as jni_sys::jint
+}
+
+// ---------------------------------------------------------------------------
+// JNI: native surface engine handshake
+// ---------------------------------------------------------------------------
+
+/// surfaceStates(long ctx) -> String[] — distinct block state strings of the
+/// parsed surface rule tree (first-appearance order). Null when the ctx has
+/// no native surface engine.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_surfaceStates(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jni_sys::jlong,
+) -> jni_sys::jobjectArray {
+    let tbl = *env;
+    let guard = SESSIONS.lock().unwrap();
+    let Some(s) = guard.as_ref().and_then(|m| m.get(&(ctx as i64)))
+        .and_then(|c| c.surface.as_ref()) else {
+        return std::ptr::null_mut();
+    };
+    let str_class = ((*tbl).v1_1.FindClass)(env, c"java/lang/String".as_ptr());
+    if str_class.is_null() {
+        return std::ptr::null_mut();
+    }
+    let states = &s.cfg.states;
+    let arr = ((*tbl).v1_1.NewObjectArray)(
+        env,
+        states.len() as jni_sys::jsize,
+        str_class,
+        std::ptr::null_mut(),
+    );
+    if arr.is_null() {
+        return std::ptr::null_mut();
+    }
+    for (i, name) in states.iter().enumerate() {
+        let cstr = match std::ffi::CString::new(name.as_str()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let js = ((*tbl).v1_1.NewStringUTF)(env, cstr.as_ptr());
+        if js.is_null() {
+            continue;
+        }
+        ((*tbl).v1_1.SetObjectArrayElement)(env, arr, i as jni_sys::jsize, js);
+    }
+    arr as jni_sys::jobjectArray
+}
+
+/// surfaceSetIds(long ctx, short[] ids) -> int. Assigns the JVM material id
+/// for every state string (same order as surfaceStates) and builds the
+/// 192 bandlands bands (needs the world-seed factory). 0 on success.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_surfaceSetIds(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jni_sys::jlong,
+    ids: jni_sys::jshortArray,
+) -> jni_sys::jint {
+    if ids.is_null() {
+        return -1;
+    }
+    let tbl = *env;
+    let len = ((*tbl).v1_1.GetArrayLength)(env, ids as jni_sys::jarray) as usize;
+    let ptr = ((*tbl).v1_1.GetShortArrayElements)(env, ids, std::ptr::null_mut());
+    if ptr.is_null() {
+        return -1;
+    }
+    let v: Vec<u16> = std::slice::from_raw_parts(ptr as *const u16, len).to_vec();
+    ((*tbl).v1_1.ReleaseShortArrayElements)(env, ids, ptr, 0);
+    // NOTE: do NOT pre-lock SESSIONS here — surface_assign_ids takes it
+    // internally (std Mutex is not reentrant; pre-locking deadlocked boot).
+    surface_assign_ids_inner(ctx as i64, v)
+}
+
+/// Rust-side helper shared by JNI + bins: assign material ids + bands.
+pub fn surface_assign_ids(id: i64, ids: &[u16]) -> Result<(), String> {
+    let mut guard = SESSIONS.lock().unwrap();
+    let Some(c) = guard.as_mut().and_then(|m| m.get_mut(&id)) else {
+        return Err("no ctx".into());
+    };
+    let Some(s) = c.surface.as_mut() else {
+        return Err("no surface".into());
+    };
+    if ids.len() != s.cfg.states.len() {
+        return Err(format!("ids {} != states {}", ids.len(), s.cfg.states.len()));
+    }
+    s.cfg.ids = ids.to_vec();
+    let factory = crate::surface::root_factory(s.env.seed);
+    s.cfg.bandlands = crate::surface::generate_bands(&s.cfg, &factory);
+    Ok(())
+}
+
+fn surface_assign_ids_inner(id: i64, v: Vec<u16>) -> i32 {
+    match surface_assign_ids(id, &v) {
+        Ok(()) => 0,
+        Err(e) => {
+            log_warn(&e);
+            -3
+        }
+    }
+}
+
+/// surfaceSetTemps(long ctx, float[] temps, boolean[] frozen) -> int.
+/// Per native biome index (ctxBiomeNames order): base temperature and the
+/// FROZEN temperature-modifier flag.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_surfaceSetTemps(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jni_sys::jlong,
+    temps: jni_sys::jfloatArray,
+    frozen: jni_sys::jbooleanArray,
+) -> jni_sys::jint {
+    if temps.is_null() || frozen.is_null() {
+        return -1;
+    }
+    let tbl = *env;
+    let tlen = ((*tbl).v1_1.GetArrayLength)(env, temps as jni_sys::jarray) as usize;
+    let flen = ((*tbl).v1_1.GetArrayLength)(env, frozen as jni_sys::jarray) as usize;
+    if tlen != flen {
+        return -2;
+    }
+    let tptr = ((*tbl).v1_1.GetFloatArrayElements)(env, temps, std::ptr::null_mut());
+    if tptr.is_null() {
+        return -1;
+    }
+    let tv: Vec<f32> = std::slice::from_raw_parts(tptr as *const f32, tlen).to_vec();
+    ((*tbl).v1_1.ReleaseFloatArrayElements)(env, temps, tptr, 0);
+    let fptr = ((*tbl).v1_1.GetBooleanArrayElements)(env, frozen, std::ptr::null_mut());
+    if fptr.is_null() {
+        return -1;
+    }
+    let fv: Vec<bool> = {
+        let raw = std::slice::from_raw_parts(fptr as *const u8, flen);
+        raw.iter().map(|b| *b != 0).collect()
+    };
+    ((*tbl).v1_1.ReleaseBooleanArrayElements)(env, frozen, fptr, 0);
+    match surface_assign_temps(ctx as i64, &tv, &fv) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Rust-side helper shared by JNI + bins.
+pub fn surface_assign_temps(id: i64, temps: &[f32], frozen: &[bool]) -> Result<(), String> {
+    let mut guard = SESSIONS.lock().unwrap();
+    let Some(c) = guard.as_mut().and_then(|m| m.get_mut(&id)) else {
+        return Err("no ctx".into());
+    };
+    let Some(s) = c.surface.as_mut() else {
+        return Err("no surface".into());
+    };
+    s.temps = temps.to_vec();
+    s.frozen = frozen.to_vec();
+    Ok(())
+}
+
+/// Rust-side helper: native biome name table of a ctx.
+pub fn ctx_biome_names_of(id: i64) -> Option<Vec<String>> {
+    let guard = SESSIONS.lock().unwrap();
+    guard
+        .as_ref()
+        .and_then(|m| m.get(&id))
+        .and_then(|c| c.biomes.as_ref())
+        .map(|b| b.src.biome_names.clone())
+}
+
+/// Rust-side helper: surface state strings of a ctx.
+pub fn surface_states_of(id: i64) -> Option<Vec<String>> {
+    let guard = SESSIONS.lock().unwrap();
+    guard
+        .as_ref()
+        .and_then(|m| m.get(&id))
+        .and_then(|c| c.surface.as_ref())
+        .map(|s| s.cfg.states.clone())
+}
+
+pub(crate) fn log_warn(msg: &str) {
+    eprintln!("[crussty] {msg}");
 }

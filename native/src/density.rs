@@ -796,17 +796,29 @@ impl Env {
     /// Build the environment for one seed (vanilla RandomState semantics).
     pub fn new(seed: i64) -> Env {
         let wg = WorldGen::load_default("");
-        Self::with_worldgen(wg, seed)
+        Self::with_worldgen(wg, seed, &[])
     }
 
     /// Build the environment from world-datapack asset overrides (the
     /// noise_settings to load is resolved from the pack dimension override).
     pub fn new_assets(seed: i64, assets: &crate::worldgen::Assets) -> Env {
         let wg = WorldGen::load_with(assets);
-        Self::with_worldgen(wg, seed)
+        Self::with_worldgen(wg, seed, &[])
     }
 
-    pub fn with_worldgen(wg: WorldGen, seed: i64) -> Env {
+    /// Same, with extra noise ids instantiated beyond the router set (the
+    /// surface engine's surface/secondary/clay_bands_offset + any pack
+    /// surface-rule noises).
+    pub fn new_assets_extra(
+        seed: i64,
+        assets: &crate::worldgen::Assets,
+        extra: &[String],
+    ) -> Env {
+        let wg = WorldGen::load_with(assets);
+        Self::with_worldgen(wg, seed, extra)
+    }
+
+    pub fn with_worldgen(wg: WorldGen, seed: i64, extra_noises: &[String]) -> Env {
         // RandomState: this.random = XoroshiroRandomSource(seed).forkPositional()
         let mut root = XoroshiroRandomSource::new(seed);
         let root_factory = root.fork_positional();
@@ -820,6 +832,30 @@ impl Env {
         //   random.fromHashOf(key.location()), params) — deterministic per id.
         let mut used: Vec<String> = Vec::new();
         collect_noise_refs(&wg, &mut used);
+        // Surface engine noises (vanilla SurfaceSystem.getOrCreateNoise —
+        // these are NOT referenced by the noise router). Skip silently when
+        // the pack dropped the noise JSON (the surface engine then bails to
+        // the vanilla Java path).
+        for extra in [
+            "minecraft:surface",
+            "minecraft:surface_secondary",
+            "minecraft:clay_bands_offset",
+            "minecraft:badlands_pillar",
+            "minecraft:badlands_pillar_roof",
+            "minecraft:badlands_surface",
+            "minecraft:iceberg_pillar",
+            "minecraft:iceberg_pillar_roof",
+            "minecraft:iceberg_surface",
+        ] {
+            if wg.noise_params.contains_key(extra) && !used.contains(&extra.to_string()) {
+                used.push(extra.to_string());
+            }
+        }
+        for extra in extra_noises {
+            if wg.noise_params.contains_key(extra) && !used.contains(extra) {
+                used.push(extra.clone());
+            }
+        }
         used.sort();
         used.dedup();
         let mut list = Vec::new();

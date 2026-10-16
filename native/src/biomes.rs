@@ -44,7 +44,7 @@ pub struct Param {
 
 impl Param {
     #[inline]
-    fn distance(&self, v: i64) -> i64 {
+    pub fn distance(&self, v: i64) -> i64 {
         let up = v.wrapping_sub(self.max);
         let down = self.min.wrapping_sub(v);
         if up > 0 {
@@ -375,7 +375,7 @@ impl BiomeSourceData {
 
     /// Vanilla-order warm-start search for one quart.
     #[inline]
-    fn find_value(&self, values: &[i64; N_PARAMS]) -> usize {
+    pub fn find_value(&self, values: &[i64; N_PARAMS]) -> usize {
         let tree_id = self as *const BiomeSourceData as usize;
         let (_, last) = SEARCH_LAST.get();
         let last = if SEARCH_LAST.get().0 == tree_id { last } else { None };
@@ -525,4 +525,9 @@ pub fn fill_biomes(
             }
         }
     }
+}
+
+/// Public quantize wrapper for diagnostics (climprobe).
+pub fn quantize_pub(v: f64) -> i64 {
+    quantize(v)
 }

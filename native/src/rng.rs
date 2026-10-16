@@ -161,6 +161,10 @@ pub struct XoroshiroRandomSource {
 }
 
 impl XoroshiroRandomSource {
+    /// vanilla XoroshiroRandomSource.nextBoolean = (nextLong() & 1) != 0
+    pub fn next_bool(&mut self) -> bool {
+        (self.next_long() & 1) != 0
+    }
     pub fn new(seed: i64) -> Self {
         XoroshiroRandomSource {
             rng: Xoroshiro128PlusPlus::from_seed(seed),

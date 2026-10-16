@@ -72,6 +72,10 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         private final java.util.concurrent.atomic.AtomicInteger rr =
                 new java.util.concurrent.atomic.AtomicInteger();
 
+        long[] all() {
+            return ctxs.clone();
+        }
+
         CtxPool(int n, long seed, int minY, int height, int sea, PackData packs) {
             this.ctxs = new long[n];
             this.locks = new ReentrantLock[n];
@@ -142,10 +146,16 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         return false;
     }
 
-    /** Vanilla surface rules (deepslate, biome surface, bedrock floor) run on top of our blocks. */
+    /**
+     * Native surface engine active: the pack's surface_rule tree is evaluated
+     * inside the native fill (noise stage) and the vanilla Java surface pass
+     * is skipped. Flipped once at world load by {@link #setupSurface}.
+     */
+    private static volatile boolean NATIVE_SURFACE = false;
+
     @Override
     public boolean shouldGenerateSurface() {
-        return true;
+        return !NATIVE_SURFACE;
     }
 
     @Override
@@ -200,10 +210,13 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     /**
      * World-datapack worldgen assets for this world, extracted once per world
      * name. Scans <world>/datapacks/ (zips + directories) in name order;
-     * LATER packs override earlier ones (vanilla pack merge order). Only the
-     * worldgen-relevant subtrees are collected (noise_settings,
-     * density_function, noise, and the overworld dimension override that
-     * carries the biome source + settings reference).
+     * LATER packs override earlier ones (verified against the real server:
+     * the RandomState probe shows Terralith's noise_settings — 335 terralith
+     * refs — wins over Tectonic's for the dptt pack pair). Within a pack, an
+     * active overlay dir overrides the pack root. Only the worldgen-relevant
+     * subtrees are
+     * collected (noise_settings, density_function, noise, and the overworld
+     * dimension override that carries the biome source + settings reference).
      */
     private static PackData packDataFor(WorldInfo worldInfo) {
         return packDataFor(worldInfo.getName());
@@ -232,7 +245,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             return null;
         }
         java.util.Arrays.sort(packs, java.util.Comparator.comparing(java.io.File::getName));
-        // merged map, later packs overwrite earlier ones
+        // merged map, later packs override earlier ones (see doc above)
         java.util.Map<String, byte[]> merged = new java.util.TreeMap<>();
         try {
             for (java.io.File pack : packs) {
@@ -248,6 +261,8 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                         // overlay dirs whose format range covers the current
                         // pack format are merged ON TOP of the pack root.
                         java.util.List<String> overlays = activeOverlays(zf, entries);
+                        // per-pack view: base first, then active overlays override
+                        java.util.Map<String, byte[]> packMap = new java.util.TreeMap<>();
                         // 1) pack root data/
                         for (java.util.zip.ZipEntry e : entries) {
                             if (e.isDirectory()) {
@@ -255,10 +270,10 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                             }
                             String rel = packRel(e.getName());
                             if (rel != null) {
-                                merged.put(rel, zf.getInputStream(e).readAllBytes());
+                                packMap.put(rel, zf.getInputStream(e).readAllBytes());
                             }
                         }
-                        // 2) active overlays (override the root)
+                        // 2) active overlays (override the pack root)
                         for (String ov : overlays) {
                             String prefix = ov + "/data/";
                             for (java.util.zip.ZipEntry e : entries) {
@@ -267,14 +282,20 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                 }
                                 String rel = packRel(e.getName().substring(ov.length() + 1));
                                 if (rel != null) {
-                                    merged.put(rel, zf.getInputStream(e).readAllBytes());
+                                    packMap.put(rel, zf.getInputStream(e).readAllBytes());
                                 }
                             }
+                        }
+                        // 3) global merge: later packs override earlier ones
+                        for (java.util.Map.Entry<String, byte[]> en : packMap.entrySet()) {
+                            merged.put(en.getKey(), en.getValue());
                         }
                     }
                 } else if (pack.isDirectory()) {
                     java.nio.file.Path root = pack.toPath();
                     java.util.List<String> overlays = activeOverlaysDir(root);
+                    // per-pack view: base first, then active overlays override
+                    java.util.Map<String, byte[]> packMap = new java.util.TreeMap<>();
                     try (java.util.stream.Stream<java.nio.file.Path> walk = java.nio.file.Files.walk(root)) {
                         walk.filter(java.nio.file.Files::isRegularFile)
                             .sorted()
@@ -283,7 +304,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                 String rel = packRel(relPath);
                                 if (rel != null) {
                                     try {
-                                        merged.put(rel, java.nio.file.Files.readAllBytes(p));
+                                        packMap.put(rel, java.nio.file.Files.readAllBytes(p));
                                     } catch (java.io.IOException ignored) {
                                     }
                                 }
@@ -303,12 +324,16 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                     String rel = packRel(full);
                                     if (rel != null) {
                                         try {
-                                            merged.put(rel, java.nio.file.Files.readAllBytes(p));
+                                            packMap.put(rel, java.nio.file.Files.readAllBytes(p));
                                         } catch (java.io.IOException ignored) {
                                         }
                                     }
                                 });
                         }
+                    }
+                    // global merge: later packs override earlier ones
+                    for (java.util.Map.Entry<String, byte[]> en : packMap.entrySet()) {
+                        merged.put(en.getKey(), en.getValue());
                     }
                 }
             }
@@ -346,6 +371,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         boolean keep = rel.contains("/worldgen/noise_settings/")
                 || rel.contains("/worldgen/density_function/")
                 || rel.contains("/worldgen/noise/")
+                || rel.contains("/worldgen/biome/")
                 || rel.endsWith("/dimension/overworld.json");
         return keep ? rel : null;
     }
@@ -517,8 +543,8 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             int minY = w.getMinHeight();
             int height = w.getMaxHeight() - w.getMinHeight();
             CtxPool pool = poolForNamed(w.getName(), seed, minY, height);
-            long ctx0 = pool.firstCtx();
-            String[] names = ChunkGenNative.ctxBiomeNames(ctx0);
+            setupSurface(pool, w);
+            String[] names = ChunkGenNative.ctxBiomeNames(pool.firstCtx());
             if (names == null) {
                 Logger.getLogger("CrusstyGen").info(
                         "world '" + w.getName() + "': no native biome source (vanilla biomes stay)");
@@ -717,7 +743,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 for (int x = 0; x < 16; x++) {
                     short id = out[i++];
                     if (id != 0) { // AIR is ChunkData default — skip
-                        Material m = mats[id];
+                        Material m = id < mats.length ? mats[id] : null;
                         if (m != null) {
                             chunkData.setBlock(x, y + minY, z, m);
                         }
@@ -748,6 +774,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static Object sectionStrategyField;
     private static java.lang.reflect.Field bulkRegistryField;
     private static Object[] sectionStatesById; // NMS BlockState per material id (null = n/a)
+    private static org.bukkit.block.data.BlockData[] bdataById; // Bukkit BlockData per id >= base (surface states)
     // per-material invariant flags (computed once from the NMS states)
     private static boolean[] matAir, matTicking, matFluidTicking, matSpecial;
     private static final java.util.Map<Object, boolean[]> opaqueCache =
@@ -1335,9 +1362,17 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                         for (int x = 0; x < 16; x++) {
                             short id = out[base + (yy << 8) + (z << 4) + x];
                             if (id != 0) {
-                                Material m = mats[id];
-                                if (m != null) {
-                                    chunkData.setBlock(x, y0 + yy + minY, z, m);
+                                if (id < mats.length) {
+                                    Material m = mats[id];
+                                    if (m != null) {
+                                        chunkData.setBlock(x, y0 + yy + minY, z, m);
+                                    }
+                                } else {
+                                    org.bukkit.block.data.BlockData bdx = bdataById != null
+                                            && id < bdataById.length ? bdataById[id] : null;
+                                    if (bdx != null) {
+                                        chunkData.setRegion(x, y0 + yy + minY, z, x, y0 + yy + minY, z, bdx);
+                                    }
                                 }
                             }
                         }
@@ -1529,6 +1564,17 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             int z = (idx >> 4) & 15;
             int x = idx & 15;
             short id = out[idx];
+            if (id >= mats.length) {
+                // surface states: compare as BlockData (Material map is 22 wide)
+                org.bukkit.block.data.BlockData wantBd = bdataById != null
+                        && id < bdataById.length ? bdataById[id] : null;
+                org.bukkit.block.data.BlockData gotBd = chunkData.getBlockData(x, y + minY, z);
+                if (wantBd == null || !wantBd.equals(gotBd)) {
+                    return "want=" + wantBd + " got=" + gotBd + " at x=" + x + " y=" + (y + minY)
+                            + " z=" + z + " outIdx=" + idx;
+                }
+                continue;
+            }
             Material want = id == 0 ? Material.AIR : mats[id];
             Material got = chunkData.getType(x, y + minY, z);
             if (want != got) {
@@ -1547,9 +1593,17 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             for (int z = 0; z < 16; z++) {
                 for (int x = 0; x < 16; x++) {
                     short id = out[i++];
-                    Material m = id == 0 ? Material.AIR : mats[id];
-                    if (m != null) {
-                        chunkData.setBlock(x, y + minY, z, m);
+                    if (id < mats.length) {
+                        Material m = id == 0 ? Material.AIR : mats[id];
+                        if (m != null) {
+                            chunkData.setBlock(x, y + minY, z, m);
+                        }
+                    } else {
+                        org.bukkit.block.data.BlockData bdx = bdataById != null
+                                && id < bdataById.length ? bdataById[id] : null;
+                        if (bdx != null) {
+                            chunkData.setRegion(x, y + minY, z, x, y + minY, z, bdx);
+                        }
                     }
                 }
             }
@@ -1896,6 +1950,113 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             bridgeBroken = true;
             LOG.warning("fluid-update marking failed, disabling bridge: " + t);
         }
+    }
+
+
+    // ------------------------------------------------------------------
+    // Native surface engine handshake (stage C): resolve the pack surface
+    // rule's block state strings to NMS BlockStates, extend the material
+    // palette, and push ids + biome temperatures into the native ctx.
+    // ------------------------------------------------------------------
+
+    private static void setupSurface(CtxPool pool, org.bukkit.World w) {
+        try {
+            long ctx0 = pool.firstCtx();
+            String[] states = ChunkGenNative.surfaceStates(ctx0);
+            if (states == null || states.length == 0) {
+                return; // no native surface engine (parse failed / no pack)
+            }
+            // CRITICAL: the surface handshake (state ids + biome temps) must
+            // land on EVERY pool ctx — fill workers acquire arbitrary ctxs,
+            // and a ctx without ids/temps silently skips the native surface
+            // tail (raw stone where deepslate/bedrock/sand should be).
+            Class<?> setup = Class.forName("com.planeta.crussty.SurfaceSetup");
+            setup.getMethod("apply", long[].class, org.bukkit.World.class, String[].class)
+                    .invoke(null, (Object) pool.all(), w, (Object) states);
+            NATIVE_SURFACE = true;
+            Logger.getLogger("CrusstyGen").info(
+                    "native surface engine active (" + states.length + " states)");
+        } catch (ClassNotFoundException e) {
+            Logger.getLogger("CrusstyGen").info(
+                    "native surface: mojmap companion absent (vanilla surface stays)");
+        } catch (Throwable t) {
+            Throwable c = t;
+            while (c.getCause() != null && c.getCause() != c) {
+                c = c.getCause();
+            }
+            Logger.getLogger("CrusstyGen").warning(
+                    "native surface setup failed; vanilla surface stays: " + c);
+        }
+    }
+
+    /** Grows the material palette with the surface states and returns the
+     *  assigned material ids (append order). Synchronized: world load is
+     *  single-threaded, but the fill workers read these arrays live. */
+    static synchronized short[] extendPalette(String[] stateStrings,
+            java.util.function.Function<String, Object> resolver) {
+        Object[] cur = sectionStatesById;
+        if (cur == null || matAir == null || globalIdById == null || palIdxScratch == null) {
+            return null;
+        }
+        int base = cur.length;
+        int n2 = base + stateStrings.length;
+        Object[] ext = java.util.Arrays.copyOf(cur, n2);
+        org.bukkit.block.data.BlockData[] bd = bdataById == null
+                ? new org.bukkit.block.data.BlockData[n2]
+                : java.util.Arrays.copyOf(bdataById, n2);
+        boolean[] aAir = java.util.Arrays.copyOf(matAir, n2);
+        boolean[] aTick = java.util.Arrays.copyOf(matTicking, n2);
+        boolean[] aFluid = java.util.Arrays.copyOf(matFluidTicking, n2);
+        boolean[] aSpecial = java.util.Arrays.copyOf(matSpecial, n2);
+        int[] gid = java.util.Arrays.copyOf(globalIdById, n2);
+        int[] pis = java.util.Arrays.copyOf(palIdxScratch, n2);
+        try {
+            Class<?> cBlockState = Class.forName(
+                    "net.minecraft.world.level.block.state.BlockState");
+            Method mIsAir = cBlockState.getMethod("isAir");
+            Method mIsRandTick = cBlockState.getMethod("isRandomlyTicking");
+            Method mGetFluid = cBlockState.getMethod("getFluidState");
+            // Bukkit BlockData per surface state (for the v1/verify paths that
+            // speak Material/BlockData, not NMS states)
+            Class<?> cCraftBlockData = Class.forName("org.bukkit.craftbukkit.block.CraftBlockData");
+            Method mFromData = cCraftBlockData.getMethod("fromData", cBlockState);
+            Class<?> cFluidState = Class.forName("net.minecraft.world.level.material.FluidState");
+            Method mFluidRand = cFluidState.getMethod("isRandomlyTicking");
+            Method mFluidEmpty = cFluidState.getMethod("isEmpty");
+            Object regObj = Class.forName("net.minecraft.world.level.block.Block")
+                    .getField("BLOCK_STATE_REGISTRY").get(null);
+            Method mGetId = regObj.getClass().getMethod("getId", Object.class);
+            for (int i = 0; i < stateStrings.length; i++) {
+                Object st = resolver.apply(stateStrings[i]);
+                int id = base + i;
+                ext[id] = st;
+                bd[id] = (org.bukkit.block.data.BlockData) mFromData.invoke(null, st);
+                aAir[id] = (Boolean) mIsAir.invoke(st);
+                aTick[id] = (Boolean) mIsRandTick.invoke(st);
+                Object fluid = mGetFluid.invoke(st);
+                aFluid[id] = (Boolean) mFluidRand.invoke(fluid)
+                        && !(Boolean) mFluidEmpty.invoke(fluid);
+                aSpecial[id] = (Boolean) mSpecialPred.invoke(null, st);
+                gid[id] = (Integer) mGetId.invoke(regObj, st);
+            }
+        } catch (Throwable t) {
+            Logger.getLogger("CrusstyGen").warning(
+                    "native surface: state resolve failed: " + t);
+            return null;
+        }
+        sectionStatesById = ext;
+        bdataById = bd;
+        matAir = aAir;
+        matTicking = aTick;
+        matFluidTicking = aFluid;
+        matSpecial = aSpecial;
+        globalIdById = gid;
+        palIdxScratch = pis;
+        short[] ids = new short[stateStrings.length];
+        for (int i = 0; i < stateStrings.length; i++) {
+            ids[i] = (short) (base + i);
+        }
+        return ids;
     }
 
 }

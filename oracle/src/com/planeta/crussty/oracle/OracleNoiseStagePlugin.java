@@ -59,6 +59,7 @@ public final class OracleNoiseStagePlugin extends JavaPlugin {
             getLogger().info("OracleNoiseStage: no -Doraclemarks/-Doraclewalk — staying inert");
             return;
         }
+        probeResolvedSettings();
         try {
             if (STATUSWALK) {
                 statusWalk();
@@ -71,6 +72,213 @@ public final class OracleNoiseStagePlugin extends JavaPlugin {
         getLogger().info("OracleNoiseStage done");
     }
 
+    /**
+     * Prints the server-resolved worldgen settings for the overworld: the
+     * noise router depth chain and the surface rule tree head — the ground
+     * truth of WHICH pack's noise_settings/DF files actually won the
+     * datapack layering (settles tectonic-vs-terralith empirically).
+     */
+    private void probeResolvedSettings() {
+        try {
+            CraftServer cs = (CraftServer) Bukkit.getServer();
+            Object mcServer = cs.getServer();
+            Object level = mcServer.getClass().getMethod("overworld").invoke(mcServer);
+            Object chunkSource = level.getClass().getMethod("getChunkSource").invoke(level);
+            Object gen = chunkSource.getClass().getMethod("getGenerator").invoke(chunkSource);
+            Object settings = gen.getClass().getMethod("generatorSettings").invoke(gen);
+            Object holder = settings instanceof Holder<?> h ? h : settings;
+            Object value = holder.getClass().getMethod("value").invoke(holder);
+            Object router = value.getClass().getMethod("noiseRouter").invoke(value);
+            Object depth = router.getClass().getMethod("depth").invoke(router);
+            Object rule = value.getClass().getMethod("surfaceRule").invoke(value);
+            String ruleS = String.valueOf(rule);
+            int terr = ruleS.split("terralith", -1).length - 1;
+            int tect = ruleS.split("tectonic", -1).length - 1;
+            getLogger().info("PROBE settings.class=" + value.getClass().getName());
+            getLogger().info("PROBE seaLevel=" + value.getClass().getMethod("seaLevel").invoke(value));
+            getLogger().info("PROBE ruleLen=" + ruleS.length() + " terralith_refs=" + terr + " tectonic_refs=" + tect);
+            getLogger().info("PROBE depthDF=" + String.valueOf(depth).substring(0, Math.min(240, String.valueOf(depth).length())));
+        } catch (Throwable t) {
+            getLogger().info("PROBE failed: " + t);
+        }
+    }
+
+
+    /**
+     * Evaluates the server's REAL SurfaceRule on the noise-stage chunk at
+     * (13,*,4) with the bytecode-verified walk semantics, logging per-y the
+     * tryApply result + context fields. Ground truth for the native surface
+     * engine divergence hunt (sand-vs-grass at the deep_lukewarm floor).
+     */
+    private void vanillaRuleProbe(Object chunkSource, ChunkAccess chunk, Class<?> accessClass) throws Exception {
+        Class<?> surfaceRules = Class.forName("net.minecraft.world.level.levelgen.SurfaceRules");
+        Class<?> ctxCls = Class.forName("net.minecraft.world.level.levelgen.SurfaceRules$Context");
+        Class<?> ruleSrcCls = Class.forName("net.minecraft.world.level.levelgen.SurfaceRules$RuleSource");
+        Class<?> ruleCls = Class.forName("net.minecraft.world.level.levelgen.SurfaceRules$SurfaceRule");
+
+        RandomState state = (RandomState) chunkSource.getClass().getMethod("randomState").invoke(chunkSource);
+        Object gen = chunkSource.getClass().getMethod("getGenerator").invoke(chunkSource);
+        Object settingsHolder = gen.getClass().getMethod("generatorSettings").invoke(gen);
+        Object settings = settingsHolder.getClass().getMethod("value").invoke(settingsHolder);
+        Object surfaceSystem = state.surfaceSystem();
+
+        // NoiseChunk for the above_preliminary / min-surface machinery
+        Object beardifier = Class.forName(
+                "net.minecraft.world.level.levelgen.DensityFunctions$BeardifierMarker")
+                .getDeclaredFields()[0].get(null);
+        Method forChunk = NoiseChunk.class.getMethod("forChunk",
+                Class.forName("net.minecraft.world.level.chunk.ChunkAccess"),
+                RandomState.class,
+                Class.forName("net.minecraft.world.level.levelgen.DensityFunctions$BeardifierOrMarker"),
+                NoiseGeneratorSettings.class,
+                Aquifer.FluidPicker.class,
+                Class.forName("net.minecraft.world.level.levelgen.blending.Blender"));
+        int seaLevel = (Integer) settings.getClass().getMethod("seaLevel").invoke(settings);
+        var defaultFluid = settings.getClass().getMethod("defaultFluid").invoke(settings);
+        Aquifer.FluidPicker fluidPicker = (x, y, z) -> {
+            var lava = new Aquifer.FluidStatus(-54, Blocks.LAVA.defaultBlockState());
+            var water = new Aquifer.FluidStatus(seaLevel, Blocks.WATER.defaultBlockState());
+            return y < Math.min(-54, seaLevel) ? lava : water;
+        };
+        Object nc = forChunk.invoke(null, chunk, state, beardifier, settings, fluidPicker,
+                Class.forName("net.minecraft.world.level.levelgen.blending.Blender")
+                        .getMethod("empty").invoke(null));
+
+        Class<?> wgCtx = Class.forName("net.minecraft.world.level.levelgen.WorldGenerationContext");
+        Object wgContext = wgCtx.getDeclaredConstructor(
+                Class.forName("net.minecraft.world.level.chunk.ChunkGenerator"),
+                Class.forName("net.minecraft.world.level.LevelHeightAccessor"))
+                .newInstance(gen, chunk);
+        java.util.function.Function<net.minecraft.core.BlockPos, net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome>> biomeGetter =
+                pos -> chunk.getNoiseBiome(pos.getX() >> 2, pos.getY() >> 2, pos.getZ() >> 2);
+        Object registry = accessClass.getField("biomeRegistry").get(chunk);
+        Object ctx = null;
+        for (java.lang.reflect.Constructor<?> c : ctxCls.getDeclaredConstructors()) {
+            if (c.getParameterCount() == 7) {
+                c.setAccessible(true);
+                try {
+                    ctx = c.newInstance(surfaceSystem, state, chunk, nc, biomeGetter, registry, wgContext);
+                    break;
+                } catch (IllegalArgumentException iae) {
+                    getLogger().info("VRULE ctor arg mismatch: " + iae + " types: ");
+                    for (Class<?> pc : c.getParameterTypes()) getLogger().info("VRULE   param " + pc);
+                }
+            }
+        }
+        if (ctx == null) { getLogger().info("VRULE: no 7-arg Context ctor worked"); return; }
+
+        Object ruleSource = settings.getClass().getMethod("surfaceRule").invoke(settings);
+        java.util.function.Function<Object, Object> rf = (java.util.function.Function<Object, Object>) ruleSource;
+        Object rule = rf.apply(ctx);
+        getLogger().info("VRULE rule class=" + rule.getClass().getName());
+
+        Method updateXZ = ctxCls.getDeclaredMethod("updateXZ", int.class, int.class);
+        updateXZ.setAccessible(true);
+        Method updateY = ctxCls.getDeclaredMethod("updateY", int.class, int.class, int.class, int.class, int.class, int.class);
+        updateY.setAccessible(true);
+        Method tryApply = ruleCls.getMethod("tryApply", int.class, int.class, int.class);
+        Method getBlockState = accessClass.getMethod("getBlockState", net.minecraft.core.BlockPos.class);
+        Method isAir = net.minecraft.world.level.block.state.BlockState.class.getMethod("isAir");
+        Method getFluidState = net.minecraft.world.level.block.state.BlockState.class
+                .getMethod("getFluidState");
+        Method fluidEmpty = net.minecraft.world.level.material.FluidState.class.getMethod("isEmpty");
+        Object defaultBlock = settings.getClass().getMethod("defaultBlock").invoke(settings);
+
+        StringBuilder log = new StringBuilder();
+        int x = 13, z = 4;
+        updateXZ.invoke(ctx, x, z);
+        int depth = 0, wh = Integer.MIN_VALUE, stoneBottom = Integer.MAX_VALUE;
+        for (int y = 62; y >= 10; y--) {
+            var pos = new net.minecraft.core.BlockPos(x, y, z);
+            var b = getBlockState.invoke(chunk, pos);
+            boolean air = (Boolean) isAir.invoke(b);
+            boolean isFluid = !((Boolean) fluidEmpty.invoke(getFluidState.invoke(b)));
+            String applied = null;
+            if (air) {
+                depth = 0; wh = Integer.MIN_VALUE;
+            } else if (isFluid) {
+                if (wh == Integer.MIN_VALUE) wh = y + 1;
+            } else {
+                if (stoneBottom >= y) {
+                    stoneBottom = -32512;
+                    for (int y2 = y - 1; y2 >= chunk.getMinY() - 1; y2--) {
+                        if (y2 < chunk.getMinY()) { stoneBottom = y2 + 1; break; }
+                        var b2 = getBlockState.invoke(chunk, new net.minecraft.core.BlockPos(x, y2, z));
+                        boolean air2 = (Boolean) isAir.invoke(b2);
+                        boolean fe2 = (Boolean) fluidEmpty.invoke(getFluidState.invoke(b2));
+                        if (air2 || !fe2) { stoneBottom = y2 + 1; break; }
+                    }
+                }
+                depth++;
+                int sdb = y - stoneBottom + 1;
+                updateY.invoke(ctx, depth, sdb, wh, x, y, z);
+                if (b == defaultBlock || b.equals(defaultBlock)) {
+                    Object st = tryApply.invoke(rule, x, y, z);
+                    if (st != null) applied = String.valueOf(st);
+                }
+                if (y == 25) {
+                    // dump the vanilla tree's matching path at this position
+                    try {
+                        StringBuilder p = new StringBuilder();
+                        Object node = rule;
+                        boolean first = true;
+                        while (true) {
+                            String cn = node.getClass().getSimpleName();
+                            if (cn.equals("SequenceRule")) {
+                                Field rf2 = node.getClass().getDeclaredField("rules");
+                                rf2.setAccessible(true);
+                                java.util.List<?> kids = (java.util.List<?>) rf2.get(node);
+                                int mi = -1;
+                                for (int i = 0; i < kids.size(); i++) {
+                                    Object kid = kids.get(i);
+                                    Method tam = kid.getClass().getMethod("tryApply", int.class, int.class, int.class);
+                                    tam.setAccessible(true);
+                                    Object r = tam.invoke(kid, x, y, z);
+                                    if (r != null) { mi = i; break; }
+                                }
+                                p.append(first ? "seq" : "/seq").append('[').append(mi).append(']');
+                                first = false;
+                                if (mi < 0) break;
+                                node = kids.get(mi);
+                            } else if (cn.equals("TestRule")) {
+                                Field cf2 = node.getClass().getDeclaredField("condition");
+                                cf2.setAccessible(true);
+                                Object cond = cf2.get(node);
+                                Method tm = cond.getClass().getMethod("test");
+                                tm.setAccessible(true);
+                                boolean ct = (Boolean) tm.invoke(cond);
+                                p.append("/cond{").append(ct).append("}");
+                                Field ff2 = node.getClass().getDeclaredField("followup");
+                                ff2.setAccessible(true);
+                                node = ff2.get(node);
+                            } else {
+                                p.append("/").append(cn).append("=").append(node);
+                                break;
+                            }
+                        }
+                        getLogger().info("VRULE PATH y=25: " + p);
+                    } catch (Throwable t2) {
+                        getLogger().info("VRULE path failed: " + t2);
+                    }
+                }
+                if (y <= 30) {
+                    Object biome = "?";
+                    try {
+                        Field biomeF = ctxCls.getDeclaredField("biome");
+                        biomeF.setAccessible(true);
+                        Object sup = biomeF.get(ctx);
+                        if (sup instanceof java.util.function.Supplier<?> s2) biome = s2.get();
+                    } catch (Throwable ignored) {
+                    }
+                    log.append(String.format("y=%d b=%s depth=%d sdb=%d wh=%d biome=%s applied=%s; ",
+                            y, String.valueOf(b).replace("Block{", "").replace("}", ""),
+                            depth, sdb, wh, String.valueOf(biome),
+                            applied == null ? "-" : applied));
+                }
+            }
+        }
+        getLogger().info("VRULE walk: " + log);
+    }
     /**
      * Walks requested chunks through the vanilla generation statuses
      * (NOISE -> SURFACE -> CARVERS -> FEATURES -> FULL) and dumps the
@@ -122,6 +330,35 @@ public final class OracleNoiseStagePlugin extends JavaPlugin {
                 for (Object[] st : statuses) {
                     Object status = st[0];
                     Object chunk = getChunk.invoke(chunkSource, cx, cz, status, true);
+                    if (st[1].equals("noise")) {
+                        try {
+                            Class<?> hmTypes = Class.forName(
+                                    "net.minecraft.world.level.levelgen.Heightmap$Types");
+                            Object wsWg = hmTypes.getField("WORLD_SURFACE_WG").get(null);
+                            Object ofWg = hmTypes.getField("OCEAN_FLOOR_WG").get(null);
+                            Method getHm = accessClass.getMethod("getHeight", hmTypes, int.class, int.class);
+                            Object h1 = getHm.invoke(chunk, wsWg, 13, 4);
+                            Object h2 = getHm.invoke(chunk, ofWg, 13, 4);
+                            getLogger().info(String.format(
+                                    "HMTRACE (%d,%d) WORLD_SURFACE_WG=%s OCEAN_FLOOR_WG=%s",
+                                    cx, cz, h1, h2));
+                            Object st13_62_4 = accessClass.getMethod("getBlockState",
+                                    Class.forName("net.minecraft.core.BlockPos")).invoke(chunk,
+                                    Class.forName("net.minecraft.core.BlockPos")
+                                            .getMethod("containing", int.class, int.class, int.class)
+                                            .invoke(null, 13, 62, 4));
+                            getLogger().info("HMTRACE block(13,62,4)=" + st13_62_4);
+                        } catch (Throwable t) {
+                            getLogger().info("HMTRACE failed: " + t);
+                        }
+                    }
+                    if (st[1].equals("noise")) {
+                        try {
+                            vanillaRuleProbe(chunkSource, (ChunkAccess) chunk, accessClass);
+                        } catch (Throwable t) {
+                            getLogger().info("VRULE failed: " + t);
+                        }
+                    }
                     Object[] lists = (Object[]) getPostProcessing.invoke(chunk);
                     int count = 0;
                     StringBuilder sb = new StringBuilder();
@@ -144,6 +381,67 @@ public final class OracleNoiseStagePlugin extends JavaPlugin {
                     w.write("STATUS " + st[1] + " marks=" + count + "\n");
                     w.write(sb.toString());
                     getLogger().info("walk " + cx + "," + cz + " status=" + st[1] + " cumulative_marks=" + count);
+
+                    // At SURFACE status: dump every non-air block of the full
+                    // column range as "x y z name[prop=v,...]" (props sorted) —
+                    // the ground truth for the native surface engine (sfcmp).
+                    if (st[1].equals("surface")) {
+                        Class<?> stateClass2 = Class.forName(
+                                "net.minecraft.world.level.block.state.BlockState");
+                        Class<?> blockPosClass2 = Class.forName(
+                                "net.minecraft.core.BlockPos$MutableBlockPos");
+                        Object blockPos2 = blockPosClass2.getDeclaredConstructor().newInstance();
+                        Method getBlockState2 = accessClass.getMethod("getBlockState",
+                                Class.forName("net.minecraft.core.BlockPos"));
+                        Method mIsAir2 = stateClass2.getMethod("isAir");
+                        Method mGetBlock2 = stateClass2.getMethod("getBlock");
+                        Object blockRegistry2 = Class.forName(
+                                "net.minecraft.core.registries.BuiltInRegistries")
+                                .getField("BLOCK").get(null);
+                        Method mKey2 = blockRegistry2.getClass()
+                                .getMethod("getKey", Object.class);
+                        Method mGetValues2 = stateClass2.getMethod("getValues");
+                        Class<?> cProperty2 = Class.forName(
+                                "net.minecraft.world.level.block.state.properties.Property");
+                        Method mPropName2 = cProperty2.getMethod("getName", Comparable.class);
+                        StringBuilder surf = new StringBuilder();
+                        for (int y = -64; y < 320; y++) {
+                            for (int lz = 0; lz < 16; lz++) {
+                                for (int lx = 0; lx < 16; lx++) {
+                                    blockPosClass2.getMethod("set", int.class, int.class, int.class)
+                                            .invoke(blockPos2, cx * 16 + lx, y, cz * 16 + lz);
+                                    Object state = getBlockState2.invoke(chunk, blockPos2);
+                                    if ((Boolean) mIsAir2.invoke(state)) continue;
+                                    Object block = mGetBlock2.invoke(state);
+                                    Object rl = mKey2.invoke(blockRegistry2, block);
+                                    String name = rl.toString();
+                                    java.util.Map<?, ?> values = (java.util.Map<?, ?>) mGetValues2.invoke(state);
+                                    if (!values.isEmpty()) {
+                                        java.util.TreeMap<String, String> kv = new java.util.TreeMap<>();
+                                        for (java.util.Map.Entry<?, ?> e : values.entrySet()) {
+                                            Object pn = e.getKey().getClass()
+                                                    .getMethod("getName").invoke(e.getKey());
+                                            kv.put(pn.toString(), mPropName2.invoke(e.getKey(), e.getValue()).toString());
+                                        }
+                                        StringBuilder pb = new StringBuilder("[");
+                                        boolean first = true;
+                                        for (java.util.Map.Entry<String, String> e : kv.entrySet()) {
+                                            if (!first) pb.append(',');
+                                            pb.append(e.getKey()).append('=').append(e.getValue());
+                                            first = false;
+                                        }
+                                        pb.append(']');
+                                        name = name + pb;
+                                    }
+                                    surf.append(cx * 16 + lx).append(' ').append(y).append(' ')
+                                            .append(cz * 16 + lz).append(' ').append(name).append('\n');
+                                }
+                            }
+                        }
+                        w.write("SURFACEBLOCKS\n");
+                        w.write(surf.toString());
+                        getLogger().info("walk " + cx + "," + cz + " surface blocks dumped: " + surf.length());
+                    }
 
                     // At NOISE status: dump the noise-stage blocks of the deep
                     // region (y -64..0) for direct comparison with the native fill.

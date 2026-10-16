@@ -47,7 +47,15 @@ fn main() {
     let seed: i64 = pos.get(2).and_then(|s| s.parse().ok()).unwrap_or(3257840388504953787);
 
     let mut assets = Assets::new();
-    for root in &roots {
+    let mut expanded: Vec<String> = Vec::new();
+    for r in &roots {
+        expanded.push(r.clone());
+        let ov = Path::new(r).join("overlay.datapack");
+        if ov.is_dir() {
+            expanded.push(ov.to_string_lossy().to_string());
+        }
+    }
+    for root in &expanded {
         let root = Path::new(root);
         let mut files = Vec::new();
         collect(root, root, &mut files);
