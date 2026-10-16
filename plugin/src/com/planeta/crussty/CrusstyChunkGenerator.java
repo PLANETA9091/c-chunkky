@@ -106,6 +106,10 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             }
         }
 
+        long firstCtx() {
+            return ctxs[0];
+        }
+
         /** Returns [ctx, lock] — prefers an unlocked ctx. */
         long acquire(ReentrantLock[] lockOut) {
             // fast path: first free lock (scan from round-robin cursor)
@@ -171,8 +175,14 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     }
 
     static CtxPool poolFor(WorldInfo worldInfo, long seed, int minY, int height) {
-        int sea = resolveSeaLevel(worldInfo);
-        PackData packs = packDataFor(worldInfo);
+        return poolForNamed(worldInfo.getName(), seed, minY, height);
+    }
+
+    /** Name-based pool lookup/creation (usable from the world-load hook,
+     *  before the first chunk fill). */
+    static CtxPool poolForNamed(String worldName, long seed, int minY, int height) {
+        int sea = resolveSeaLevel(worldName);
+        PackData packs = packDataFor(worldName);
         WorldKey key = new WorldKey(seed, sea, packs == null ? 0 : packs.hash());
         return POOLS.computeIfAbsent(key, k -> {
             Logger.getLogger("CrusstyGen").info(
@@ -180,6 +190,11 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     + (packs == null ? "none (embedded vanilla)" : packs.paths().length + " assets hash=" + packs.hash()));
             return new CtxPool(POOL_SIZE, seed, minY, height, sea, packs);
         });
+    }
+
+    /** Any pooled ctx id for diagnostics (pool creation is deterministic). */
+    static long firstCtx(CtxPool pool) {
+        return pool.firstCtx();
     }
 
     /**
@@ -191,10 +206,14 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
      * carries the biome source + settings reference).
      */
     private static PackData packDataFor(WorldInfo worldInfo) {
+        return packDataFor(worldInfo.getName());
+    }
+
+    private static PackData packDataFor(String worldName) {
         if (!DP_NATIVE) {
             return null;
         }
-        return PACK_CACHE.computeIfAbsent(worldInfo.getName(), n -> extractPackData(n));
+        return PACK_CACHE.computeIfAbsent(worldName, n -> extractPackData(n));
     }
 
     private static PackData extractPackData(String worldName) {
@@ -485,6 +504,62 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         return out;
     }
 
+    /**
+     * World-load hook: eagerly create the ctx pool (boot pre-resolve of the
+     * datapack worldgen assets) and, when the native ctx carries a
+     * multi_noise biome source, swap the vanilla generator's biomeSource
+     * for the native one (the BIOMES chunk status then runs the native RTree
+     * + climate sampler instead of the Java MultiNoise search).
+     */
+    static void onWorldLoad(org.bukkit.World w) {
+        try {
+            long seed = w.getSeed();
+            int minY = w.getMinHeight();
+            int height = w.getMaxHeight() - w.getMinHeight();
+            CtxPool pool = poolForNamed(w.getName(), seed, minY, height);
+            long ctx0 = pool.firstCtx();
+            String[] names = ChunkGenNative.ctxBiomeNames(ctx0);
+            if (names == null) {
+                Logger.getLogger("CrusstyGen").info(
+                        "world '" + w.getName() + "': no native biome source (vanilla biomes stay)");
+                return;
+            }
+            int sections = height / 16;
+            int minQuartY = minY / 4;
+            CrusstyFiller filler = (ctx, cx, cz, out) -> {
+                ReentrantLock[] lockBox = new ReentrantLock[1];
+                long ctx2 = pool.acquire(lockBox);
+                try {
+                    return ChunkGenNative.fillBiomes(ctx2, cx, cz, out);
+                } finally {
+                    lockBox[0].unlock();
+                }
+            };
+            Class<?> swap = Class.forName("com.planeta.crussty.BiomeSwap");
+            swap.getMethod("apply", org.bukkit.World.class, CrusstyFiller.class,
+                            String[].class, int.class, int.class)
+                    .invoke(null, w, filler, names, sections, minQuartY);
+            Logger.getLogger("CrusstyGen").info(
+                    "world '" + w.getName() + "': native biome source active ("
+                    + names.length + " biomes)");
+        } catch (Throwable t) {
+            Throwable c = t;
+            while (c.getCause() != null && c.getCause() != c) {
+                c = c.getCause();
+            }
+            Logger.getLogger("CrusstyGen").warning(
+                    "native biome source swap failed; vanilla biomes stay: " + c);
+            for (int i = 0; i < 6 && c.getStackTrace() != null && i < c.getStackTrace().length; i++) {
+                Logger.getLogger("CrusstyGen").warning("  at " + c.getStackTrace()[i]);
+            }
+        }
+    }
+
+    /** Bulk native biome fill (implemented over the ctx pool). */
+    interface CrusstyFiller {
+        int fill(long ctx, int cx, int cz, int[] out);
+    }
+
     /** Tiny JSON text scanner used by parseOverlays (finds keys, reads
      *  string literals and integer tokens; whitespace-tolerant). */
     private static final class JsonScanner {
@@ -532,7 +607,11 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
      * to the bundled-vanilla 63.
      */
     private static int resolveSeaLevel(WorldInfo info) {
-        return SEA_CACHE.computeIfAbsent(info.getName(), n -> {
+        return resolveSeaLevel(info.getName());
+    }
+
+    private static int resolveSeaLevel(String worldName) {
+        return SEA_CACHE.computeIfAbsent(worldName, n -> {
             try {
                 World w = Bukkit.getWorld(n);
                 if (w == null) {

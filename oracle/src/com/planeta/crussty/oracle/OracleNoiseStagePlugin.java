@@ -6,6 +6,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.StructureManager;
 import net.minecraft.world.level.levelgen.Aquifer;
 import net.minecraft.world.level.levelgen.Beardifier;
@@ -485,6 +486,12 @@ public final class OracleNoiseStagePlugin extends JavaPlugin {
                         dumpCells(nc, wc);
                     }
                 }
+                if (Boolean.getBoolean("oraclebiomes")) {
+                    Path outB = dir.resolve(String.format("biomes_%d_%d.txt", cx, cz));
+                    try (BufferedWriter wb = Files.newBufferedWriter(outB)) {
+                        dumpBiomes((ChunkAccess) chunkAccess, wb, cx, cz);
+                    }
+                }
                 try (BufferedWriter wi = Files.newBufferedWriter(dir.resolve(String.format("ncinfo_%d_%d.txt", cx, cz)))) {
                     wi.write("NCINFO blender=" + blenderInfo(nc)
                             + " beardifier=" + BeardifierOrMarkerName(nc)
@@ -561,6 +568,65 @@ public final class OracleNoiseStagePlugin extends JavaPlugin {
             }
         }
         return b.getClass().getSimpleName() + " hmap=" + h + " dmap=" + d;
+    }
+
+    /** Dump the chunk's biome container per quart in the vanilla
+     *  fillBiomesFromNoise iteration order (sections asc, x, y, z):
+     *  "BIOME <qx> <qy> <qz> <registry-name>". */
+    private void dumpBiomes(ChunkAccess chunk, BufferedWriter wb, int cx, int cz) throws Exception {
+        Class<?> accessClass = chunk.getClass();
+        while (accessClass != null && !accessClass.getSimpleName().equals("ChunkAccess")) {
+            accessClass = accessClass.getSuperclass();
+        }
+        if (accessClass == null) throw new IllegalStateException("ChunkAccess not found");
+
+        // sections carry their own biome PalettedContainer (4x4x4 quarts)
+        Object[] sectionsArr = (Object[]) accessClass.getMethod("getSections").invoke(chunk);
+        Class<?> sectionCls = sectionsArr.getClass().getComponentType();
+        Method getBiomesM = sectionCls.getMethod("getBiomes");
+
+        int quartX0 = cx * 4;
+        int quartZ0 = cz * 4;
+        // getMinY lives on LevelHeightAccessor — search the hierarchy
+        Method minBuildM = null;
+        for (Class<?> k = chunk.getClass(); k != null && minBuildM == null; k = k.getSuperclass()) {
+            try {
+                minBuildM = k.getMethod("getMinY");
+            } catch (NoSuchMethodException ignored) {
+            }
+        }
+        if (minBuildM == null) throw new IllegalStateException("getMinY not found");
+        int minQuartY = net.minecraft.core.QuartPos.fromBlock((Integer) minBuildM.invoke(chunk));
+        for (int sy = 0; sy < sectionsArr.length; sy++) {
+            Object container = getBiomesM.invoke(sectionsArr[sy]);
+            Method get = null;
+            for (Class<?> k = container.getClass(); k != null && get == null; k = k.getSuperclass()) {
+                for (Method m : k.getDeclaredMethods()) {
+                    if (m.getName().equals("get") && m.getParameterCount() == 3
+                            && m.getParameterTypes()[0] == int.class) {
+                        m.setAccessible(true);
+                        get = m;
+                        break;
+                    }
+                }
+            }
+            if (get == null) throw new IllegalStateException("PalettedContainer.get(x,y,z) not found");
+            int qy0 = minQuartY + sy * 4;
+            for (int x = 0; x < 4; x++) {
+                for (int y = 0; y < 4; y++) {
+                    for (int z = 0; z < 4; z++) {
+                        Object holder = get.invoke(container, x, y, z);
+                        String name = "unknown";
+                        if (holder instanceof net.minecraft.core.Holder<?> h) {
+                            name = h.unwrapKey().map(k -> k.location().toString())
+                                    .orElse("none");
+                        }
+                        wb.write("BIOME " + (quartX0 + x) + " " + (qy0 + y) + " "
+                                + (quartZ0 + z) + " " + name + "\n");
+                    }
+                }
+            }
+        }
     }
 
     /** Decompiled doFill block loop (no sections/heightmaps — text dump). */

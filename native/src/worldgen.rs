@@ -72,6 +72,11 @@ impl Assets {
         crate::asset(path)
     }
 
+    /// Pack-provided paths (deterministic order for scans).
+    pub fn paths(&self) -> impl Iterator<Item = &String> {
+        self.files.keys()
+    }
+
     /// Number of pack-provided files (0 = embedded-vanilla mode).
     pub fn len(&self) -> usize {
         self.files.len()

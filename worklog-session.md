@@ -1213,3 +1213,33 @@ Stage Summary:
   (бинарники локально, ~23MB, в git не идут). spark: dp 518fd8Iu1W, van sWZknWKDUU.
 - Плановая скорость с датапаками сейчас: ~168ms/чанк end-to-end (2-core sandbox); нативная
   стадия p50 ~11-13ms под нагрузкой. Следующий фронт — A (натив-датапак JSON), затем B (биомы).
+
+---
+Task ID: cont-41 (2026-10-16, НАТИВ-БИОМЫ: BiomeSwap active, -41% e2e на датапаках)
+Agent: Super Z (main)
+Task: продолжить до 1ms — нативизация биомов (roadmap B), всё сразу.
+
+Work Log:
+- biomes.rs: полный порт Climate.RTree/MultiNoise (quantize f32*10000, greedy bucketize,
+  stable sorts по |mid|, warm-start ThreadLocal, vanilla fillBiomesFromNoise order) +
+  climate-семплер по RAW router DFs (Direct, col-cache y-инвариантных полей).
+- JNI: ctxBiomeNames/fillBiomes; плагин: onWorldLoad -> BiomeSwap.apply (swap biomeSource на
+  NativeBiomeSource, registry Holder.Reference холдеры — НЕ Holder.direct, иначе ломаются
+  biome.is(key) в surface-правилах); oracle: dumpBiomes (-Doraclebiomes).
+- ДВА ЛОВУШКИ пойманы: (1) plugin/build.sh без 'paperweight-mappings-namespace: mojang'
+  в манифесте — Paper ремапит mojmap-ссылки как spigot -> NoSuchMethodError IdMap.getValue;
+  (2) JRE-only бокс после чистки /home/z/tools — переустановлен Temurin JDK 21.
+- Верификация паритета: oracle-дампы биомов (vanilla, Terralith+Tectonic) vs native biomefill
+  (extract_biome_assets.py = реплика extractPackData, PACK_FORMAT=81): 5/5 чанков БИТ-ТОЧНО
+  (7680 кварт, 149 биомов, 1713 entry RTree).
+- fill_biomes: 430us/чанк (0.28us/кварт) — против ~63ms Java-стадии.
+- E2E (2-core sandbox, prof_session, dptt): окно 99.0 ms/chunk (было 167.58) = -41%;
+  стационарные батчи 142->111->79->62 ms/chunk. Локальный judge dptt: 0.002%
+  (127/6.29M блоков) со свапом — лучше прежних 0.005%.
+- Отладочный детур: prof_session требовал CrusstyProbe.jar (crusfull) — oracle-скрипт
+  его удалил; генерация шла (193 FULL в paper debug chunks), харнесс не видел прогресса.
+
+Stage Summary:
+- Roadmap B (биомы) ЗАКРЫТ: нативный RTree+climate в проде, паритет бит-точный, -41% e2e.
+- Остаток Java-стадий с датапаками (2-core): surface ~25% (~36ms->~22ms от 99), features
+  ~8%, height-queries ~12%. Следующий фронт: C (нативные surface-правила датапака).

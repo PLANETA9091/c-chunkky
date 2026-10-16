@@ -1,0 +1,9 @@
+baseline (judge_local) — vanilla Paper server chunk generation, region 8x8 chunks (cx,cz in [-4..3])
+seed=3257840388504953787  min_y=-64 height=384  sea_level=63
+datapacks: server_datapacks
+method: single server invocation; wall-clock from 'forceload add -64 -64 63 63' until
+  crusstatus reports 64/64 chunks of the region loaded (coarse; includes settle/poll
+  granularity of 2s); wall_ms=51428; ms/chunk=803
+dump: crusstydumpregion of the same region took 1764ms (not part of baseline)
+note: chunks already present on disk (e.g. spawn overlap) load fast and lower the average
+date: 2026-10-16T10:00:26Z

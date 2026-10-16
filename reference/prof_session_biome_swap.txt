@@ -1,0 +1,7 @@
+# prof session biome_swap 2026-10-16T09:09:51Z
+world=dptt2 datapacks_dir=server_datapacks fill_threads=2 parallel=1 heap=-Xms1G -Xmx2G
+18c29f1c871f71a96961af2664d7ae2e  01_tectonic.zip
+ee7f451a8d1a13b29090a08543bda46a  02_terralith.zip
+052b8c9b5415f660127ef31fa1382b8e  server/paper.jar
+fa477f70ae9c9e3149767a8438e6d210  server/plugins/CrusstyGen.jar
+2a0aab1193734f2f2b33e4a0582db4a4  native/target/release/libcrussty_chunkgen.so

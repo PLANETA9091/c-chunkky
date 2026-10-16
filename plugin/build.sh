@@ -14,8 +14,31 @@ JARBIN="$(dirname "$JAVAC")/jar"
 echo "using javac: $JAVAC"
 rm -rf classes
 mkdir -p classes
-"$JAVAC" -encoding UTF-8 -cp "$API_JAR:$LIBS" -d classes $(find src -name '*.java')
+# Main sources (paper-api only)
+SRCS_MAIN=$(find src -name '*.java' ! -name 'NativeBiomeSource.java' ! -name 'BiomeSwap.java')
+"$JAVAC" -encoding UTF-8 -cp "$API_JAR:$LIBS" -d classes $SRCS_MAIN
+
+# NMS companions (NativeBiomeSource/BiomeSwap) need the mojmap paper jar —
+# present only after harness/bootstrap_server.sh (CI integration job). When
+# absent the plugin still builds and runs with vanilla Java biomes.
+SERVER_JAR="../server/versions/1.21.8/paper-1.21.8.jar"
+if [ -f "$SERVER_JAR" ]; then
+  echo "compiling NMS biome companions against $SERVER_JAR"
+  MOJANG_LIBS="$(find ../server/libraries/com/mojang ../server/libraries/it -name '*.jar' 2>/dev/null | tr '\n' ':')"
+  "$JAVAC" -encoding UTF-8 -cp "classes:$SERVER_JAR:$API_JAR:$LIBS:$MOJANG_LIBS" -d classes \
+    src/com/planeta/crussty/NativeBiomeSource.java src/com/planeta/crussty/BiomeSwap.java
+else
+  echo "no server jar — NMS biome companions skipped (vanilla Java biomes)"
+fi
 cp resources/plugin.yml classes/
-"$JARBIN" cf CrusstyGen.jar -C classes .
+# mojmap-mapped NMS references (NativeBiomeSource/BiomeSwap) — without this
+# manifest marker Paper's plugin remapper treats the bytecode as spigot-mapped
+# and garbles the NMS interface calls (NoSuchMethodError at runtime).
+cat > classes/MANIFEST.MF << 'MF'
+Manifest-Version: 1.0
+paperweight-mappings-namespace: mojang
+
+MF
+"$JARBIN" --create --file CrusstyGen.jar --manifest classes/MANIFEST.MF -C classes .
 echo "--- md5 (deploy hygiene: record in server/deployed.md5) ---"
 md5sum CrusstyGen.jar

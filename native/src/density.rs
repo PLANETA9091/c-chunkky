@@ -62,10 +62,21 @@ impl Mode {
 /// Sound because every density node is a pure function of (pt, mode, interp).
 /// The serial is bumped by the driver once per new evaluation context
 /// (one corner point / one block / one prelim probe).
+pub static COL_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static COL_MISSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub struct MemoCtx {
     stamp: Box<[Cell<u64>]>,
     value: Box<[Cell<f64>]>,
     serial: Cell<u64>,
+    /// Optional per-(x, z) column cache for compile-time y-invariant
+    /// Cache2d/FlatCache subtrees (slot = Compiled::col_idx[node]). Filled
+    /// on first use; values are pure-function results, reused across all
+    /// y at the same (x, z) — bit-identical to recomputation. Each slot is
+    /// 16-way associative, holding the whole chunk's 16 quart columns: the
+    /// way index derives from the quart coordinates, so the vanilla biome
+    /// query order (x, y, z with z innermost) never thrashes.
+    cols: Vec<Cell<[ColEntry; 16]>>,
 }
 
 impl MemoCtx {
@@ -74,7 +85,16 @@ impl MemoCtx {
             stamp: vec![Cell::new(0); n].into_boxed_slice(),
             value: vec![Cell::new(0.0); n].into_boxed_slice(),
             serial: Cell::new(0),
+            cols: Vec::new(),
         }
+    }
+
+    /// Enable the column cache (col_count slots).
+    pub fn with_cols(mut self, cols: usize) -> Self {
+        if cols > 0 {
+            self.cols = vec![Cell::new([ColEntry::default(); 16]); cols];
+        }
+        self
     }
 
     /// Begin a new evaluation context (one point / block).
@@ -822,6 +842,59 @@ impl Env {
         }
     }
 
+    /// Compile-time y-invariance check for one arena subtree (DAG-safe,
+    /// memoized recursion; the arena has no cycles).
+    pub fn df_y_invariant(&self, compiled: &Compiled, idx: u32) -> bool {
+        fn visit(arena: &[WKind], state: &mut [u8], i: usize) -> bool {
+            if state[i] == 2 {
+                return true;
+            }
+            if state[i] == 3 {
+                return false;
+            }
+            state[i] = 1;
+            let yinv = match &arena[i] {
+                WKind::Const(_) | WKind::ShiftA { .. } | WKind::ShiftB { .. } => true,
+                WKind::Noise { y_scale, .. } => *y_scale == 0.0,
+                WKind::ShiftedNoise { y_scale, .. } => *y_scale == 0.0,
+                WKind::YClampedGradient { .. }
+                | WKind::OldBlendedNoise { .. }
+                | WKind::EndIslands
+                | WKind::WeirdScaledSampler { .. } => false,
+                // Spline value = piecewise-linear over its coordinate's value
+                // — y-dependent iff the coordinate subtree is.
+                WKind::Spline { coordinate, .. } => visit(arena, state, *coordinate as usize),
+                // In Direct mode Interpolated evaluates its child directly
+                // (vanilla ctx != NoiseChunk) — recurse into it.
+                WKind::Interpolated { child, .. } => visit(arena, state, *child as usize),
+                WKind::Clamp { input, .. }
+                | WKind::Mapped { input, .. }
+                | WKind::MulOrAdd { input, .. }
+                | WKind::Cache2d { child: input }
+                | WKind::CacheOnce { child: input }
+                | WKind::FlatCache { child: input }
+                | WKind::CacheAllInCell { child: input } => visit(arena, state, *input as usize),
+                WKind::Ap2 { a, b, .. } => {
+                    visit(arena, state, *a as usize) && visit(arena, state, *b as usize)
+                }
+                WKind::RangeChoice {
+                    input,
+                    when_in_range,
+                    when_out_of_range,
+                    ..
+                } => {
+                    visit(arena, state, *input as usize)
+                        && visit(arena, state, *when_in_range as usize)
+                        && visit(arena, state, *when_out_of_range as usize)
+                }
+            };
+            state[i] = if yinv { 2 } else { 3 };
+            yinv
+        }
+        let mut state = vec![0u8; compiled.arena.len()];
+        visit(&compiled.arena, &mut state, idx as usize)
+    }
+
     /// Compile the wired evaluator for this env's worldgen.
     pub fn compile(&self) -> Compiled {
         let mut c = Compiler::new(&self.wg);
@@ -1399,6 +1472,45 @@ pub struct ColEntry {
     pub x: i32,
     pub z: i32,
     pub v: f64,
+}
+
+impl Default for ColEntry {
+    fn default() -> Self {
+        ColEntry { ok: false, x: 0, z: 0, v: 0.0 }
+    }
+}
+
+/// 4-way set-associative lookup/store for one column slot.
+#[inline]
+fn col_lookup4(cols: &Cell<[ColEntry; 16]>, x: i32, z: i32) -> Option<f64> {
+    let arr = cols.get();
+    let way = col_way(x, z);
+    let e = arr[way];
+    if e.ok && e.x == x && e.z == z {
+        return Some(e.v);
+    }
+    // linear probe fallback (defensive; the way mapping is injective per chunk)
+    for i in 0..16 {
+        let e = arr[i];
+        if e.ok && e.x == x && e.z == z {
+            return Some(e.v);
+        }
+    }
+    None
+}
+
+/// The chunk has 16 quart columns (x: 4 x z: 4) — map (x, z) onto one of 16
+/// ways injectively within a chunk.
+#[inline]
+fn col_way(x: i32, z: i32) -> usize {
+    (((x >> 2) & 3) * 4 + ((z >> 2) & 3)) as usize
+}
+
+#[inline]
+fn col_store4(cols: &Cell<[ColEntry; 16]>, x: i32, z: i32, v: f64) {
+    let mut arr = cols.get();
+    arr[col_way(x, z)] = ColEntry { ok: true, x, z, v };
+    cols.set(arr);
 }
 
 impl<const N: usize> BatchMemo<N> {
@@ -2183,6 +2295,26 @@ impl Env {
                     pt.z as f64 / d,
                 );
                 d * v.abs()
+            }
+            WKind::Cache2d { child } | WKind::FlatCache { child }
+                if c.col_idx[idx as usize] != u32::MAX =>
+            {
+                // y-invariant child (compile-time proven): one value serves
+                // the whole (x, z) column — bit-exact pure-function reuse.
+                match mem {
+                    Some(m) if !m.cols.is_empty() => {
+                        let ci = c.col_idx[idx as usize] as usize;
+                        if let Some(v) = col_lookup4(&m.cols[ci], pt.x, pt.z) {
+                            v
+                        } else {
+                            COL_MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let v = self.eval(c, *child, pt, mode, interp, mem);
+                            col_store4(&m.cols[ci], pt.x, pt.z, v);
+                            v
+                        }
+                    }
+                    _ => self.eval(c, *child, pt, mode, interp, mem),
+                }
             }
             WKind::Cache2d { child }
             | WKind::CacheOnce { child }

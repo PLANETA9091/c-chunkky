@@ -31,7 +31,18 @@ public final class CrusstyGenPlugin extends JavaPlugin {
         if (cmd != null) {
             cmd.setExecutor(this);
         }
+        // Eager datapack pre-resolve + native biome source swap per world.
+        getServer().getPluginManager().registerEvents(listener(), this);
         getLogger().info("CrusstyGen enabled — generator: CrusstyChunkGenerator (noise stage takeover)");
+    }
+
+    private org.bukkit.event.Listener listener() {
+        return new org.bukkit.event.Listener() {
+            @org.bukkit.event.EventHandler
+            public void onWorldLoad(org.bukkit.event.world.WorldLoadEvent e) {
+                CrusstyChunkGenerator.onWorldLoad(e.getWorld());
+            }
+        };
     }
 
     @Override

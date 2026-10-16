@@ -35,6 +35,22 @@ public final class ChunkGenNative {
 
     public static native void fill(long ctx, int chunkX, int chunkZ, short[] out);
 
+    /**
+     * ctxBiomeNames(ctx) -> String[] — deduplicated biome names of the native
+     * multi_noise source (stable index order used by fillBiomes), or null
+     * when the ctx has no native biome source (embedded-vanilla worldgen).
+     */
+    public static native String[] ctxBiomeNames(long ctx);
+
+    /**
+     * fillBiomes(ctx, cx, cz, out) -> int — writes the chunk's biome quart
+     * indexes (indexes into the ctxBiomeNames table, NOT registry ids) in
+     * the vanilla fillBiomesFromNoise order: out[s*64 + x*16 + y*4 + z],
+     * sections ascending (height/16 sections x 4x4x4 quarts). Returns the
+     * count written, or -1 when the ctx has no native biome source.
+     */
+    public static native int fillBiomes(long ctx, int cx, int cz, int[] out);
+
     public static native int fillMarked(long ctx, int chunkX, int chunkZ, short[] out, long[] marks);
 
     /**
