@@ -1506,3 +1506,23 @@ Stage Summary:
 - F1 decode+expand stack complete; next: DecoOp emission (simple_block/replace_single_block
   place + selectors dispatch), decoStates/decoSetIds handshake (surfaceStates pattern),
   FFI decoPlan entry, probe bit-check, then shouldGenerateDecorations=false on dptt.
+
+---
+## Session cont-48b: place engine + FFI substrate GREEN
+
+Work Log:
+- features_place.rs: PlaceCtx{center, state_index}, DecoOp{x,y,z rel to chunk origin,
+  stateIdx, FLAG_TICK/ROTATED}; selector RNG pinned (SimpleRandomSelector=nextInt(size)
+  next(31)-path, RandomBool=next(1), RandomSelector=first-hit-nextFloat-return,
+  WeightedState=nextInt(total)+walk); place_placed/place_configured with depth guard.
+- Tests: count=3 ops/flags/band/determinism, canSurvive gate, selector pick — 26/26 GREEN.
+  schedule_tick Bool decode fixed; selector entries = PLACED refs (vanilla) — tests aligned.
+- features_place_ffi.rs: DecoState::seal (state table, index), run_feature (exact
+  setDecorationSeed+setFeatureSeed, ops buffer 5×i32/op); Ctx.deco slot; op.state resolved
+  via table at emission.
+
+Stage Summary:
+- F1 Rust stack complete: decode → registry → expand → place → ops → FFI substrate.
+- Next: JNI wrappers (decoAddConfigured/decoAddPlaced/decoSeal/decoStates/decoSetIds/
+  decoRunFeature), Java DecoSetup + applier, biome-features list decode (per-biome
+  step/index protocol), probe bit-check, shouldGenerateDecorations=false.
