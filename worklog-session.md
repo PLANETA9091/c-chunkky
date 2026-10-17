@@ -1464,3 +1464,24 @@ Stage Summary:
   SurfaceWaterDepth) + simple_block/replace_single_block via bdata palette bridge;
   then per-feature probe bit-check on probe pack, dptt judge after wiring
   shouldGenerateDecorations=false.
+
+---
+## Session cont-47b: placement chain evaluator — depth-first goldens GREEN
+
+Work Log:
+- UniformInt/UniformHeight/TrapezoidHeight sampled formulas pinned (UniformInt=nextInt(span)+min
+  via BitRandomSource default; UniformHeight=Mth.randomBetweenInclusive; Trapezoid — later).
+- native/src/features_placement.rs: lazy depth-first flatMap semantics replicated by recursive
+  expand_chain; IntProvider {Constant,Uniform}, HeightProvider {UniformAbs}, level-free Modifier
+  subset (InSquare, Count, RarityFilter, RandomOffset, HeightRangeUniformAbs).
+- reference/java/ChainRef.java: 5-modifier golden chain x2 seeds x2 origins; per-chain FRESH
+  feature seed (vanilla: one setFeatureSeed per placed-feature index per chunk) — first ref
+  draft carried RNG across chains, caught by test, fixed to mirror vanilla.
+- Bug caught by goldens: InSquare z-field typo (pos.z instead of computed z) — exactly the
+  class of bug the depth-first goldens exist for.
+- cargo test 22/22 GREEN (7 features tests total). .so rebuilt.
+
+Stage Summary:
+- RNG + placement core bit-exact. Next: DecoLevel bridge (level-dependent modifiers:
+  Heightmap/BiomeFilter/BlockPredicate/SurfaceWaterDepth/EnvironmentScan), placed_feature JSON
+  decode (538 unique refs), simple_block/replace_single_block first target, then probe bit-check.
