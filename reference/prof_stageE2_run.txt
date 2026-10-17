@@ -1,0 +1,37 @@
+01_tectonic.zip
+02_terralith.zip
+# prof session stageE2 2026-10-17T07:44:14Z
+world=dptt datapacks_dir=server_datapacks fill_threads=2 parallel=1 heap=-Xms1G -Xmx2G
+18c29f1c871f71a96961af2664d7ae2e  01_tectonic.zip
+ee7f451a8d1a13b29090a08543bda46a  02_terralith.zip
+052b8c9b5415f660127ef31fa1382b8e  server/paper.jar
+1154d021f5428d28472a85c0c695b9d5  server/plugins/CrusstyGen.jar
+4158110a5f669e4829cce2c5bbcb94ce  native/target/release/libcrussty_chunkgen.so
+--- deployed.md5 ---
+# deployed.md5 2026-10-17T07:44:14Z
+052b8c9b5415f660127ef31fa1382b8e  paper.jar
+1154d021f5428d28472a85c0c695b9d5  plugins/CrusstyGen.jar
+debec8a5fb5378d3c10a578ceae61201  plugins/CrusstyProbe.jar
+paper started pid=11881 fifo_holder=11879
+>   [07:44:54 INFO]: Done (38.982s)! For help, type "help"
+SERVER UP
+=== warmup: 8x8 at cx 20..27 ===
+warmup wall: 6197 ms (64 chunks)
+spark start: 
+spark retry: 
+spark profiler: on=0
+batch cz 32..34: 36 chunks in 4531 ms -> 125.8 ms/chunk
+batch cz 35..37: 36 chunks in 3332 ms -> 92.5 ms/chunk
+batch cz 38..40: 36 chunks in 2417 ms -> 67.1 ms/chunk
+batch cz 41..43: 36 chunks in 1816 ms -> 50.4 ms/chunk
+=== window: 12141 ms / 144 chunks = 84.3 ms/chunk end-to-end ===
+=== final stats ===
+batch cz 38..40: 36 chunks in 2417 ms -> 67.1 ms/chunk
+batch cz 41..43: 36 chunks in 1816 ms -> 50.4 ms/chunk
+window_ms=12141 chunks=144 ms_per_chunk=84.31
+--- crusgenstats (final) ---
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=392  mean=14600.0us  min=5462.3us  p50=10869.6us  p99=52266.5us  max=65189.4us  [native=13.75ms nat_p50=10.13ms layout=0.80ms beard=0.00ms marks=0.02ms]  [lay setup=0.01 sec=0.20 hmap=0.59 verify=0.00 | uni=0.00/0.2 lin=0.00/0.0 glob=0.00/8.0 pb=0.00/0.00]  [sections filled=0 mixed=3136 air=6272 v1fallback=0 bulk=ok]  swapfail=null  marks_seen=17128 marks_landed=17128 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=747 wall=10.93ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=4.39 par_strips=2.90]
+
+--- spark links in console ---
+(no spark link)
+=== report: reference/prof_session_stageE2.txt ===

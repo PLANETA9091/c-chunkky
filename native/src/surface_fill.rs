@@ -108,6 +108,11 @@ pub struct ColWalk<'a> {
     // per-site lazy caches
     pub xz_cache: Vec<(u64, bool)>,
     pub y_cache: Vec<(u64, bool)>,
+    /// Biome cond results keyed by (xz_counter, quartY) — biome conds depend
+    /// only on (column, quart-Y), but the y_cache resets per block (3D-biome
+    /// semantics), so Terralith's ~hundreds-of-branches biome dispatch
+    /// re-resolved quart + set scan per band block. One u64 compare now.
+    biome_cache: Vec<(u64, bool)>,
 }
 
 impl<'a> ColWalk<'a> {
@@ -158,6 +163,7 @@ impl<'a> ColWalk<'a> {
             water_height: MIN_LEVEL,
             xz_cache: vec![(0, false); cond_count],
             y_cache: vec![(0, false); cond_count],
+            biome_cache: vec![(0, false); cond_count],
         }
     }
 
@@ -261,6 +267,21 @@ impl<'a> ColWalk<'a> {
             self.min_surface_level = mth_floor(v) + self.surface_depth - 8;
         }
         self.min_surface_level
+    }
+
+    /// Probe used by the deep-zone fast path: computes (and caches) the
+    /// per-column min surface level exactly like the AbovePreliminary cond.
+    fn min_surface_probe(&mut self) -> i32 {
+        self.min_surface_level()
+    }
+
+    /// Bit-exact replica of the VerticalGradient cond band eval (only called
+    /// inside a gradient band, where the plain range shortcuts don't fire).
+    fn gradient_at(&mut self, name: &str, true_y: i32, false_y: i32, x: i32, y: i32, z: i32) -> bool {
+        let d = mth_map(y as f64, true_y as f64, false_y as f64, 1.0, 0.0);
+        let mut gf = self.factory.from_hash_of(name).fork_positional();
+        let mut r: XoroshiroRandomSource = gf.at(x, y, z);
+        (r.next_f32() as f64) < d
     }
 
     // -- biome helpers ------------------------------------------------------
@@ -393,8 +414,18 @@ impl<'a> ColWalk<'a> {
         match &self.cfg.conds[ci] {
             SrCond::Not(_) => unreachable!(),
             SrCond::Biome { set } => {
+                // cache per (column, quartY): the y_cache layer above resets
+                // per block, but the biome only changes with the quart.
+                let qy = ((self.block_y - self.cfg.min_y) >> 2).max(0) as u64;
+                let key = ((self.xz_counter as u64) << 12) | (qy & 0xFFF);
+                let cached = self.biome_cache[ci];
+                if cached.0 == key {
+                    return cached.1;
+                }
                 let bi = self.biome_idx_at(self.block_x, self.block_y, self.block_z);
-                set.contains(&(bi as u32))
+                let v = set.contains(&(bi as u32));
+                self.biome_cache[ci] = (key, v);
+                v
             }
             SrCond::Temperature => {
                 let bi = self.biome_idx_at(self.block_x, self.block_y, self.block_z);
@@ -517,6 +548,97 @@ impl<'a> ColWalk<'a> {
 /// Apply the surface rules to a filled chunk buffer. `biome_grid` is the
 /// fillBiomes output for this chunk (sections x 64 quart entries) or None
 /// (native computes it as a fallback — slow path).
+
+/// Deep-zone fast path for the Terralith/vanilla-shaped root:
+///   seq[ vgrad(bedrock_floor) -> block,
+///        above_preliminary_surface -> (huge surface tree),
+///        not(above_preliminary_surface) -> (small deep rules),
+///        vgrad(deepslate) -> block ]
+/// Below the per-column preliminary surface kid[1] is statically false and
+/// kid[0]/kid[3] are constant outside their y bands, so the ~60k deep solid
+/// blocks per chunk skip the root recursion: one small generic walk for
+/// kid[2]'s branch + band math for the gradients. Bit-exact by construction;
+/// any structural mismatch falls back to the full walk.
+struct DeepFast {
+    bed_name: String,
+    bed_true: i32,
+    bed_false: i32,
+    bed_state: u16,
+    ds_name: String,
+    ds_true: i32,
+    ds_false: i32,
+    ds_state: u16,
+    deep_then: usize,
+    /// kid[2]'s first cond — a Biome cond (guarded): pure function of
+    /// (column, quartY), so the gate is resolved once per quart instead of
+    /// per block. u32::MAX when the structure differs (no gate).
+    gate_cond: usize,
+}
+
+fn block_state_of(cfg: &super::surface::SurfaceConfig, ri: usize) -> Option<u16> {
+    match cfg.rules.get(ri)? {
+        super::surface::SrRule::Block { state } => cfg.ids.get(*state as usize).copied(),
+        super::surface::SrRule::Sequence(k) if k.len() == 1 => block_state_of(cfg, k[0]),
+        _ => None,
+    }
+}
+
+fn deep_fast(cfg: &super::surface::SurfaceConfig) -> Option<DeepFast> {
+    let kids = match cfg.rules.get(cfg.root)? {
+        super::surface::SrRule::Sequence(k) => k,
+        _ => return None,
+    };
+    if kids.len() != 4 {
+        return None;
+    }
+    let (r0, r1, r2, r3) = (
+        cfg.rules.get(kids[0])?,
+        cfg.rules.get(kids[1])?,
+        cfg.rules.get(kids[2])?,
+        cfg.rules.get(kids[3])?,
+    );
+    let super::surface::SrRule::IfTrue { cond: c0, then: t0 } = r0 else { return None };
+    let super::surface::SrRule::IfTrue { cond: c1, .. } = r1 else { return None };
+    let super::surface::SrRule::IfTrue { cond: c2, then: t2 } = r2 else { return None };
+    let super::surface::SrRule::IfTrue { cond: c3, then: t3 } = r3 else { return None };
+    if !matches!(cfg.conds.get(*c1)?, super::surface::SrCond::AbovePreliminary) {
+        return None;
+    }
+    let super::surface::SrCond::Not(inner) = cfg.conds.get(*c2)? else { return None };
+    if !matches!(cfg.conds.get(*inner)?, super::surface::SrCond::AbovePreliminary) {
+        return None;
+    }
+    let super::surface::SrCond::VerticalGradient { name: bn, true_y: bt, false_y: bf } =
+        cfg.conds.get(*c0)? else { return None };
+    let super::surface::SrCond::VerticalGradient { name: dn, true_y: dt, false_y: df } =
+        cfg.conds.get(*c3)? else { return None };
+    let bed_state = block_state_of(cfg, *t0)?;
+    let ds_state = block_state_of(cfg, *t3)?;
+    // kid[2]'s then often starts with `if biome(...) -> ...` (e.g. Terralith
+    // jungle-cave mud): hoist that gate to a per-quart cache.
+    let gate_cond = match cfg.rules.get(*t2) {
+        Some(super::surface::SrRule::IfTrue { cond, .. }) => {
+            match cfg.conds.get(*cond) {
+                Some(super::surface::SrCond::Biome { .. }) => *cond,
+                _ => usize::MAX,
+            }
+        }
+        _ => usize::MAX,
+    };
+    Some(DeepFast {
+        bed_name: bn.clone(),
+        bed_true: *bt,
+        bed_false: *bf,
+        bed_state,
+        ds_name: dn.clone(),
+        ds_true: *dt,
+        ds_false: *df,
+        ds_state,
+        deep_then: *t2,
+        gate_cond,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn apply_surface(
     env: &Env,
@@ -557,7 +679,10 @@ pub fn apply_surface(
         }
     };
     // heightmap WORLD_SURFACE_WG: topmost non-air per column
+    // (CRUS_SF_NOHM=1: diagnostic skip — timing only, results invalid)
+    let sf_nohm = std::env::var("CRUS_SF_NOHM").ok().as_deref() == Some("1");
     let mut hm = [0i32; 256];
+    if !sf_nohm {
     for lz in 0..16i32 {
         for lx in 0..16i32 {
             let mut top = min_y - 1;
@@ -579,6 +704,9 @@ pub fn apply_surface(
             hm[(lz * 16 + lx) as usize] = top;
         }
     }
+    } else {
+        hm = [min_y; 256];
+    }
     let cond_count = cfg.conds.len();
     let mut interp = InterpState::new(compiled.interp_slots, 4, height / 8);
     let mut memo = MemoCtx::new(compiled.arena.len()).with_cols(compiled.col_count as usize);
@@ -588,6 +716,15 @@ pub fn apply_surface(
         temps, frozen, names, cond_count, &hm, &noise_handles,
     );
     let default_id = cfg.default_id;
+    // (CRUS_SF_NOWALK / CRUS_SF_NOSCAN: diagnostic skips — timing only)
+    let sf_nowalk = std::env::var("CRUS_SF_NOWALK").ok().as_deref() == Some("1");
+    let sf_noscan = std::env::var("CRUS_SF_NOSCAN").ok().as_deref() == Some("1");
+    let nofast = std::env::var("CRUS_SF_NOFAST").ok().as_deref() == Some("1");
+    let fast = if nofast { None } else { deep_fast(cfg) };
+    // per (column, quartY) gate results for the deep-zone biome cond:
+    // 255 = unknown, else 0/1. Allocated once per chunk.
+    let quarts = (cfg.height / 4).max(1) as usize;
+    let mut gate_cache: Vec<u8> = vec![255u8; 256 * quarts];
     for lz in 0..16i32 {
         for lx in 0..16i32 {
             let bx = cx * 16 + lx;
@@ -612,7 +749,9 @@ pub fn apply_surface(
                         water_height = y + 1;
                     }
                 } else {
-                    if stone_bottom >= y {
+                    if sf_noscan {
+                        stone_bottom = -32512;
+                    } else if stone_bottom >= y {
                         stone_bottom = -32512;
                         let mut y2 = y - 1;
                         while y2 >= min_y - 1 {
@@ -632,8 +771,64 @@ pub fn apply_surface(
                     depth += 1;
                     let sdb = y - stone_bottom + 1;
                     walk.update_y(depth, sdb, water_height, y);
-                    if b == default_id {
-                        if let Some(st) = walk.try_apply(cfg.root) {
+                    if b == default_id && !sf_nowalk {
+                        let st = if let Some(fp) = &fast {
+                            if y >= walk.min_surface_probe() {
+                                // surface band — full rule tree
+                                walk.try_apply(cfg.root)
+                            } else {
+                                // deep zone: kid[0] bedrock gradient, kid[2]
+                                // small deep rules (always-true branch),
+                                // kid[3] deepslate gradient — kid[1] is
+                                // statically false here.
+                                let mut st: Option<u16> = None;
+                                if y <= fp.bed_true {
+                                    st = Some(fp.bed_state);
+                                } else if y < fp.bed_false
+                                    && walk.gradient_at(&fp.bed_name, fp.bed_true, fp.bed_false, bx, y, bz)
+                                {
+                                    st = Some(fp.bed_state);
+                                }
+                                if st.is_none() {
+                                    // kid[2] gate: resolve its biome cond once
+                                    // per (column, quartY) — the branch is
+                                    // biome-gated and false for the vast
+                                    // majority of quarts.
+                                    let mut st2: Option<u16> = None;
+                                    if fp.gate_cond != usize::MAX {
+                                        let qy = (((y - cfg.min_y) >> 2).max(0) as usize).min(quarts - 1);
+                                        let gslot = (col_base as usize) * quarts + qy;
+                                        let g = gate_cache[gslot];
+                                        let gate = if g != 255 {
+                                            g != 0
+                                        } else {
+                                            let v = walk.test(fp.gate_cond);
+                                            gate_cache[gslot] = v as u8;
+                                            v
+                                        };
+                                        if gate {
+                                            st2 = walk.try_apply(fp.deep_then);
+                                        }
+                                    } else {
+                                        st2 = walk.try_apply(fp.deep_then);
+                                    }
+                                    st = st2;
+                                    if st.is_none() {
+                                        if y <= fp.ds_true {
+                                            st = Some(fp.ds_state);
+                                        } else if y < fp.ds_false
+                                            && walk.gradient_at(&fp.ds_name, fp.ds_true, fp.ds_false, bx, y, bz)
+                                        {
+                                            st = Some(fp.ds_state);
+                                        }
+                                    }
+                                }
+                                st
+                            }
+                        } else {
+                            walk.try_apply(cfg.root)
+                        };
+                        if let Some(st) = st {
                             if let Some((tx, ty, tz)) = trace_pos() {
                                 if tx == bx && tz == bz {
                                     let name = if (st as usize) < super::surface::MAT_NAMES.len() {

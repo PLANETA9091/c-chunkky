@@ -662,15 +662,47 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fillBiomes
         cz as i32,
         &mut slice[..n],
     );
+    store_biome_grid(&c, cx as i32, cz as i32, &slice[..n]);
+    ((*tbl).v1_1.ReleaseIntArrayElements)(env, out, ptr, 0);
+    n as jni_sys::jint
+}
+
+/// Store a computed biome grid for (cx, cz) so the surface tail consumes it
+/// instead of recomputing climates (fillBiomes JNI path). Public so the
+/// isolated bench can replicate the plugin's BIOMES -> NOISE order.
+pub fn store_biome_grid(c: &Ctx, cx: i32, cz: i32, grid: &[i32]) {
     if let Some(s) = c.surface.as_ref() {
         let mut g = s.grid_cache.lock().unwrap();
         if g.len() > 48 {
             g.clear();
         }
-        g.insert((cx as i32, cz as i32), Box::from(&slice[..n]));
+        g.insert((cx, cz), Box::from(grid));
     }
-    ((*tbl).v1_1.ReleaseIntArrayElements)(env, out, ptr, 0);
-    n as jni_sys::jint
+}
+
+/// Bench/plugin-test helper: compute + store the biome grid for one chunk
+/// (the native half of the plugin's fillBiomes, without JNI).
+pub fn bench_fill_biomes(id: i64, cx: i32, cz: i32, out: &mut [i32]) -> i32 {
+    let guard = SESSIONS.lock().unwrap();
+    let map = guard.as_ref().expect("sessions map");
+    let c = map.get(&id).expect("ctx id");
+    let Some(state) = &c.biomes else { return -1 };
+    let sections = state.env.wg.height as usize / 16;
+    let n = sections * 64;
+    if out.len() < n {
+        return -1;
+    }
+    crate::biomes::fill_biomes(
+        &state.src,
+        &state.climate,
+        state.env,
+        &state.compiled,
+        cx,
+        cz,
+        &mut out[..n],
+    );
+    store_biome_grid(c, cx, cz, &out[..n]);
+    n as i32
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,318 @@
+--- deployed.md5 ---
+# deployed.md5 2026-10-17T08:25:43Z (plugin_bench)
+052b8c9b5415f660127ef31fa1382b8e  server/paper.jar
+1154d021f5428d28472a85c0c695b9d5  server/plugins/CrusstyGen.jar
+4158110a5f669e4829cce2c5bbcb94ce  native/target/release/libcrussty_chunkgen.so
+server/bukkit.yml written:
+worlds:
+  dptt:
+    generator: CrusstyGen
+
+level-name=dptt
+level-seed=3257840388504953787
+--- wiping world dirs (dptt) for a deterministic run ---
+datapacks wired from DATAPACKS_DIR=server_datapacks:
+01_tectonic.zip
+02_terralith.zip
+versions.txt
+--- deployed.md5 ---
+# deployed.md5 2026-10-17T08:25:46Z
+052b8c9b5415f660127ef31fa1382b8e  paper.jar
+1154d021f5428d28472a85c0c695b9d5  plugins/CrusstyGen.jar
+debec8a5fb5378d3c10a578ceae61201  plugins/CrusstyProbe.jar
+paper started pid=31155 fifo_holder=31153
+>   [08:26:27 INFO]: Done (40.393s)! For help, type "help"
+SERVER UP
+=== server pid check: crusstatus must report srvpid=31155 ===
+dptt: loaded=49 region[-4..3,-4..3]=0/64 forced=0 f(0,-4)=false f(0,0)=false l(0,-4)=false srvpid=31155
+dptt_the_end: loaded=49 region[-4..3,-4..3]=49/64 forced=0 f(0,-4)=false f(0,0)=false l(0,-4)=false srvpid=31155
+
+=== JIT warmup region (chunks 8..15, 8..15) — discarded ===
+harness/plugin_bench.sh: line 121: [: 337
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+CMD_FAIL: [Errno 32] Broken pipe
+rcon: giving up after retries: crusgenstats
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+harness/plugin_bench.sh: line 121: [: 377
+0: integer expression expected
+=== warmup done: chunks=377
+0/64 ===
+=== pregen wall: 44898ms (sequential forceload, incl. poll granularity) ===
+=== crusgenstats ===
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=267  mean=13191.3us  min=6960.7us  p50=10046.7us  p99=46203.7us  max=54560.5us  [native=12.00ms nat_p50=9.43ms layout=1.05ms beard=0.00ms marks=0.12ms]  [lay setup=0.01 sec=0.31 hmap=0.73 verify=0.00 | uni=0.00/0.3 lin=0.00/0.0 glob=0.00/8.0 pb=0.00/0.00]  [sections filled=0 mixed=2136 air=4272 v1fallback=0 bulk=ok]  swapfail=null  marks_seen=14357 marks_landed=14357 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=711 wall=11.85ms slice=0.00 cellfill=0.41 material=2.27 select=0.09 par_planes=4.94 par_strips=3.08]
+
+REGION_DUMP done=64 skipped=0 dir=/home/z/my-project/c-faster/reference/dumps_plugin/dptt prefix=chunk ms=1723
+
+64
+SERVER DOWN (rcon stop)
+=== parity: plugin world vs reference/dumps/dptt ===
+  chunk_-1_-1.crsf: diff 0/98304 = 0.00%
+  chunk_-1_-2.crsf: diff 0/98304 = 0.00%
+  chunk_-1_-3.crsf: diff 2/98304 = 0.00%
+  chunk_-1_-4.crsf: diff 0/98304 = 0.00%
+  chunk_-1_0.crsf: diff 0/98304 = 0.00%
+  chunk_-1_1.crsf: diff 1/98304 = 0.00%
+  chunk_-1_2.crsf: diff 14/98304 = 0.01%
+  chunk_-1_3.crsf: diff 7/98304 = 0.01%
+  chunk_-2_-1.crsf: diff 6/98304 = 0.01%
+  chunk_-2_-2.crsf: diff 12/98304 = 0.01%
+  chunk_-2_-3.crsf: diff 0/98304 = 0.00%
+  chunk_-2_-4.crsf: diff 0/98304 = 0.00%
+  chunk_-2_0.crsf: diff 0/98304 = 0.00%
+  chunk_-2_1.crsf: diff 0/98304 = 0.00%
+  chunk_-2_2.crsf: diff 0/98304 = 0.00%
+  chunk_-2_3.crsf: diff 13/98304 = 0.01%
+  chunk_-3_-1.crsf: diff 14/98304 = 0.01%
+  chunk_-3_-2.crsf: diff 26/98304 = 0.03%
+  chunk_-3_-3.crsf: diff 0/98304 = 0.00%
+  chunk_-3_-4.crsf: diff 0/98304 = 0.00%
+  chunk_-3_0.crsf: diff 14/98304 = 0.01%
+  chunk_-3_1.crsf: diff 2/98304 = 0.00%
+  chunk_-3_2.crsf: diff 0/98304 = 0.00%
+  chunk_-3_3.crsf: diff 4/98304 = 0.00%
+  chunk_-4_-1.crsf: diff 11/98304 = 0.01%
+  chunk_-4_-2.crsf: diff 8/98304 = 0.01%
+  chunk_-4_-3.crsf: diff 0/98304 = 0.00%
+  chunk_-4_-4.crsf: diff 2/98304 = 0.00%
+  chunk_-4_0.crsf: diff 4/98304 = 0.00%
+  chunk_-4_1.crsf: diff 0/98304 = 0.00%
+  chunk_-4_2.crsf: diff 0/98304 = 0.00%
+  chunk_-4_3.crsf: diff 0/98304 = 0.00%
+  chunk_0_-1.crsf: diff 0/98304 = 0.00%
+  chunk_0_-2.crsf: diff 0/98304 = 0.00%
+  chunk_0_-3.crsf: diff 0/98304 = 0.00%
+  chunk_0_-4.crsf: diff 0/98304 = 0.00%
+  chunk_0_0.crsf: diff 0/98304 = 0.00%
+  chunk_0_1.crsf: diff 22/98304 = 0.02%
+  chunk_0_2.crsf: diff 0/98304 = 0.00%
+  chunk_0_3.crsf: diff 0/98304 = 0.00%
+  chunk_1_-1.crsf: diff 18/98304 = 0.02%
+  chunk_1_-2.crsf: diff 37/98304 = 0.04%
+  chunk_1_-3.crsf: diff 32/98304 = 0.03%
+  chunk_1_-4.crsf: diff 0/98304 = 0.00%
+  chunk_1_0.crsf: diff 2/98304 = 0.00%
+  chunk_1_1.crsf: diff 13/98304 = 0.01%
+  chunk_1_2.crsf: diff 17/98304 = 0.02%
+  chunk_1_3.crsf: diff 6/98304 = 0.01%
+  chunk_2_-1.crsf: diff 0/98304 = 0.00%
+  chunk_2_-2.crsf: diff 25/98304 = 0.03%
+  chunk_2_-3.crsf: diff 77/98304 = 0.08%
+  chunk_2_-4.crsf: diff 0/98304 = 0.00%
+  chunk_2_0.crsf: diff 4/98304 = 0.00%
+  chunk_2_1.crsf: diff 0/98304 = 0.00%
+  chunk_2_2.crsf: diff 9/98304 = 0.01%
+  chunk_2_3.crsf: diff 14/98304 = 0.01%
+  chunk_3_-1.crsf: diff 0/98304 = 0.00%
+  chunk_3_-2.crsf: diff 2/98304 = 0.00%
+  chunk_3_-3.crsf: diff 2/98304 = 0.00%
+  chunk_3_-4.crsf: diff 7/98304 = 0.01%
+  chunk_3_0.crsf: diff 0/98304 = 0.00%
+  chunk_3_1.crsf: diff 0/98304 = 0.00%
+  chunk_3_2.crsf: diff 15/98304 = 0.02%
+  chunk_3_3.crsf: diff 2/98304 = 0.00%
+OVERALL: 444/6291456 blocks differ = 0.007% across 64 chunks
+HEIGHTMAP: 0/16384 columns changed; mean |dh| = 0.00
