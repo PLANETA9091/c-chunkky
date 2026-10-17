@@ -1402,3 +1402,37 @@ Stage Summary:
 - Остаток e2e после D: features+height-остатки (heights-запросы фич это WorldGenRegion.getHeight
   — дешёвые высоты прото-чанка, не getBaseHeight), light, serialization, 2-core contention.
   Честный номер окна — CI bench. Фундамент features-движка описан выше.
+
+---
+## Session cont-42..46 (this sandbox): independent JFR cut + dptt parity cross-check + JRE-only tooling
+
+Work Log:
+- Sandbox came back JRE-only (no javac/jcmd/jfr binaries). All three resurrected
+  via module classes: javac = java -m jdk.compiler/com.sun.tools.javac.Main,
+  jar = java -m jdk.jartool/sun.tools.jar.Main, jcmd = java -m jdk.jcmd/sun.tools.jcmd.JCmd,
+  jfr print = java -m jdk.jfr/jdk.jfr.internal.tool.Main. sampler_session.sh +
+  plugin/build.sh patched (with set -e -o pipefail guards on the tools-glob).
+- Independent re-discovery of the dead-surface bug via fresh JFR cut (cont42b):
+  biomes bucket 16.1% = full SurfaceSystem.buildSurface stacks, noise_java 16.9%
+  partially surface-driven NoiseChunk.wrap -> native surface NOT active. Root cause
+  confirmed identical to remote 75af1c7 (handshake before initBulk palette +
+  CraftBlockData moved to block.data in 1.21.8). Local fix (SURFACE_RETRY after
+  first fill) validated the diagnosis end-to-end, then superseded by remote's
+  eager-initBulk fix during rebase — remote version has zero straggler window.
+- judge_dptt.sh added (fresh world + packs + forceload -4..3 + settle + dump +
+  diff vs reference/dumps_plugin/dptt; REF default points at c-faster canonical).
+- Parity cross-checks with native surface LIVE (first time in production):
+  local retry-fix build: 274/6.29M = 0.004%, HEIGHTMAP 0/16384 (cont44a);
+  remote HEAD (eager fix + stage D + deep-zone): 248/6.29M = 0.004%,
+  HEIGHTMAP 0/16384 (cont46). Independent confirmation beyond remote's
+  vanilla-judge 0.011% (a0422d3).
+- JFR stage shares post-fix (cont45): biomes 16.1%->2.0%, noise_java 16.9%->12.0%,
+  native_fill_jni 8.1%->18.0% (absorbed surface_tail). Sandbox CPU degraded
+  across the day (native p50 6.3->26ms) — e2e windows not comparable day-to-day;
+  shares are the signal. Expect the freed ~20% to show on CI 4-core windows.
+
+Stage Summary:
+- Remote HEAD (e746d13) verified bit-exact on dptt with ALL native stages live.
+- Remaining Java fronts (post-fix JFR, this box): NoiseChunk.wrap 12% (partially
+  addressed by stage D — re-cut JFR on CI to see the residual), features 8.3%,
+  other 6.8% (ResourceLocation/Decoder during gen), jvm 40% Moonrise plumbing.
