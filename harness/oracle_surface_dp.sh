@@ -21,10 +21,16 @@ chmod +x oracle/build.sh
 bash oracle/build.sh
 
 mkdir -p server/plugins
-rm -f server/plugins/CrusstyGen.jar server/plugins/CrusstyProbe.jar
+if [ "${KEEP_CRUSSTY:-0}" = "1" ]; then
+  # co-boot: CrusstyGen stays installed (A/B probes of OUR pipeline through
+  # the oracle statuswalk); bukkit.yml keeps its worlds->generator mapping.
+  cp plugin/CrusstyGen.jar server/plugins/CrusstyGen.jar
+  printf 'worlds:\n  %s:\n    generator: CrusstyGen\n' "$LEVEL" > server/bukkit.yml
+else
+  rm -f server/plugins/CrusstyGen.jar server/plugins/CrusstyProbe.jar
+  : > server/bukkit.yml
+fi
 cp oracle/CrusstyOracle.jar server/plugins/
-
-: > server/bukkit.yml
 sed -i "s/^level-name=.*/level-name=$LEVEL/; s/^level-seed=.*/level-seed=3257840388504953787/; s/^allow-nether=.*/allow-nether=false/" server/server.properties
 grep -qE "^allow-nether=false" server/server.properties || echo "allow-nether=false" >> server/server.properties
 rm -rf "server/$LEVEL" "server/${LEVEL}_nether" "server/${LEVEL}_the_end"
@@ -49,10 +55,12 @@ mkfifo run.in
 ( sleep 28800 > run.in ) &
 echo $! > fifo.pid
 java -Xms512M -Xmx1536M \
+  -Djava.library.path="$ROOT/native/target/release" \
   -Doraclewalk=$([ "$ORACLE_MODE" = statuswalk ] && echo true || echo false) \
   -Doraclemarks=$([ "$ORACLE_MODE" = statuswalk ] && echo false || echo true) \
   -Doraclebiomes=$([ "$ORACLE_MODE" = run ] && echo true || echo false) \
   -Doraclemarks.chunklist="$CHUNKLIST" \
+  -Doracleprobe.col="${ORACLEPROBE_COL:-}" \
   -jar paper.jar nogui < run.in > run.out 2>&1 &
 echo $! > server.pid
 cd "$ROOT"

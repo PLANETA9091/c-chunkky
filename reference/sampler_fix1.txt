@@ -1,0 +1,9 @@
+# sampler session fix1 2026-10-17T09:58:07Z world=dptt gen=crussty
+01_tectonic.zip
+02_terralith.zip
+bukkit
+versions.txt
+window_ms=38323
+--- crusgenstats (final) ---
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=290  mean=25295.1us  min=7629.7us  p50=20267.5us  p99=65268.9us  max=101576.6us  [native=22.86ms nat_p50=17.68ms layout=1.85ms beard=0.46ms marks=0.04ms]  [lay setup=0.04 sec=0.71 hmap=1.07 verify=0.02 | uni=0.00/0.6 lin=0.00/0.0 glob=0.00/8.6 pb=0.00/0.00]  [sections filled=0 mixed=2494 air=4466 v1fallback=0 bulk=ok]  swapfail=null  marks_seen=4519 marks_landed=4519 bridge_no_chunk=0 bridge_err=0 beard_chunks=19 beard_pieces=303 | [CrusstyGen] jni_prof[fills=290 wall=22.71ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=9.75 par_strips=5.35]
+

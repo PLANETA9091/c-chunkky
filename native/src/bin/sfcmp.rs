@@ -223,6 +223,8 @@ fn main() {
     let mut missing = 0;
     let mut extra = 0;
     let mut shown = 0;
+    let mut pair_hist: std::collections::HashMap<(String, String), usize> = Default::default();
+    let mut y_hist: std::collections::BTreeMap<i32, usize> = Default::default();
     for (k, os) in &oracle {
         match native.get(k) {
             None => {
@@ -234,6 +236,8 @@ fn main() {
             }
             Some(ns) if ns != os => {
                 wrong += 1;
+                *pair_hist.entry((os.clone(), ns.clone())).or_default() += 1;
+                *y_hist.entry(k.1).or_default() += 1;
                 if shown < 15 {
                     println!("WRONG   {k:?} oracle={os} native={ns}");
                     shown += 1;
@@ -242,6 +246,16 @@ fn main() {
             _ => {}
         }
     }
+    let mut pairs: Vec<(_, _)> = pair_hist.into_iter().collect();
+    pairs.sort_by(|a, b| b.1.cmp(&a.1));
+    for ((os, ns), n) in pairs.iter().take(20) {
+        println!("PAIR x{n:5}  {os} -> {ns}");
+    }
+    let ys: Vec<String> = y_hist
+        .iter()
+        .map(|(y, n)| format!("{y}:{n}"))
+        .collect();
+    println!("YDIST {}", ys.join(" "));
     shown = 0;
     for (k, ns) in &native {
         if !oracle.contains_key(k) {

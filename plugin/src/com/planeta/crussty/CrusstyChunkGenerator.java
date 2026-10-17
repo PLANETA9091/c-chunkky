@@ -893,6 +893,11 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static final Object BULK_LOCK = new Object();
     private static Method mGetSectionsAcc, mFillState, mDefaultBlockState;
     private static Method mGetAndSetUnch, mSpecialPred, mSetRawData;
+    /** Heightmap.getRawData() — Paper 1.21.8 SimpleBitStorage pads the raw
+     *  array to 37 longs for a 384-high world; our heightmap writer must
+     *  match that length or setRawData rejects the write and the save/load
+     *  round-trip warns "expected: 37, got: 36" on every chunk load. */
+    private static Method mGetRawData;
     private static Method mTickingAdd; // Moonrise tickingBlocks.add(short)
     private static java.lang.reflect.Field fNonEmpty, fTickingBlock, fTickingFluid, fSpecial;
     private static java.lang.reflect.Field fTickingList, fIsOpaque, fChunkHeightmaps;
@@ -971,6 +976,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                         Class.forName("net.minecraft.world.level.chunk.ChunkAccess"),
                         Class.forName("net.minecraft.world.level.levelgen.Heightmap$Types"),
                         long[].class);
+                mGetRawData = cHeightmap.getMethod("getRawData");
                 fChunkHeightmaps = cChunkAccess.getField("heightmaps");
                 Class<?> cBlock = Class.forName("net.minecraft.world.level.block.Block");
                 mDefaultBlockState = cBlock.getMethod("defaultBlockState");
@@ -1591,7 +1597,10 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             });
             types.add(type);
             hms.add(hm);
-            raws.add(new long[(256 * 9 + 63) / 64]);
+            // match the LIVE heightmap storage length exactly (Paper pads to
+            // 37 longs at 9 bits/256 entries; the vanilla formula gives 36)
+            long[] existing = (long[]) mGetRawData.invoke(hm);
+            raws.add(new long[existing == null ? (256 * 9 + 63) / 64 : existing.length]);
             opqs.add(opq);
         }
         int ntypes = types.size();
@@ -1767,6 +1776,13 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     // cached NMS handles
     private static Class<?> cChunkPos, cStructureStart, cStructurePiece, cPoolPiece, cBoundingBox,
             cJunction, cStructure, cChunkStatus;
+    /** Dedicated CraftWorld->ServerLevel bridge for collectBeard. MUST NOT be
+     *  the same field as mGetHandle: initBulk() assigns mGetHandle to
+     *  CraftChunkData.getHandle for the section-swap path, and the two
+     *  overwrites raced — the second structure-bearing fill then threw
+     *  "object is not an instance of declaring class" and permanently
+     *  disabled the beardifier (structure terrain adaptation silently off). */
+    private static Method mWorldHandle, mWorldChunkSource;
     private static Method mGetHandle, mGetChunkSource, mGetChunkAtIfLoaded, mGetChunkFull,
             mGetAllRefs, mGetStartForStructure, mTerrainAdapt, mStartGetPieces, mStartIsValid,
             mPieceGetBox, mPieceIsClose, mPoolGetElement, mElementProjection, mPoolGetDelta,
@@ -1789,9 +1805,9 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 cStructure = Class.forName("net.minecraft.world.level.levelgen.structure.Structure");
                 cChunkStatus = Class.forName("net.minecraft.world.level.chunk.status.ChunkStatus");
                 ctorChunkPos = cChunkPos.getConstructor(int.class, int.class);
-                mGetHandle = Class.forName("org.bukkit.craftbukkit.CraftWorld").getMethod("getHandle");
+                mWorldHandle = Class.forName("org.bukkit.craftbukkit.CraftWorld").getMethod("getHandle");
                 Class<?> levelClass = Class.forName("net.minecraft.server.level.ServerLevel");
-                mGetChunkSource = levelClass.getMethod("getChunkSource");
+                mWorldChunkSource = levelClass.getMethod("getChunkSource");
                 Class<?> chunkCacheClass = Class.forName("net.minecraft.server.level.ServerChunkCache");
                 mGetChunkAtIfLoaded = chunkCacheClass.getMethod("getChunkAtIfLoadedImmediately", int.class, int.class);
                 Class<?> accessClass = Class.forName("net.minecraft.world.level.chunk.ChunkAccess");
@@ -1847,8 +1863,8 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             if (w == null) {
                 return EMPTY_BEARD;
             }
-            Object nmsWorld = mGetHandle.invoke(w);
-            Object chunkSource = mGetChunkSource.invoke(nmsWorld);
+            Object nmsWorld = mWorldHandle.invoke(w);
+            Object chunkSource = mWorldChunkSource.invoke(nmsWorld);
             // the generating ProtoChunk (LINKED CraftChunkData) carries the refs
             Object ref = weakChunkField.get(chunkData);
             if (!(ref instanceof WeakReference<?> wr)) {
@@ -1973,7 +1989,12 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             return out;
         } catch (Throwable t) {
             beardBroken = true;
-            LOG.warning("beard collection failed, disabling: " + t);
+            StackTraceElement[] st = t.getStackTrace();
+            StringBuilder at = new StringBuilder();
+            for (int i = 0; i < 3 && i < st.length; i++) {
+                at.append(" | at ").append(st[i]);
+            }
+            LOG.warning("beard collection failed, disabling: " + t + at);
             return EMPTY_BEARD;
         }
     }
@@ -2086,22 +2107,31 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     // ------------------------------------------------------------------
 
     private static void setupSurface(CtxPool pool, org.bukkit.World w) {
+        // A/B kill-switch: CRUS_NO_NATIVE_SURFACE=1 restores the vanilla Java
+        // surface pass on top of the native noise fill (pre-stage-C behavior).
+        if ("1".equals(System.getenv("CRUS_NO_NATIVE_SURFACE"))) {
+            Logger.getLogger("CrusstyGen").info("native surface DISABLED via CRUS_NO_NATIVE_SURFACE");
+            return;
+        }
         try {
             long ctx0 = pool.firstCtx();
             String[] states = ChunkGenNative.surfaceStates(ctx0);
             if (states == null || states.length == 0) {
                 return; // no native surface engine (parse failed / no pack)
             }
-            // The bulk palette (sectionStatesById/matAir/globalIdById/...)
-            // used to initialize lazily inside the FIRST fill() — but this
-            // handshake runs BEFORE any fill at onWorldLoad, so extendPalette
-            // saw null arrays and the whole native surface engine silently
-            // stayed disabled (vanilla Java surface ran instead, ~30-40% of
-            // the gen-worker). Initialize it eagerly: initBulk is pure
-            // reflection wiring, world-load-safe, chunk-free.
+            // extendPalette needs the bulk-path palette globals
+            // (sectionStatesById/matAir/globalIdById/palIdxScratch); they are
+            // built by initBulk(), which historically only ran inside the first
+            // chunk FILL — i.e. AFTER this world-load hook. At load time the
+            // globals were still null, extendPalette returned null and the
+            // native surface engine silently never engaged: vanilla
+            // SurfaceSystem then re-ran on top of the native surface for the
+            // whole session (measured ~30% of the generation window).
             if (!bulkReady && !bulkBroken) {
                 initBulk();
             }
+            LOG.info("surface handshake: bulkReady=" + bulkReady + " bulkBroken="
+                    + bulkBroken + " reason=" + bulkFailReason);
             // CRITICAL: the surface handshake (state ids + biome temps) must
             // land on EVERY pool ctx — fill workers acquire arbitrary ctxs,
             // and a ctx without ids/temps silently skips the native surface
@@ -2132,6 +2162,12 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             java.util.function.Function<String, Object> resolver) {
         Object[] cur = sectionStatesById;
         if (cur == null || matAir == null || globalIdById == null || palIdxScratch == null) {
+            LOG.warning("extendPalette: palette globals null (states="
+                    + (cur != null) + " matAir=" + (matAir != null)
+                    + " gid=" + (globalIdById != null)
+                    + " pis=" + (palIdxScratch != null)
+                    + " bulkReady=" + bulkReady + " bulkBroken=" + bulkBroken
+                    + " reason=" + bulkFailReason + ")");
             return null;
         }
         int base = cur.length;
@@ -2153,16 +2189,14 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             Method mIsRandTick = cBlockState.getMethod("isRandomlyTicking");
             Method mGetFluid = cBlockState.getMethod("getFluidState");
             // Bukkit BlockData per surface state (for the v1/verify paths that
-            // speak Material/BlockData, not NMS states). Package moved across
-            // Paper releases: block.CraftBlockData (<=1.21.1) vs
-            // block.data.CraftBlockData (1.21.2+).
+            // speak Material/BlockData, not NMS states)
             Class<?> cCraftBlockData;
             try {
                 cCraftBlockData = Class.forName(
-                        "org.bukkit.craftbukkit.block.CraftBlockData");
+                        "org.bukkit.craftbukkit.block.data.CraftBlockData");
             } catch (ClassNotFoundException e) {
                 cCraftBlockData = Class.forName(
-                        "org.bukkit.craftbukkit.block.data.CraftBlockData");
+                        "org.bukkit.craftbukkit.block.CraftBlockData");
             }
             Method mFromData = cCraftBlockData.getMethod("fromData", cBlockState);
             Class<?> cFluidState = Class.forName("net.minecraft.world.level.material.FluidState");

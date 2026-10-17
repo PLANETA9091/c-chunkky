@@ -4723,16 +4723,6 @@ BEARDVALS
 9 63 15 0
 12 63 15 0
 15 63 15 0
-NCINFO blender= hmap=0 dmap=0 beardifier=Beardifier firstCellX=0 firstCellZ=0 cellCountXZ=4 cellCountY=96 cellNoiseMinY=-16 firstNoiseX=0 firstNoiseZ=0 noiseSizeXZ=4 cellWidth=4 cellHeight=4
-NCRERUN marks=8
-5 -26 3
-4 -25 5
-5 -25 5
-5 -25 6
-6 -25 4
-6 -25 5
-6 -25 6
-7 -25 5
 STATUS surface marks=8
 5 -26 3
 4 -25 5

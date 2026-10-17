@@ -188,6 +188,55 @@ public final class OracleNoiseStagePlugin extends JavaPlugin {
         int x = 13, z = 4;
         updateXZ.invoke(ctx, x, z);
         int depth = 0, wh = Integer.MIN_VALUE, stoneBottom = Integer.MAX_VALUE;
+        // deep-walk probe: replicate the vanilla surface column walk for an
+        // arbitrary column and log context + rule results per block. Activated
+        // with -Doracleprobe.col=x:z (chunk = the walked noise-status chunk).
+        String probeCol = System.getProperty("oracleprobe.col", "");
+        if (!probeCol.isBlank()) {
+            String[] pp = probeCol.split(":");
+            int px = Integer.parseInt(pp[0].trim());
+            int pz = Integer.parseInt(pp[1].trim());
+            updateXZ.invoke(ctx, px, pz);
+            int pd = 0, pwh = Integer.MIN_VALUE, psb = Integer.MAX_VALUE;
+            for (int y = chunk.getHeight() + chunk.getMinY() - 1; y >= chunk.getMinY(); y--) {
+                var pos = new net.minecraft.core.BlockPos(px, y, pz);
+                var b = getBlockState.invoke(chunk, pos);
+                boolean air = (Boolean) isAir.invoke(b);
+                boolean isFluid = !((Boolean) fluidEmpty.invoke(getFluidState.invoke(b)));
+                if (air) {
+                    pd = 0; pwh = Integer.MIN_VALUE;
+                    getLogger().info(String.format("VWALK %d %d %d AIR", px, y, pz));
+                    continue;
+                }
+                if (isFluid) {
+                    if (pwh == Integer.MIN_VALUE) pwh = y + 1;
+                    getLogger().info(String.format("VWALK %d %d %d FLUID wh=%d", px, y, pz, pwh));
+                    continue;
+                }
+                if (psb >= y) {
+                    psb = -32512;
+                    for (int y2 = y - 1; y2 >= chunk.getMinY() - 1; y2--) {
+                        if (y2 < chunk.getMinY()) { psb = y2 + 1; break; }
+                        var b2 = getBlockState.invoke(chunk, new net.minecraft.core.BlockPos(px, y2, pz));
+                        boolean air2 = (Boolean) isAir.invoke(b2);
+                        boolean fe2 = (Boolean) fluidEmpty.invoke(getFluidState.invoke(b2));
+                        if (air2 || !fe2) { psb = y2 + 1; break; }
+                    }
+                }
+                pd++;
+                int psdb = y - psb + 1;
+                updateY.invoke(ctx, pd, psdb, pwh, px, y, pz);
+                String st = null;
+                if (b == defaultBlock || b.equals(defaultBlock)) {
+                    Object r = tryApply.invoke(rule, px, y, pz);
+                    if (r != null) st = String.valueOf(r);
+                }
+                getLogger().info(String.format("VWALK %d %d %d %s d=%d wh=%d sdb=%d state=%s",
+                        px, y, pz, b, pd, pwh, psdb, st));
+            }
+            getLogger().info("VWALK done");
+            return;
+        }
         for (int y = 62; y >= 10; y--) {
             var pos = new net.minecraft.core.BlockPos(x, y, z);
             var b = getBlockState.invoke(chunk, pos);
