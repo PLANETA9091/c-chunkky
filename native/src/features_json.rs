@@ -334,7 +334,11 @@ pub fn decode_configured_feature(j: &Json) -> FeatureCfg {
                 Some(Some(p)) => p,
                 _ => return FeatureCfg::Unsupported("simple_block-place"),
             };
-            let ticks = cfg.get("schedule_tick").and_then(|v| v.as_i64()).unwrap_or(0) != 0;
+            let ticks = match cfg.get("schedule_tick") {
+                Some(crate::json::Json::Bool(b)) => *b,
+                Some(v) => v.as_i64().unwrap_or(0) != 0,
+                None => false,
+            };
             FeatureCfg::SimpleBlock { place, ticks }
         }
         "minecraft:replace_single_block" => {
