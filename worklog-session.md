@@ -1485,3 +1485,24 @@ Stage Summary:
 - RNG + placement core bit-exact. Next: DecoLevel bridge (level-dependent modifiers:
   Heightmap/BiomeFilter/BlockPredicate/SurfaceWaterDepth/EnvironmentScan), placed_feature JSON
   decode (538 unique refs), simple_block/replace_single_block first target, then probe bit-check.
+
+---
+## Session cont-47c: features F1 body — level layer + predicates + JSON decode of real packs
+
+Work Log:
+- DecoLevel trait + full modifier set in features_deco.rs; pure variants re-expanded with
+  same RNG order (ChainRef goldens re-pinned through the deco path implicitly via placement).
+- BIOME_INFO_NOISE pinned: LegacyRandomSource(-1698467423379765010) -> forkPositional
+  (1 LCG draw) -> LegacyPositionalRandomFactory.fromHashOf("octave_0") [String.hashCode ^ seed]
+  -> ImprovedNoise::new_legacy; value = imp.noise(wrap(x),0,wrap(z)), wrap=±3.3554432E7.
+- features_placement.rs gained HeightProvider (anchors+uniform+trapezoid); expand_chain_ctx.
+- features_json.rs: strict decode; state strings canonical "ns:block[k=v,..]" (JSON order);
+  packs census: modded types only in 3/603 placed files -> vanilla subset 99.5%.
+- Real-pack coverage: configured 92/510 F1-supported, placed 375/570 fully supported.
+  Unsupported-by-design at F1: tree/vegetation_patch/ore/random_patch/disk... (F2-F5).
+- cargo test 23/23 GREEN (lib).
+
+Stage Summary:
+- F1 decode+expand stack complete; next: DecoOp emission (simple_block/replace_single_block
+  place + selectors dispatch), decoStates/decoSetIds handshake (surfaceStates pattern),
+  FFI decoPlan entry, probe bit-check, then shouldGenerateDecorations=false on dptt.
