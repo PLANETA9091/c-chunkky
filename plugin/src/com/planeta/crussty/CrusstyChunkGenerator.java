@@ -2092,6 +2092,16 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             if (states == null || states.length == 0) {
                 return; // no native surface engine (parse failed / no pack)
             }
+            // The bulk palette (sectionStatesById/matAir/globalIdById/...)
+            // used to initialize lazily inside the FIRST fill() — but this
+            // handshake runs BEFORE any fill at onWorldLoad, so extendPalette
+            // saw null arrays and the whole native surface engine silently
+            // stayed disabled (vanilla Java surface ran instead, ~30-40% of
+            // the gen-worker). Initialize it eagerly: initBulk is pure
+            // reflection wiring, world-load-safe, chunk-free.
+            if (!bulkReady && !bulkBroken) {
+                initBulk();
+            }
             // CRITICAL: the surface handshake (state ids + biome temps) must
             // land on EVERY pool ctx — fill workers acquire arbitrary ctxs,
             // and a ctx without ids/temps silently skips the native surface
@@ -2143,8 +2153,17 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             Method mIsRandTick = cBlockState.getMethod("isRandomlyTicking");
             Method mGetFluid = cBlockState.getMethod("getFluidState");
             // Bukkit BlockData per surface state (for the v1/verify paths that
-            // speak Material/BlockData, not NMS states)
-            Class<?> cCraftBlockData = Class.forName("org.bukkit.craftbukkit.block.CraftBlockData");
+            // speak Material/BlockData, not NMS states). Package moved across
+            // Paper releases: block.CraftBlockData (<=1.21.1) vs
+            // block.data.CraftBlockData (1.21.2+).
+            Class<?> cCraftBlockData;
+            try {
+                cCraftBlockData = Class.forName(
+                        "org.bukkit.craftbukkit.block.CraftBlockData");
+            } catch (ClassNotFoundException e) {
+                cCraftBlockData = Class.forName(
+                        "org.bukkit.craftbukkit.block.data.CraftBlockData");
+            }
             Method mFromData = cCraftBlockData.getMethod("fromData", cBlockState);
             Class<?> cFluidState = Class.forName("net.minecraft.world.level.material.FluidState");
             Method mFluidRand = cFluidState.getMethod("isRandomlyTicking");
