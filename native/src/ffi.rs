@@ -23,6 +23,8 @@ struct Ctx {
     /// Native SurfaceRules engine (pack surface_rule). None = vanilla Java
     /// surface stage stays active.
     surface: Option<SurfaceState>,
+    /// Native features engine (stage F). None until decoSeal compiles the registry.
+    deco: Option<crate::features_place_ffi::DecoState>,
 }
 
 /// Native surface engine state (config parsed from the pack noise_settings;
@@ -202,7 +204,7 @@ pub fn ctx_new(seed: i64, _min_y: i32, _height: i32, sea_level: i32) -> i64 {
     let env: &'static DEnv = Box::leak(env);
     let gen = ChunkGen::new(env);
     let mut map = SESSIONS.lock().unwrap();
-    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes: None, surface: None });
+    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes: None, surface: None, deco: None });
     id
 }
 
@@ -243,7 +245,7 @@ pub fn ctx_new_assets(
         }
     };
     let mut map = SESSIONS.lock().unwrap();
-    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes, surface });
+    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes, surface, deco: None });
     Ok(id)
 }
 

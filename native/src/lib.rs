@@ -23,6 +23,7 @@ pub mod features_placement;
 pub mod features_deco;
 pub mod features_json;
 pub mod features_place;
+pub mod features_place_ffi;
 pub mod ffi;
 
 include!(concat!(env!("OUT_DIR"), "/assets_manifest.rs"));

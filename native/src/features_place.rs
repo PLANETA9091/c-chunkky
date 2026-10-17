@@ -28,6 +28,8 @@ pub struct PlaceCtx<'a> {
     /// center chunk block origin (chunkX<<4, chunkZ<<4)
     pub center_x: i32,
     pub center_z: i32,
+    /// state string -> decoStates table index (decoSetIds handshake)
+    pub state_index: &'a std::collections::HashMap<String, u16>,
 }
 
 impl<'a> PlaceCtx<'a> {
@@ -125,7 +127,8 @@ pub fn place_configured(
                 flags |= FLAG_ROTATED;
             }
             let (rx, rz) = ctx.rel(pos);
-            ops.push(DecoOp { x: rx, y: pos.y as i16, z: rz, state: 0, flags }); // state idx resolved via decoStates at handshake
+            let sid = ctx.state_index.get(&state).copied().unwrap_or(0);
+            ops.push(DecoOp { x: rx, y: pos.y as i16, z: rz, state: sid, flags });
             true
         }
         FeatureCfg::ReplaceBlock { targets } => {
@@ -140,13 +143,14 @@ pub fn place_configured(
                 };
                 if hit {
                     let mut rotated = false;
-                    if sample_state(src, rng, &mut rotated).is_some() {
+                    if let Some(st) = sample_state(src, rng, &mut rotated) {
                         let mut flags = 0;
                         if rotated {
                             flags |= FLAG_ROTATED;
                         }
                         let (rx, rz) = ctx.rel(pos);
-                        ops.push(DecoOp { x: rx, y: pos.y as i16, z: rz, state: 0, flags });
+                        let sid = ctx.state_index.get(&st).copied().unwrap_or(0);
+                        ops.push(DecoOp { x: rx, y: pos.y as i16, z: rz, state: sid, flags });
                     }
                     break;
                 }
@@ -193,6 +197,8 @@ fn pred_ids(pred: &crate::features_deco::BlockPredicate) -> &[String] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static EMPTY_IDX: std::sync::LazyLock<std::collections::HashMap<String, u16>> =
+        std::sync::LazyLock::new(std::collections::HashMap::new);
     use crate::features_deco::{BlockPredicate, DecoLevel, HeightmapTy, Mod as DM};
     use crate::features_json::decode_registry;
     use std::collections::HashMap;
@@ -232,7 +238,7 @@ mod tests {
         let placed = r#"{"feature":"test:cfg","placement":[{"type":"minecraft:count","count":3},{"type":"minecraft:in_square"}]}"#;
         let reg = build_reg(cfg, placed);
         let level = Mock { h: 64 };
-        let ctx = PlaceCtx { reg: &reg, level: &level, center_x: 16, center_z: -16 };
+        let ctx = PlaceCtx { reg: &reg, level: &level, center_x: 16, center_z: -16, state_index: &EMPTY_IDX };
         let mut rng = WorldgenRandom::new();
         let deco = rng.set_decoration_seed(777, 16, -16);
         rng.set_feature_seed(deco, 0, 5);
@@ -278,7 +284,7 @@ mod tests {
         let placed = r#"{"feature":"test:cfg","placement":[]}"#;
         let reg = build_reg(cfg, placed);
         let level = No { h: 64 };
-        let ctx = PlaceCtx { reg: &reg, level: &level, center_x: 0, center_z: 0 };
+        let ctx = PlaceCtx { reg: &reg, level: &level, center_x: 0, center_z: 0, state_index: &EMPTY_IDX };
         let mut rng = WorldgenRandom::new();
         let deco = rng.set_decoration_seed(1, 0, 0);
         rng.set_feature_seed(deco, 0, 0);
@@ -312,7 +318,7 @@ mod tests {
         ];
         let reg = decode_registry(cfgs.into_iter(), pls.into_iter());
         let level = Mock { h: 64 };
-        let ctx = PlaceCtx { reg: &reg, level: &level, center_x: 0, center_z: 0 };
+        let ctx = PlaceCtx { reg: &reg, level: &level, center_x: 0, center_z: 0, state_index: &EMPTY_IDX };
         let mut counts = [0usize; 2];
         for s in 0..500 {
             let mut rng = WorldgenRandom::new();
