@@ -1350,3 +1350,55 @@ Stage Summary:
   carvers, light, serialization) + контенция 2-core. Следующие фронты: натив height-сервис (D),
   features — мега-проект; на 2-core shared потолок окна сильно шумит — честные сравнения только
   CI judge (4-core) или isolated bench.
+
+---
+## Stage D COMPLETE — native height service (session cont-42)
+
+Work Log:
+- JFR-перемотка старого профиля (jfr_dp_samp): 12% Java-воркера = Structure.onTopOfChunkCenter
+  -> getFirstOccupiedHeight -> CustomChunkGenerator.getBaseHeight -> ВАНИЛЬНЫЙ
+  NoiseBasedChunkGenerator.getBaseHeight (пересимуляция 1-колонки NoiseChunk на КАЖДЫЙ запрос;
+  BeardifierMarker пустой, Blender.empty, БЕЗ surface rules).
+- Контракт CB снят javap'ом из paper-1.21.8.jar: CustomChunkGenerator.getBaseHeight при
+  implementBaseHeight=true (конструктор ставит 1) зовёт БУКВАЛЬНЫЙ override
+  ChunkGenerator.getBaseHeight(WorldInfo,Random,int,int,org.bukkit.HeightMap) с БЛОЧНЫМИ коорд.
+  (seed-рандом по x>>4/z>>4 — ignored), CraftHeightMap.fromNMS конвертит NMS->Bukkit enum
+  (WORLD_SURFACE_WG/OCEAN_FLOOR_WG есть). UnsupportedOperationException -> перманентный фолбэк
+  на ваниль (не кидаем).
+- Реализация (ТОЛЬКО Java, натив не тронут): heightsCtx в CtxPool — создаётся как пул-ctx, НО
+  никогда не получает surface ids/temps -> guard surface_tail пропускает -> plain fill() на нём =
+  точная ванильная noise-колонка (= anchor ванильного getBaseHeight по построению).
+  getBaseHeight(WORLD_SURFACE[_WG]|OCEAN_FLOOR[_WG]) -> per-chunk кэш int[512] (top non-air /
+  top solid, +1, -1=пусто), scan по 98304-массиву, evict на 65536; остальные типы -> super.
+  ВАЖНО: heightsCtx НЕ в ротации филлов (иначе чанки без surface!). SurfaceSetup трогает только
+  pool.all() — heightsCtx вне.
+- Паритет: dptt judge 319/6.29M = 0.005% (не изменился, только vegetation-order шум), HEIGHTMAP
+  0/16384. Структуры не сдвинулись — heights бит-точны.
+- Perf: fills 670->759 (+89 heights-fills на 396 чанков = +0.22/чанк), jni wall 11.2->8.9ms.
+  Окно песочницы шумит +-20% (stageD 99.3 / stageD_ft1 91.1 vs 94.2 до) — честная дельта на CI.
+  CRUS_FILL_THREADS=1 на 2-ядерной: native p50 5.43 vs 6.23ms, par_* = 0 — на 2-core ft=1 чуть
+  лучше; CI (4-core) остаётся ft=2 (env-driven, без изменений кода).
+- push a824f26; CI run 154 in_progress (api.github.com rate-limited, вердикт в след. сессии;
+  локальный джадж к CI-гейту 0.05% имеет запас 10x).
+
+Scoping СЛЕДУЮЩЕГО фронта — features (мега-проект; scripts/feature_census.py):
+- dptt = 1713 биомов (dimension/overworld.json: multi_noise, settings=minecraft:overworld),
+  538 unique placed refs. Гистограмма configured types (refs/unique):
+  random_selector 3071/60, ore 1675/19, simple_block 1421/35, random_patch 1228/41,
+  vegetation_patch 728/34, tree 683/35, disk 590/24, fallen_tree 235/7, simple_random_selector
+  217/12, vines 175/2, multiface_growth 164/3, geode 99/5, flower 91/9, bamboo 45/1,
+  dripstone_cluster 35/2, nether_forest_vegetation 33/1, waterlogged_vegetation_patch 24/4,
+  netherrack_replace_blobs 18/12, block_column 15/3, forest_rock 13/1, underwater_magma 12/1,
+  spring_feature 4/2, sculk_patch 1/1. ВСЕ типы ванильные (terralith random_selector = minecraft).
+- Путь повторения успеха stage C: контракт из декомпила (/tmp/my-project/decomp/src —
+  NoiseBasedChunkGenerator, NoiseChunk, DensityFunctions, RandomState; для features нужен новый
+  декомпил: PlacedFeature/PlacementModifier/Feature*/WorldGenRegion/ChunkRandom RNG-протокол),
+  изолированный probe-pack (probe/datapacks/crussty-custom), пофичевая bit-проверка, потом
+  shouldGenerateDecorations=false + NMS-мост спиллов (как marks/bridge).
+- carvers в dptt ОТСУТСТВУЮТ (carvers:null в Tectonic noise_settings — scripts/inspect_carvers.py),
+  нативить не надо.
+
+Stage Summary:
+- Остаток e2e после D: features+height-остатки (heights-запросы фич это WorldGenRegion.getHeight
+  — дешёвые высоты прото-чанка, не getBaseHeight), light, serialization, 2-core contention.
+  Честный номер окна — CI bench. Фундамент features-движка описан выше.
