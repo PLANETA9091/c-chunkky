@@ -1436,3 +1436,31 @@ Stage Summary:
 - Remaining Java fronts (post-fix JFR, this box): NoiseChunk.wrap 12% (partially
   addressed by stage D — re-cut JFR on CI to see the residual), features 8.3%,
   other 6.8% (ResourceLocation/Decoder during gen), jvm 40% Moonrise plumbing.
+
+---
+## Session cont-47: features engine kickoff — contract + decompile + RNG parity
+
+Work Log:
+- Decompile farm extended: extracted 717 classes (feature/ placement/ configurations/
+  stateproviders/ trunk-foliage-treedecorators/ blockpredicates/ + WorldGenRegion) from
+  versions/1.21.8/paper-1.21.8.jar; vineflower (paper jar as -e classpath) -> src14: 449 java.
+- Contract read and pinned in reference/features_contract.md: master loop (deco seed per chunk,
+  structures then sorted union of feature indices per step, Paper featureSeeds override burns
+  4 xoro next(32)), full placement-modifier chain RNG order, ensureCanWrite writeRadius=1
+  (3x3 writable), setBlock flags/dummy-BE/postprocess, proto heightmap semantics.
+- New native/src/features_rng.rs: WorldgenRandom (xoro-wrapped next(bits) semantics,
+  setDecorationSeed/setFeatureSeed, nextInt default next(31) path, f32/f64 quantization quirks).
+- Bit-parity harness: reference/java/WgrRef.java (resurrected javac) -> 6 DECO cases + FQUIRK
+  f32/f64/nextInt goldens; native tests assert all bit-exact.
+- Sandbox lost Rust toolchain again; rustup minimal reinstalled (rustc 1.99.1).
+- cargo test 19/19 GREEN (4 new: decoration_parity, float_and_bound_goldens,
+  next_int_bound_semantics, deterministic_streams); .so rebuilt (3.3MB, Oct 17).
+- CI verdict for 798631c still uncheckable (api.github.com rate-limited from this IP, no gh token).
+
+Stage Summary:
+- Features stage F1 has its RNG floor: seeding protocol bit-exact, contract doc pinned.
+- Next: F1 implementation — placed_feature JSON parse (json.rs) + modifier chain
+  (InSquare/Count/Rarity/BiomeFilter/Heightmap/HeightRange/RandomOffset/BlockPredicate/
+  SurfaceWaterDepth) + simple_block/replace_single_block via bdata palette bridge;
+  then per-feature probe bit-check on probe pack, dptt judge after wiring
+  shouldGenerateDecorations=false.

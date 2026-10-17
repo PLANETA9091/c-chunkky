@@ -18,6 +18,7 @@ pub mod surface;
 pub mod surface_fill;
 pub mod beard;
 pub mod nochunk;
+pub mod features_rng;
 pub mod ffi;
 
 include!(concat!(env!("OUT_DIR"), "/assets_manifest.rs"));
