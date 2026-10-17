@@ -1,0 +1,559 @@
+//! Features JSON decode (stage F1): placed_feature / configured_feature -> native structs.
+//! Strict vanilla-loader semantics: unknown types -> Unsupported (element skipped by the
+//! server's registry loader too — parity by construction). Coverage stats in tests.
+
+use crate::features_deco::*;
+use crate::features_placement::{HeightProvider as HP, IntProvider as IP, Modifier as PM};
+use crate::json::{self, Json};
+use std::collections::HashMap;
+
+// ---------------------------------------------------------------------------
+// Config model
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub enum StateSrc {
+    Simple(String),
+    Weighted(Vec<(u32, String)>),
+    Unsupported(&'static str),
+}
+
+#[derive(Clone, Debug)]
+pub enum FeatureCfg {
+    NoOp,
+    SimpleBlock {
+        place: StateSrc,
+        ticks: bool,
+    },
+    ReplaceBlock {
+        targets: Vec<(BlockPredicate, StateSrc)>,
+    },
+    RandomSelector {
+        entries: Vec<(f32, String)>,
+        default: String,
+    },
+    SimpleRandomSelector {
+        entries: Vec<String>,
+    },
+    RandomBoolSelector {
+        chance: f32,
+        if_true: String,
+        if_false: String,
+    },
+    Unsupported(&'static str),
+}
+
+#[derive(Clone, Debug)]
+pub struct PlacedDef {
+    pub feature: String,
+    pub placement: Vec<Mod>,
+}
+
+pub struct FeatureRegistry {
+    pub placed: HashMap<String, PlacedDef>,
+    pub configured: HashMap<String, FeatureCfg>,
+    pub unsupported_placed: usize,
+    pub unsupported_configured: usize,
+    pub total_placed: usize,
+    pub total_configured: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Decoders
+// ---------------------------------------------------------------------------
+
+fn decode_int_provider(j: &Json) -> Option<IP> {
+    if let Some(v) = j.as_i64() {
+        return Some(IP::Constant(v as i32));
+    }
+    let obj = j.get("type")?.as_str()?;
+    match obj {
+        "minecraft:constant" => j.get("value").and_then(|v| v.as_i64()).map(|v| IP::Constant(v as i32)),
+        "minecraft:uniform" => {
+            let lo = j.get("min_inclusive").and_then(|v| v.as_i64())?;
+            let hi = j.get("max_inclusive").and_then(|v| v.as_i64())?;
+            Some(IP::Uniform { lo: lo as i32, hi: hi as i32 })
+        }
+        _ => None,
+    }
+}
+
+fn decode_height(j: &Json) -> Option<HP> {
+    if let Some(a) = j.get("absolute").and_then(|v| v.as_i64()) {
+        return Some(HP::Abs(a as i32));
+    }
+    if let Some(a) = j.get("above_bottom").and_then(|v| v.as_i64()) {
+        return Some(HP::AboveBottom(a as i32));
+    }
+    if let Some(a) = j.get("below_top").and_then(|v| v.as_i64()) {
+        return Some(HP::BelowTop(a as i32));
+    }
+    let t = j.get("type")?.as_str()?;
+    match t {
+        "minecraft:uniform" => {
+            let lo = decode_anchor_val(j.get("min_inclusive")?)?;
+            let hi = decode_anchor_val(j.get("max_inclusive")?)?;
+            Some(HP::Uniform { lo, hi })
+        }
+        "minecraft:trapezoid" => {
+            let lo = decode_anchor_val(j.get("min_inclusive")?)?;
+            let hi = decode_anchor_val(j.get("max_inclusive")?)?;
+            Some(HP::Trapezoid { lo, hi, plateau: -1 })
+        }
+        _ => None,
+    }
+}
+
+fn decode_anchor(j: &Json) -> Option<HP> {
+    // anchor is itself a height-provider-shaped object or int
+    if let Some(v) = j.as_i64() {
+        return Some(HP::Abs(v as i32));
+    }
+    decode_height(j)
+}
+
+/// flat i32 anchor value (already absolute/above_bottom/below_top variants)
+fn decode_anchor_val(j: &Json) -> Option<i32> {
+    if let Some(v) = j.as_i64() {
+        return Some(v as i32);
+    }
+    if let Some(v) = j.get("absolute").and_then(|v| v.as_i64()) {
+        return Some(v as i32);
+    }
+    if let Some(v) = j.get("above_bottom").and_then(|v| v.as_i64()) {
+        return Some(v as i32);
+    }
+    if let Some(v) = j.get("below_top").and_then(|v| v.as_i64()) {
+        return Some(v as i32);
+    }
+    None
+}
+
+fn decode_state_provider(j: &Json) -> Option<StateSrc> {
+    let t = j.get("type")?.as_str()?;
+    match t {
+        "minecraft:simple_state_provider" => {
+            let s = j.get("state")?;
+            Some(StateSrc::Simple(state_string(s)?))
+        }
+        "minecraft:weighted_list_state_provider" => {
+            let arr = j.get("distribution")?.as_arr()?;
+            let mut v = Vec::new();
+            for e in arr {
+                let w = e.get("weight").and_then(|x| x.as_i64())? as u32;
+                let s = state_string(e.get("data")?)?;
+                v.push((w, s));
+            }
+            Some(StateSrc::Weighted(v))
+        }
+        "minecraft:rotated_state_provider" => {
+            let s = j.get("property_source")?;
+            Some(StateSrc::Simple(format!("ROTATED\0{}", state_string(s)?)))
+        }
+        _ => Some(StateSrc::Unsupported("state_provider")),
+    }
+}
+
+/// canonical "ns:block[k=v,...]" string from a vanilla state JSON
+pub fn state_string(j: &Json) -> Option<String> {
+    let name = j.get("Name").and_then(|v| v.as_str()).or_else(|| j.as_str())?;
+    if let Some(props) = j.get("Properties") {
+        let mut kv = Vec::new();
+        if let Some(obj) = props.as_obj() {
+            for (k, v) in obj {
+                kv.push(format!("{}={}", k, v.as_str()?));
+            }
+        }
+        if kv.is_empty() {
+            return Some(name.to_string());
+        }
+        return Some(format!("{}[{}]", name, kv.join(",")));
+    }
+    Some(name.to_string())
+}
+
+fn decode_predicate(j: &Json) -> Option<BlockPredicate> {
+    let t = j.get("type")?.as_str()?;
+    Some(match t {
+        "minecraft:true" => BlockPredicate::True,
+        "minecraft:all_of" => {
+            let mut v = Vec::new();
+            for e in j.get("predicates")?.as_arr()? {
+                v.push(decode_predicate(e)?);
+            }
+            BlockPredicate::AllOf(v)
+        }
+        "minecraft:any_of" => {
+            let mut v = Vec::new();
+            for e in j.get("predicates")?.as_arr()? {
+                v.push(decode_predicate(e)?);
+            }
+            BlockPredicate::AnyOf(v)
+        }
+        "minecraft:not" => BlockPredicate::Not(Box::new(decode_predicate(j.get("predicate")?)?)),
+        "minecraft:matching_blocks" => {
+            let mut v = Vec::new();
+            for e in j.get("blocks")?.as_arr()? {
+                v.push(state_string(e)?);
+            }
+            BlockPredicate::MatchingBlocks(v)
+        }
+        "minecraft:matching_fluids" => {
+            let mut v = Vec::new();
+            for e in j.get("fluids")?.as_arr()? {
+                v.push(state_string(e)?);
+            }
+            BlockPredicate::MatchingFluids(v)
+        }
+        "minecraft:replaceable" => BlockPredicate::Replaceable,
+        "minecraft:solid" => BlockPredicate::Solid,
+        "minecraft:has_sturdy_face" => {
+            let dir = match j.get("direction").and_then(|v| v.as_str())? {
+                "down" => 0,
+                "up" => 1,
+                "north" => 2,
+                "south" => 3,
+                "west" => 4,
+                "east" => 5,
+                _ => return None,
+            };
+            let off = j.get("offset").and_then(|v| v.as_arr());
+            let (ox, oy, oz) = match off {
+                Some(a) if a.len() == 3 => (
+                    a[0].as_i64()? as i32,
+                    a[1].as_i64()? as i32,
+                    a[2].as_i64()? as i32,
+                ),
+                _ => (0, 0, 0),
+            };
+            BlockPredicate::HasSturdyFace { offset: (ox, oy, oz), dir }
+        }
+        "minecraft:would_survive" => {
+            let s = state_string(j.get("state")?)?;
+            BlockPredicate::WouldSurvive { state: s }
+        }
+        "minecraft:inside_world_bounds" => BlockPredicate::InsideWorldBounds,
+        "minecraft:unobstructed" => BlockPredicate::Unobstructed,
+        _ => BlockPredicate::Unsupported("predicate"),
+    })
+}
+
+fn decode_heightmap_ty(s: &str) -> Option<HeightmapTy> {
+    Some(match s {
+        "WORLD_SURFACE_WG" => HeightmapTy::WorldSurfaceWg,
+        "WORLD_SURFACE" => HeightmapTy::WorldSurface,
+        "OCEAN_FLOOR_WG" => HeightmapTy::OceanFloorWg,
+        "OCEAN_FLOOR" => HeightmapTy::OceanFloor,
+        "MOTION_BLOCKING" => HeightmapTy::MotionBlocking,
+        "MOTION_BLOCKING_NO_LEAVES" => HeightmapTy::MotionBlockingNoLeaves,
+        _ => return None,
+    })
+}
+
+pub fn decode_placement_modifier(j: &Json) -> Mod {
+    let t = match j.get("type").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => return Mod::Unsupported("modifier:no-type"),
+    };
+    match t.as_str() {
+        "minecraft:count" => match decode_int_provider(j.get("count").unwrap_or(&Json::Num(1.0))) {
+            Some(p) => Mod::Pure(PM::Count(p)),
+            None => Mod::Unsupported("count-provider"),
+        },
+        "minecraft:in_square" => Mod::Pure(PM::InSquare),
+        "minecraft:rarity_filter" => match j.get("chance").and_then(|v| v.as_i64()) {
+            Some(c) => Mod::Pure(PM::RarityFilter { chance: c as i32 }),
+            None => Mod::Unsupported("rarity"),
+        },
+        "minecraft:random_offset" => {
+            let xz = j.get("xz_spread").and_then(decode_int_provider);
+            let y = j.get("y_spread").and_then(decode_int_provider);
+            match (xz, y) {
+                (Some(xz), Some(y)) => Mod::Pure(PM::RandomOffset { xz, y }),
+                _ => Mod::Unsupported("random_offset-provider"),
+            }
+        }
+        "minecraft:height_range" => match j.get("height").and_then(decode_height) {
+            Some(h) => Mod::Pure(PM::HeightRange(h)),
+            None => Mod::Unsupported("height_range"),
+        },
+        "minecraft:heightmap" => match j.get("heightmap").and_then(|v| v.as_str()).and_then(decode_heightmap_ty) {
+            Some(ty) => Mod::Heightmap { ty },
+            None => Mod::Unsupported("heightmap-ty"),
+        },
+        "minecraft:biome" => Mod::BiomeFilter { feature: 0 },
+        "minecraft:block_predicate_filter" => match j.get("predicate").map(decode_predicate) {
+            Some(Some(p)) => Mod::PredFilter(p),
+            _ => Mod::Unsupported("predicate"),
+        },
+        "minecraft:surface_water_depth_filter" => match j.get("max_water_depth").and_then(|v| v.as_i64()) {
+            Some(m) => Mod::SurfaceWaterDepth { max: m as i32 },
+            None => Mod::Unsupported("water-depth"),
+        },
+        "minecraft:environment_scan" => {
+            let dir = match j.get("direction_of_search").and_then(|v| v.as_str()) {
+                Some("up") => 1,
+                Some("down") => 0,
+                _ => return Mod::Unsupported("envscan-dir"),
+            };
+            let steps = j.get("max_steps").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let target = match j.get("target_condition").map(decode_predicate) {
+                Some(Some(p)) => p,
+                _ => return Mod::Unsupported("envscan-target"),
+            };
+            let allowed = match j.get("allowed_search_condition").map(decode_predicate) {
+                Some(Some(p)) => Some(p),
+                Some(None) => return Mod::Unsupported("envscan-allowed"),
+                None => None,
+            };
+            Mod::EnvScan { dir, max_steps: steps, target, allowed }
+        }
+        "minecraft:noise_based_count" => {
+            let ratio = j.get("noise_to_count_ratio").and_then(|v| v.as_i64());
+            let factor = j.get("noise_factor").and_then(|v| v.as_f64());
+            let offset = j.get("noise_offset").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            match (ratio, factor) {
+                (Some(r), Some(f)) => Mod::NoiseBasedCount { ratio: r as i32, factor: f, offset },
+                _ => Mod::Unsupported("noise-count"),
+            }
+        }
+        _ => Mod::Unsupported("modifier"),
+    }
+}
+
+pub fn decode_configured_feature(j: &Json) -> FeatureCfg {
+    let t = match j.get("type").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return FeatureCfg::Unsupported("cf:no-type"),
+    };
+    let cfg = j.get("config").cloned().unwrap_or(Json::Obj(Vec::new()));
+    match t {
+        "minecraft:no_op" => FeatureCfg::NoOp,
+        "minecraft:simple_block" => {
+            let place = match cfg.get("to_place").map(decode_state_provider) {
+                Some(Some(p)) => p,
+                _ => return FeatureCfg::Unsupported("simple_block-place"),
+            };
+            let ticks = cfg.get("schedule_tick").and_then(|v| v.as_i64()).unwrap_or(0) != 0;
+            FeatureCfg::SimpleBlock { place, ticks }
+        }
+        "minecraft:replace_single_block" => {
+            let mut targets = Vec::new();
+            match cfg.get("targets").and_then(|v| v.as_arr()) {
+                Some(arr) => {
+                    for e in arr {
+                        let pred = match e.get("target").map(decode_predicate) {
+                            Some(Some(p)) => p,
+                            _ => return FeatureCfg::Unsupported("replace-target"),
+                        };
+                        let st = match e.get("state").map(decode_state_provider) {
+                            Some(Some(s)) => s,
+                            _ => return FeatureCfg::Unsupported("replace-state"),
+                        };
+                        targets.push((pred, st));
+                    }
+                    FeatureCfg::ReplaceBlock { targets }
+                }
+                None => FeatureCfg::Unsupported("replace-targets"),
+            }
+        }
+        "minecraft:random_selector" => {
+            let default = match cfg.get("default").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => return FeatureCfg::Unsupported("rs-default"),
+            };
+            let mut entries = Vec::new();
+            match cfg.get("features").and_then(|v| v.as_arr()) {
+                Some(arr) => {
+                    for e in arr {
+                        let c = e.get("chance").and_then(|v| v.as_f64());
+                        let f = e.get("feature").and_then(|v| v.as_str());
+                        match (c, f) {
+                            (Some(c), Some(f)) => entries.push((c as f32, f.to_string())),
+                            _ => return FeatureCfg::Unsupported("rs-entry"),
+                        }
+                    }
+                    FeatureCfg::RandomSelector { entries, default }
+                }
+                None => FeatureCfg::Unsupported("rs-features"),
+            }
+        }
+        "minecraft:simple_random_selector" => {
+            let mut entries = Vec::new();
+            match cfg.get("features").and_then(|v| v.as_arr()) {
+                Some(arr) => {
+                    for e in arr {
+                        match e.as_str().or_else(|| e.get("feature").and_then(|f| f.as_str())) {
+                            Some(s) => entries.push(s.to_string()),
+                            None => return FeatureCfg::Unsupported("srs-entry"),
+                        }
+                    }
+                    FeatureCfg::SimpleRandomSelector { entries }
+                }
+                None => FeatureCfg::Unsupported("srs-features"),
+            }
+        }
+        "minecraft:random_boolean_selector" => {
+            let if_true = cfg.get("if_true").and_then(|v| v.as_str()).or_else(|| cfg.get("if_true").and_then(|v| v.get("feature").and_then(|f| f.as_str())));
+            let if_false = cfg.get("if_false").and_then(|v| v.as_str()).or_else(|| cfg.get("if_false").and_then(|v| v.get("feature").and_then(|f| f.as_str())));
+            match (if_true, if_false) {
+                (Some(t), Some(f)) => FeatureCfg::RandomBoolSelector { chance: 0.5, if_true: t.to_string(), if_false: f.to_string() },
+                _ => FeatureCfg::Unsupported("rbs"),
+            }
+        }
+        _ => FeatureCfg::Unsupported("cf-type"),
+    }
+}
+
+pub fn decode_registry(
+    configured: impl Iterator<Item = (String, String)>, // name -> json text
+    placed: impl Iterator<Item = (String, String)>,
+) -> FeatureRegistry {
+    let mut reg = FeatureRegistry {
+        placed: HashMap::new(),
+        configured: HashMap::new(),
+        unsupported_placed: 0,
+        unsupported_configured: 0,
+        total_placed: 0,
+        total_configured: 0,
+    };
+    for (name, text) in configured {
+        reg.total_configured += 1;
+        match json::parse(&text) {
+            Ok(j) => {
+                let cfg = decode_configured_feature(&j);
+                if matches!(cfg, FeatureCfg::Unsupported(_)) {
+                    reg.unsupported_configured += 1;
+                }
+                reg.configured.insert(name, cfg);
+            }
+            Err(_) => {
+                reg.unsupported_configured += 1;
+            }
+        }
+    }
+    for (name, text) in placed {
+        reg.total_placed += 1;
+        match json::parse(&text) {
+            Ok(j) => {
+                let feature = match j.get("feature").and_then(|v| v.as_str()) {
+                    Some(f) => f.to_string(),
+                    None => {
+                        reg.unsupported_placed += 1;
+                        continue;
+                    }
+                };
+                let mut placement = Vec::new();
+                let mut bad = false;
+                if let Some(arr) = j.get("placement").and_then(|v| v.as_arr()) {
+                    for e in arr {
+                        let m = decode_placement_modifier(e);
+                        if matches!(m, Mod::Unsupported(_)) {
+                            bad = true;
+                        }
+                        placement.push(m);
+                    }
+                }
+                if bad {
+                    reg.unsupported_placed += 1;
+                }
+                reg.placed.insert(name, PlacedDef { feature, placement });
+            }
+            Err(_) => {
+                reg.unsupported_placed += 1;
+            }
+        }
+    }
+    reg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Decode the REAL dptt packs (Tectonic+Terralith) and report vanilla-subset coverage.
+    /// Packs extracted to /tmp/dptt_packs (see worklog); test skips gracefully if absent.
+    #[test]
+    fn real_pack_coverage() {
+        let root = std::path::Path::new("/tmp/dptt_packs");
+        if !root.exists() {
+            eprintln!("packs not extracted — skipping");
+            return;
+        }
+        let mut configured: Vec<(String, String)> = Vec::new();
+        let mut placed: Vec<(String, String)> = Vec::new();
+        for pack in ["tectonic", "terralith"] {
+            for kind_dir in ["configured_feature", "placed_feature"] {
+                let base = root.join(pack).join("data").join(pack).join("worldgen").join(kind_dir);
+                if kind_dir == "configured_feature" {
+                    collect_json(&base, &mut configured);
+                } else {
+                    collect_json(&base, &mut placed);
+                }
+            }
+        }
+        eprintln!("collected: {} configured, {} placed files", configured.len(), placed.len());
+        assert!(configured.len() > 400, "too few configured files found");
+        assert!(placed.len() > 500, "too few placed files found");
+        let n_cfg = configured.len();
+        let n_pl = placed.len();
+        let reg = decode_registry(configured.into_iter(), placed.into_iter());
+        eprintln!(
+            "CONFIGURED: {}/{} decoded, {} unsupported",
+            reg.total_configured - reg.unsupported_configured,
+            reg.total_configured,
+            reg.unsupported_configured
+        );
+        eprintln!(
+            "PLACED: {}/{} fully supported ({} with some unsupported modifier)",
+            reg.total_placed - reg.unsupported_placed,
+            reg.total_placed,
+            reg.unsupported_placed
+        );
+        // F1 scope: only 5 configured types are natively placeable; every FILE must still
+        // classify (Unsupported is a valid classification). Assert supported F1 subset:
+        let supported_cfg = reg.configured.values()
+            .filter(|c| !matches!(c, FeatureCfg::Unsupported(_)))
+            .count();
+        eprintln!("F1 supported configured: {}", supported_cfg);
+        assert!(supported_cfg >= 50, "F1 configured subset unexpectedly small: {}", supported_cfg);
+        assert!(reg.total_placed == n_pl, "registry drop");
+        assert!(reg.total_configured == n_cfg, "registry drop");
+        // spot-check a known decoded feature
+        let ice = reg.placed.get("tectonic:underground_river/ice");
+        assert!(ice.is_some(), "tectonic:underground_river/ice must decode");
+    }
+
+    fn collect_json(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_json(&p, out);
+            } else if p.extension().map(|x| x == "json").unwrap_or(false) {
+                if let Ok(text) = std::fs::read_to_string(&p) {
+                    let rel = p.to_string_lossy();
+                    let name = rel.rsplit_once("/worldgen/").map(|(_, r)| r)
+                        .unwrap_or(&rel)
+                        .trim_end_matches(".json")
+                        .to_string();
+                    let name = name
+                        .trim_start_matches("configured_feature/")
+                        .trim_start_matches("placed_feature/")
+                        .to_string();
+                    let name = format!("{}:{}", pack_ns(&rel), name);
+                    out.push((name, text));
+                }
+            }
+        }
+    }
+
+    fn pack_ns(rel: &str) -> String {
+        // .../data/<ns>/worldgen/... -> <ns>
+        let parts: Vec<&str> = rel.split('/').collect();
+        if let Some(i) = parts.iter().position(|&p| p == "data") {
+            return parts.get(i + 1).map(|s| s.to_string()).unwrap_or_default();
+        }
+        String::new()
+    }
+}

@@ -46,6 +46,12 @@ impl Json {
             _ => None,
         }
     }
+    pub fn as_obj(&self) -> Option<&[(String, Json)]> {
+        match self {
+            Json::Obj(pairs) => Some(pairs.as_slice()),
+            _ => None,
+        }
+    }
     pub fn is_obj(&self) -> bool {
         matches!(self, Json::Obj(_))
     }

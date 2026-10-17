@@ -47,24 +47,42 @@ impl IntProvider {
     }
 }
 
-/// HeightProvider subset with ABSOLUTE VerticalAnchors only (dptt-dominant case);
-/// Y-anchored/clamped variants resolve via the level context in a later increment.
+/// HeightProvider with VerticalAnchor resolution (absolute / above_bottom / below_top).
+/// Trapezoid plateau: -1 = plain triangle (vanilla TrapezoidHeight.of(min,max)).
 #[derive(Clone, Copy, Debug)]
 pub enum HeightProvider {
-    UniformAbs { lo: i32, hi: i32 },
+    Abs(i32),
+    AboveBottom(i32),
+    BelowTop(i32),
+    Uniform { lo: i32, hi: i32 },
+    Trapezoid { lo: i32, hi: i32, plateau: i32 },
 }
 
 impl HeightProvider {
-    /// vanilla UniformHeight.sample: resolveY both anchors; empty range -> min (warned);
-    /// else Mth.randomBetweenInclusive(random, min, max) = nextInt(span) + min.
-    #[inline]
-    pub fn sample(&self, rng: &mut WorldgenRandom) -> i32 {
+    /// vanilla HeightProvider.sample: UniformHeight/TrapezoidHeight with resolved anchors.
+    /// gen_depth = max_y - min_y + 1 (WorldGenerationContext).
+    pub fn sample(&self, rng: &mut WorldgenRandom, min_y: i32, gen_depth: i32) -> i32 {
         match *self {
-            HeightProvider::UniformAbs { lo, hi } => {
-                if lo > hi {
-                    lo
+            HeightProvider::Abs(v) => v,
+            HeightProvider::AboveBottom(v) => min_y + v,
+            HeightProvider::BelowTop(v) => min_y + gen_depth - 1 - v,
+            HeightProvider::Uniform { lo, hi } => {
+                if lo > hi { lo } else { rng.next_int_bound(hi - lo + 1) + lo }
+            }
+            HeightProvider::Trapezoid { lo, hi, plateau } => {
+                let a = lo;
+                let b = hi;
+                if a > b {
+                    a
                 } else {
-                    rng.next_int_bound(hi - lo + 1) + lo
+                    let span = b - a;
+                    if plateau >= span {
+                        rng.next_int_bound(span + 1) + a
+                    } else {
+                        let i3 = (span - plateau) / 2;
+                        let i4 = span - i3;
+                        a + rng.next_int_bound(i4 + 1) + rng.next_int_bound(i3 + 1)
+                    }
                 }
             }
         }
@@ -84,18 +102,30 @@ pub enum Modifier {
     RarityFilter { chance: i32 },
     /// x += xz.sample, y += y.sample, z += xz.sample  (xz sampled TWICE: X then Z)
     RandomOffset { xz: IntProvider, y: IntProvider },
-    /// pos.atY(UniformHeight(abs lo..abs hi).sample(rng))
-    HeightRangeUniformAbs { lo: i32, hi: i32 },
+    /// pos.atY(height.sample(rng, ctx)) — Uniform/Trapezoid over resolved anchors
+    HeightRange(HeightProvider),
 }
 
 /// Depth-first expansion of the modifier chain — equivalent to vanilla's lazy stream pull.
+/// min_y/gen_depth feed VerticalAnchor resolution (pass the real dimension values).
 pub fn expand_chain(
     mods: &[Modifier],
     rng: &mut WorldgenRandom,
     pos: BlockPos,
     out: &mut Vec<BlockPos>,
 ) {
-    expand_rec(mods, 0, rng, pos, out);
+    expand_rec(mods, 0, rng, pos, out, 0, 384);
+}
+
+pub fn expand_chain_ctx(
+    mods: &[Modifier],
+    rng: &mut WorldgenRandom,
+    pos: BlockPos,
+    out: &mut Vec<BlockPos>,
+    min_y: i32,
+    gen_depth: i32,
+) {
+    expand_rec(mods, 0, rng, pos, out, min_y, gen_depth);
 }
 
 fn expand_rec(
@@ -104,37 +134,39 @@ fn expand_rec(
     rng: &mut WorldgenRandom,
     pos: BlockPos,
     out: &mut Vec<BlockPos>,
+    min_y: i32,
+    gen_depth: i32,
 ) {
     if idx == mods.len() {
         out.push(pos);
         return;
     }
     match mods[idx] {
-        Modifier::InSquare => {
+            Modifier::InSquare => {
             let x = rng.next_int_bound(16) + pos.x;
             let z = rng.next_int_bound(16) + pos.z;
-            expand_rec(mods, idx + 1, rng, BlockPos { x, y: pos.y, z }, out);
+            expand_rec(mods, idx + 1, rng, BlockPos { x, y: pos.y, z }, out, min_y, gen_depth);
         }
         Modifier::Count(p) => {
             let n = p.sample(rng).max(0);
             for _ in 0..n {
-                expand_rec(mods, idx + 1, rng, pos, out);
+                expand_rec(mods, idx + 1, rng, pos, out, min_y, gen_depth);
             }
         }
         Modifier::RarityFilter { chance } => {
             if rng.next_f32() < 1.0 / (chance as f32) {
-                expand_rec(mods, idx + 1, rng, pos, out);
+                expand_rec(mods, idx + 1, rng, pos, out, min_y, gen_depth);
             }
         }
         Modifier::RandomOffset { xz, y } => {
             let x = pos.x + xz.sample(rng);
             let ny = pos.y + y.sample(rng);
             let z = pos.z + xz.sample(rng);
-            expand_rec(mods, idx + 1, rng, BlockPos::new(x, ny, z), out);
+            expand_rec(mods, idx + 1, rng, BlockPos::new(x, ny, z), out, min_y, gen_depth);
         }
-        Modifier::HeightRangeUniformAbs { lo, hi } => {
-            let h = HeightProvider::UniformAbs { lo, hi }.sample(rng);
-            expand_rec(mods, idx + 1, rng, BlockPos { y: h, ..pos }, out);
+        Modifier::HeightRange(hp) => {
+            let h = hp.sample(rng, min_y, gen_depth);
+            expand_rec(mods, idx + 1, rng, BlockPos { y: h, ..pos }, out, min_y, gen_depth);
         }
     }
 }
@@ -158,7 +190,7 @@ mod tests {
                 xz: IntProvider::Uniform { lo: -3, hi: 3 },
                 y: IntProvider::Uniform { lo: 0, hi: 1 },
             },
-            HeightRangeUniformAbs { lo: -32, hi: 64 },
+            HeightRange(HeightProvider::Uniform { lo: -32, hi: 64 }),
         ];
         struct Case {
             seed: i64,
@@ -212,7 +244,7 @@ mod tests {
         assert_eq!(IntProvider::Constant(-7).sample(&mut rng), -7);
         assert_eq!(rng.count(), before, "ConstantInt must not burn RNG");
         // UniformHeight empty range: returns min without consuming RNG (vanilla warn path)
-        assert_eq!(HeightProvider::UniformAbs { lo: 10, hi: 4 }.sample(&mut rng), 10);
+        assert_eq!(HeightProvider::Uniform { lo: 10, hi: 4 }.sample(&mut rng, 0, 384), 10);
         assert_eq!(rng.count(), before);
         // zero/negative count yields no positions
         let mods = [Modifier::Count(IntProvider::Uniform { lo: -2, hi: -1 })];
