@@ -1,6 +1,7 @@
 package com.planeta.crussty;
 
 import org.bukkit.Bukkit;
+import org.bukkit.HeightMap;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.generator.ChunkGenerator;
@@ -72,6 +73,19 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         private final java.util.concurrent.atomic.AtomicInteger rr =
                 new java.util.concurrent.atomic.AtomicInteger();
 
+        /**
+         * Dedicated context for getBaseHeight (stage D): created exactly like
+         * the pool ctxs but NEVER given surface ids/temps — the native
+         * surface_tail guard skips such a ctx, so fill() on it reproduces the
+         * vanilla NOISE column (what vanilla NoiseBasedChunkGenerator
+         * #getBaseHeight computes: interpolated NoiseChunk states, empty
+         * BeardifierMarker, Blender.empty, no surface rules). Must NOT join
+         * the normal fill rotation (its output has no surface). Guarded by
+         * its own lock.
+         */
+        final long heightsCtx;
+        final ReentrantLock heightsLock = new ReentrantLock();
+
         long[] all() {
             return ctxs.clone();
         }
@@ -108,10 +122,39 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     CTX.add(ctx);
                 }
             }
+            // heights ctx: same creation path, but kept OUT of the fill
+            // rotation and never surface-initialized (see field doc).
+            long hctx;
+            if (packs != null) {
+                hctx = ChunkGenNative.newCtxAssets(seed, sea, packs.paths(), packs.blobs());
+            } else {
+                hctx = 0;
+            }
+            if (hctx == 0) {
+                hctx = ChunkGenNative.newCtx(seed, minY, height, sea);
+            }
+            if (hctx == 0) {
+                for (int j = 0; j < n; j++) {
+                    ChunkGenNative.freeCtx(ctxs[j]);
+                }
+                throw new IllegalStateException(
+                        "crussty_chunkgen heights ctx_new failed for seed " + seed);
+            }
+            this.heightsCtx = hctx;
+            synchronized (CTX) {
+                CTX.add(hctx);
+            }
         }
 
         long firstCtx() {
             return ctxs[0];
+        }
+
+        long[] allWithHeights() {
+            long[] out = new long[ctxs.length + 1];
+            System.arraycopy(ctxs, 0, out, 0, ctxs.length);
+            out[ctxs.length] = heightsCtx;
+            return out;
         }
 
         /** Returns [ctx, lock] — prefers an unlocked ctx. */
@@ -137,6 +180,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             for (long ctx : ctxs) {
                 ChunkGenNative.freeCtx(ctx);
             }
+            ChunkGenNative.freeCtx(heightsCtx);
         }
     }
 
@@ -182,6 +226,81 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     @Override
     public boolean shouldGenerateMobs() {
         return true;
+    }
+
+    // ------------------------------------------------------------------
+    // Stage D — native height service.
+    //
+    // CraftBukkit's CustomChunkGenerator.getBaseHeight delegates to the
+    // WRAPPED vanilla NoiseBasedChunkGenerator.getBaseHeight: a fresh
+    // 1-column NoiseChunk simulation (empty BeardifierMarker, Blender.empty,
+    // interpolated noise states, NO surface rules) for EVERY query. Structures
+    // call it on every onTopOfChunkCenter — ~12% of the Java worker on dptt.
+    //
+    // We serve the identical semantics from the native pipeline: the
+    // heightsCtx (no surface ids -> surface_tail guard skips it) reproduces
+    // the vanilla noise column bit-exactly, so the derived heightmap equals
+    // vanilla getBaseHeight by construction. Both WORLD_SURFACE (non-air
+    // predicate) and OCEAN_FLOOR (solid predicate) are served; other types
+    // fall back to super (vanilla path).
+    // ------------------------------------------------------------------
+    private final java.util.concurrent.ConcurrentHashMap<Long, int[]> heightCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    @Override
+    public int getBaseHeight(WorldInfo worldInfo, Random random, int x, int z,
+            HeightMap heightMap) {
+        int off;
+        if (heightMap == HeightMap.WORLD_SURFACE_WG || heightMap == HeightMap.WORLD_SURFACE) {
+            off = 0;
+        } else if (heightMap == HeightMap.OCEAN_FLOOR_WG || heightMap == HeightMap.OCEAN_FLOOR) {
+            off = 256;
+        } else {
+            return super.getBaseHeight(worldInfo, random, x, z, heightMap);
+        }
+        int cx = x >> 4, cz = z >> 4;
+        long key = ((long) cx << 32) | (cz & 0xFFFFFFFFL);
+        if (heightCache.size() > 65536) {
+            heightCache.clear(); // pregen-scale guard; heights are recomputable
+        }
+        int[] h = heightCache.computeIfAbsent(key, k -> computeColumnHeights(worldInfo, cx, cz));
+        int rel = h[off + ((((z & 15) << 4) | (x & 15)))];
+        return rel < 0 ? worldInfo.getMinHeight() : worldInfo.getMinHeight() + rel + 1;
+    }
+
+    /** [0..255]=WORLD_SURFACE rel-y (top non-air), [256..511]=OCEAN_FLOOR
+     *  rel-y (top solid); -1 = none. Noise-column semantics (no surface
+     *  rules, no beardifier) — exactly the vanilla getBaseHeight anchor. */
+    private int[] computeColumnHeights(WorldInfo worldInfo, int cx, int cz) {
+        long seed = worldInfo.getSeed();
+        int minY = worldInfo.getMinHeight();
+        int height = worldInfo.getMaxHeight() - worldInfo.getMinHeight();
+        CtxPool pool = poolFor(worldInfo, seed, minY, height);
+        short[] out = buf.get();
+        pool.heightsLock.lock();
+        try {
+            ChunkGenNative.fill(pool.heightsCtx, cx, cz, out);
+        } finally {
+            pool.heightsLock.unlock();
+        }
+        int[] res = new int[512];
+        java.util.Arrays.fill(res, -1);
+        Material[] mats = GenStats.MATERIALS;
+        for (int col = 0; col < 256; col++) {
+            for (int y = height - 1; y >= 0; y--) {
+                short id = out[(y << 8) + col];
+                if (id == 0) { // AIR
+                    continue;
+                }
+                res[col] = y; // WORLD_SURFACE_WG: first non-air from top
+                Material m = id < mats.length ? mats[id] : null;
+                if (m != null && m.isSolid()) { // OCEAN_FLOOR_WG: first solid from top
+                    res[256 + col] = y;
+                    break;
+                }
+            }
+        }
+        return res;
     }
 
     static CtxPool poolFor(WorldInfo worldInfo, long seed, int minY, int height) {
