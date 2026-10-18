@@ -122,7 +122,7 @@ pub fn build_deco_ctx(
         placed.into_iter(),
     );
     Some(DecoCtx {
-        state: crate::features_place_ffi::DecoState::seal(reg),
+        state: crate::features_place_ffi::DecoState::seal(reg, &uid_names),
         plan,
         biome_features,
         uid_names,
@@ -283,6 +283,7 @@ pub fn run_feature_master(
         center_x: origin.x,
         center_z: origin.z,
         state_index: &state.state_index,
+        uid_index: &state.uid_index,
     };
     let mut ops: Vec<DecoOp> = Vec::new();
     place_placed(&ctx, name, &mut rng, origin, &mut ops, 0);

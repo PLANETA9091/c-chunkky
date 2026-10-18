@@ -1,0 +1,72 @@
+{
+ "type": "minecraft:overworld",
+ "generator": {
+  "type": "minecraft:noise",
+  "settings": "minecraft:overworld",
+  "biome_source": {
+   "type": "minecraft:multi_noise",
+   "biomes": [
+    {
+     "biome": "crussty_f1:test_a",
+     "parameters": {
+      "temperature": [
+       -1.0047858741932016,
+       -0.445
+      ],
+      "humidity": [
+       -1.2,
+       2.0
+      ],
+      "continentalness": [
+       -1.2,
+       2.0
+      ],
+      "erosion": [
+       -1.2,
+       2.0
+      ],
+      "weirdness": [
+       -1.2,
+       2.0
+      ],
+      "depth": [
+       -1.2,
+       2.0
+      ],
+      "offset": 0.0
+     }
+    },
+    {
+     "biome": "crussty_f1:test_b",
+     "parameters": {
+      "temperature": [
+       -0.445,
+       2.0
+      ],
+      "humidity": [
+       -1.2,
+       2.0
+      ],
+      "continentalness": [
+       -1.2,
+       2.0
+      ],
+      "erosion": [
+       -1.2,
+       2.0
+      ],
+      "weirdness": [
+       -1.2,
+       2.0
+      ],
+      "depth": [
+       -1.2,
+       2.0
+      ],
+      "offset": 0.0
+     }
+    }
+   ]
+  }
+ }
+}

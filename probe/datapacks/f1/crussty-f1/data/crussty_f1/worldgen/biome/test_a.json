@@ -1,0 +1,45 @@
+{
+ "has_precipitation": true,
+ "temperature": 0.8,
+ "downfall": 0.4,
+ "effects": {
+  "fog_color": 12638463,
+  "water_color": 4159204,
+  "water_fog_color": 329011,
+  "sky_color": 7972607,
+  "mood_sound": {
+   "sound": "minecraft:ambient.cave",
+   "tick_delay": 6000,
+   "block_search_extent": 8,
+   "offset": 2.0
+  }
+ },
+ "spawners": {},
+ "spawn_costs": {},
+ "features": [
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [
+   "crussty_f1:ore_replace"
+  ],
+  [],
+  [],
+  [
+   "crussty_f1:flowers",
+   "crussty_f1:weighted",
+   "crussty_f1:rotated",
+   "crussty_f1:rand_sel",
+   "crussty_f1:srs",
+   "crussty_f1:rbs",
+   "crussty_f1:offset_water",
+   "crussty_f1:pred_gate",
+   "crussty_f1:rarity_gate"
+  ],
+  []
+ ],
+ "carvers": []
+}

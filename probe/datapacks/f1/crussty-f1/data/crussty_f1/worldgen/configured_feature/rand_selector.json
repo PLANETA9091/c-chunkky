@@ -1,0 +1,12 @@
+{
+ "type": "minecraft:random_selector",
+ "config": {
+  "features": [
+   {
+    "chance": 0.3,
+    "feature": "crussty_f1:sel_a"
+   }
+  ],
+  "default": "crussty_f1:sel_b"
+ }
+}

@@ -152,8 +152,11 @@ public final class DecoDriver extends BlockPopulator {
         }
     }
 
-    private void runChunk(long ctx, int cx, int cz,
-                          LimitedRegion limited) {
+    private static volatile boolean FIRST_LOGGED = false;
+
+    private void runChunk(long ctx, int cx, int cz, LimitedRegion limited) {
+        final boolean first = !FIRST_LOGGED;
+        FIRST_LOGGED = true;
         int ox = cx << 4;
         int oz = cz << 4;
         int oy = reg.getMinY();
@@ -164,8 +167,14 @@ public final class DecoDriver extends BlockPopulator {
         String[] biomes = regionBiomes(cx, cz);
         int[] runsBuf = new int[PLAN_TOTAL() * 2 + 16];
         int runs = ChunkGenNative.decoChunkPlan(ctx, biomes, runsBuf);
+        if (first) {
+            StringBuilder bs = new StringBuilder();
+            for (String b : biomes) bs.append(b).append(' ');
+            LOG.info("[deco-dbg] biomes(" + biomes.length + ")=" + bs + " runs=" + runs);
+        }
 
         int[] ops = new int[5 * 65536];
+        int totalOps = 0;
         for (int k = 0; k < runs; k++) {
             int step = runsBuf[k * 2];
             int gid = runsBuf[k * 2 + 1];
@@ -174,9 +183,18 @@ public final class DecoDriver extends BlockPopulator {
             }
             int n = ChunkGenNative.decoRunFeature(ctx, l, -1L, ox, oy, oz, maxY,
                     step, gid, this, ops);
+            if (first && (n < 0 || k == 0)) {
+                LOG.info("[deco-dbg] run k=" + k + " step=" + step + " gid=" + gid + " -> n=" + n);
+            }
+            if (n > 0) {
+                totalOps += n;
+            }
             for (int i = 0; i < n; i++) {
                 applyOp(limited, ox, oz, ops, i * 5);
             }
+        }
+        if (first) {
+            LOG.info("[deco-dbg] totalOps=" + totalOps);
         }
     }
 

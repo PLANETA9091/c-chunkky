@@ -15,10 +15,15 @@ pub struct DecoState {
     /// distinct state strings, first-appearance order (decoStates/decoSetIds handshake)
     pub states: Vec<String>,
     pub state_index: std::collections::HashMap<String, u16>,
+    /// placed name -> uid (vanilla topFeature identity for BiomeFilter)
+    pub uid_index: std::collections::HashMap<String, u32>,
 }
 
 impl DecoState {
-    pub fn seal(mut reg: FeatureRegistry) -> Self {
+    /// uid_order = the featuresPerStep flattened order (DecoCtx.uid_names):
+    /// BiomeFilter uids must live in the SAME space the bridge maps back to
+    /// names (JniLevel receives exactly this slice).
+    pub fn seal(mut reg: FeatureRegistry, uid_order: &[String]) -> Self {
         let mut states = Vec::new();
         let mut idx = std::collections::HashMap::new();
         // deterministic order: sorted configured names (JSON maps are ordered in our parser)
@@ -27,7 +32,11 @@ impl DecoState {
         for name in cfg_names {
             index_states_cfg(&reg.configured[name], &mut states, &mut idx);
         }
-        DecoState { reg, states, state_index: idx }
+        let mut uid_index = std::collections::HashMap::new();
+        for (i, n) in uid_order.iter().enumerate() {
+            uid_index.insert(n.clone(), i as u32);
+        }
+        DecoState { reg, states, state_index: idx, uid_index }
     }
 }
 
@@ -96,6 +105,7 @@ pub fn run_feature(
         center_x: chunk_block_x,
         center_z: chunk_block_z,
         state_index: &state.state_index,
+        uid_index: &state.uid_index,
     };
     let mut ops: Vec<DecoOp> = Vec::new();
     place_placed(&ctx, name, &mut rng, BlockPos::new(chunk_block_x, level.min_y(), chunk_block_z), &mut ops, 0);

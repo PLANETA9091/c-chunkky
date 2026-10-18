@@ -137,7 +137,11 @@ fn decode_state_provider(j: &Json) -> Option<StateSrc> {
             Some(StateSrc::Simple(state_string(s)?))
         }
         "minecraft:weighted_list_state_provider" => {
-            let arr = j.get("distribution")?.as_arr()?;
+            // WeightedStateProvider codec field = "entries" (1.21.8)
+            let arr = j
+                .get("entries")
+                .or_else(|| j.get("distribution"))?
+                .as_arr()?;
             let mut v = Vec::new();
             for e in arr {
                 let w = e.get("weight").and_then(|x| x.as_i64())? as u32;
@@ -146,8 +150,9 @@ fn decode_state_provider(j: &Json) -> Option<StateSrc> {
             }
             Some(StateSrc::Weighted(v))
         }
-        "minecraft:rotated_state_provider" => {
-            let s = j.get("property_source")?;
+        "minecraft:rotated_block_provider" | "minecraft:rotated_state_provider" => {
+            // RotatedBlockProvider codec: BlockState.CODEC.fieldOf("state")
+            let s = j.get("state")?;
             Some(StateSrc::Simple(format!("ROTATED\0{}", state_string(s)?)))
         }
         _ => Some(StateSrc::Unsupported("state_provider")),
@@ -172,8 +177,36 @@ pub fn state_string(j: &Json) -> Option<String> {
     Some(name.to_string())
 }
 
+/// RuleTest codec (replace_single_block targets): block_match / tag_match /
+/// random_block_match / blockstate_match / always_true. Tag tests need the
+/// JVM tag registry -> Unsupported at F1.
+fn decode_rule_test(j: &Json) -> Option<BlockPredicate> {
+    let t = j.get("predicate_type").or_else(|| j.get("type"))?.as_str()?;
+    Some(match t {
+        "minecraft:always_true" => BlockPredicate::True,
+        "minecraft:block_match" => {
+            let b = j.get("block")?.as_str()?;
+            BlockPredicate::MatchingBlocks(vec![b.to_string()])
+        }
+        "minecraft:random_block_match" => {
+            let b = j.get("block")?.as_str()?;
+            let p = j.get("probability")?.as_f64()?;
+            // probability 1.0 == always; other probabilities need RNG in the
+            // predicate path (vanilla draws nextFloat per position) -> F3 scope
+            if p >= 1.0 {
+                BlockPredicate::MatchingBlocks(vec![b.to_string()])
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    })
+}
+
 fn decode_predicate(j: &Json) -> Option<BlockPredicate> {
-    let t = j.get("type")?.as_str()?;
+    // vanilla rule-test / block-predicate JSON key = "predicate_type" (the
+    // blockpredicates codec field); "type" accepted for leniency
+    let t = j.get("predicate_type").or_else(|| j.get("type"))?.as_str()?;
     Some(match t {
         "minecraft:true" => BlockPredicate::True,
         "minecraft:all_of" => {
@@ -346,12 +379,14 @@ pub fn decode_configured_feature(j: &Json) -> FeatureCfg {
             match cfg.get("targets").and_then(|v| v.as_arr()) {
                 Some(arr) => {
                     for e in arr {
-                        let pred = match e.get("target").map(decode_predicate) {
+                        let pred = match e.get("target").map(decode_rule_test) {
                             Some(Some(p)) => p,
                             _ => return FeatureCfg::Unsupported("replace-target"),
                         };
-                        let st = match e.get("state").map(decode_state_provider) {
-                            Some(Some(s)) => s,
+                        // vanilla ReplaceBlockFeature: "state" is a PLAIN
+                        // BlockState (not a provider)
+                        let st = match e.get("state").map(state_string) {
+                            Some(Some(s)) => StateSrc::Simple(s),
                             _ => return FeatureCfg::Unsupported("replace-state"),
                         };
                         targets.push((pred, st));
@@ -398,8 +433,10 @@ pub fn decode_configured_feature(j: &Json) -> FeatureCfg {
             }
         }
         "minecraft:random_boolean_selector" => {
-            let if_true = cfg.get("if_true").and_then(|v| v.as_str()).or_else(|| cfg.get("if_true").and_then(|v| v.get("feature").and_then(|f| f.as_str())));
-            let if_false = cfg.get("if_false").and_then(|v| v.as_str()).or_else(|| cfg.get("if_false").and_then(|v| v.get("feature").and_then(|f| f.as_str())));
+            // vanilla codec keys: feature_true / feature_false (if_true/if_false
+            // were the decomposed-class field names, not the registry form)
+            let if_true = cfg.get("feature_true").and_then(|v| v.as_str()).or_else(|| cfg.get("if_true").and_then(|v| v.as_str())).or_else(|| cfg.get("feature_true").and_then(|v| v.get("feature").and_then(|f| f.as_str())));
+            let if_false = cfg.get("feature_false").and_then(|v| v.as_str()).or_else(|| cfg.get("if_false").and_then(|v| v.as_str())).or_else(|| cfg.get("feature_false").and_then(|v| v.get("feature").and_then(|f| f.as_str())));
             match (if_true, if_false) {
                 (Some(t), Some(f)) => FeatureCfg::RandomBoolSelector { chance: 0.5, if_true: t.to_string(), if_false: f.to_string() },
                 _ => FeatureCfg::Unsupported("rbs"),

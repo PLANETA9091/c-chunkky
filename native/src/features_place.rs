@@ -32,6 +32,8 @@ pub struct PlaceCtx<'a> {
     pub center_z: i32,
     /// state string -> decoStates table index (decoSetIds handshake)
     pub state_index: &'a std::collections::HashMap<String, u16>,
+    /// placed name -> uid (vanilla topFeature identity for BiomeFilter)
+    pub uid_index: &'a std::collections::HashMap<String, u32>,
 }
 
 impl<'a> PlaceCtx<'a> {
@@ -90,13 +92,19 @@ pub fn place_placed(
         return false;
     };
     let mods: &[Mod] = placement;
-    let mut positions = Vec::new();
-    expand_deco(mods, 0, ctx.level, rng, origin, &mut positions);
+    let uid = ctx.uid_index.get(name).copied().unwrap_or(u32::MAX);
+    let feature = feature.clone();
     let mut any = false;
-    for pos in positions {
-        if place_configured(ctx, feature, rng, pos, ops, depth + 1) {
-            any = true;
-        }
+    // leaf = the configured feature body, pulled LAZILY per position (the
+    // body draws RNG before the next position's modifiers run)
+    {
+        let mut leaf = |pos: BlockPos, rng: &mut WorldgenRandom| -> bool {
+            if place_configured(ctx, &feature, rng, pos, ops, depth + 1) {
+                any = true;
+            }
+            true
+        };
+        expand_deco(mods, 0, ctx.level, rng, origin, &mut leaf, uid);
     }
     any
 }
@@ -198,6 +206,8 @@ mod tests {
     use super::*;
     static EMPTY_IDX: std::sync::LazyLock<std::collections::HashMap<String, u16>> =
         std::sync::LazyLock::new(std::collections::HashMap::new);
+    static EMPTY_U32: std::sync::LazyLock<std::collections::HashMap<String, u32>> =
+        std::sync::LazyLock::new(std::collections::HashMap::new);
     use crate::features_deco::{BlockPredicate, DecoLevel, HeightmapTy, Mod as DM};
     use crate::features_json::decode_registry;
     use std::collections::HashMap;
@@ -237,7 +247,7 @@ mod tests {
         let placed = r#"{"feature":"test:cfg","placement":[{"type":"minecraft:count","count":3},{"type":"minecraft:in_square"}]}"#;
         let reg = build_reg(cfg, placed);
         let level = Mock { h: 64 };
-        let ctx = PlaceCtx { reg: &reg, level: &level, center_x: 16, center_z: -16, state_index: &EMPTY_IDX };
+        let ctx = PlaceCtx { reg: &reg, level: &level, center_x: 16, center_z: -16, state_index: &EMPTY_IDX, uid_index: &EMPTY_U32 };
         let mut rng = WorldgenRandom::new();
         let deco = rng.set_decoration_seed(777, 16, -16);
         rng.set_feature_seed(deco, 0, 5);
@@ -283,7 +293,7 @@ mod tests {
         let placed = r#"{"feature":"test:cfg","placement":[]}"#;
         let reg = build_reg(cfg, placed);
         let level = No { h: 64 };
-        let ctx = PlaceCtx { reg: &reg, level: &level, center_x: 0, center_z: 0, state_index: &EMPTY_IDX };
+        let ctx = PlaceCtx { reg: &reg, level: &level, center_x: 0, center_z: 0, state_index: &EMPTY_IDX, uid_index: &EMPTY_U32 };
         let mut rng = WorldgenRandom::new();
         let deco = rng.set_decoration_seed(1, 0, 0);
         rng.set_feature_seed(deco, 0, 0);
@@ -317,7 +327,7 @@ mod tests {
         ];
         let reg = decode_registry(cfgs.into_iter(), pls.into_iter());
         let level = Mock { h: 64 };
-        let ctx = PlaceCtx { reg: &reg, level: &level, center_x: 0, center_z: 0, state_index: &EMPTY_IDX };
+        let ctx = PlaceCtx { reg: &reg, level: &level, center_x: 0, center_z: 0, state_index: &EMPTY_IDX, uid_index: &EMPTY_U32 };
         let mut counts = [0usize; 2];
         for s in 0..500 {
             let mut rng = WorldgenRandom::new();
@@ -341,5 +351,47 @@ mod tests {
             picks[s % 2] += 1;
         }
         assert_eq!(picks[0] + picks[1], 500);
+    }
+
+    /// BiomeFilter must receive the uid of the placed feature BEING placed
+    /// (vanilla PlacementContext.topFeature), resolved through uid_index.
+    #[test]
+    fn biome_filter_carries_top_uid() {
+        struct UidProbe(std::sync::Mutex<Vec<u32>>);
+        impl DecoLevelExt for UidProbe {
+            fn state_is(&self, _: BlockPos, _: &[String]) -> bool { false }
+            fn fluid_is(&self, _: BlockPos, _: &[String]) -> bool { false }
+        }
+        impl DecoLevel for UidProbe {
+            fn min_y(&self) -> i32 { -64 }
+            fn max_y(&self) -> i32 { 320 }
+            fn height(&self, _: HeightmapTy, _: i32, _: i32) -> i32 { 64 }
+            fn state(&self, _: BlockPos) -> u32 { 0 }
+            fn fluid(&self, _: BlockPos) -> u32 { 0 }
+            fn biome_has_feature(&self, _: BlockPos, f: u32) -> bool {
+                self.0.lock().unwrap().push(f);
+                f == 42
+            }
+            fn can_survive(&self, _: &str, _: BlockPos) -> bool { true }
+            fn is_replaceable(&self, _: BlockPos) -> bool { false }
+            fn is_solid(&self, _: BlockPos) -> bool { false }
+            fn has_sturdy_face(&self, _: BlockPos, _: u8) -> bool { false }
+            fn is_outside_build_height(&self, _: i32) -> bool { false }
+        }
+        let cfg = r#"{"type":"minecraft:simple_block","config":{"to_place":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:poppy"}}}}"#;
+        let placed = r#"{"feature":"test:cfg","placement":[{"type":"minecraft:in_square"},{"type":"minecraft:biome"}]}"#;
+        let reg = build_reg(cfg, placed);
+        let mut uids: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        uids.insert("test:pf".to_string(), 42);
+        let level = UidProbe(std::sync::Mutex::new(Vec::new()));
+        let ctx = PlaceCtx { reg: &reg, level: &level, center_x: 0, center_z: 0, state_index: &EMPTY_IDX, uid_index: &uids };
+        let mut rng = WorldgenRandom::new();
+        let deco = rng.set_decoration_seed(7, 0, 0);
+        rng.set_feature_seed(deco, 0, 9);
+        let mut ops = Vec::new();
+        place_placed(&ctx, "test:pf", &mut rng, BlockPos::new(0, 64, 0), &mut ops, 0);
+        let seen = level.0.lock().unwrap();
+        assert!(!seen.is_empty(), "biome filter consulted");
+        assert!(seen.iter().all(|u| *u == 42), "topFeature uid must be 42, got {:?}", *seen);
     }
 }

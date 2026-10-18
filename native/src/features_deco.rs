@@ -246,17 +246,23 @@ fn pure_expand_one(
     }
 }
 
-/// Depth-first expansion over the full modifier set (lazy flatMap semantics).
+/// Depth-first expansion over the full modifier set (lazy flatMap semantics):
+/// each position runs the WHOLE modifier chain and the LEAF action (the
+/// configured feature body — which draws RNG) BEFORE the next position is
+/// pulled. Vanilla: stream.forEach(pos -> configuredFeature.place(..)) with
+/// lazy flatMap pulls. `top_uid` = uid of the placed feature being placed
+/// (vanilla topFeature).
 pub fn expand_deco(
     mods: &[Mod],
     idx: usize,
     level: &dyn DecoLevelExt,
     rng: &mut WorldgenRandom,
     pos: BlockPos,
-    out: &mut Vec<BlockPos>,
+    leaf: &mut dyn FnMut(BlockPos, &mut WorldgenRandom) -> bool,
+    top_uid: u32,
 ) {
     if idx == mods.len() {
-        out.push(pos);
+        leaf(pos, rng);
         return;
     }
     match &mods[idx] {
@@ -265,31 +271,33 @@ pub fn expand_deco(
             let mut next = Vec::new();
             pure_expand_one(m, rng, pos, &mut next, level.min_y(), gen_depth);
             for p in next {
-                expand_deco(mods, idx + 1, level, rng, p, out);
+                expand_deco(mods, idx + 1, level, rng, p, leaf, top_uid);
             }
         }
         Mod::Heightmap { ty } => {
             let h = level.height(*ty, pos.x, pos.z);
             if h > level.min_y() {
-                expand_deco(mods, idx + 1, level, rng, BlockPos::new(pos.x, h, pos.z), out);
+                expand_deco(mods, idx + 1, level, rng, BlockPos::new(pos.x, h, pos.z), leaf, top_uid);
             }
         }
-        Mod::BiomeFilter { feature } => {
-            if level.biome_has_feature(pos, *feature) {
-                expand_deco(mods, idx + 1, level, rng, pos, out);
+        Mod::BiomeFilter { .. } => {
+            // vanilla BiomeFilter reads PlacementContext.topFeature — the placed
+            // feature currently being placed (passed through the expansion)
+            if level.biome_has_feature(pos, top_uid) {
+                expand_deco(mods, idx + 1, level, rng, pos, leaf, top_uid);
             }
         }
         Mod::PredFilter(p) => {
             let st = level.state(pos);
             if pred_matches(p, level, pos, st) == Some(true) {
-                expand_deco(mods, idx + 1, level, rng, pos, out);
+                expand_deco(mods, idx + 1, level, rng, pos, leaf, top_uid);
             }
         }
         Mod::SurfaceWaterDepth { max } => {
             let of = level.height(HeightmapTy::OceanFloor, pos.x, pos.z);
             let ws = level.height(HeightmapTy::WorldSurface, pos.x, pos.z);
             if ws - of <= *max {
-                expand_deco(mods, idx + 1, level, rng, pos, out);
+                expand_deco(mods, idx + 1, level, rng, pos, leaf, top_uid);
             }
         }
         Mod::EnvScan { dir, max_steps, target, allowed } => {
@@ -314,8 +322,8 @@ pub fn expand_deco(
             for _ in 0..*max_steps {
                 let st = level.state(cur);
                 if pred_matches(target, level, cur, st) == Some(true) {
-                    out.push(cur);
-                    expand_deco(mods, idx + 1, level, rng, cur, out);
+                    leaf(cur, rng);
+                    expand_deco(mods, idx + 1, level, rng, cur, leaf, top_uid);
                     return;
                 }
                 cur = BlockPos::new(cur.x, cur.y + step.1, cur.z);
@@ -328,7 +336,8 @@ pub fn expand_deco(
             }
             let st = level.state(cur);
             if pred_matches(target, level, cur, st) == Some(true) {
-                expand_deco(mods, idx + 1, level, rng, cur, out);
+                leaf(cur, rng);
+                expand_deco(mods, idx + 1, level, rng, cur, leaf, top_uid);
             }
         }
         Mod::NoiseBasedCount { ratio, factor, offset } => {
@@ -336,7 +345,7 @@ pub fn expand_deco(
             let v = biome_info_noise().value(pos.x as f64 / factor, pos.z as f64 / factor);
             let n = ((v + offset) * (*ratio as f64)).ceil() as i64;
             for _ in 0..n.max(0) {
-                expand_deco(mods, idx + 1, level, rng, pos, out);
+                expand_deco(mods, idx + 1, level, rng, pos, leaf, top_uid);
             }
         }
         Mod::Unsupported(_) => {}

@@ -54,6 +54,15 @@ impl WorldgenRandom {
     /// WorldgenRandom overrides next(bits), so the wrapped Lemire never runs here.
     pub fn next_int_bound(&mut self, bound: i32) -> i32 {
         debug_assert!(bound > 0);
+        if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+            let v = self.next_int_bound_inner(bound);
+            eprintln!("[draw] bound={bound} -> {v}");
+            return v;
+        }
+        self.next_int_bound_inner(bound)
+    }
+
+    fn next_int_bound_inner(&mut self, bound: i32) -> i32 {
         if bound & (bound - 1) == 0 {
             return ((bound as i64) * (self.next_bits(31) as i64) >> 31) as i32;
         }

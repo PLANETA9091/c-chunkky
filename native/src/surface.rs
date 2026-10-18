@@ -349,7 +349,7 @@ impl<'a> Parser<'a> {
                     eprintln!("surface parse: stone_depth without surface_type");
                     return None;
                 }
-                let asd = j.get("add_surface_depth").and_then(|v| v.as_i64()).unwrap_or(0) != 0;
+                let asd = j.get("add_surface_depth").and_then(crate::json::Json::as_bool).unwrap_or(false);
                 let sdr = j
                     .get("secondary_depth_range")
                     .and_then(|v| v.as_i32())
@@ -371,7 +371,7 @@ impl<'a> Parser<'a> {
                     .get("surface_depth_multiplier")
                     .and_then(|v| v.as_i32())
                     .unwrap_or(0);
-                let asd = j.get("add_stone_depth").and_then(|v| v.as_i64()).unwrap_or(0) != 0;
+                let asd = j.get("add_stone_depth").and_then(crate::json::Json::as_bool).unwrap_or(false);
                 self.cfg.conds.push(SrCond::Water { offset, surface_depth_multiplier: sdm, add_stone_depth: asd });
                 self.cfg.conds.len() - 1
             }
@@ -384,8 +384,27 @@ impl<'a> Parser<'a> {
                     .get("surface_depth_multiplier")
                     .and_then(|v| v.as_i32())
                     .unwrap_or(0);
-                let asd = j.get("add_stone_depth").and_then(|v| v.as_i64()).unwrap_or(0) != 0;
+                let asd = j.get("add_stone_depth").and_then(crate::json::Json::as_bool).unwrap_or(false);
                 self.cfg.conds.push(SrCond::YAbove { anchor, add_stone_depth: asd, surface_depth_multiplier: sdm });
+                self.cfg.conds.len() - 1
+            }
+            // Paper patch of the vanilla bedrock rule: same shape as
+            // vertical_gradient + is_roof (ignored — flat bedrock off in
+            // bench worlds; generate-flat-bedrock=false default).
+            "paper:optionally_flat_bedrock_condition_source" => {
+                let name = match j.get("random_name").and_then(|v| v.as_str()) {
+                    Some(n) => canon(n),
+                    None => { eprintln!("surface parse: paper bedrock without random_name"); return None; }
+                };
+                let ty = match j.get("true_at_and_below").and_then(|v| parse_anchor(v, self.wg)) {
+                    Some(a) => a,
+                    None => { eprintln!("surface parse: paper bedrock true anchor bad"); return None; }
+                };
+                let fy = match j.get("false_at_and_above").and_then(|v| parse_anchor(v, self.wg)) {
+                    Some(a) => a,
+                    None => { eprintln!("surface parse: paper bedrock false anchor bad"); return None; }
+                };
+                self.cfg.conds.push(SrCond::VerticalGradient { name, true_y: ty, false_y: fy });
                 self.cfg.conds.len() - 1
             }
             "minecraft:vertical_gradient" => {

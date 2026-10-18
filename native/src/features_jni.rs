@@ -55,6 +55,15 @@ pub struct JniLevel<'a> {
     uid_names: &'a [String],
     min_y: i32,
     max_y: i32,
+    trace: std::cell::Cell<u32>,
+}
+
+impl<'a> JniLevel<'a> {
+    fn trace_tick(&self) -> bool {
+        let t = self.trace.get();
+        self.trace.set(t + 1);
+        t < 5
+    }
 }
 
 impl<'a> JniLevel<'a> {
@@ -103,7 +112,7 @@ impl<'a> JniLevel<'a> {
             if !ok {
                 return None;
             }
-            Some(JniLevel { env, obj, mids, uid_names, min_y, max_y })
+            Some(JniLevel { env, obj, mids, uid_names, min_y, max_y, trace: std::cell::Cell::new(0) })
         }
     }
 
@@ -111,7 +120,9 @@ impl<'a> JniLevel<'a> {
     fn z_call(&self, mid: jni_sys::jmethodID, args: &[jni_sys::jvalue]) -> bool {
         let tbl = unsafe { *self.env };
         unsafe {
-            let r = ((*tbl).v1_1.CallBooleanMethod)(self.env, self.obj, mid, args);
+            // A-variant takes a jvalue* — the plain Call*Method is C-varargs
+            // and a Rust slice would be read as a single jvalue (JVM crash).
+            let r = ((*tbl).v1_1.CallBooleanMethodA)(self.env, self.obj, mid, args.as_ptr());
             if ((*tbl).v1_2.ExceptionCheck)(self.env) {
                 ((*tbl).v1_1.ExceptionClear)(self.env);
                 return false;
@@ -172,15 +183,25 @@ impl<'a> DecoLevel for JniLevel<'a> {
     fn height(&self, ty: HeightmapTy, x: i32, z: i32) -> i32 {
         let tbl = unsafe { *self.env };
         unsafe {
-            let r = ((*tbl).v1_1.CallIntMethod)(
-                self.env,
-                self.obj,
-                self.mids.height,
+            let ivals = [
                 Self::val_i(ty as i32),
                 Self::val_i(x),
                 Self::val_i(z),
+            ];
+            let tr = self.trace_tick();
+            let r = ((*tbl).v1_1.CallIntMethodA)(
+                self.env,
+                self.obj,
+                self.mids.height,
+                ivals.as_ptr(),
             );
-            if ((*tbl).v1_2.ExceptionCheck)(self.env) {
+            let exc = ((*tbl).v1_2.ExceptionCheck)(self.env);
+            if tr {
+                crate::ffi::log_warn(&format!(
+                    "[jni-dbg] height ty={} x={x} z={z} -> {r} exc={exc}", ty as i32
+                ));
+            }
+            if exc {
                 ((*tbl).v1_1.ExceptionClear)(self.env);
                 return self.min_y(); // heights below min disable heightmap moves
             }
@@ -333,11 +354,16 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoPlan(
         .and_then(|c| c.deco.as_ref()) else {
         return std::ptr::null_mut();
     };
+    // outer component type must be String[] (ArrayStoreException otherwise)
     let str_class = ((*tbl).v1_1.FindClass)(env, c"java/lang/String".as_ptr());
     if str_class.is_null() {
         return std::ptr::null_mut();
     }
-    let outer = ((*tbl).v1_1.NewObjectArray)(env, d.plan.steps.len() as jni_sys::jsize, str_class, std::ptr::null_mut());
+    let arr_class = ((*tbl).v1_1.FindClass)(env, c"[Ljava/lang/String;".as_ptr());
+    if arr_class.is_null() {
+        return std::ptr::null_mut();
+    }
+    let outer = ((*tbl).v1_1.NewObjectArray)(env, d.plan.steps.len() as jni_sys::jsize, arr_class, std::ptr::null_mut());
     if outer.is_null() {
         return std::ptr::null_mut();
     }
