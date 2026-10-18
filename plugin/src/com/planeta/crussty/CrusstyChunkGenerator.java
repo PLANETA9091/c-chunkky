@@ -215,7 +215,34 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
 
     @Override
     public boolean shouldGenerateDecorations() {
-        return true;
+        return !NATIVE_DECO;
+    }
+
+    /**
+     * Native deco engine active (stage F1): vanilla addVanillaDecorations is
+     * skipped (structures AND features — Paper gates both on this flag) and
+     * the DecoDriver populator runs the native feature pipeline instead.
+     * Opt-in via CRUS_NATIVE_DECO=1; dptt keeps vanilla until full feature
+     * coverage (structures included). Flipped by {@link #setupDeco}.
+     */
+    private static volatile boolean NATIVE_DECO = false;
+
+    /** Pool for the deco populator (set by setupDeco). */
+    private static volatile CtxPool DECO_POOL;
+
+    /** Populator-side ctx acquisition (same pool protocol as fills). */
+    static long decoAcquire(java.util.concurrent.locks.ReentrantLock[] lockOut) {
+        CtxPool p = DECO_POOL;
+        if (p == null) {
+            return 0;
+        }
+        return p.acquire(lockOut);
+    }
+
+    static void decoRelease(java.util.concurrent.locks.ReentrantLock[] lockBox) {
+        if (lockBox[0] != null) {
+            lockBox[0].unlock();
+        }
     }
 
     @Override
@@ -491,6 +518,8 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 || rel.contains("/worldgen/density_function/")
                 || rel.contains("/worldgen/noise/")
                 || rel.contains("/worldgen/biome/")
+                || rel.contains("/worldgen/configured_feature/")
+                || rel.contains("/worldgen/placed_feature/")
                 || rel.endsWith("/dimension/overworld.json");
         return keep ? rel : null;
     }
@@ -663,6 +692,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             int height = w.getMaxHeight() - w.getMinHeight();
             CtxPool pool = poolForNamed(w.getName(), seed, minY, height);
             setupSurface(pool, w);
+            setupDeco(pool, w);
             String[] names = ChunkGenNative.ctxBiomeNames(pool.firstCtx());
             if (names == null) {
                 Logger.getLogger("CrusstyGen").info(
@@ -2105,6 +2135,112 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     // rule's block state strings to NMS BlockStates, extend the material
     // palette, and push ids + biome temperatures into the native ctx.
     // ------------------------------------------------------------------
+
+    /**
+     * Stage F1 native decoration handshake (opt-in via CRUS_NATIVE_DECO=1).
+     * Requires a native deco engine in the ctx (pack worldgen assets carry
+     * placed/configured features + biome feature lists). Flips
+     * shouldGenerateDecorations to false and registers the DecoDriver
+     * populator — vanilla addVanillaDecorations (structures AND features)
+     * is replaced end-to-end. Only flip for probe packs with no structures:
+     * dptt keeps vanilla decorations until feature coverage is complete.
+     */
+    private static void setupDeco(CtxPool pool, org.bukkit.World w) {
+        if (!"1".equals(System.getenv("CRUS_NATIVE_DECO"))) {
+            return;
+        }
+        try {
+            long ctx0 = pool.firstCtx();
+            String[] states = ChunkGenNative.decoStates(ctx0);
+            String[][] plan = ChunkGenNative.decoPlan(ctx0);
+            if (states == null || plan == null) {
+                Logger.getLogger("CrusstyGen").info(
+                        "native deco: ctx has no deco engine (vanilla decorations stay)");
+                return;
+            }
+            // biome -> placed feature refs union, from the pack biome JSONs
+            java.util.Map<String, java.util.Set<String>> bf = new java.util.HashMap<>();
+            PackData pd = packDataFor(w.getName());
+            if (pd != null) {
+                for (int i = 0; i < pd.paths().length; i++) {
+                    String p = pd.paths()[i];
+                    int k = p.indexOf("/worldgen/biome/");
+                    if (k < 0 || !p.endsWith(".json")) {
+                        continue;
+                    }
+                    String name = p.substring(0, k) + ":"
+                            + p.substring(k + "/worldgen/biome/".length(), p.length() - 5);
+                    bf.put(name, parseBiomeFeatureRefs(pd.blobs()[i]));
+                }
+            }
+            String[] names = ChunkGenNative.ctxBiomeNames(ctx0);
+            java.util.Set<String> possible = names == null
+                    ? null
+                    : new java.util.HashSet<>(java.util.Arrays.asList(names));
+            DECO_POOL = pool;
+            Class<?> drv = Class.forName("com.planeta.crussty.DecoDriver");
+            drv.getMethod("setup", org.bukkit.World.class, String[].class,
+                            String[][].class, java.util.Map.class, java.util.Set.class)
+                    .invoke(null, w, states, plan, bf, possible);
+            NATIVE_DECO = true;
+            Logger.getLogger("CrusstyGen").info("native deco engine active ("
+                    + plan.length + " steps, " + states.length + " states, "
+                    + possible.size() + " possible biomes) — vanilla decorations off");
+        } catch (ClassNotFoundException e) {
+            Logger.getLogger("CrusstyGen").info(
+                    "native deco: DecoDriver absent (vanilla decorations stay)");
+        } catch (Throwable t) {
+            Throwable c = t;
+            while (c.getCause() != null && c.getCause() != c) {
+                c = c.getCause();
+            }
+            Logger.getLogger("CrusstyGen").warning(
+                    "native deco setup failed; vanilla decorations stay: " + c);
+        }
+    }
+
+    /** Placed-feature refs inside a biome JSON "features" array (union of
+     *  all steps; hand-rolled scan — refs are plain quoted strings). */
+    private static java.util.Set<String> parseBiomeFeatureRefs(byte[] json) {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        if (json == null) {
+            return out;
+        }
+        String s = new String(json, java.nio.charset.StandardCharsets.UTF_8);
+        int fk = s.indexOf("\"features\"");
+        if (fk < 0) {
+            return out;
+        }
+        int open = s.indexOf('[', fk);
+        if (open < 0) {
+            return out;
+        }
+        int depth = 0;
+        for (int i = open; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '"') {
+                int e = s.indexOf('"', i + 1);
+                while (e > 0 && s.charAt(e - 1) == '\\') {
+                    e = s.indexOf('"', e + 1);
+                }
+                if (e < 0) {
+                    break;
+                }
+                if (depth > 0) {
+                    out.add(s.substring(i + 1, e));
+                }
+                i = e;
+            } else if (c == '[' || c == '{') {
+                depth++;
+            } else if (c == ']' || c == '}') {
+                depth--;
+                if (depth <= 0) {
+                    break;
+                }
+            }
+        }
+        return out;
+    }
 
     private static void setupSurface(CtxPool pool, org.bukkit.World w) {
         // A/B kill-switch: CRUS_NO_NATIVE_SURFACE=1 restores the vanilla Java

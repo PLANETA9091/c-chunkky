@@ -14,7 +14,7 @@ use std::sync::Mutex;
 // Sessions own a leaked Env (seed-bound); ChunkGen reuses it by &'static.
 // Single global map guarded by a Mutex: Paper worker threads serialize per
 // ctx in the plugin (ReentrantLock), the global lock is uncontended.
-struct Ctx {
+pub struct Ctx {
     gen: ChunkGen<'static>,
     /// Native multi_noise biome source (pack dimension override). None =
     /// keep the vanilla Java biome path (embedded-vanilla ctx has no
@@ -23,8 +23,9 @@ struct Ctx {
     /// Native SurfaceRules engine (pack surface_rule). None = vanilla Java
     /// surface stage stays active.
     surface: Option<SurfaceState>,
-    /// Native features engine (stage F). None until decoSeal compiles the registry.
-    deco: Option<crate::features_place_ffi::DecoState>,
+    /// Native features engine (stage F). None until the pack assets carry a
+    /// data-driven dimension (embedded-vanilla ctx keeps vanilla decorations).
+    pub deco: Option<crate::features_master::DecoCtx>,
 }
 
 /// Native surface engine state (config parsed from the pack noise_settings;
@@ -190,7 +191,7 @@ fn build_biome_state(
     })
 }
 
-static SESSIONS: Mutex<Option<HashMap<i64, Ctx>>> = Mutex::new(None);
+pub(crate) static SESSIONS: Mutex<Option<HashMap<i64, Ctx>>> = Mutex::new(None);
 static NEXT_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
 /// Create a generator context for (seed, minY, height, seaLevel). Returns the
@@ -229,9 +230,9 @@ pub fn ctx_new_assets(
         let surface = biomes
             .as_ref()
             .and_then(|b| build_surface_state(&assets, b.env, Some(b)));
-        (ChunkGen::new(env), biomes, surface)
+        (ChunkGen::new(env), biomes, surface, crate::features_master::build_deco_ctx(&assets))
     });
-    let (gen, biomes, surface) = match result {
+    let (gen, biomes, surface, deco) = match result {
         Ok(v) => v,
         Err(p) => {
             let msg = if let Some(s) = p.downcast_ref::<String>() {
@@ -245,7 +246,7 @@ pub fn ctx_new_assets(
         }
     };
     let mut map = SESSIONS.lock().unwrap();
-    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes, surface, deco: None });
+    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes, surface, deco });
     Ok(id)
 }
 

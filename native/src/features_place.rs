@@ -16,11 +16,13 @@ pub struct DecoOp {
     pub z: i16,
     /// index into the decoStates table (handshake-resolved by the JVM bridge)
     pub state: u16,
-    pub flags: u8, // bit0 = schedule_tick, bit1 = rotated90
+    /// bit0 = schedule_tick; bit1 = rotated provider; bits2-3 = axis pick (0=X 1=Y 2=Z)
+    pub flags: u8,
 }
 
 pub const FLAG_TICK: u8 = 1;
 pub const FLAG_ROTATED: u8 = 2;
+pub const AXIS_SHIFT: u8 = 2;
 
 pub struct PlaceCtx<'a> {
     pub reg: &'a FeatureRegistry,
@@ -39,32 +41,37 @@ impl<'a> PlaceCtx<'a> {
     }
 }
 
-fn sample_state(src: &StateSrc, rng: &mut WorldgenRandom, rotated: &mut bool) -> Option<String> {
-    match src {
-        StateSrc::Simple(s) => Some(s.clone()),
+fn sample_state(src: &StateSrc, rng: &mut WorldgenRandom, flags: &mut u8) -> Option<String> {
+    let raw = match src {
+        StateSrc::Simple(s) => s.clone(),
         StateSrc::Weighted(list) => {
             let total: u32 = list.iter().map(|(w, _)| w).sum();
             if total == 0 {
                 return None;
             }
             let mut pick = rng.next_int_bound(total as i32) as i32;
+            let mut hit = None;
             for (w, s) in list {
                 pick -= *w as i32;
                 if pick < 0 {
-                    return Some(s.clone());
+                    hit = Some(s.clone());
+                    break;
                 }
             }
-            list.last().map(|(_, s)| s.clone())
+            hit.or_else(|| list.last().map(|(_, s)| s.clone()))?
         }
-        StateSrc::Unsupported(_) => None,
-    }
-    .map(|s| match s.strip_prefix("ROTATED\0") {
+        StateSrc::Unsupported(_) => return None,
+    };
+    // RotatedBlockProvider.getState: Axis.getRandom(random) = VALUES[nextInt(3)]
+    // (X, Y, Z order) — consumes RNG on EVERY draw, then trySetValue(AXIS, pick).
+    match raw.strip_prefix("ROTATED\0") {
         Some(inner) => {
-            *rotated = true;
-            inner.to_string()
+            let axis = rng.next_int_bound(3) as u8;
+            *flags |= FLAG_ROTATED | (axis << AXIS_SHIFT);
+            Some(inner.to_string())
         }
-        None => s,
-    })
+        None => Some(raw),
+    }
 }
 
 /// Recursively place a placed feature by name. Returns "any op placed" (vanilla place()).
@@ -112,19 +119,15 @@ pub fn place_configured(
     match cfg {
         FeatureCfg::NoOp => true,
         FeatureCfg::SimpleBlock { place, ticks } => {
-            let mut rotated = false;
-            let Some(state) = sample_state(place, rng, &mut rotated) else {
+            let mut flags: u8 = 0;
+            let Some(state) = sample_state(place, rng, &mut flags) else {
                 return false;
             };
             if !ctx.level.can_survive(&state, pos) {
                 return false;
             }
-            let mut flags = 0;
             if *ticks {
                 flags |= FLAG_TICK;
-            }
-            if rotated {
-                flags |= FLAG_ROTATED;
             }
             let (rx, rz) = ctx.rel(pos);
             let sid = ctx.state_index.get(&state).copied().unwrap_or(0);
@@ -142,12 +145,8 @@ pub fn place_configured(
                     _ => false,
                 };
                 if hit {
-                    let mut rotated = false;
-                    if let Some(st) = sample_state(src, rng, &mut rotated) {
-                        let mut flags = 0;
-                        if rotated {
-                            flags |= FLAG_ROTATED;
-                        }
+                    let mut flags: u8 = 0;
+                    if let Some(st) = sample_state(src, rng, &mut flags) {
                         let (rx, rz) = ctx.rel(pos);
                         let sid = ctx.state_index.get(&st).copied().unwrap_or(0);
                         ops.push(DecoOp { x: rx, y: pos.y as i16, z: rz, state: sid, flags });

@@ -65,6 +65,42 @@ public final class ChunkGenNative {
      *  biome index: base temperature + FROZEN modifier flag. */
     public static native int surfaceSetTemps(long ctx, float[] temps, boolean[] frozen);
 
+    // ------------------------------------------------------------------
+    // Stage F1 — native feature decoration engine (see features_jni.rs).
+    // Protocol: decoStates/decoPlan at world load; per chunk decoDecoSeed
+    // once + decoChunkPlan for the (step, index) runs; per run decoRunFeature
+    // with DecoLevelBridge upcalls, ops written with setBlock(pos, state, 2).
+    // ------------------------------------------------------------------
+
+    /** decoStates(ctx) -> String[] — distinct state strings of the decoded
+     *  feature registry (ops reference them by index), or null when the ctx
+     *  has no native deco engine. */
+    public static native String[] decoStates(long ctx);
+
+    /** decoPlan(ctx) -> String[][] — featuresPerStep in FeatureSorter order
+     *  (index within a step = the vanilla per-step feature seed index i3). */
+    public static native String[][] decoPlan(long ctx);
+
+    /** decoChunkPlan(ctx, regionBiomes, out) -> int runs — union of the
+     *  region biomes' features mapped to (step, index) runs, sorted per
+     *  step. out[2k] = step, out[2k+1] = index. Returns -1 when out is too
+     *  small (size it to sum(plan[step].length) * 2 + 16). */
+    public static native int decoChunkPlan(long ctx, String[] regionBiomes, int[] out);
+
+    /** decoRunFeature(ctx, decoSeed, paperSeed, originX, originY, originZ,
+     *  maxY, step, gid, bridge, ops) -> int opCount. Expands one placed
+     *  feature with the exact vanilla seeding (paperSeed -1 = no Paper
+     *  featureSeeds override). ops[5k..+5] = xRel, yAbs, zRel, stateIdx,
+     *  flags (bit0 schedule_tick, bit1 rotated + axis in bits 2-3). Level
+     *  queries upcall into the bridge object (DecoDriver). */
+    public static native int decoRunFeature(long ctx, long decoSeed, long paperSeed,
+            int originX, int originY, int originZ, int maxY, int step, int gid,
+            Object bridge, int[] ops);
+
+    /** decoDecoSeed(levelSeed, originX, originZ) -> long — the vanilla chunk
+     *  decoration seed `l` (setDecorationSeed; every feature re-seeds from it). */
+    public static native long decoDecoSeed(long levelSeed, int originX, int originZ);
+
     public static native int fillMarked(long ctx, int chunkX, int chunkZ, short[] out, long[] marks);
 
     /**
