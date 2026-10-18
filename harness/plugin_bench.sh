@@ -122,6 +122,9 @@ rcon "crusstatus" | head -4 || true
 # the measured one first (identical code paths — same world/seed/datapack),
 # unload it, then reset the stats ring — the measured window below is
 # steady-state, which is the honest per-chunk cost.
+# CRUS_WARMUP=0 skips it entirely (parity probe runs: warmup is dead weight
+# that pushes the phase past the sandbox's 10-min tool timeout).
+if [ "${CRUS_WARMUP:-1}" != "0" ]; then
 echo "=== JIT warmup region (chunks 8..15, 8..15) — discarded ==="
 rcon "forceload add 128 128 255 255" >/dev/null || true
 NWARM=0
@@ -134,6 +137,7 @@ echo "=== warmup done: chunks=${NWARM:-?}/64 ==="
 rcon "forceload remove all" >/dev/null || true
 sleep 2
 rcon "crusgenstats reset" >/dev/null || true
+fi
 
 # --- pregen + measure -------------------------------------------------------
 # Sequential per-chunk forceload (cx asc, cz asc): ore/blob features write into

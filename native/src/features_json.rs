@@ -201,7 +201,7 @@ fn decode_state_provider(j: &Json) -> Option<StateSrc> {
             let s = j.get("state")?;
             Some(StateSrc::Simple(state_string(s)?))
         }
-        "minecraft:weighted_list_state_provider" => {
+        "minecraft:weighted_state_provider" | "minecraft:weighted_list_state_provider" => {
             // WeightedStateProvider codec field = "entries" (1.21.8)
             let arr = j
                 .get("entries")
@@ -399,6 +399,14 @@ pub fn decode_placement_modifier(j: &Json) -> Mod {
             Some(m) => Mod::SurfaceWaterDepth { max: m as i32 },
             None => Mod::Unsupported("water-depth"),
         },
+        "minecraft:surface_relative_threshold_filter" => {
+            let Some(ty) = j.get("heightmap").and_then(|v| v.as_str()).and_then(decode_heightmap_ty) else {
+                return Mod::Unsupported("srt-heightmap");
+            };
+            let min = j.get("min_inclusive").and_then(|v| v.as_i64()).map(|v| v as i32).unwrap_or(i32::MIN);
+            let max = j.get("max_inclusive").and_then(|v| v.as_i64()).map(|v| v as i32).unwrap_or(i32::MAX);
+            Mod::SurfaceRelativeThreshold { ty, min, max }
+        }
         "minecraft:environment_scan" => {
             let dir = match j.get("direction_of_search").and_then(|v| v.as_str()) {
                 Some("up") => 1,
@@ -569,9 +577,14 @@ pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry
                 return FeatureCfg::Unsupported("patch-feature");
             };
             // vanilla: the inner is a PLACED feature — a string ref or an
-            // inline {feature, placement} object. Inline objects are NOT in
-            // any biome's feature list (no FeatureSorter uid, BiomeFilter
-            // would fail in vanilla too — parity by construction).
+            // inline {feature, placement} object. A string ref resolves
+            // through reg.placed at place time (place_placed by name); inline
+            // objects register under synthetic $-names and are NOT in any
+            // biome's feature list (no FeatureSorter uid, BiomeFilter would
+            // fail in vanilla too — parity by construction).
+            if let Some(s) = fj.as_str() {
+                return FeatureCfg::RandomPatch { tries, xz_spread, y_spread, inner: s.to_string() };
+            }
             let inner = format!("{name}$/inner");
             if !decode_inline_placed(&inner, fj, reg) {
                 return FeatureCfg::Unsupported("patch-inner");

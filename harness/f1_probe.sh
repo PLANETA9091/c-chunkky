@@ -64,6 +64,9 @@ wire_datapacks() {
 # ore veins contesting across the forceload border). Substrate parity itself
 # is covered by the dptt judge; this probe isolates the FEATURES engine.
 # ---------------------------------------------------------------------------
+# CRUS_PHASE=a|b|all: the sandbox reaps background processes between tool
+# calls, so the harness splits into two foreground phases.
+if [ "${CRUS_PHASE:-all}" != "b" ]; then
 echo "=== [A] native-substrate + vanilla deco reference run ==="
 clean_world
 cat > "$SRV/bukkit.yml" << 'EOF'
@@ -79,7 +82,7 @@ cp "$ROOT/plugin/CrusstyGen.jar" "$SRV/plugins/CrusstyGen.jar"
 # CRUS_NATIVE_DECO deliberately NOT set here.
 pkill -9 -f 'java .*-jar paper\.jar' 2>/dev/null || true
 sleep 3
-CRUS_FRESH=0 CRUS_SKIP_DIFF=1 bash harness/plugin_bench.sh "$WORLD" "$ROOT/reference/dumps_plugin/$WORLD"
+CRUS_FRESH=0 CRUS_SKIP_DIFF=1 CRUS_WARMUP=0 bash harness/plugin_bench.sh "$WORLD" "$ROOT/reference/dumps_plugin/$WORLD"
 bash harness/server_down.sh >/dev/null 2>&1 || true
 
 # Run A dumps become the reference set for Run B's diff. Keep ONLY the inner
@@ -104,10 +107,12 @@ for p in list(d.glob("chunk_*.crsf")):
         kept += 1
 print(f"[f1] inner 8x8 reference: {kept} chunks ({lo}..{hi})")
 PY
+fi
 
 # ---------------------------------------------------------------------------
 # Run B — native deco (CrusstyGen + CRUS_NATIVE_DECO=1)
 # ---------------------------------------------------------------------------
+if [ "${CRUS_PHASE:-all}" != "a" ]; then
 echo "=== [B] native deco run ==="
 clean_world
 cat > "$SRV/bukkit.yml" << 'EOF'
@@ -120,6 +125,7 @@ wire_datapacks
 cp "$ROOT/plugin/CrusstyGen.jar" "$SRV/plugins/CrusstyGen.jar"
 
 # plugin_bench.sh does boot + pregen + dump + diff (REF_DIR = run A dumps)
-export CRUS_FRESH=0 CRUS_SKIP_DIFF=0 CRUS_NATIVE_DECO=1
+export CRUS_FRESH=0 CRUS_SKIP_DIFF=0 CRUS_NATIVE_DECO=1 CRUS_WARMUP=0
 export DATAPACKS_DIR="$PACKS"
 bash harness/plugin_bench.sh "$WORLD" "$ROOT/reference/dumps/f1probe_vanilla"
+fi

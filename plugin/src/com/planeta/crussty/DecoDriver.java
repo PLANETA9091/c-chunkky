@@ -347,7 +347,32 @@ public final class DecoDriver extends BlockPopulator {
     // ------------------------------------------------------------------
 
     public int height(int ty, int x, int z) {
-        return reg.getHeight(TYPES[ty], x, z);
+        // Paper proto chunks serve WG-semantics heightmaps (OCEAN_FLOOR_WG =
+        // blocksMotion WITHOUT the fluid check), but vanilla
+        // WorldGenRegion.getHeight recomputes the non-WG types from the actual
+        // blocks with the fluid-aware predicates. Replicate the vanilla
+        // predicates by scanning the column (WorldGenRegion.getHeight = first
+        // available + 1).
+        return scanHeight(TYPES[ty], x, z);
+    }
+
+    private int scanHeight(Heightmap.Types t, int x, int z) {
+        int top = reg.getMaxY() - 1;
+        int bottom = reg.getMinY();
+        for (int y = top; y >= bottom; y--) {
+            BlockState st = reg.getBlockState(new BlockPos(x, y, z));
+            boolean hit = switch (t) {
+                case WORLD_SURFACE, WORLD_SURFACE_WG -> !st.isAir();
+                case OCEAN_FLOOR, MOTION_BLOCKING -> st.blocksMotion() || !st.getFluidState().isEmpty();
+                case OCEAN_FLOOR_WG -> st.blocksMotion();
+                case MOTION_BLOCKING_NO_LEAVES -> st.blocksMotion() && !st.is(BlockTags.LEAVES)
+                        || !st.getFluidState().isEmpty();
+            };
+            if (hit) {
+                return y + 1;
+            }
+        }
+        return bottom;
     }
 
     public boolean stateIs(int x, int y, int z, String[] names) {
@@ -418,6 +443,9 @@ public final class DecoDriver extends BlockPopulator {
     public boolean biomeHasFeature(int x, int y, int z, String placed) {
         Holder<Biome> h = reg.getBiomeManager().getBiome(new BlockPos(x, y, z));
         String name = biomeKey(h.value());
+        if ((x == 1615 && z == 1612) || (x == 1612 && z == 1665) || (x == 1612 && z == 1673)) {
+            LOG.info("[f1trace] biomeHasFeature " + placed + " (" + x + "," + y + "," + z + ") biome=" + name);
+        }
         Map<String, Set<String>> bf = BIOME_FEATURES;
         if (bf == null) {
             return false;

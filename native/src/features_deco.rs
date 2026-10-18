@@ -327,6 +327,13 @@ pub enum Mod {
     SurfaceWaterDepth {
         max: i32,
     },
+    /// SurfaceRelativeThresholdFilter: height(type) within [min, max] (no RNG).
+    /// min/max are absolute; i32::MIN/MAX = unbounded.
+    SurfaceRelativeThreshold {
+        ty: HeightmapTy,
+        min: i32,
+        max: i32,
+    },
     EnvScan {
         /// 0=down 1=up (only directions used by dptt packs); max_steps; target; allowed
         dir: u8,
@@ -372,6 +379,9 @@ fn pure_expand_one(
             let x = pos.x + xz.sample(rng);
             let ny = pos.y + y.sample(rng);
             let z = pos.z + xz.sample(rng);
+            if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+                eprintln!("[off] {} {} {} -> {} {} {}", pos.x, pos.y, pos.z, x, ny, z);
+            }
             out.push(BlockPos::new(x, ny, z));
         }
         crate::features_placement::Modifier::HeightRange(hp) => {
@@ -441,7 +451,16 @@ pub fn expand_deco(
         Mod::SurfaceWaterDepth { max } => {
             let of = level.height(HeightmapTy::OceanFloor, pos.x, pos.z);
             let ws = level.height(HeightmapTy::WorldSurface, pos.x, pos.z);
+            if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+                eprintln!("[swd] {} {} {} of={of} ws={ws} max={max} -> {}", pos.x, pos.y, pos.z, ws - of <= *max);
+            }
             if ws - of <= *max {
+                expand_deco(mods, idx + 1, level, rng, pos, leaf, top_uid);
+            }
+        }
+        Mod::SurfaceRelativeThreshold { ty, min, max } => {
+            let h = level.height(*ty, pos.x, pos.z);
+            if h >= *min && h <= *max {
                 expand_deco(mods, idx + 1, level, rng, pos, leaf, top_uid);
             }
         }

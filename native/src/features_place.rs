@@ -1089,11 +1089,14 @@ mod tests {
         assert!(reg.configured.contains_key("test:cfg$/inner$/cfg"), "inline inner cfg registered");
         assert_eq!(reg.placed.get("test:cfg$/inner").unwrap().feature, "test:cfg$/inner$/cfg");
 
-        // random_patch with string-ref inner
+        // random_patch with string-ref inner: resolved directly via reg.placed
         let reg = build_reg(
             r#"{"type":"minecraft:random_patch","config":{"tries":3,"xz_spread":2,"y_spread":1,"feature":"test:pf"}}"#,
             r#"{"feature":"test:cfg","placement":[]}"#,
         );
-        assert_eq!(reg.placed.get("test:cfg$/inner").unwrap().feature, "test:pf");
+        match reg.configured.get("test:cfg") {
+            Some(FeatureCfg::RandomPatch { inner, .. }) => assert_eq!(inner, "test:pf"),
+            other => panic!("patch string-ref decode: {:?}", other),
+        }
     }
 }
