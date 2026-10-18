@@ -1564,3 +1564,48 @@ Stage Summary:
   disk (590); then probe pack v2 for ore/disk; dptt flip needs structures story.
 - Ops cost: decoRunFeature upcalls are per-query JNI — batch/snapshot the 3x3 region
   natively for the perf pass (ops already batched 5xi32).
+
+---
+## Session cont-50: F2 bisect to near-parity — 4 root causes found via 12x12 probe
+
+Work Log:
+- Probe infra: f1_probe.sh split into CRUS_PHASE=a|b (the sandbox reaps
+  background processes between tool calls — setsid/nohup do NOT survive);
+  CRUS_WARMUP=0 skips the JIT warmup (the phase fits the 10-min tool cap).
+- F2 decode+place shipped (ore/scattered/random_patch/disk + RuleTest +
+  RuleBased provider + FLAG_RAW/FLAG_POSTPROC + OverlayLevel) — commit 2f28215.
+- Bisect saga (poppy 181 + daisy 56 misses, deterministic across runs):
+  1. DecoDriver.height(): Paper proto chunks serve WG-semantics heightmaps;
+     vanilla WorldGenRegion recomputes non-WG types (OCEAN_FLOOR/MOTION_
+     BLOCKING = blocksMotion||fluid) from blocks. Fixed via column scan
+     (scanHeight). Fixed offset_water swd filter (ws-of 1 vs 0).
+  2. The decoder accepted only legacy "weighted_list_state_provider"; 1.21.8
+     packs use "weighted_state_provider". The weighted feature silently
+     decoded Unsupported -> no leaf draws -> the non-interleaved RNG stream
+     -> the poppy/daisy misses. 0b2398a committed the renamed pack + the old
+     decoder (the F1 probe measured the pre-commit consistent pair!).
+  3. random_patch string-ref inner: resolved as a configured name; actually a
+     PLACED ref. Now place_placed resolves it by name (patch_ref works).
+  4. surface_relative_threshold_filter: added (SurfaceRelativeThreshold).
+- The trace-driven method that cracked it: [draw]/[m]/[biomef]/[leaf]/[swd]
+  native traces + DecoDriver LOG upcall traces + per-chunk chunkdbg; the
+  comparison against Java refs (FlowersRef/PatchRef — the RNG core MUST be
+  copied from golden-verified WgrRef; my hand-rolled port had a wrong
+  stafford constant + a wrong nextLong and cost an hour).
+- Known lesson: leaf draws (weighted pick, rotated axis, selector) INTERLEAVE
+  with position draws — a naive Java ref without the interleaving misleads.
+- Result: F1-only pack = 10/6.29M (0.000% = the F1-pair noise floor: the
+  margin-chunk vanilla-deco race, ~5-10 surface blocks). The full F2 pack =
+  939 (0.015%): the remaining = patch_ref bone positions (the vanilla lane's
+  bone sets differ from ours; our patch = bit-exact vs PatchRef.java locally!)
+  + ore vein shapes (~165 blocks, gold/copper).
+- Tests 38/38. Commits 524d1fd (+2f28215). Pushed? — pending.
+
+Stage Summary:
+- F2 = 4 fixes deep: weighted/disk/patch_simple/patch_weighted/offset_water
+  bit-exact; remaining divergences isolated to patch_ref bones + ore veins.
+- Next: Java OreRef (the vein draw/cell model vs the native local run);
+  the patch_ref bone divergence (the vanilla lane's patch draws differ —
+  check Paper's PlacedFeature.place vs placeWithBiomeCheck inside patches!).
+- The worklog + harness = the repro state; the packs live in
+  probe/datapacks/f1 (the full F2 biome lists restored).
