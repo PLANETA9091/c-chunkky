@@ -4,7 +4,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-# locate javac: PATH first, then local Temurin JDKs in /home/z/tools
+# locate javac: PATH first, then local Temurin JDKs in /home/z/tools, then
+# the JDK's compiler module (JRE-only sandboxes: java -m jdk.compiler/...)
 JAVAC="${JAVAC:-$(command -v javac || true)}"
 if [ -z "$JAVAC" ]; then
   JAVAC="$(ls /home/z/tools/jdk-*/bin/javac 2>/dev/null | sort | tail -1)"

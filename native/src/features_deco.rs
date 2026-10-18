@@ -40,6 +40,8 @@ pub trait DecoLevel {
     fn biome_has_feature(&self, pos: BlockPos, feature: u32) -> bool;
     /// BlockState.canSurvive(level, pos) — resolved by the JVM bridge
     fn can_survive(&self, state: &str, pos: BlockPos) -> bool;
+    /// BlockState.isAir() at pos
+    fn is_air(&self, pos: BlockPos) -> bool;
     /// BlockState.is(BlockTags.REPLACEABLE)
     fn is_replaceable(&self, pos: BlockPos) -> bool;
     fn is_solid(&self, pos: BlockPos) -> bool;
@@ -58,9 +60,10 @@ pub enum BlockPredicate {
     AllOf(Vec<BlockPredicate>),
     AnyOf(Vec<BlockPredicate>),
     Not(Box<BlockPredicate>),
-    /// block ids resolved from the state-string table at handshake time
-    MatchingBlocks(Vec<String>),
-    MatchingFluids(Vec<String>),
+    /// block ids resolved from the state-string table at handshake time;
+    /// off = predicate offset (vanilla MatchingBlocksTest/MatchingFluidsTest)
+    MatchingBlocks { ids: Vec<String>, off: (i32, i32, i32) },
+    MatchingFluids { ids: Vec<String>, off: (i32, i32, i32) },
     Replaceable,
     Solid,
     HasSturdyFace { offset: (i32, i32, i32), dir: u8 },
@@ -96,12 +99,16 @@ pub fn pred_matches(
             Some(false)
         }
         BlockPredicate::Not(p) => pred_matches(p, level, pos, state_at_pos).map(|b| !b),
-        BlockPredicate::MatchingBlocks(ids) => {
+        BlockPredicate::MatchingBlocks { ids, off } => {
             // id resolution: ids are state STRINGS; equality via level.state -> String is
             // delegated: the bridge pre-resolves strings to a set of opaque ids.
-            Some(level.state_is(pos, ids))
+            let p = BlockPos::new(pos.x + off.0, pos.y + off.1, pos.z + off.2);
+            Some(level.state_is(p, ids))
         }
-        BlockPredicate::MatchingFluids(ids) => Some(level.fluid_is(pos, ids)),
+        BlockPredicate::MatchingFluids { ids, off } => {
+            let p = BlockPos::new(pos.x + off.0, pos.y + off.1, pos.z + off.2);
+            Some(level.fluid_is(p, ids))
+        }
         BlockPredicate::Replaceable => Some(level.is_replaceable(pos)),
         BlockPredicate::Solid => Some(level.is_solid(pos)),
         BlockPredicate::HasSturdyFace { offset, dir } => {
@@ -119,6 +126,134 @@ pub fn pred_matches(
 pub trait DecoLevelExt: DecoLevel {
     fn state_is(&self, pos: BlockPos, ids: &[String]) -> bool;
     fn fluid_is(&self, pos: BlockPos, ids: &[String]) -> bool;
+    /// RuleTest.tag_match — state.is(TagKey.create(BLOCK, tag)) at pos
+    fn tag_is(&self, pos: BlockPos, tag: &str) -> bool;
+    /// solidity of a block NAME (no position): used by OverlayLevel to answer
+    /// is_solid for states written earlier in the same feature run (vanilla
+    /// reads its own writes; our ops flush after the feature).
+    fn name_is_solid(&self, name: &str) -> bool {
+        let _ = name;
+        false
+    }
+    /// record a state the engine will write at pos (OverlayLevel hook; no-op
+    /// on raw levels)
+    fn write_overlay(&self, pos: BlockPos, state: &str) {
+        let _ = (pos, state);
+    }
+    /// pending written state at pos, if any
+    fn read_overlay(&self, pos: BlockPos) -> Option<String> {
+        let _ = pos;
+        None
+    }
+    /// Debug: block registry key at pos (empty on mocks)
+    fn state_name(&self, pos: BlockPos) -> String {
+        let _ = pos;
+        String::new()
+    }
+}
+
+/// level name of a state string ("ns:block[props]" -> "ns:block")
+#[inline]
+pub fn state_block_name(state: &str) -> &str {
+    match state.split_once('[') {
+        Some((n, _)) => n,
+        None => state,
+    }
+}
+
+/// OverlayLevel: wraps a DecoLevelExt and serves states written DURING the
+/// current feature run (vanilla setBlock is live; our ops flush to the region
+/// only after the feature returns — without the overlay, intra-feature reads
+/// of own writes see stale blocks and diverge, e.g. weighted patch inners
+/// re-tested by later tries).
+pub struct OverlayLevel<'a> {
+    inner: &'a dyn DecoLevelExt,
+    ov: std::cell::RefCell<std::collections::HashMap<(i32, i32, i32), String>>,
+}
+
+impl<'a> OverlayLevel<'a> {
+    pub fn new(inner: &'a dyn DecoLevelExt) -> Self {
+        OverlayLevel { inner, ov: std::cell::RefCell::new(std::collections::HashMap::new()) }
+    }
+}
+
+#[inline]
+fn is_air_name(name: &str) -> bool {
+    name == "minecraft:air" || name == "minecraft:cave_air" || name == "minecraft:void_air"
+}
+
+impl DecoLevel for OverlayLevel<'_> {
+    fn min_y(&self) -> i32 { self.inner.min_y() }
+    fn max_y(&self) -> i32 { self.inner.max_y() }
+    fn height(&self, ty: HeightmapTy, x: i32, z: i32) -> i32 { self.inner.height(ty, x, z) }
+    fn state(&self, pos: BlockPos) -> u32 { self.inner.state(pos) }
+    fn fluid(&self, pos: BlockPos) -> u32 { self.inner.fluid(pos) }
+    fn biome_has_feature(&self, pos: BlockPos, feature: u32) -> bool {
+        self.inner.biome_has_feature(pos, feature)
+    }
+    fn can_survive(&self, state: &str, pos: BlockPos) -> bool {
+        self.inner.can_survive(state, pos)
+    }
+    fn is_air(&self, pos: BlockPos) -> bool {
+        if let Some(st) = self.ov.borrow().get(&(pos.x, pos.y, pos.z)) {
+            return is_air_name(state_block_name(st));
+        }
+        self.inner.is_air(pos)
+    }
+    fn is_replaceable(&self, pos: BlockPos) -> bool {
+        if self.ov.borrow().contains_key(&(pos.x, pos.y, pos.z)) {
+            // feature-written states (disks/patches/ore) are not replaceable
+            return false;
+        }
+        self.inner.is_replaceable(pos)
+    }
+    fn is_solid(&self, pos: BlockPos) -> bool {
+        if let Some(st) = self.ov.borrow().get(&(pos.x, pos.y, pos.z)) {
+            return self.inner.name_is_solid(state_block_name(st));
+        }
+        self.inner.is_solid(pos)
+    }
+    fn has_sturdy_face(&self, pos: BlockPos, dir: u8) -> bool {
+        self.inner.has_sturdy_face(pos, dir)
+    }
+    fn is_outside_build_height(&self, y: i32) -> bool {
+        self.inner.is_outside_build_height(y)
+    }
+}
+
+impl DecoLevelExt for OverlayLevel<'_> {
+    fn state_is(&self, pos: BlockPos, ids: &[String]) -> bool {
+        if let Some(st) = self.ov.borrow().get(&(pos.x, pos.y, pos.z)) {
+            // BlockState.is(Block) ignores properties
+            let name = state_block_name(st);
+            return ids.iter().any(|i| i == name);
+        }
+        self.inner.state_is(pos, ids)
+    }
+    fn fluid_is(&self, pos: BlockPos, ids: &[String]) -> bool {
+        if self.ov.borrow().contains_key(&(pos.x, pos.y, pos.z)) {
+            return false; // feature writes are never fluids
+        }
+        self.inner.fluid_is(pos, ids)
+    }
+    fn tag_is(&self, pos: BlockPos, tag: &str) -> bool {
+        // overlay entries cannot be tag-tested natively; written states in
+        // current features never match the queried tags — delegate (stale)
+        self.inner.tag_is(pos, tag)
+    }
+    fn name_is_solid(&self, name: &str) -> bool { self.inner.name_is_solid(name) }
+    fn write_overlay(&self, pos: BlockPos, state: &str) {
+        self.ov.borrow_mut().insert((pos.x, pos.y, pos.z), state.to_string());
+    }
+    fn read_overlay(&self, pos: BlockPos) -> Option<String> {
+        self.ov.borrow().get(&(pos.x, pos.y, pos.z)).cloned()
+    }
+    fn state_name(&self, pos: BlockPos) -> String {
+        if let Some(st) = self.ov.borrow().get(&(pos.x, pos.y, pos.z)) {
+            return st.clone();
+        }
+        self.inner.state_name(pos)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +397,9 @@ pub fn expand_deco(
     top_uid: u32,
 ) {
     if idx == mods.len() {
+        if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+            eprintln!("[leaf] uid={top_uid} {} {} {}", pos.x, pos.y, pos.z);
+        }
         leaf(pos, rng);
         return;
     }
@@ -276,6 +414,9 @@ pub fn expand_deco(
         }
         Mod::Heightmap { ty } => {
             let h = level.height(*ty, pos.x, pos.z);
+            if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+                eprintln!("[hm] {} {} {} ty={ty:?} h={h} -> {}", pos.x, pos.y, pos.z, h > level.min_y());
+            }
             if h > level.min_y() {
                 expand_deco(mods, idx + 1, level, rng, BlockPos::new(pos.x, h, pos.z), leaf, top_uid);
             }
@@ -283,7 +424,11 @@ pub fn expand_deco(
         Mod::BiomeFilter { .. } => {
             // vanilla BiomeFilter reads PlacementContext.topFeature — the placed
             // feature currently being placed (passed through the expansion)
-            if level.biome_has_feature(pos, top_uid) {
+            let ok = level.biome_has_feature(pos, top_uid);
+            if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+                eprintln!("[biomef] {} {} {} uid={top_uid} -> {ok}", pos.x, pos.y, pos.z);
+            }
+            if ok {
                 expand_deco(mods, idx + 1, level, rng, pos, leaf, top_uid);
             }
         }

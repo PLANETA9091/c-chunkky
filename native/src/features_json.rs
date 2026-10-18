@@ -11,10 +11,27 @@ use std::collections::HashMap;
 // Config model
 // ---------------------------------------------------------------------------
 
+/// RuleTest (structure templatesystem) as used by ore targets.
+#[derive(Clone, Debug)]
+pub enum RuleTest {
+    True,
+    BlockMatch(String),
+    TagMatch(String),
+    /// RandomBlockMatchTest: state.is(block) && nextFloat() < probability
+    RandomBlock { block: String, probability: f32 },
+}
+
 #[derive(Clone, Debug)]
 pub enum StateSrc {
     Simple(String),
     Weighted(Vec<(u32, String)>),
+    /// RuleBasedBlockStateProvider: first matching rule wins, else fallback.
+    /// Rules are (if_true predicate, then provider); getState draws RNG only
+    /// through the picked provider (weighted/rotated/noise leaves).
+    RuleBased {
+        fallback: Box<StateSrc>,
+        rules: Vec<(BlockPredicate, StateSrc)>,
+    },
     Unsupported(&'static str),
 }
 
@@ -28,6 +45,18 @@ pub enum FeatureCfg {
     ReplaceBlock {
         targets: Vec<(BlockPredicate, StateSrc)>,
     },
+    /// minecraft:ore — BulkSectionAccess writes (raw, no heightmap updates)
+    Ore {
+        discard: f32,
+        size: i32,
+        targets: Vec<(RuleTest, String)>,
+    },
+    /// minecraft:scattered_ore — region setBlock flags=2
+    ScatteredOre {
+        discard: f32,
+        size: i32,
+        targets: Vec<(RuleTest, String)>,
+    },
     RandomSelector {
         entries: Vec<(f32, String)>,
         default: String,
@@ -39,6 +68,25 @@ pub enum FeatureCfg {
         chance: f32,
         if_true: String,
         if_false: String,
+    },
+    /// minecraft:random_patch — 2 draws per axis per try (X, Y, Z), inner
+    /// placed feature placed with the SAME rng stream (no reseed, vanilla).
+    /// `inner` = synthetic registry id registered at decode time.
+    RandomPatch {
+        tries: i32,
+        xz_spread: i32,
+        y_spread: i32,
+        inner: String,
+    },
+    /// minecraft:disk — radius IntProvider sampled ONCE; x-outer/z-inner
+    /// column scan with dx²+dz²<=r² mask; per-column top-down target test;
+    /// RuleBased provider per placed block; markAboveForPostProcessing on
+    /// the first hit of each consecutive run.
+    Disk {
+        provider: StateSrc,
+        target: BlockPredicate,
+        radius: IP,
+        half_height: i32,
     },
     Unsupported(&'static str),
 }
@@ -98,7 +146,9 @@ fn decode_height(j: &Json) -> Option<HP> {
         "minecraft:trapezoid" => {
             let lo = decode_anchor_val(j.get("min_inclusive")?)?;
             let hi = decode_anchor_val(j.get("max_inclusive")?)?;
-            Some(HP::Trapezoid { lo, hi, plateau: -1 })
+            // vanilla default plateau = 0 (triangle)
+            let plateau = j.get("plateau").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            Some(HP::Trapezoid { lo, hi, plateau })
         }
         _ => None,
     }
@@ -130,6 +180,21 @@ fn decode_anchor_val(j: &Json) -> Option<i32> {
 }
 
 fn decode_state_provider(j: &Json) -> Option<StateSrc> {
+    // RuleBasedBlockStateProvider wrapper: {"fallback": provider, "rules":
+    // [{"if_true": predicate, "then": provider}]} (no "type" key). Only used
+    // by disk features today; a wrapper with empty rules == its fallback.
+    if j.get("fallback").is_some() || j.get("rules").is_some() {
+        let fb = decode_state_provider(j.get("fallback")?)?;
+        let mut rules = Vec::new();
+        if let Some(arr) = j.get("rules").and_then(|v| v.as_arr()) {
+            for e in arr {
+                let pred = decode_predicate(e.get("if_true")?)?;
+                let then = decode_state_provider(e.get("then")?)?;
+                rules.push((pred, then));
+            }
+        }
+        return Some(StateSrc::RuleBased { fallback: Box::new(fb), rules });
+    }
     let t = j.get("type")?.as_str()?;
     match t {
         "minecraft:simple_state_provider" => {
@@ -177,30 +242,32 @@ pub fn state_string(j: &Json) -> Option<String> {
     Some(name.to_string())
 }
 
-/// RuleTest codec (replace_single_block targets): block_match / tag_match /
-/// random_block_match / blockstate_match / always_true. Tag tests need the
-/// JVM tag registry -> Unsupported at F1.
-fn decode_rule_test(j: &Json) -> Option<BlockPredicate> {
+/// RuleTest codec (ore targets + replace_single_block targets):
+/// always_true / block_match / tag_match / random_block_match /
+/// random_blockstate_match / blockstate_match.
+fn decode_rule_test(j: &Json) -> Option<RuleTest> {
     let t = j.get("predicate_type").or_else(|| j.get("type"))?.as_str()?;
     Some(match t {
-        "minecraft:always_true" => BlockPredicate::True,
-        "minecraft:block_match" => {
-            let b = j.get("block")?.as_str()?;
-            BlockPredicate::MatchingBlocks(vec![b.to_string()])
-        }
-        "minecraft:random_block_match" => {
-            let b = j.get("block")?.as_str()?;
-            let p = j.get("probability")?.as_f64()?;
-            // probability 1.0 == always; other probabilities need RNG in the
-            // predicate path (vanilla draws nextFloat per position) -> F3 scope
-            if p >= 1.0 {
-                BlockPredicate::MatchingBlocks(vec![b.to_string()])
-            } else {
-                return None;
-            }
-        }
+        "minecraft:always_true" => RuleTest::True,
+        "minecraft:block_match" => RuleTest::BlockMatch(j.get("block")?.as_str()?.to_string()),
+        "minecraft:tag_match" => RuleTest::TagMatch(j.get("tag")?.as_str()?.to_string()),
+        "minecraft:random_block_match" => RuleTest::RandomBlock {
+            block: j.get("block")?.as_str()?.to_string(),
+            probability: j.get("probability")?.as_f64()? as f32,
+        },
         _ => return None,
     })
+}
+
+fn decode_offset(j: &Json) -> (i32, i32, i32) {
+    match j.get("offset").and_then(|v| v.as_arr()) {
+        Some(a) if a.len() == 3 => (
+            a[0].as_i64().unwrap_or(0) as i32,
+            a[1].as_i64().unwrap_or(0) as i32,
+            a[2].as_i64().unwrap_or(0) as i32,
+        ),
+        _ => (0, 0, 0),
+    }
 }
 
 fn decode_predicate(j: &Json) -> Option<BlockPredicate> {
@@ -225,18 +292,27 @@ fn decode_predicate(j: &Json) -> Option<BlockPredicate> {
         }
         "minecraft:not" => BlockPredicate::Not(Box::new(decode_predicate(j.get("predicate")?)?)),
         "minecraft:matching_blocks" => {
+            // "blocks" may be a single string or a list (ExtraCodecs fast paths)
             let mut v = Vec::new();
-            for e in j.get("blocks")?.as_arr()? {
-                v.push(state_string(e)?);
+            if let Some(s) = j.get("blocks").and_then(|x| x.as_str()) {
+                v.push(s.to_string());
+            } else {
+                for e in j.get("blocks")?.as_arr()? {
+                    v.push(state_string(e)?);
+                }
             }
-            BlockPredicate::MatchingBlocks(v)
+            BlockPredicate::MatchingBlocks { ids: v, off: decode_offset(j) }
         }
         "minecraft:matching_fluids" => {
             let mut v = Vec::new();
-            for e in j.get("fluids")?.as_arr()? {
-                v.push(state_string(e)?);
+            if let Some(s) = j.get("fluids").and_then(|x| x.as_str()) {
+                v.push(s.to_string());
+            } else {
+                for e in j.get("fluids")?.as_arr()? {
+                    v.push(state_string(e)?);
+                }
             }
-            BlockPredicate::MatchingFluids(v)
+            BlockPredicate::MatchingFluids { ids: v, off: decode_offset(j) }
         }
         "minecraft:replaceable" => BlockPredicate::Replaceable,
         "minecraft:solid" => BlockPredicate::Solid,
@@ -354,7 +430,7 @@ pub fn decode_placement_modifier(j: &Json) -> Mod {
     }
 }
 
-pub fn decode_configured_feature(j: &Json) -> FeatureCfg {
+pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry) -> FeatureCfg {
     let t = match j.get("type").and_then(|v| v.as_str()) {
         Some(t) => t,
         None => return FeatureCfg::Unsupported("cf:no-type"),
@@ -380,7 +456,11 @@ pub fn decode_configured_feature(j: &Json) -> FeatureCfg {
                 Some(arr) => {
                     for e in arr {
                         let pred = match e.get("target").map(decode_rule_test) {
-                            Some(Some(p)) => p,
+                            Some(Some(rt)) => match rt {
+                                RuleTest::True => BlockPredicate::True,
+                                RuleTest::BlockMatch(b) => BlockPredicate::MatchingBlocks { ids: vec![b], off: (0, 0, 0) },
+                                _ => return FeatureCfg::Unsupported("replace-target"),
+                            },
                             _ => return FeatureCfg::Unsupported("replace-target"),
                         };
                         // vanilla ReplaceBlockFeature: "state" is a PLAIN
@@ -442,8 +522,123 @@ pub fn decode_configured_feature(j: &Json) -> FeatureCfg {
                 _ => FeatureCfg::Unsupported("rbs"),
             }
         }
+        "minecraft:ore" | "minecraft:scattered_ore" => {
+            let Some(size) = cfg.get("size").and_then(|v| v.as_i64()) else {
+                return FeatureCfg::Unsupported("ore-size");
+            };
+            let discard = cfg
+                .get("discard_chance_on_air_exposure")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0) as f32;
+            let mut targets = Vec::new();
+            let mut bad = false;
+            if let Some(arr) = cfg.get("targets").and_then(|v| v.as_arr()) {
+                for e in arr {
+                    let rt = match e.get("target").map(decode_rule_test) {
+                        Some(Some(rt)) => rt,
+                        _ => {
+                            bad = true;
+                            break;
+                        }
+                    };
+                    match e.get("state").map(state_string) {
+                        Some(Some(st)) => targets.push((rt, st)),
+                        _ => {
+                            bad = true;
+                            break;
+                        }
+                    }
+                }
+            } else {
+                bad = true;
+            }
+            if bad {
+                return FeatureCfg::Unsupported("ore-targets");
+            }
+            if t == "minecraft:ore" {
+                FeatureCfg::Ore { discard, size: size as i32, targets }
+            } else {
+                FeatureCfg::ScatteredOre { discard, size: size as i32, targets }
+            }
+        }
+        "minecraft:random_patch" => {
+            let tries = cfg.get("tries").and_then(|v| v.as_i64()).unwrap_or(128) as i32;
+            let xz_spread = cfg.get("xz_spread").and_then(|v| v.as_i64()).unwrap_or(7) as i32;
+            let y_spread = cfg.get("y_spread").and_then(|v| v.as_i64()).unwrap_or(3) as i32;
+            let Some(fj) = cfg.get("feature") else {
+                return FeatureCfg::Unsupported("patch-feature");
+            };
+            // vanilla: the inner is a PLACED feature — a string ref or an
+            // inline {feature, placement} object. Inline objects are NOT in
+            // any biome's feature list (no FeatureSorter uid, BiomeFilter
+            // would fail in vanilla too — parity by construction).
+            let inner = format!("{name}$/inner");
+            if !decode_inline_placed(&inner, fj, reg) {
+                return FeatureCfg::Unsupported("patch-inner");
+            }
+            FeatureCfg::RandomPatch { tries, xz_spread, y_spread, inner }
+        }
+        "minecraft:disk" => {
+            let Some(Some(radius)) = cfg.get("radius").map(decode_int_provider) else {
+                return FeatureCfg::Unsupported("disk-radius");
+            };
+            let Some(half_height) = cfg.get("half_height").and_then(|v| v.as_i64()) else {
+                return FeatureCfg::Unsupported("disk-half");
+            };
+            let Some(Some(target)) = cfg.get("target").map(decode_predicate) else {
+                return FeatureCfg::Unsupported("disk-target");
+            };
+            if matches!(target, BlockPredicate::Unsupported(_)) {
+                return FeatureCfg::Unsupported("disk-target-unsupported");
+            }
+            let Some(Some(provider)) = cfg.get("state_provider").map(decode_state_provider) else {
+                return FeatureCfg::Unsupported("disk-provider");
+            };
+            FeatureCfg::Disk {
+                provider,
+                target,
+                radius,
+                half_height: half_height as i32,
+            }
+        }
         _ => FeatureCfg::Unsupported("cf-type"),
     }
+}
+
+/// Decode an inline placed-feature JSON, registering it (and any nested inline
+/// configured feature) into the registry under synthetic `$`-names. `fj` is a
+/// placed feature: a plain string ref, or {"feature": ref|inline-cfg,
+/// "placement": [...]}. Returns success.
+pub fn decode_inline_placed(name: &str, fj: &Json, reg: &mut FeatureRegistry) -> bool {
+    if let Some(s) = fj.as_str() {
+        reg.placed.insert(name.to_string(), PlacedDef { feature: s.to_string(), placement: Vec::new() });
+        return true;
+    }
+    let feature = match fj.get("feature") {
+        Some(o) if o.as_str().is_some() => o.as_str().unwrap().to_string(),
+        Some(o) if o.get("type").and_then(|v| v.as_str()).is_some() => {
+            let cfg_name = format!("{name}$/cfg");
+            let cfg = decode_configured_feature(&cfg_name, o, reg);
+            if matches!(cfg, FeatureCfg::Unsupported(_)) {
+                return false;
+            }
+            reg.configured.insert(cfg_name.clone(), cfg);
+            cfg_name
+        }
+        _ => return false,
+    };
+    let mut placement = Vec::new();
+    if let Some(arr) = fj.get("placement").and_then(|v| v.as_arr()) {
+        for e in arr {
+            let m = decode_placement_modifier(e);
+            if matches!(m, Mod::Unsupported(_)) {
+                return false;
+            }
+            placement.push(m);
+        }
+    }
+    reg.placed.insert(name.to_string(), PlacedDef { feature, placement });
+    true
 }
 
 pub fn decode_registry(
@@ -462,7 +657,7 @@ pub fn decode_registry(
         reg.total_configured += 1;
         match json::parse(&text) {
             Ok(j) => {
-                let cfg = decode_configured_feature(&j);
+                let cfg = decode_configured_feature(&name, &j, &mut reg);
                 if matches!(cfg, FeatureCfg::Unsupported(_)) {
                     reg.unsupported_configured += 1;
                 }

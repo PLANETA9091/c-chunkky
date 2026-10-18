@@ -1526,3 +1526,41 @@ Stage Summary:
 - Next: JNI wrappers (decoAddConfigured/decoAddPlaced/decoSeal/decoStates/decoSetIds/
   decoRunFeature), Java DecoSetup + applier, biome-features list decode (per-biome
   step/index protocol), probe bit-check, shouldGenerateDecorations=false.
+
+---
+## Session cont-49: F1 COMPLETE — probe bit-exact 0/6.29M, full native pipeline
+
+Work Log:
+- Recreated decomp for stage F pieces: FeatureSorter (+StepFeatureData: indexMapping =
+  Util.createIndexIdentityLookup), Graph.depthFirstSearch, CustomChunkGenerator (the flag
+  topology: shouldGenerateDecorations=false kills structures AND features; populators live
+  OUTSIDE the gate → populator = the native deco entry), CraftLimitedRegion (getBuffer=16
+  → full 3x3), WorldGenRegion.getHeight (+1 twice convention), PalettedContainerRO.getAll,
+  1.21.8 renames (getMinY/getMaxY, defaultBlockState, Holder.value, Registry.get→Optional<
+  Holder.Reference>, BuiltInRegistries.BIOME GONE → registryAccess().lookupOrThrow).
+- features_master.rs: FeatureSorter port (globalId first-appearance over possibleBiomes
+  order, per-biome forward chains, DFS post-order reverse), chunk_plan, run_feature_master,
+  decoration_seed, DecoCtx built from pack assets (biome feature lists + registry), 5 tests.
+- features_jni.rs: JniLevel upcall bridge (height/stateIs/fluidIs/isReplaceable/isSolid/
+  hasSturdyFace/wouldSurvive/biomeHasFeature/outsideBuildHeight) + decoStates/decoPlan/
+  decoChunkPlan/decoRunFeature/decoDecoSeed exports. Call*MethodA (varargs slice = JVM crash).
+- DecoDriver.java (NMS companion): populator master loop, setBlock(pos,state,2)+scheduleTick,
+  3x3 biome union via section palettes, state parser, first-call diagnostics.
+- CRUS_NATIVE_DECO=1 opt-in (decorations=false kills structures too — dptt stays vanilla).
+- Fix chain to bit-exactness (each caught by probe/RotRef/dumps, see commit 0b2398a):
+  lazy feature-body pull (leaf callback — THE stream fix), RotatedBlockProvider nextInt(3),
+  BiomeFilter topFeature uid, 4 JSON decoder bugs, rule_test decode, paper: bedrock
+  condition (native surface now covers vanilla overworld rules!), JSON bool parse
+  (add_surface_depth/add_stone_depth — vanilla-rule-wide divergence), decoPlan array type.
+- RotRef.java oracle: hand-stream [square x, square z, height, axis]x3 == vanilla world's
+  bone positions bit-exact; f1dbg for local replay + registry dumps.
+- Probe numbers: vanilla-lane A (pack loaded) vs native B: 1.72% → 0.068% → 0.154% →
+  0.005% → 0.000% (0/6291456, HEIGHTMAP 0/16384, 64 chunks).
+
+Stage Summary:
+- F1 SHIPPED: native decorations engine bit-exact end-to-end on the probe (noise+biomes+
+  surface+deco all native). 32/32 tests. Commits 347d255 + 0b2398a pushed.
+- Next (F2): ore feature (1675 refs — pools/size/discard/vein RNG), random_patch (1228),
+  disk (590); then probe pack v2 for ore/disk; dptt flip needs structures story.
+- Ops cost: decoRunFeature upcalls are per-query JNI — batch/snapshot the 3x3 region
+  natively for the perf pass (ops already batched 5xi32).

@@ -15,6 +15,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainerRO;
 import net.minecraft.world.level.levelgen.Heightmap;
 import org.bukkit.World;
@@ -215,6 +216,13 @@ public final class DecoDriver extends BlockPopulator {
         int stateIdx = ops[o + 3];
         int flags = ops[o + 4];
         String[] states = STATES;
+        if ((flags & 32) != 0) {
+            // FLAG_POSTPROC: vanilla markAboveForPostProcessing (DiskFeature)
+            // — chunk-level postprocessing mark, no block write.
+            ChunkAccess ch = reg.getChunk((ox + rx) >> 4, (oz + rz) >> 4);
+            ch.markPosForPostprocessing(new BlockPos(ox + rx, y, oz + rz));
+            return;
+        }
         if (stateIdx < 0 || stateIdx >= states.length) {
             return;
         }
@@ -231,6 +239,19 @@ public final class DecoDriver extends BlockPopulator {
             }
         }
         BlockPos pos = new BlockPos(ox + rx, y, oz + rz);
+        if ((flags & 16) != 0) {
+            // FLAG_RAW: vanilla BulkSectionAccess write (OreFeature) — section-
+            // level setBlockState(state, false): NO heightmap update, no
+            // postprocessing marks, no block events.
+            ChunkAccess ch = reg.getChunk((ox + rx) >> 4, (oz + rz) >> 4);
+            int si = reg.getSectionIndex(y);
+            if (si < 0 || si >= ch.getSectionsCount()) {
+                return;
+            }
+            LevelChunkSection sec = ch.getSection(si);
+            sec.setBlockState((ox + rx) & 15, y & 15, (oz + rz) & 15, st, false);
+            return;
+        }
         reg.setBlock(pos, st, 2);
         if ((flags & 1) != 0) { // FLAG_TICK
             reg.scheduleTick(pos, st.getBlock(), 0);
@@ -349,6 +370,31 @@ public final class DecoDriver extends BlockPopulator {
             }
         }
         return false;
+    }
+
+    /** OreFeature isAdjacentToAir: state.isAir() at pos. */
+    public boolean isAir(int x, int y, int z) {
+        return reg.getBlockState(new BlockPos(x, y, z)).isAir();
+    }
+
+    /** OverlayLevel: solidity of a block NAME (state string) written earlier
+     *  in the same feature run — cached by the native side. */
+    public boolean nameIsSolid(String name) {
+        BlockState st = state(name);
+        return st != null && st.isSolid();
+    }
+
+    /** RuleTest.tag_match: state.is(TagKey.create(BLOCK, tag)). */
+    public boolean tagIs(int x, int y, int z, String tag) {
+        BlockState st = reg.getBlockState(new BlockPos(x, y, z));
+        return st.is(net.minecraft.tags.TagKey.create(net.minecraft.core.registries.Registries.BLOCK,
+                ResourceLocation.parse(tag)));
+    }
+
+    /** Debug upcall: block registry key at pos (draw-trace diagnostics). */
+    public String stateName(int x, int y, int z) {
+        BlockState st = reg.getBlockState(new BlockPos(x, y, z));
+        return BuiltInRegistries.BLOCK.getKey(st.getBlock()).toString();
     }
 
     public boolean isReplaceable(int x, int y, int z) {

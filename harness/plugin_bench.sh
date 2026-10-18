@@ -56,6 +56,13 @@ cp "$JAR" "$SRV/plugins/CrusstyGen.jar"
 echo "--- deployed.md5 ---"; cat "$SRV/deployed.md5"
 
 # --- config -----------------------------------------------------------------
+# measured region base chunk (8x8): CRUS_REGION_MIN moves the region away from
+# the boot-time spawn pregen (its deco order differs between the reference and
+# native lanes). Default -4 = the historical 8x8 around origin.
+X0="${CRUS_REGION_MIN:--6}"
+X1=$((X0 + 11))
+REGION_TAG="region\\[$X0\\.\\.$X1,$X0\\.\\.$X1\\]"
+
 # generator wiring (bukkit.yml applies at world creation)
 python3 - "$WORLD" <<'PY'
 import sys
@@ -65,6 +72,8 @@ open("server/bukkit.yml", "w").write(content)
 print("server/bukkit.yml written:")
 print(content)
 PY
+
+# --- boot -------------------------------------------------------------------
 # world + seed (+ nether off: saves boot/pregen time, judge is overworld-only)
 sed -i "s/^level-name=.*/level-name=$WORLD/; s/^level-seed=.*/level-seed=$SEED/; s/^allow-nether=.*/allow-nether=false/" "$SRV/server.properties"
 grep -qE "^allow-nether=false" "$SRV/server.properties" || echo "allow-nether=false" >> "$SRV/server.properties"
@@ -98,7 +107,7 @@ export CRUS_PROFILE="${CRUS_PROFILE:-1}"
 # hard cleanup: a stale server (e.g. from the oracle step) holding RCON port
 # 25575 silently steals judge rcon traffic — kill everything first.
 bash harness/server_down.sh >/dev/null 2>&1 || true
-pkill -9 -f 'paper\.jar' 2>/dev/null || true
+pkill -9 -f 'java .*-jar paper\.jar' 2>/dev/null || true
 sleep 3
 bash harness/server_up.sh
 SRVPID="$(cat "$SRV/server.pid")"
@@ -136,8 +145,8 @@ T0=$(date +%s%N)
 EXPECT=0
 STALL=0
 RETRY_MAX=4
-for cz in $(seq -4 3); do
-  for cx in $(seq -4 3); do
+for cz in $(seq $X0 $X1); do
+  for cx in $(seq $X0 $X1); do
     EXPECT=$((EXPECT + 1))
     loaded_ok=0
     for attempt in $(seq 1 $RETRY_MAX); do
@@ -146,7 +155,7 @@ for cz in $(seq -4 3); do
         # parse the counter AFTER '=': the naive [0-9]* match returned "4"
         # (the first number inside "[-4..3,-4..3]") — the loop then waited
         # forever on chunk #5. [0-9]+$ grabs the trailing counter only.
-        LOADED=$(rcon "crusstatus" | grep -m1 -o "region\[-4\.\.3,-4\.\.3\]=[0-9]*" | grep -oE "[0-9]+$" || true)
+        LOADED=$(rcon "crusstatus" | grep -m1 -o "${REGION_TAG}=[0-9]*" | grep -oE "[0-9]+$" || true)
         if [ "${LOADED:-0}" -ge "$EXPECT" ]; then loaded_ok=1; STALL=0; break; fi
         if [ "$((i % 15))" -eq 0 ]; then
           echo "[pregen stall] chunk $cx $cz (attempt $attempt): wait ${i}s, loaded=${LOADED:-?}/$EXPECT"
@@ -190,7 +199,7 @@ rcon "crusgenstats" | tee "reference/plugin_stats_$WORLD.txt" || true
 
 # --- dump plugin world ------------------------------------------------------
 mkdir -p "$OUT_DIR"
-rcon "crusstydumpregion -4 -4 3 3 $OUT_DIR chunk" | tail -2
+rcon "crusstydumpregion $X0 $X0 $X1 $X1 $OUT_DIR chunk" | tail -2
 ls "$OUT_DIR" | wc -l
 
 # --- shutdown ---------------------------------------------------------------

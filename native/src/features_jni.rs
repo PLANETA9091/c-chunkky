@@ -36,6 +36,10 @@ use jni_sys::{jint, jlong, jobject, jobjectArray};
 // ---------------------------------------------------------------------------
 
 struct BridgeMids {
+    is_air: jni_sys::jmethodID,
+    tag_is: jni_sys::jmethodID,
+    state_name: jni_sys::jmethodID,
+    name_is_solid: jni_sys::jmethodID,
     height: jni_sys::jmethodID,
     state_is: jni_sys::jmethodID,
     fluid_is: jni_sys::jmethodID,
@@ -86,6 +90,10 @@ impl<'a> JniLevel<'a> {
                 ((*tbl).v1_1.GetMethodID)(env, class, n.as_ptr(), s.as_ptr())
             };
             let mids = BridgeMids {
+                is_air: mid("isAir", "(III)Z"),
+                tag_is: mid("tagIs", "(IIILjava/lang/String;)Z"),
+                state_name: mid("stateName", "(III)Ljava/lang/String;"),
+                name_is_solid: mid("nameIsSolid", "(Ljava/lang/String;)Z"),
                 height: mid("height", "(III)I"),
                 state_is: mid("stateIs", "(III[Ljava/lang/String;)Z"),
                 fluid_is: mid("fluidIs", "(III[Ljava/lang/String;)Z"),
@@ -97,6 +105,10 @@ impl<'a> JniLevel<'a> {
                 outside_build_height: mid("outsideBuildHeight", "(I)Z"),
             };
             let ok = [
+                mids.is_air,
+                mids.tag_is,
+                mids.state_name,
+                mids.name_is_solid,
                 mids.height,
                 mids.state_is,
                 mids.fluid_is,
@@ -244,6 +256,12 @@ impl<'a> DecoLevel for JniLevel<'a> {
             ],
         )
     }
+    fn is_air(&self, pos: BlockPos) -> bool {
+        self.z_call(
+            self.mids.is_air,
+            &[Self::val_i(pos.x), Self::val_i(pos.y), Self::val_i(pos.z)],
+        )
+    }
     fn is_replaceable(&self, pos: BlockPos) -> bool {
         self.z_call(
             self.mids.is_replaceable,
@@ -273,6 +291,66 @@ impl<'a> DecoLevel for JniLevel<'a> {
 }
 
 impl<'a> DecoLevelExt for JniLevel<'a> {
+    /// Debug upcall: block registry key at pos (trace-only).
+    fn state_name(&self, pos: BlockPos) -> String {
+        let tbl = unsafe { *self.env };
+        unsafe {
+            let ivals = [
+                Self::val_i(pos.x),
+                Self::val_i(pos.y),
+                Self::val_i(pos.z),
+            ];
+            let r = ((*tbl).v1_1.CallObjectMethodA)(
+                self.env,
+                self.obj,
+                self.mids.state_name,
+                ivals.as_ptr(),
+            );
+            if r.is_null() {
+                return String::from("?");
+            }
+            let cstr = ((*tbl).v1_1.GetStringUTFChars)(self.env, r as jni_sys::jstring, std::ptr::null_mut());
+            let s = if cstr.is_null() {
+                String::from("?")
+            } else {
+                std::ffi::CStr::from_ptr(cstr).to_string_lossy().into_owned()
+            };
+            if !cstr.is_null() {
+                ((*tbl).v1_1.ReleaseStringUTFChars)(self.env, r as jni_sys::jstring, cstr);
+            }
+            s
+        }
+    }
+    fn tag_is(&self, pos: BlockPos, tag: &str) -> bool {
+        let Some(js) = self.new_jstring(tag) else { return false };
+        self.z_call(
+            self.mids.tag_is,
+            &[
+                Self::val_i(pos.x),
+                Self::val_i(pos.y),
+                Self::val_i(pos.z),
+                Self::val_l(js),
+            ],
+        )
+    }
+    fn name_is_solid(&self, name: &str) -> bool {
+        // solidity of a written state's block name (overlay reads); cached per
+        // name — the JVM parses the state string and asks BlockState.isSolid
+        thread_local! {
+            static CACHE: std::cell::RefCell<std::collections::HashMap<String, bool>> =
+                std::cell::RefCell::new(std::collections::HashMap::new());
+        }
+        if let Some(v) = CACHE.with(|c| c.borrow().get(name).copied()) {
+            return v;
+        }
+        let Some(js) = self.new_jstring(name) else { return false };
+        let v = self.z_call(
+            self.mids.name_is_solid,
+            &[Self::val_l(js)],
+        );
+        CACHE.with(|c| c.borrow_mut().insert(name.to_string(), v));
+        v
+    }
     fn state_is(&self, pos: BlockPos, ids: &[String]) -> bool {
         let Some(arr) = self.new_string_array(ids) else { return false };
         self.z_call(

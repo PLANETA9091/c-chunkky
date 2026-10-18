@@ -24,7 +24,12 @@
   [],
   [],
   [
-   "crussty_f1:ore_replace"
+   "crussty_f1:ore_replace",
+   "crussty_f1:ore_iron",
+   "crussty_f1:ore_gold",
+   "crussty_f1:ore_scattered",
+   "crussty_f1:disk_a",
+   "crussty_f1:disk_rule"
   ],
   [],
   [],
@@ -39,7 +44,11 @@
    "crussty_f1:pred_gate",
    "crussty_f1:rarity_gate"
   ],
-  []
+  [
+   "crussty_f1:patch_simple",
+   "crussty_f1:patch_weighted",
+   "crussty_f1:patch_ref"
+  ]
  ],
  "carvers": []
 }

@@ -63,6 +63,12 @@ fn index_states_cfg(
                 index_state_src(src, states, idx);
             }
         }
+        FC::Ore { targets, .. } | FC::ScatteredOre { targets, .. } => {
+            for (_, st) in targets {
+                note(st, states, idx);
+            }
+        }
+        FC::Disk { provider, .. } => index_state_src(provider, states, idx),
         _ => {}
     }
 }
@@ -78,6 +84,12 @@ fn index_state_src(
         SS::Weighted(list) => {
             for (_, s) in list {
                 note(s, states, idx);
+            }
+        }
+        SS::RuleBased { fallback, rules } => {
+            index_state_src(fallback, states, idx);
+            for (_, then) in rules {
+                index_state_src(then, states, idx);
             }
         }
         SS::Unsupported(_) => {}
@@ -99,9 +111,12 @@ pub fn run_feature(
     let mut rng = WorldgenRandom::new();
     let deco = rng.set_decoration_seed(seed, chunk_block_x, chunk_block_z);
     rng.set_feature_seed(deco, index, step);
+    // overlay: intra-feature reads must see the feature's own writes (vanilla
+    // setBlock is live; ops flush to the region after the feature returns)
+    let overlay = crate::features_deco::OverlayLevel::new(level);
     let ctx = PlaceCtx {
         reg: &state.reg,
-        level,
+        level: &overlay,
         center_x: chunk_block_x,
         center_z: chunk_block_z,
         state_index: &state.state_index,

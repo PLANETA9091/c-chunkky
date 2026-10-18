@@ -37,12 +37,15 @@ public final class ProbePlugin extends JavaPlugin {
 
     private static final int MAGIC = 0x46534243; // bytes C,R,S,F in LE order
     private static final int VERSION = 1;
-    private static final int REGION_MIN = -4;    // test region: 8x8 chunks around origin
-    private static final int REGION_MAX = 3;
+    // status/dump region: 12x12 chunks; CRUS_REGION_MIN lets the f1 probe move
+    // the measured region away from spawn AND cover every margin chunk whose
+    // features can spill into the compared inner 8x8 (see f1_probe.sh).
+    private static final int REGION_MIN = Integer.getInteger("crus.region.min", -6);
+    private static final int REGION_MAX = REGION_MIN + 11;
 
     @Override
     public void onEnable() {
-        getLogger().info("CrusstyProbe enabled — vanilla reference dumper");
+        getLogger().info("CrusstyProbe enabled — vanilla reference dumper (region " + REGION_MIN + ".." + REGION_MAX + ")");
     }
 
     @Override
@@ -117,7 +120,7 @@ public final class ProbePlugin extends JavaPlugin {
                  .append(" f(0,0)=").append(w.isChunkForceLoaded(0, 0))
                  .append(" l(0,-4)=").append(w.isChunkLoaded(0, -4));
             sender.sendMessage(w.getName() + ": loaded=" + total
-                    + " region[-4..3,-4..3]=" + region + "/64"
+                    + " region[" + REGION_MIN + ".." + REGION_MAX + "," + REGION_MIN + ".." + REGION_MAX + "]=" + region + "/64"
                     + " forced=" + forced
                     + flags
                     + " srvpid=" + ProcessHandle.current().pid());

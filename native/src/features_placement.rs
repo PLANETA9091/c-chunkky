@@ -32,17 +32,14 @@ pub enum IntProvider {
 }
 
 impl IntProvider {
+    /// vanilla UniformInt.sample = Mth.randomBetweenInclusive(min, max):
+    /// min + nextInt(max-min+1) — ALWAYS draws (even min==max -> nextInt(1)
+    /// consumes next(31) and returns 0).
     #[inline]
     pub fn sample(&self, rng: &mut WorldgenRandom) -> i32 {
         match *self {
             IntProvider::Constant(v) => v,
-            IntProvider::Uniform { lo, hi } => {
-                if hi <= lo {
-                    lo
-                } else {
-                    rng.next_int_bound(hi - lo + 1) + lo
-                }
-            }
+            IntProvider::Uniform { lo, hi } => rng.next_int_bound((hi - lo + 1).max(1)) + lo,
         }
     }
 }
@@ -67,7 +64,9 @@ impl HeightProvider {
             HeightProvider::AboveBottom(v) => min_y + v,
             HeightProvider::BelowTop(v) => min_y + gen_depth - 1 - v,
             HeightProvider::Uniform { lo, hi } => {
-                if lo > hi { lo } else { rng.next_int_bound(hi - lo + 1) + lo }
+                // vanilla UniformHeight: randomBetweenInclusive(min, max) —
+                // no lo==hi early exit, nextInt(1) still draws
+                rng.next_int_bound((hi - lo + 1).max(1)) + lo
             }
             HeightProvider::Trapezoid { lo, hi, plateau } => {
                 let a = lo;
@@ -243,9 +242,10 @@ mod tests {
         let before = rng.count();
         assert_eq!(IntProvider::Constant(-7).sample(&mut rng), -7);
         assert_eq!(rng.count(), before, "ConstantInt must not burn RNG");
-        // UniformHeight empty range: returns min without consuming RNG (vanilla warn path)
+        // UniformHeight empty range: vanilla has no guard (randomBetweenInclusive
+        // -> nextInt(1) draw returning min); invalid packs would throw in vanilla
         assert_eq!(HeightProvider::Uniform { lo: 10, hi: 4 }.sample(&mut rng, 0, 384), 10);
-        assert_eq!(rng.count(), before);
+        assert_eq!(rng.count(), before + 1, "nextInt(1) draw consumed even for empty range");
         // zero/negative count yields no positions
         let mods = [Modifier::Count(IntProvider::Uniform { lo: -2, hi: -1 })];
         let mut out = Vec::new();

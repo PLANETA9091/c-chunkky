@@ -3,7 +3,7 @@ seed=3257840388504953787  min_y=-64 height=384  sea_level=63
 datapacks: none
 method: single server invocation; wall-clock from 'forceload add -64 -64 63 63' until
   crusstatus reports 64/64 chunks of the region loaded (coarse; includes settle/poll
-  granularity of 2s); wall_ms=46198; ms/chunk=721
-dump: crusstydumpregion of the same region took 1607ms (not part of baseline)
+  granularity of 2s); wall_ms=46242; ms/chunk=722
+dump: crusstydumpregion of the same region took 1598ms (not part of baseline)
 note: chunks already present on disk (e.g. spawn overlap) load fast and lower the average
-date: 2026-10-18T08:57:25Z
+date: 2026-10-18T12:07:21Z
