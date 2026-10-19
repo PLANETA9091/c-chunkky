@@ -22,6 +22,16 @@ import net.minecraft.world.level.levelgen.RandomSupport;
 import net.minecraft.world.level.levelgen.XoroshiroRandomSource;
 import net.minecraft.world.level.levelgen.WorldgenRandom;
 import net.minecraft.world.level.levelgen.feature.ConfiguredFeature;
+import net.minecraft.world.level.levelgen.structure.BoundingBox;
+import net.minecraft.world.level.levelgen.structure.Structure;
+import net.minecraft.world.level.levelgen.structure.StructureStart;
+import net.minecraft.world.level.StructureManager;
+import net.minecraft.core.Registry;
+import net.minecraft.world.level.levelgen.GenerationStep;
+import net.minecraft.core.SectionPos;
+import net.minecraft.world.level.ChunkPos;
+import java.util.stream.Collectors;
+
 import net.minecraft.world.level.levelgen.placement.PlacedFeature;
 import net.minecraft.world.level.chunk.ChunkGenerator;
 import net.minecraft.world.level.LevelAccessor;
@@ -188,6 +198,7 @@ public final class DecoDriver extends BlockPopulator {
 
         int[] ops = new int[5 * 65536];
         int totalOps = 0;
+        runStructures(l, cx, cz);
         for (int k = 0; k < runs; k++) {
             int step = runsBuf[k * 2];
             int gid = runsBuf[k * 2 + 1];
@@ -254,6 +265,62 @@ public final class DecoDriver extends BlockPopulator {
         } catch (Throwable t) {
             LOG.warning("deco delegate failed for " + placedName + ": " + t);
         }
+    }
+
+    /**
+     * Vanilla structures portion of addVanillaDecorations (shouldGenerateDecorations
+     * = false kills structures too). Exact vanilla protocol: shared WorldgenRandom
+     * over the deco seed, per step: setFeatureSeed(l, i1, i) with i1 the LOCAL
+     * structure index (registry groupingBy order), startsForStructure ->
+     * placeInChunk(level, sm, generator, rng, writableArea, pos).
+     */
+    private void runStructures(long decoSeed, int cx, int cz) {
+        if (NMS_GEN == null || reg == null) {
+            return;
+        }
+        try {
+            Registry<Structure> structReg = reg.registryAccess().lookupOrThrow(Registries.STRUCTURE);
+            Map<Integer, List<Structure>> map = structReg.stream()
+                    .collect(Collectors.groupingBy(s -> s.step().ordinal()));
+            WorldgenRandom srng = new WorldgenRandom(
+                    new XoroshiroRandomSource(RandomSupport.generateUniqueSeed()));
+            SectionPos sp = SectionPos.of(new ChunkPos(cx, cz), reg.getMinSectionY());
+            // Paper: WorldGenRegion lacks structureManager(); build one over
+            // the region exactly like StructureManager.forWorldGenRegion does.
+            StructureManager sm = reg.getLevel().structureManager().forWorldGenRegion(reg);
+            if (!sm.shouldGenerateStructures()) {
+                return;
+            }
+            BoundingBox writable = writableArea();
+            int max = Math.max(GenerationStep.Decoration.values().length, PLAN.length);
+            for (int i = 0; i < max; i++) {
+                int i1 = 0;
+                for (Structure structure : map.getOrDefault(i, List.of())) {
+                    srng.setFeatureSeed(decoSeed, i1, i);
+                    try {
+                        reg.setCurrentlyGenerating(() -> structReg.getResourceKey(structure)
+                                .map(Object::toString).orElse(structure.toString()));
+                    } catch (Throwable ignored) {
+                        // diagnostics only
+                    }
+                    for (StructureStart ss : sm.startsForStructure(sp, structure)) {
+                        ss.placeInChunk(reg, sm, NMS_GEN, srng, writable, new ChunkPos(cx, cz));
+                    }
+                    i1++;
+                }
+            }
+        } catch (Throwable t) {
+            LOG.warning("deco structures failed (chunk " + cx + "," + cz + "): " + t);
+        }
+    }
+
+    /** vanilla ChunkGenerator.getWritableArea: the 3x3 chunk region box. */
+    private BoundingBox writableArea() {
+        ChunkPos pos = reg.getCenter();
+        int x = pos.getMinBlockX();
+        int z = pos.getMinBlockZ();
+        return new BoundingBox(x - 16, reg.getMinY(), z - 16,
+                x + 31, reg.getMinY() + reg.getHeight() - 1, z + 31);
     }
 
     private int PLAN_TOTAL() {
