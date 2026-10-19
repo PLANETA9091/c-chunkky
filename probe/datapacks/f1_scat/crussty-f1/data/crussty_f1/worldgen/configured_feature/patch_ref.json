@@ -1,0 +1,9 @@
+{
+ "type": "minecraft:random_patch",
+ "config": {
+  "tries": 8,
+  "xz_spread": 4,
+  "y_spread": 1,
+  "feature": "crussty_f1:rotated_nb"
+ }
+}

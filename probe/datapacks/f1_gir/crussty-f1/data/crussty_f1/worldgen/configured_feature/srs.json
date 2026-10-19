@@ -1,0 +1,9 @@
+{
+ "type": "minecraft:simple_random_selector",
+ "config": {
+  "features": [
+   "crussty_f1:sel_a",
+   "crussty_f1:sel_b"
+  ]
+ }
+}

@@ -434,8 +434,15 @@ fn place_ore(
         ctx.emit(ops, pos, state, flags);
     };
 
+    let vein_trace = vein_trace_on(ctx.center_x >> 4, ctx.center_z >> 4);
     if scattered {
         let n = rng.next_int_bound(size + 1);
+        if vein_trace {
+            eprintln!(
+                "[scat@{}] o=({},{},{}) n={n} size={size} discard={discard}",
+                ctx.center_x >> 4, origin.x, origin.y, origin.z
+            );
+        }
         for i in 0..n {
             let mag = i.min(7);
             // offsetTargetPos: 3 axes x (nextFloat - nextFloat) * mag, Math.round
@@ -446,6 +453,9 @@ fn place_ore(
             let dy = off(rng, mag);
             let dz = off(rng, mag);
             let pos = BlockPos::new(origin.x + dx, origin.y + dy, origin.z + dz);
+            if vein_trace {
+                eprintln!("[spos@{}] i={i} p=({},{},{}) mag={mag}", ctx.center_x >> 4, pos.x, pos.y, pos.z);
+            }
             let replaced = ctx.level.read_overlay(pos).is_some();
             for (rt, st) in targets {
                 let hit = if replaced {
@@ -495,13 +505,24 @@ fn place_ore(
 
     // early gate: any column in the box with ocean-floor height >= y0
     let mut ok = false;
+    let mut gate_h: i32 = i32::MIN;
     'outer: for ix in x0..=x0 + width {
         for iz in z0..=z0 + width {
-            if y0 <= ctx.level.height(crate::features_deco::HeightmapTy::OceanFloorWg, ix, iz) {
+            let h = ctx.level.height(crate::features_deco::HeightmapTy::OceanFloorWg, ix, iz);
+            if h > gate_h {
+                gate_h = h;
+            }
+            if y0 <= h {
                 ok = true;
                 break 'outer;
             }
         }
+    }
+    if vein_trace {
+        eprintln!(
+            "[vein@{}] o=({},{},{}) f={f:.9} box=({x0},{y0},{z0}) w={width} h={height} size={size} discard={discard} gate={ok} maxh={gate_h}",
+            ctx.center_x >> 4, origin.x, origin.y, origin.z
+        );
     }
     if std::env::var("CRUS_DRAW_TRACE").is_ok() {
         eprintln!("[gate] ox={} oy={} oz={} y0={y0} -> {ok}", origin.x, origin.y, origin.z);
@@ -548,13 +569,6 @@ fn place_ore(
     }
 
     let mut seen: std::collections::HashSet<(i32, i32, i32)> = std::collections::HashSet::new();
-    let vein_trace = std::env::var("CRUS_VEIN_TRACE").is_ok();
-    if vein_trace {
-        eprintln!(
-            "[vein@{}] o=({},{},{}) f={f:.9} box=({x0},{y0},{z0}) w={width} h={height} size={size} discard={discard}",
-            ctx.center_x >> 4, origin.x, origin.y, origin.z
-        );
-    }
     for (px, py, pz, rad) in &pts {
         let rad = *rad;
         if rad < 0.0 {
@@ -632,6 +646,28 @@ fn place_ore(
 #[inline]
 fn mth_lerp(t: f64, a: f64, b: f64) -> f64 {
     a + t * (b - a)
+}
+
+/// CRUS_VEIN_TRACE: empty value = trace every chunk; a comma list "cx:cz,..."
+/// = trace only veins whose owning chunk is in the list.
+fn vein_trace_on(cx: i32, cz: i32) -> bool {
+    static ON: std::sync::OnceLock<Option<Vec<(i32, i32)>>> = std::sync::OnceLock::new();
+    match ON.get_or_init(|| {
+        let v = std::env::var("CRUS_VEIN_TRACE").ok()?;
+        let v = v.trim();
+        if v.is_empty() {
+            return Some(Vec::new()); // empty list = "all"
+        }
+        let mut out = Vec::new();
+        for part in v.split(',') {
+            let (a, b) = part.trim().split_once(':')?;
+            out.push((a.trim().parse().ok()?, b.trim().parse().ok()?));
+        }
+        Some(out)
+    }) {
+        Some(list) => list.is_empty() || list.contains(&(cx, cz)),
+        None => false,
+    }
 }
 
 /// Mth.SIN table: SIN[i] = (float)Math.sin(i * 2PI / 65536);

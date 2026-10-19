@@ -551,6 +551,11 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
     let Some(level) = JniLevel::new(env, bridge, &d.uid_names, origin_y, max_y) else {
         return -1;
     };
+    // Intra-feature overlay: vanilla setBlock is live, our ops flush after the
+    // feature returns. Without this, scattered_ore re-visits of own writes see
+    // the RAW block (stone), consume an extra random_block match draw and
+    // cascade every later spos — the F2 probe's residual ore divergence.
+    let overlay = crate::features_deco::OverlayLevel::new(&level);
     let olen = ((*tbl).v1_1.GetArrayLength)(env, out as jni_sys::jarray) as usize;
     if olen < 5 {
         return -1;
@@ -562,7 +567,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
     let slice = std::slice::from_raw_parts_mut(ptr as *mut i32, olen);
     let n = run_feature_master(
         &d.state,
-        &level,
+        &overlay,
         deco_seed as i64,
         if paper_seed == -1 { None } else { Some(paper_seed as i64) },
         BlockPos::new(origin_x as i32, origin_y as i32, origin_z as i32),

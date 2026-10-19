@@ -182,10 +182,65 @@ fn is_air_name(name: &str) -> bool {
     name == "minecraft:air" || name == "minecraft:cave_air" || name == "minecraft:void_air"
 }
 
+/// blocksMotion() for the states our features write (vanilla heightmap
+/// MOTION_BLOCKING predicate is blocksMotion || fluid).
+#[inline]
+fn blocks_motion(name: &str) -> bool {
+    !matches!(
+        name,
+        "minecraft:poppy"
+            | "minecraft:oxeye_daisy"
+            | "minecraft:cornflower"
+            | "minecraft:lily_of_the_valley"
+            | "minecraft:dandelion"
+            | "minecraft:allium"
+            | "minecraft:azure_bluet"
+            | "minecraft:short_grass"
+            | "minecraft:fern"
+            | "minecraft:air"
+            | "minecraft:cave_air"
+            | "minecraft:void_air"
+    )
+}
+
+#[inline]
+fn is_fluid_name(name: &str) -> bool {
+    name == "minecraft:water" || name == "minecraft:lava"
+}
+
 impl DecoLevel for OverlayLevel<'_> {
     fn min_y(&self) -> i32 { self.inner.min_y() }
     fn max_y(&self) -> i32 { self.inner.max_y() }
-    fn height(&self, ty: HeightmapTy, x: i32, z: i32) -> i32 { self.inner.height(ty, x, z) }
+    fn height(&self, ty: HeightmapTy, x: i32, z: i32) -> i32 {
+        // Vanilla setBlock updates the chunk heightmaps LIVE, so a later
+        // feature's heightmap placement (e.g. rand_selector after the
+        // bone_block rotations) sees earlier same-run writes. Our ops flush
+        // only after the feature — rebuild the height from the base map plus
+        // the overlay entries of this column.
+        let base = self.inner.height(ty, x, z);
+        let mut h = base;
+        for ((ox, oy, oz), st) in self.ov.borrow().iter() {
+            if *ox != x || *oz != z {
+                continue;
+            }
+            let name = state_block_name(st);
+            let blocking = match ty {
+                HeightmapTy::WorldSurfaceWg | HeightmapTy::WorldSurface => {
+                    !is_air_name(name)
+                }
+                HeightmapTy::OceanFloorWg | HeightmapTy::OceanFloor => {
+                    !is_air_name(name) && !is_fluid_name(name)
+                }
+                HeightmapTy::MotionBlocking | HeightmapTy::MotionBlockingNoLeaves => {
+                    blocks_motion(name) || is_fluid_name(name)
+                }
+            };
+            if blocking && oy + 1 > h {
+                h = oy + 1;
+            }
+        }
+        h
+    }
     fn state(&self, pos: BlockPos) -> u32 { self.inner.state(pos) }
     fn fluid(&self, pos: BlockPos) -> u32 { self.inner.fluid(pos) }
     fn biome_has_feature(&self, pos: BlockPos, feature: u32) -> bool {
@@ -201,9 +256,24 @@ impl DecoLevel for OverlayLevel<'_> {
         self.inner.is_air(pos)
     }
     fn is_replaceable(&self, pos: BlockPos) -> bool {
-        if self.ov.borrow().contains_key(&(pos.x, pos.y, pos.z)) {
-            // feature-written states (disks/patches/ore) are not replaceable
-            return false;
+        if let Some(st) = self.ov.borrow().get(&(pos.x, pos.y, pos.z)) {
+            // BlockTags.REPLACEABLE for the states our features write: the
+            // small flowers ARE replaceable (a later patch try may overwrite
+            // an earlier flower), everything else (ore/bone/grass_block/
+            // andesite/tuff/disk material) is not.
+            let name = state_block_name(st);
+            return matches!(
+                name,
+                "poppy"
+                    | "oxeye_daisy"
+                    | "cornflower"
+                    | "lily_of_the_valley"
+                    | "dandelion"
+                    | "allium"
+                    | "azure_bluet"
+                    | "short_grass"
+                    | "fern"
+            );
         }
         self.inner.is_replaceable(pos)
     }
@@ -237,8 +307,21 @@ impl DecoLevelExt for OverlayLevel<'_> {
         self.inner.fluid_is(pos, ids)
     }
     fn tag_is(&self, pos: BlockPos, tag: &str) -> bool {
-        // overlay entries cannot be tag-tested natively; written states in
-        // current features never match the queried tags — delegate (stale)
+        // Overlay entries MUST be tag-tested against their own name, not the
+        // stale world block: ore_replace writes andesite/tuff, which DO match
+        // stone/deepslate_ore_replaceables, while our ore/flower/bone writes
+        // never match any queried tag. Delegating shifted the ore_gold
+        // discard-draw stream wherever an earlier write covered a candidate.
+        if let Some(st) = self.ov.borrow().get(&(pos.x, pos.y, pos.z)) {
+            let name = state_block_name(st);
+            return match tag {
+                "minecraft:stone_ore_replaceables" => {
+                    matches!(name, "stone" | "granite" | "diorite" | "andesite")
+                }
+                "minecraft:deepslate_ore_replaceables" => matches!(name, "deepslate" | "tuff"),
+                _ => false,
+            };
+        }
         self.inner.tag_is(pos, tag)
     }
     fn name_is_solid(&self, name: &str) -> bool { self.inner.name_is_solid(name) }
