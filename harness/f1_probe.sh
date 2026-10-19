@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 WORLD=f1probe
 SEED=3257840388504953787
-PACKS="$ROOT/probe/datapacks/f1"
+PACKS="${CRUS_PACK:-$ROOT/probe/datapacks/f1}"
 SRV="server"
 
 # Measured region base chunk. The harness forceloads a 12x12 region (base..

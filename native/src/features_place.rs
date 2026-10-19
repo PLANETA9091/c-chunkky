@@ -165,6 +165,18 @@ pub fn place_configured(
     let Some(cfg) = ctx.reg.configured.get(name) else {
         return false;
     };
+    // vanilla Feature.place(config, level, gen, random, origin):
+    // `return level.ensureCanWrite(origin) && this.place(...)` — the WHOLE
+    // feature body (incl. the state-provider draw) is skipped when the
+    // origin falls outside the 3x3 writeRadius. This is what eats exactly
+    // one draw (the rotated axis nextInt(3)) for patch-inner bones that
+    // land one past the region edge.
+    {
+        let (rx, rz) = ctx.rel(pos);
+        if !in_writable(rx as i32, rz as i32) {
+            return false;
+        }
+    }
     match cfg {
         FeatureCfg::NoOp => true,
         FeatureCfg::SimpleBlock { place, ticks } => {
@@ -458,8 +470,13 @@ fn place_ore(
     let size_f = size as f32;
     let f1: f32 = size_f / 8.0f32;
     let ceil: i32 = ((size_f / 16.0f32 * 2.0f32 + 1.0f32) / 2.0f32).ceil() as i32;
-    let sin_f = (f as f64).sin();
-    let cos_f = (f as f64).cos();
+    // vanilla: Math.sin((double)f) — HotSpot intrinsic; NOT Mth.sin (the
+    // 65536-table). The intrinsic differs from the system libm in the last
+    // ulp for ~0.3% of the f-domain -> floor() boundary flips -> the whole
+    // vein cloud shifts. features_math restores Java bits via a correction
+    // table over the finite f32-promoted input domain.
+    let sin_f = crate::features_math::java_sin(f as f64);
+    let cos_f = crate::features_math::java_cos(f as f64);
     let min_x = origin.x as f64 + sin_f * f1 as f64;
     let max_x = origin.x as f64 - sin_f * f1 as f64;
     let min_z = origin.z as f64 + cos_f * f1 as f64;
@@ -531,6 +548,13 @@ fn place_ore(
     }
 
     let mut seen: std::collections::HashSet<(i32, i32, i32)> = std::collections::HashSet::new();
+    let vein_trace = std::env::var("CRUS_VEIN_TRACE").is_ok();
+    if vein_trace {
+        eprintln!(
+            "[vein@{}] o=({},{},{}) f={f:.9} box=({x0},{y0},{z0}) w={width} h={height} size={size} discard={discard}",
+            ctx.center_x >> 4, origin.x, origin.y, origin.z
+        );
+    }
     for (px, py, pz, rad) in &pts {
         let rad = *rad;
         if rad < 0.0 {
@@ -572,9 +596,27 @@ fn place_ore(
                         continue;
                     }
                     for (rt, st) in targets {
-                        let hit = rule_test_matches(rt, ctx.level, pos, rng)
-                            && (should_skip_air_check(rng, discard)
-                                || !is_adjacent_to_air(ctx.level, pos));
+                        let tag_hit = rule_test_matches(rt, ctx.level, pos, rng);
+                        // vanilla short-circuit: the discard draw happens ONLY
+                        // when the target test matched
+                        let hit = tag_hit && {
+                            let skip = should_skip_air_check(rng, discard);
+                            let air = is_adjacent_to_air(ctx.level, pos);
+                            if vein_trace {
+                                eprintln!(
+                                    "O cand {} {} {} tag={} skip={} air={} w={}",
+                                    pos.x, pos.y, pos.z, tag_hit, skip, air,
+                                    if skip || !air { st.as_str() } else { "-" }
+                                );
+                            }
+                            skip || !air
+                        };
+                        if vein_trace && !tag_hit {
+                            eprintln!(
+                                "O cand {} {} {} tag=false w=-",
+                                pos.x, pos.y, pos.z
+                            );
+                        }
                         if hit {
                             emit(ctx, ops, pos, st, true);
                             break;
@@ -718,6 +760,43 @@ mod tests {
         let _ = BlockPredicate::True; // keep import used
         let _ = DM::Heightmap { ty: HeightmapTy::WorldSurface };
         let _ = HashMap::<String, usize>::new();
+    }
+
+    /// vanilla Feature.place gates the WHOLE body on ensureCanWrite(origin):
+    /// a configured feature whose origin is outside the 3x3 writeRadius is
+    /// skipped WITHOUT its state-provider draw (the rotated axis nextInt(3)
+    /// must not be consumed — this was the patch_ref bone divergence).
+    #[test]
+    fn leaf_gate_skips_provider_draw() {
+        let cfg = r#"{"type":"minecraft:simple_block","config":{"to_place":{"type":"minecraft:rotated_block_provider","state":{"Name":"minecraft:bone_block"}}}}"#;
+        let placed = r#"{"feature":"test:cfg","placement":[]}"#;
+        let reg = build_reg(cfg, placed);
+        let level = Mock { h: 64 };
+        // center (0,0): writable rel = [-16..31]. x=32 is one PAST the edge.
+        let ctx = PlaceCtx { reg: &reg, level: &level, center_x: 0, center_z: 0, state_index: &EMPTY_IDX, uid_index: &EMPTY_U32 };
+        let mut rng = WorldgenRandom::new();
+        rng.set_seed(4242);
+        let mut ops = Vec::new();
+        let any = place_configured(&ctx, "test:cfg", &mut rng, BlockPos::new(32, 8, 0), &mut ops, 0);
+        assert!(!any, "outside writeRadius -> leaf skipped");
+        assert!(ops.is_empty(), "no ops emitted");
+        // the rotated provider's nextInt(3) must NOT have been consumed:
+        // the next draw on this rng must equal a fresh rng's first draw.
+        let mut ref_rng = WorldgenRandom::new();
+        ref_rng.set_seed(4242);
+        let a = rng.next_bits(31);
+        let b = ref_rng.next_bits(31);
+        assert_eq!(a, b, "provider draw must be skipped with the leaf");
+        // just inside the edge (rel 31): the body runs, the axis draw IS
+        // consumed -> rng2's next draw aligns with ref's SECOND draw.
+        let mut rng2 = WorldgenRandom::new();
+        rng2.set_seed(4242);
+        let mut ops2 = Vec::new();
+        let any2 = place_configured(&ctx, "test:cfg", &mut rng2, BlockPos::new(31, 8, 0), &mut ops2, 0);
+        assert!(any2 && ops2.len() == 1, "inside writeRadius -> leaf runs");
+        let c = rng2.next_bits(31);
+        let d = ref_rng.next_bits(31);
+        assert_eq!(c, d, "inside leaf consumed exactly one draw");
     }
 
     /// simple_random_selector: uniform nextInt(size) via next(31) path; deterministic pick.
