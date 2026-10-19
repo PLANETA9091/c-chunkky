@@ -212,12 +212,22 @@ impl DecoLevel for OverlayLevel<'_> {
     fn min_y(&self) -> i32 { self.inner.min_y() }
     fn max_y(&self) -> i32 { self.inner.max_y() }
     fn height(&self, ty: HeightmapTy, x: i32, z: i32) -> i32 {
-        // Vanilla setBlock updates the chunk heightmaps LIVE, so a later
-        // feature's heightmap placement (e.g. rand_selector after the
-        // bone_block rotations) sees earlier same-run writes. Our ops flush
-        // only after the feature — rebuild the height from the base map plus
-        // the overlay entries of this column.
+        // Paper 1.21.8: ChunkStatus CARVERS/FEATURES register FINAL_HEIGHTMAPS
+        // (OCEAN_FLOOR/WORLD_SURFACE/MOTION_BLOCKING/MB_NO_LEAVES) for setBlock
+        // updates. The WG maps (WORLD_SURFACE_WG/OCEAN_FLOOR_WG) are NOT
+        // updated by decoration writes — they stay frozen at their pre-
+        // decoration (surface) values (vanilla trace: WS_WG(1616,1750)=102
+        // AFTER a cornflower@102, whose update r=true only hit the FINAL
+        // WORLD_SURFACE map). So overlay writes must NOT reach WG reads:
+        // vanilla placements reading WS_WG/OCEAN_FLOOR_WG see the frozen map.
         let base = self.inner.height(ty, x, z);
+        match ty {
+            HeightmapTy::WorldSurfaceWg | HeightmapTy::OceanFloorWg => return base,
+            HeightmapTy::WorldSurface
+            | HeightmapTy::OceanFloor
+            | HeightmapTy::MotionBlocking
+            | HeightmapTy::MotionBlockingNoLeaves => {}
+        }
         let mut h = base;
         for ((ox, oy, oz), st) in self.ov.borrow().iter() {
             if *ox != x || *oz != z {

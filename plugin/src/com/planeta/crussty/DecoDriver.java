@@ -347,12 +347,22 @@ public final class DecoDriver extends BlockPopulator {
     // ------------------------------------------------------------------
 
     public int height(int ty, int x, int z) {
-        // Paper proto chunks serve WG-semantics heightmaps (OCEAN_FLOOR_WG =
-        // blocksMotion WITHOUT the fluid check), but vanilla
-        // WorldGenRegion.getHeight recomputes the non-WG types from the actual
-        // blocks with the fluid-aware predicates. Replicate the vanilla
-        // predicates by scanning the column (WorldGenRegion.getHeight = first
-        // available + 1).
+        // Paper 1.21.8 (vantrace agent proof): ChunkStatus CARVERS/FEATURES
+        // register FINAL_HEIGHTMAPS for setBlock updates, so the WG maps
+        // (WORLD_SURFACE_WG/OCEAN_FLOOR_WG) are FROZEN at their pre-decoration
+        // (surface) values — decoration writes do NOT reach them (vanilla
+        // trace: WS_WG(1616,1750)=102 after a cornflower@102 whose update
+        // r=true hit only the FINAL WORLD_SURFACE map). Read the chunk's
+        // heightmap data instead of scanning the live blocks.
+        if (ty == 0 || ty == 2) {
+            ChunkAccess ch = reg.getChunk(x >> 4, z >> 4);
+            return ch.getHeight(TYPES[ty], x & 15, z & 15) + 1;
+        }
+        // The non-WG types are FINAL maps (live): vanilla WorldGenRegion
+        // recomputes them from the actual blocks with the fluid-aware
+        // predicates. The region's own writes of PREVIOUS features are
+        // flushed, so a column scan matches vanilla's live FINAL maps.
+        // (The current feature's own writes are overlayed in Rust.)
         return scanHeight(TYPES[ty], x, z);
     }
 

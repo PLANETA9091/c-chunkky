@@ -1,0 +1,3 @@
+Manifest-Version: 1.0
+Premain-Class: com.planeta.crussty.agent.VanTraceAgent
+Boot-Class-Path: agent.jar

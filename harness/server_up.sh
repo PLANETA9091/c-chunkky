@@ -40,6 +40,11 @@ REGION_D_ARGS=""
 if [ "${CRUS_REGION_MIN:-}" != "" ]; then
   REGION_D_ARGS="-Dcrus.region.min=$CRUS_REGION_MIN"
 fi
+# vanilla-lane heightmap/getHeight trace agent (probe/agent)
+AGENT_ARGS=""
+if [ "${CRUS_AGENT:-0}" = "1" ]; then
+  AGENT_ARGS="-javaagent:$ROOT/probe/agent/agent.jar"
+fi
 
 # --- generation determinism ------------------------------------------------
 # Paper's chunk system generates/decorates chunks on a worker pool; with the
@@ -79,7 +84,7 @@ if [ "${CRUS_SERIAL_GC:-0}" = "1" ]; then
   GC_FLAGS="-XX:CICompilerCount=2 -XX:+UseSerialGC"
   HEAP_ARGS="${CRUS_HEAP:--Xms1G -Xmx1536M}"
 fi
-java $HEAP_ARGS $JAVA_LIB_PATH_ARGS $REGION_D_ARGS \
+java $HEAP_ARGS $JAVA_LIB_PATH_ARGS $REGION_D_ARGS $AGENT_ARGS \
   $PGEN_FLAG \
   $GC_FLAGS \
   -XX:NonProfiledCodeHeapSize=64m \
