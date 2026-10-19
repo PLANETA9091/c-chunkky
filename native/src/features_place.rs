@@ -56,6 +56,15 @@ impl<'a> PlaceCtx<'a> {
         let (rx, rz) = self.rel(pos);
         let sid = self.state_index.get(state).copied().unwrap_or(0);
         ops.push(DecoOp { x: rx, y: pos.y as i16, z: rz, state: sid, flags });
+        if sel_trace_on(self.center_x >> 4, self.center_z >> 4) {
+            eprintln!(
+                "[op@{}] w ({},{},{}) {state} flags={flags:#x}",
+                self.center_x >> 4,
+                pos.x,
+                pos.y,
+                pos.z
+            );
+        }
         self.write(pos, state);
     }
 }
@@ -150,6 +159,52 @@ pub fn place_placed(
     any
 }
 
+/// DFS over the placed->configured feature graph: true when EVERY configured
+/// body in the graph is natively supported. Any Unsupported node (tree,
+/// vegetation_patch, block_column, geode, ...) anywhere in the graph — even
+/// nested behind a selector or a patch — forces the whole placed feature to
+/// the vanilla-lane delegate: a partial native run would desync the feature's
+/// own RNG stream vs vanilla (leaf draws interleave with positions).
+pub fn placed_fully_supported(reg: &FeatureRegistry, name: &str, depth: u32) -> bool {
+    if depth > 64 {
+        return false;
+    }
+    let Some(PlacedDef { feature, placement }) = reg.placed.get(name) else {
+        return false;
+    };
+    cfg_fully_supported(reg, feature, depth + 1)
+}
+
+fn cfg_fully_supported(reg: &FeatureRegistry, cfg_name: &str, depth: u32) -> bool {
+    if depth > 64 {
+        return false;
+    }
+    let Some(cfg) = reg.configured.get(cfg_name) else {
+        return false;
+    };
+    match cfg {
+        FeatureCfg::NoOp
+        | FeatureCfg::SimpleBlock { .. }
+        | FeatureCfg::ReplaceBlock { .. }
+        | FeatureCfg::Ore { .. }
+        | FeatureCfg::ScatteredOre { .. }
+        | FeatureCfg::Disk { .. } => true,
+        FeatureCfg::RandomSelector { entries, default } => {
+            entries.iter().all(|(_, n)| placed_fully_supported(reg, n, depth + 1))
+                && placed_fully_supported(reg, default, depth + 1)
+        }
+        FeatureCfg::SimpleRandomSelector { entries } => entries
+            .iter()
+            .all(|n| placed_fully_supported(reg, n, depth + 1)),
+        FeatureCfg::RandomBoolSelector { if_true, if_false, .. } => {
+            placed_fully_supported(reg, if_true, depth + 1)
+                && placed_fully_supported(reg, if_false, depth + 1)
+        }
+        FeatureCfg::RandomPatch { inner, .. } => placed_fully_supported(reg, inner, depth + 1),
+        FeatureCfg::Unsupported(_) => false,
+    }
+}
+
 /// Place one configured feature at pos. Emits DecoOps for block-writing features.
 pub fn place_configured(
     ctx: &PlaceCtx,
@@ -214,10 +269,31 @@ pub fn place_configured(
             true // vanilla always returns true
         }
         FeatureCfg::RandomSelector { entries, default } => {
+            let tr = sel_trace_on(ctx.center_x >> 4, ctx.center_z >> 4);
             for (chance, next) in entries {
-                if rng.next_f32() < *chance {
+                let r = rng.next_f32();
+                if tr {
+                    eprintln!(
+                        "[rsel@{}] p=({},{},{}) chance={chance} roll={r:.9} hit={}",
+                        ctx.center_x >> 4,
+                        pos.x,
+                        pos.y,
+                        pos.z,
+                        r < *chance
+                    );
+                }
+                if r < *chance {
                     return place_placed(ctx, next, rng, pos, ops, depth + 1);
                 }
+            }
+            if tr {
+                eprintln!(
+                    "[rsel@{}] p=({},{},{}) -> default",
+                    ctx.center_x >> 4,
+                    pos.x,
+                    pos.y,
+                    pos.z
+                );
             }
             place_placed(ctx, default, rng, pos, ops, depth + 1)
         }
@@ -226,6 +302,16 @@ pub fn place_configured(
                 return false;
             }
             let idx = rng.next_int_bound(entries.len() as i32) as usize;
+            if sel_trace_on(ctx.center_x >> 4, ctx.center_z >> 4) {
+                eprintln!(
+                    "[srs@{}] p=({},{},{}) size={} idx={idx}",
+                    ctx.center_x >> 4,
+                    pos.x,
+                    pos.y,
+                    pos.z,
+                    entries.len()
+                );
+            }
             place_placed(ctx, &entries[idx], rng, pos, ops, depth + 1)
         }
         FeatureCfg::RandomBoolSelector {
@@ -233,7 +319,17 @@ pub fn place_configured(
             if_false,
             ..
         } => {
-            if rng.next_bool() {
+            let pick = rng.next_bool();
+            if sel_trace_on(ctx.center_x >> 4, ctx.center_z >> 4) {
+                eprintln!(
+                    "[rbs@{}] p=({},{},{}) pick={pick}",
+                    ctx.center_x >> 4,
+                    pos.x,
+                    pos.y,
+                    pos.z
+                );
+            }
+            if pick {
                 place_placed(ctx, if_true, rng, pos, ops, depth + 1)
             } else {
                 place_placed(ctx, if_false, rng, pos, ops, depth + 1)
@@ -393,6 +489,28 @@ fn rule_test_matches(
             level.state_is(pos, std::slice::from_ref(block))
                 && rng.next_f32() < *probability
         }
+    }
+}
+
+/// CRUS_SEL_TRACE: comma list "cx:cz,..." — trace selector picks / ops for
+/// those owning chunks only (empty value = all chunks).
+fn sel_trace_on(cx: i32, cz: i32) -> bool {
+    static ON: std::sync::OnceLock<Option<Vec<(i32, i32)>>> = std::sync::OnceLock::new();
+    match ON.get_or_init(|| {
+        let v = std::env::var("CRUS_SEL_TRACE").ok()?;
+        let v = v.trim();
+        if v.is_empty() {
+            return Some(Vec::new());
+        }
+        let mut out = Vec::new();
+        for part in v.split(',') {
+            let (a, b) = part.trim().split_once(':')?;
+            out.push((a.trim().parse().ok()?, b.trim().parse().ok()?));
+        }
+        Some(out)
+    }) {
+        Some(list) => list.is_empty() || list.contains(&(cx, cz)),
+        None => false,
     }
 }
 

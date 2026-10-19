@@ -1,0 +1,7 @@
+{
+ "type": "minecraft:random_boolean_selector",
+ "config": {
+  "feature_true": "crussty_f1:sel_a",
+  "feature_false": "crussty_f1:sel_b"
+ }
+}

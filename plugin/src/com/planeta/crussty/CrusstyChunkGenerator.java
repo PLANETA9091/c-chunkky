@@ -2177,11 +2177,25 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             java.util.Set<String> possible = names == null
                     ? null
                     : new java.util.HashSet<>(java.util.Arrays.asList(names));
+            // NMS generator for the hybrid delegate (unsupported placed features
+            // run vanilla PlacedFeature.placeWithBiomeCheck with it). Reflection
+            // only: this class compiles against the Bukkit API.
+            Object nmsGen = null;
+            try {
+                Object sl = Class.forName("org.bukkit.craftbukkit.CraftWorld")
+                        .getMethod("getHandle").invoke(w);
+                Object src = sl.getClass().getMethod("getChunkSource").invoke(sl);
+                nmsGen = src.getClass().getMethod("getGenerator").invoke(src);
+            } catch (Throwable t) {
+                Logger.getLogger("CrusstyGen").warning(
+                        "native deco: NMS generator unavailable (hybrid delegate off): " + t);
+            }
             DECO_POOL = pool;
             Class<?> drv = Class.forName("com.planeta.crussty.DecoDriver");
             drv.getMethod("setup", org.bukkit.World.class, String[].class,
-                            String[][].class, java.util.Map.class, java.util.Set.class)
-                    .invoke(null, w, states, plan, bf, possible);
+                            String[][].class, java.util.Map.class, java.util.Set.class,
+                            Object.class)
+                    .invoke(null, w, states, plan, bf, possible, nmsGen);
             NATIVE_DECO = true;
             Logger.getLogger("CrusstyGen").info("native deco engine active ("
                     + plan.length + " steps, " + states.length + " states, "

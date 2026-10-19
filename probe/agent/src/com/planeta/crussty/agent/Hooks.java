@@ -29,6 +29,27 @@ public final class Hooks {
         }
     }
 
+
+    public static void dseed(long ret, long levelSeed, int x, int z) {
+        System.out.println("[dseed] lvl=" + levelSeed + " x=" + x + " z=" + z + " -> " + ret);
+    }
+
+    public static void fseed(long deco, int index, int step) {
+        System.out.println("[fseed] deco=" + deco + " idx=" + index + " step=" + step);
+    }
+
+
+    public static void cf(Object configured, Object pos) {
+        // ConfiguredFeature.toString() = "Configured: <feature class>: <config>"
+        // BlockPos.toString() = "BlockPos{x=.., y=.., z=..}"
+        String p = String.valueOf(pos);
+        // keep only x/y/z to limit log size
+        int a = p.indexOf('{');
+        int b = p.indexOf('}');
+        System.out.println("[cf] " + String.valueOf(configured).substring(0, Math.min(60, String.valueOf(configured).length()))
+                + " origin=" + (a >= 0 && b > a ? p.substring(a, b + 1) : p));
+    }
+
     private Hooks() {
     }
 }

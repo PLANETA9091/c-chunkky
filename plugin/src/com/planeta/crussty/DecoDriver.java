@@ -18,6 +18,13 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainerRO;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.levelgen.RandomSupport;
+import net.minecraft.world.level.levelgen.XoroshiroRandomSource;
+import net.minecraft.world.level.levelgen.WorldgenRandom;
+import net.minecraft.world.level.levelgen.feature.ConfiguredFeature;
+import net.minecraft.world.level.levelgen.placement.PlacedFeature;
+import net.minecraft.world.level.chunk.ChunkGenerator;
+import net.minecraft.world.level.LevelAccessor;
 import org.bukkit.World;
 import org.bukkit.craftbukkit.generator.CraftLimitedRegion;
 import org.bukkit.generator.LimitedRegion;
@@ -94,6 +101,8 @@ public final class DecoDriver extends BlockPopulator {
     private final World world;
     /** per-populate region handle (upcalls run on the populate thread). */
     private WorldGenRegion reg;
+    /** NMS generator (hybrid delegate runs vanilla PlacedFeature with it). */
+    private static volatile ChunkGenerator NMS_GEN;
 
     private DecoDriver(World world) {
         this.world = world;
@@ -105,11 +114,14 @@ public final class DecoDriver extends BlockPopulator {
      * decoStates/decoPlan succeeded (ctx has a native deco engine).
      */
     public static void setup(World world, String[] states, String[][] plan,
-                             Map<String, Set<String>> biomeFeatures, Set<String> possibleBiomes) {
+                             Map<String, Set<String>> biomeFeatures, Set<String> possibleBiomes,
+                             Object nmsGenRaw) {
         STATES = states;
         PLAN = plan;
         BIOME_FEATURES = biomeFeatures;
         POSSIBLE_BIOMES = possibleBiomes;
+        // raw from the reflection handoff (CrusstyChunkGenerator has no mojmap)
+        NMS_GEN = nmsGenRaw instanceof ChunkGenerator g ? g : null;
         world.getPopulators().add(new DecoDriver(world));
         ACTIVE = true;
     }
@@ -184,6 +196,13 @@ public final class DecoDriver extends BlockPopulator {
             }
             int n = ChunkGenNative.decoRunFeature(ctx, l, -1L, ox, oy, oz, maxY,
                     step, gid, this, ops);
+            if (n == -2) {
+                // hybrid delegate: the placed feature's configured graph has an
+                // unsupported node (tree, vegetation_patch, ...) — run it
+                // ENTIRELY on the vanilla path with the same RNG slot.
+                delegateVanilla(PLAN[step][gid], step, gid, l, ox, oy, oz);
+                continue;
+            }
             if (first && (n < 0 || k == 0)) {
                 LOG.info("[deco-dbg] run k=" + k + " step=" + step + " gid=" + gid + " -> n=" + n);
             }
@@ -196,6 +215,44 @@ public final class DecoDriver extends BlockPopulator {
         }
         if (first) {
             LOG.info("[deco-dbg] totalOps=" + totalOps);
+        }
+    }
+
+    /**
+     * Vanilla-lane execution of one placed feature (F3 hybrid delegate).
+     * Exact vanilla protocol for a single feature slot:
+     *   rng.setFeatureSeed(decoSeed, gid, step);
+     *   placedFeature.placeWithBiomeCheck(reg, generator, rng, origin);
+     * The RNG is fresh: setFeatureSeed fully defines the state (vanilla keeps
+     * ONE shared WorldgenRandom, but every feature re-seeds before place).
+     * NOTE: Paper featureSeeds override (config != -1) would need
+     * rng.setDecorationSeed(configSeed, ox, oz) first — no pack here uses it;
+     * the native path ignores it too (paperSeed == -1 always today).
+     */
+    private void delegateVanilla(String placedName, int step, int gid, long decoSeed,
+                                 int ox, int oy, int oz) {
+        if (NMS_GEN == null || reg == null) {
+            return;
+        }
+        try {
+            var holders = reg.registryAccess().lookupOrThrow(Registries.PLACED_FEATURE)
+                    .get(ResourceLocation.parse(placedName));
+            if (holders.isEmpty()) {
+                LOG.warning("deco delegate: placed feature missing in registry: " + placedName);
+                return;
+            }
+            Holder.Reference<PlacedFeature> holder = holders.get();
+            // vanilla addVanillaDecorations wraps an XoroshiroRandomSource — the
+            // wrapped source MUST be xoro: setFeatureSeed -> setSeed ->
+            // upgradeSeedTo128bit (an LCG LegacyRandomSource here would run the
+            // legacy next(31) path and shift every draw — the f1_hyb probe's
+            // 9669-block tree divergence).
+            WorldgenRandom rng = new WorldgenRandom(
+                    new XoroshiroRandomSource(RandomSupport.generateUniqueSeed()));
+            rng.setFeatureSeed(decoSeed, gid, step);
+            holder.value().placeWithBiomeCheck(reg, NMS_GEN, rng, new BlockPos(ox, oy, oz));
+        } catch (Throwable t) {
+            LOG.warning("deco delegate failed for " + placedName + ": " + t);
         }
     }
 

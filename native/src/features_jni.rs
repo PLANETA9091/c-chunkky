@@ -547,6 +547,14 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
         return -1;
     };
     let name = name.clone();
+    // Hybrid delegate gate: a placed feature whose configured graph contains
+    // ANY unsupported node (tree, vegetation_patch, ...) must run ENTIRELY on
+    // the vanilla lane (Java PlacedFeature.placeWithBiomeCheck) — a partial
+    // native run would desync that feature's own RNG stream. -2 = delegate.
+    // Early exit BEFORE the JniLevel/bridge setup (cheap, no upcalls).
+    if !crate::features_place::placed_fully_supported(&d.state.reg, &name, 0) {
+        return -2;
+    }
     // NOTE: env may be attached to a worker thread; direct upcalls only.
     let Some(level) = JniLevel::new(env, bridge, &d.uid_names, origin_y, max_y) else {
         return -1;

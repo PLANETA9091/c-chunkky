@@ -22,6 +22,12 @@ public final class VanTraceAgent {
                     if ("net/minecraft/server/level/WorldGenRegion".equals(className)) {
                         return WorldGenRegionWeaver.weave(classfileBuffer);
                     }
+                    if ("net/minecraft/world/level/levelgen/feature/ConfiguredFeature".equals(className)) {
+                        return ConfiguredFeatureWeaver.weave(classfileBuffer);
+                    }
+                    if ("net/minecraft/world/level/levelgen/WorldgenRandom".equals(className)) {
+                        return WorldgenRandomWeaver.weave(classfileBuffer);
+                    }
                     if ("net/minecraft/world/level/levelgen/Heightmap".equals(className)) {
                         return HeightmapWeaver.weave(classfileBuffer);
                     }
