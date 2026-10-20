@@ -1633,3 +1633,62 @@ Work Log:
 Stage Summary:
 - F5 ДВИЖОК ГОТОВ: деревья + vegetation patches нативны, golden vs РЕАЛЬНЫЕ vanilla-классы. Осталось: полный-pack probe (f1 probe pack v3 с деревьями) + dptt flip для tree/vegetation_patch + pale_moss_patch (ванильный configured feature — нужен fallback-реестр vanilla JSON или delegate).
 - Next: probe-верификация на паках, потом F6-хвост (block_column 10, flower 9, fallen_tree 7, geode 6, netherrack_replace_blobs 12, ...) и перф-проход (JNI batching).
+
+---
+## Session cont-52: PERF PASS — region snapshot 28.9->1.9ms + CI judge root-caused
+
+Work Log:
+- CI investigation (vanilla judge 0.556% since e746d13): downloaded the CI dump
+  artifacts, diffed locally with samples. NOT a SIMD path (avx2 forced = clean),
+  NOT gen-parallelism (4b4971e still 0.556%). The mismatch classes: kelp +1-2
+  blocks, fresh small_amethyst_buds, lava flow levels, shifted ore veins.
+- ROOT CAUSE (CI-only): post-generation simulation — random ticks (kelp/bud
+  growth drawn in chunk-load order = timing) + the settle compared different
+  simulation depths (15s wall) + the 12x12-vs-8x8 pregen margin asymmetry (the
+  ring chunks' spills overwrote the judged edge columns vs the reference).
+- Judge protocol fix (ccbb90d): randomTickSpeed=0 both lanes, tick-matched
+  settle (300 ticks via the new crustick/getGameTime probe command), the
+  symmetric 8x8 pregen (CRUS_REGION_MIN default -4), crusstatus rect argument,
+  diff_dumps CRUS_DIFF_SAMPLES mismatch samples. References recaptured
+  (vanilla + dptt) with the frozen protocol. Local floors: vanilla 123/6.29M
+  = 0.002% (was 537), dptt 4181 = 0.066% static (ocean gravel/stone on
+  Tectonic surface rules + kelp placement margins — gate 0.10 + follow-up).
+- PERF PASS (7aead81) — 3x3 region section snapshot (features_snap.rs):
+  * point queries (state_is/fluid_is/is_air/is_replaceable/is_solid/
+    has_sturdy_face/state_name/biome_has_feature) served from lazily-loaded
+    section snapshots: palette entries carry FLAG bits computed in Java with
+    the exact vanilla predicates; biome quart cells + the BiomeManager ZOOM
+    (8-neighbor LCG fiddle, seed=obfuscateSeed(worldSeed) via decoChunkBegin)
+    — the deco biome reads are ZOOMED, NOT raw container reads (the 2D-biome
+    probe masked the zoom; dptt 3D biomes broke ops by 46% until ported).
+  * decoBiomeFeaturesFull handshake: the FULL pack biome->features map (a
+    GLOBAL in Rust — the per-ctx map left the other pool ctxs empty = the
+    0.084% probe regression).
+  * chunk-scoped overlay + epoch: delegate features write via the region ->
+    decoDelegateMark clears the overlay + bumps the epoch (stale sections
+    reload); dropped ops sync via decoOpsDropped (phantom overlay entries).
+  * GetPrimitiveArrayCritical on the ops buffer: GetIntArrayElements copied
+    1.5MB TO+BACK per feature = ~65GB memcpy per 332-chunk pregen (the 17ms!).
+  * ThreadLocal ops/drop buffers (500MB GC churn), structures fast gate
+    (hasAnyStructureReferences on the 3x3 = 3.4ms on structureless packs).
+  * DecoStats (crusgenstats tail): wall/plan/struct/run/apply + upcalls.
+- Numbers: F1 probe parity 0.002% (272/14.2M, HEIGHTMAP 0 — the same floor as
+  pre-snapshot); deco wall: probe 28.9 -> 1.81ms mean / p50 1.41ms, dptt
+  28.9 -> 7.95ms (p50 3.7ms). Upcalls: 11,616 -> 209/chunk (stateis/fluidis/
+  isair = 0 — all from the snapshot). 48/48 tests.
+- dptt native-vs-vanilla 2.128% = the PRE-EXISTING F2/F6 tail (NOSNAP bisect:
+  the same diff on the pre-snapshot code paths; the ore vein shapes + patch
+  bones from cont-50 + the unsupported-config spread) — the native dptt deco
+  was never vanilla-parity-checked before (judge_dptt.sh compared the plugin
+  lane against itself). Separately tracked.
+- Probe build.sh: JRE-only javac handling fixed (the multi-word launcher).
+
+Stage Summary:
+- The deco engine now: probe p50 1.41ms (the 1ms target within reach — the
+  wouldSurvive JNI 97/chunk + the heights 45/chunk + the chain compute remain),
+  dptt p50 3.7ms (the struct 3.0-3.4ms floor = the vanilla placeInChunk + the
+  delegate ~1.2ms + run 3.1ms).
+- Next: (a) the CI verdict for ccbb90d; (b) wouldSurvive native rules + the
+  WG heightmap snapshot (the last cheap JNI); (c) the native compute profile
+  (the string interning in state_is); (d) the dptt native parity track (the
+  ore shapes/F6 tail) + the dptt 0.066% static floor investigation.
