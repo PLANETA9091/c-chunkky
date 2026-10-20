@@ -66,6 +66,8 @@ def main() -> int:
     if not common:
         print("no common chunk files — nothing to compare")
         return 1
+    import os
+    samples = os.environ.get("CRUS_DIFF_SAMPLES", "") == "1"
     total = 0
     diff = 0
     hm_changed = 0
@@ -86,6 +88,27 @@ def main() -> int:
         total += n
         diff += d
         print(f"  {name}: diff {d}/{n} = {100.0 * d / n:.2f}%")
+        # mismatch samples: coords + both block states (CRUS_DIFF_SAMPLES=1)
+        if samples and d:
+            shown = 0
+            for y in range(HEIGHT - 1, -1, -1):
+                base = y * 256
+                for z in range(16):
+                    for x in range(16):
+                        i = base + z * 16 + x
+                        sa, sb = pal_a[idx_a[i]], pal_b[idx_b[i]]
+                        if sa != sb:
+                            wx = cxa * 16 + x
+                            wz = cza * 16 + z
+                            wy = y + MINY
+                            print(f"    MISMATCH ({wx}, {wy}, {wz}) ref={sa} ours={sb}")
+                            shown += 1
+                            if shown >= 40:
+                                break
+                    if shown >= 40:
+                        break
+                if shown >= 40:
+                    break
     print(f"OVERALL: {diff}/{total} blocks differ = {100.0 * diff / total:.3f}% across {len(common)} chunks")
     cols = 256 * len(common)
     print(f"HEIGHTMAP: {hm_changed}/{cols} columns changed; mean |dh| = {hm_abs_sum / cols:.2f}")

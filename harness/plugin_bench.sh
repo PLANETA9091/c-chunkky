@@ -100,6 +100,21 @@ elif [ "$WORLD" = "datapack" ]; then
 fi
 
 # --- boot -------------------------------------------------------------------
+# Judge determinism: the native noise stage finishes in ~3ms/chunk, which OPENS
+# Paper's concurrency window — neighbour carvers (Java) run on other workers
+# while this chunk decorates. The reference capture (bench.sh, vanilla-speed
+# Java noise) never had overlapping carver/deco, so the contested 3x3 margin
+# writes and the per-chunk feature RNG streams (a carver touching the same
+# proto chunk flips canSurvive -> whole-chunk RNG cascade) resolve in forceload
+# order there. Symptom: CI 4-core runner 0.556% (exploding +X columns, ore
+# veins shifted) vs 2-core local 0.009% on the SAME code — commits e746d13+
+# (native surface engaged -> fill went fast). gen-parallelism=false restores
+# the reference semantics for the judged lane. CRUS_GEN_PARALLEL=1 opts out.
+if [ "${CRUS_GEN_PARALLEL:-0}" != "1" ]; then
+  sed -i "s/^  gen-parallelism: .*/  gen-parallelism: 'false'/" "$SRV/config/paper-global.yml"
+  echo "gen-parallelism=false (judge serial semantics):"
+  grep -A3 "^chunk-system:" "$SRV/config/paper-global.yml" | head -4
+fi
 # Parallel fill threads for the native .so (slice corners + cell strips):
 # corners/strips are pure functions of position; results bit-identical.
 export CRUS_FILL_THREADS="${CRUS_FILL_THREADS:-2}"
