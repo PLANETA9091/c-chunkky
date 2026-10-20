@@ -117,10 +117,42 @@ pub fn build_deco_ctx(
             }
         }
     }
+    // vanilla fallback: pack features WIN (pack names inserted first), the
+    // built-in 1.21.8 set fills the gaps (minecraft:fancy_oak selectors,
+    // minecraft:pale_moss_patch nested places, vanilla vegetation inners)
+    let pack_cfg: std::collections::HashSet<String> =
+        configured.iter().map(|(n, _)| n.clone()).collect();
+    let pack_pl: std::collections::HashSet<String> =
+        placed.iter().map(|(n, _)| n.clone()).collect();
+    for (n, t) in crate::features_vanilla_data::VANILLA_CONFIGURED {
+        if !pack_cfg.contains(*n) {
+            configured.push(((*n).to_string(), (*t).to_string()));
+        }
+    }
+    for (n, t) in crate::features_vanilla_data::VANILLA_PLACED {
+        if !pack_pl.contains(*n) {
+            placed.push(((*n).to_string(), (*t).to_string()));
+        }
+    }
     let reg = crate::features_json::decode_registry(
         configured.into_iter(),
         placed.into_iter(),
     );
+    // extend the uid space: inner placed refs (vanilla trees behind pack
+    // selectors, pale_moss_patch, vegetation inners) resolve their OWN
+    // BiomeFilter uid — without a mapping the bridge would return false and
+    // silently drop every inner placement
+    let mut uid_names = uid_names;
+    let known: std::collections::HashSet<&String> = uid_names.iter().collect();
+    let mut extra: Vec<&String> = reg
+        .placed
+        .keys()
+        .filter(|n| !known.contains(*n))
+        .collect();
+    extra.sort();
+    for n in extra {
+        uid_names.push(n.clone());
+    }
     Some(DecoCtx {
         state: crate::features_place_ffi::DecoState::seal(reg, &uid_names),
         plan,
