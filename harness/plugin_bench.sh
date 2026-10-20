@@ -205,6 +205,13 @@ for cz in $(seq $X0 $X1); do
       # (bench.sh, slow path) never hits this, so parity is unaffected.
       echo "[pregen RETRY] chunk $cx $cz did not load in 30s (attempt $attempt/$RETRY_MAX) — re-issuing forceload"
     done
+    # per-chunk dump: the chunk's state RIGHT after its own generation — the
+    # post-gen simulation exposure (scheduled fluid/growth ticks while the
+    # region fills) is then ~10 ticks on BOTH lanes. The final-region dump
+    # compared different simulation depths (the reference chunks sat through
+    # the slow vanilla pregen ~900 ticks; the native lane ~300 — the CI-only
+    # bubble_column/ocean-floor divergence class).
+    rcon "crusstydump $cx $cz $OUT_DIR/chunk_${cx}_${cz}.crsf" >/dev/null || true
     if [ "$loaded_ok" -ne 1 ]; then
       STALL=$((STALL + 1))
       echo "[pregen STALL] chunk $cx $cz did not load after $RETRY_MAX attempts (loaded=${LOADED:-?}/$EXPECT, stalls=$STALL)"
@@ -223,29 +230,20 @@ T1=$(date +%s%N)
 WALL_MS=$(( (T1 - T0) / 1000000 ))
 echo "=== pregen wall: ${WALL_MS}ms (sequential forceload, incl. poll granularity) ==="
 
-# settle: TICK-matched (300 game ticks = the capture's 15s at TPS 20) — the
-# scheduled fluid/growth ticks fire in tick order, so equal tick counts mean
-# equal simulation depth regardless of the runner's wall-clock speed.
-SETTLE_T0=$(rcon "crustick" | grep -m1 -oE "gametime=[0-9]+" | cut -d= -f2)
-echo "settle: tick-matched 300 from gametime=${SETTLE_T0:-?}"
-if [ -n "${SETTLE_T0:-}" ]; then
-  for i in $(seq 1 90); do
-    NOW=$(rcon "crustick" | grep -m1 -oE "gametime=[0-9]+" | cut -d= -f2)
-    if [ -n "$NOW" ] && [ $((NOW - SETTLE_T0)) -ge 300 ]; then
-      echo "settle: reached gametime=$NOW (+$((NOW - SETTLE_T0)) ticks)"
-      break
-    fi
-    sleep 1
-  done
-fi
+# settle: the per-chunk dumps above already froze the compared state at each
+# chunk's generation; no region-wide settle is needed (it would only deepen
+# the simulation AFTER the dumps — unused by the judge).
 sleep 2
 
 echo "=== crusgenstats ==="
 rcon "crusgenstats" | tee "reference/plugin_stats_$WORLD.txt" || true
 
 # --- dump plugin world ------------------------------------------------------
+# The per-chunk dumps (above) ARE the judge dataset: the region dump at the
+# end would overwrite them with a DEEPER-simulated state (the lanes differ
+# there by construction — see the per-chunk note). The mkdir/wc remain as the
+# deployment sanity check.
 mkdir -p "$OUT_DIR"
-rcon "crusstydumpregion $X0 $X0 $X1 $X1 $OUT_DIR chunk" | tail -2
 ls "$OUT_DIR" | wc -l
 
 # --- shutdown ---------------------------------------------------------------

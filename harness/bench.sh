@@ -64,6 +64,8 @@ for fcz in $(seq -4 3); do
       if [ "${N:-0}" -ge "$EXPECT" ]; then break; fi
       sleep 1
     done
+    # per-chunk dump (the judge dataset — see plugin_bench.sh)
+    rcon "crusstydump $fcx $fcz $DUMPDIR/chunk_${fcx}_${fcz}.crsf $WORLD" >/dev/null || true
   done
 done
 
@@ -86,27 +88,14 @@ if [ "${N:-0}" != "64" ]; then
 fi
 
 WALL_MS=$((T1 - T0))
-# settle: TICK-matched (300 game ticks ~ the historical 15s at TPS 20).
-# The scheduled fluid/growth ticks fire in tick order — equal tick counts mean
-# equal simulation depth on any runner. randomTickSpeed=0 removes the random
-# component entirely (growth was the CI-only divergence class).
-SETTLE_T0=$(rcon "crustick" | grep -m1 -oE "gametime=[0-9]+" | cut -d= -f2 || true)
-echo "[bench] settle: tick-matched 300 from gametime=${SETTLE_T0:-?}"
-if [ -n "${SETTLE_T0:-}" ]; then
-  for i in $(seq 1 120); do
-    NOW=$(rcon "crustick" | grep -m1 -oE "gametime=[0-9]+" | cut -d= -f2 || true)
-    if [ -n "$NOW" ] && [ $((NOW - SETTLE_T0)) -ge 300 ]; then
-      echo "[bench] settle: reached gametime=$NOW (+$((NOW - SETTLE_T0)) ticks)"
-      break
-    fi
-    sleep 1
-  done
-fi
+# settle: the per-chunk dumps below freeze the compared state at each chunk's
+# generation — no region-wide settle (it would deepen the simulation after
+# the dumps; the judge compares the per-chunk dataset).
 sleep 2
 
-echo "[bench] dumping region to $DUMPDIR"
-DUMP_OUT=$(rcon "crusstydumpregion -4 -4 3 3 $DUMPDIR chunk $WORLD")
-echo "[bench] $DUMP_OUT"
+echo "[bench] per-chunk dumps already written (the judge dataset)"
+DUMP_OUT=$(ls "$DUMPDIR" | wc -l)
+echo "[bench] dump files: $DUMP_OUT"
 
 "$ROOT/harness/server_down.sh"
 
