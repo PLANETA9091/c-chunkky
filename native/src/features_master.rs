@@ -38,6 +38,14 @@ pub struct DecoCtx {
     pub biome_features: HashMap<String, Vec<Vec<String>>>,
     /// step-major flattened plan order: uid -> placed name (BiomeFilter ids)
     pub uid_names: Vec<String>,
+    /// chunk-scoped feature-write overlay (ALL of this chunk's feature
+    /// writes; the ops flush to the region after each feature, but the
+    /// snapshot + later features must see them live)
+    pub chunk_ov: std::cell::RefCell<crate::features_snap::OvMap>,
+    /// lazy 3x3 region section snapshot (perf pass — no per-query JNI)
+    pub chunk_snap: std::cell::RefCell<crate::features_snap::SnapRegion>,
+    /// BiomeManager.obfuscateSeed(world seed) — the biome zoom fiddle seed
+    pub chunk_zoom_seed: std::cell::Cell<i64>,
 }
 
 impl DecoCtx {
@@ -158,6 +166,9 @@ pub fn build_deco_ctx(
         plan,
         biome_features,
         uid_names,
+        chunk_ov: std::cell::RefCell::new(crate::features_snap::OvMap::new()),
+        chunk_snap: std::cell::RefCell::new(crate::features_snap::SnapRegion::new(0, 0, -1024, 26)),
+        chunk_zoom_seed: std::cell::Cell::new(0),
     })
 }
 

@@ -30,6 +30,10 @@ import net.minecraft.core.Registry;
 import net.minecraft.world.level.levelgen.GenerationStep;
 import net.minecraft.core.SectionPos;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Palette;
+import net.minecraft.world.level.chunk.PalettedContainer.Data;
+import net.minecraft.util.BitStorage;
 import java.util.stream.Collectors;
 
 import net.minecraft.world.level.levelgen.placement.PlacedFeature;
@@ -108,6 +112,18 @@ public final class DecoDriver extends BlockPopulator {
     private static final java.util.logging.Logger LOG =
             java.util.logging.Logger.getLogger("CrusstyGen");
 
+    /** Per-thread reusable ops buffer (65536 ops x 6 i32). */
+    private static final ThreadLocal<int[]> OPS_BUF = new ThreadLocal<>();
+    /** Per-thread dropped-op coord buffer (x,y,z triples). */
+    private static final ThreadLocal<int[]> DROP_BUF = new ThreadLocal<>();
+
+    /** Delegate holder cache (parse+registry walk once per placed name).
+     * Concurrent populate threads: CHM + Set are the safe scope. */
+    private static final java.util.concurrent.ConcurrentHashMap<String, Holder.Reference<PlacedFeature>> DELEGATE_HOLDER =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final java.util.Set<String> DELEGATE_MISSING =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     private final World world;
     /** per-populate region handle (upcalls run on the populate thread). */
     private WorldGenRegion reg;
@@ -166,7 +182,9 @@ public final class DecoDriver extends BlockPopulator {
             return;
         }
         try {
+            long tw0 = System.nanoTime();
             runChunk(ctx, cx, cz, limited);
+            DecoStats.recordChunk(System.nanoTime() - tw0);
         } catch (Throwable t) {
             LOG.warning("deco: chunk " + cx + "," + cz + " failed: " + t);
         } finally {
@@ -186,32 +204,72 @@ public final class DecoDriver extends BlockPopulator {
         int maxY = reg.getMaxY();
         long seed = world.getSeed();
         long l = ChunkGenNative.decoDecoSeed(seed, ox, oz);
+        // chunk-scoped overlay + snapshot reset (Rust side) — must precede
+        // the feature loop so the snapshot reflects the pre-deco region and
+        // the overlay starts empty
+        // BiomeManager.getBiome zoom seed (obfuscated world seed): the deco
+        // biome queries zoom over 8 quart neighbors with this fiddle seed
+        long zoomSeed;
+        try {
+            zoomSeed = net.minecraft.world.level.biome.BiomeManager
+                    .obfuscateSeed(seed);
+        } catch (Throwable t) {
+            zoomSeed = 0;
+        }
+        ChunkGenNative.decoChunkBegin(ctx, cx, cz, reg.getMinSectionY(), zoomSeed);
 
+        long tp0 = System.nanoTime();
         String[] biomes = regionBiomes(cx, cz);
         int[] runsBuf = new int[PLAN_TOTAL() * 2 + 16];
         int runs = ChunkGenNative.decoChunkPlan(ctx, biomes, runsBuf);
+        DecoStats.PLAN_TOTAL.addAndGet(System.nanoTime() - tp0);
         if (first) {
             StringBuilder bs = new StringBuilder();
             for (String b : biomes) bs.append(b).append(' ');
             LOG.info("[deco-dbg] biomes(" + biomes.length + ")=" + bs + " runs=" + runs);
         }
 
-        int[] ops = new int[6 * 65536];
+        // Reused ops buffer (ThreadLocal): 1.5MB per chunk-deco allocated 332x
+        // per pregen = 500MB GC churn. Same protocol: [n*6] ints, trailing
+        // garbage ignored. Threads populate concurrently — TL is the safe scope.
+        int[] ops = OPS_BUF.get();
+        if (ops == null) {
+            ops = new int[6 * 65536];
+            OPS_BUF.set(ops);
+        }
+        int[] drops = DROP_BUF.get();
+        if (drops == null) {
+            drops = new int[3072];
+            DROP_BUF.set(drops);
+        }
         int totalOps = 0;
+        long ts0 = System.nanoTime();
         runStructures(l, cx, cz);
+        DecoStats.STRUCT_TOTAL.addAndGet(System.nanoTime() - ts0);
+        long tr = 0;
+        long ta = 0;
         for (int k = 0; k < runs; k++) {
             int step = runsBuf[k * 2];
             int gid = runsBuf[k * 2 + 1];
             if (step < 0) {
                 break; // runs truncated (buffer too small) — logged below
             }
+            DecoStats.FEATURES_TOTAL.incrementAndGet();
+            long tr0 = System.nanoTime();
             int n = ChunkGenNative.decoRunFeature(ctx, l, -1L, ox, oy, oz, maxY,
                     step, gid, this, ops);
+            tr += System.nanoTime() - tr0;
             if (n == -2) {
                 // hybrid delegate: the placed feature's configured graph has an
                 // unsupported node (tree, vegetation_patch, ...) — run it
                 // ENTIRELY on the vanilla path with the same RNG slot.
+                long td0 = System.nanoTime();
                 delegateVanilla(PLAN[step][gid], step, gid, l, ox, oy, oz);
+                // the vanilla feature wrote via the region — the native
+                // snapshot cannot see those blocks: invalidate (lazy reload)
+                ChunkGenNative.decoDelegateMark(ctx);
+                DecoStats.DELEGATE_TOTAL.addAndGet(System.nanoTime() - td0);
+                DecoStats.DELEGATE_COUNT.incrementAndGet();
                 continue;
             }
             if (first && (n < 0 || k == 0)) {
@@ -220,10 +278,28 @@ public final class DecoDriver extends BlockPopulator {
             if (n > 0) {
                 totalOps += n;
             }
+            long ta0 = System.nanoTime();
+            int ndrop = 0;
             for (int i = 0; i < n; i++) {
-                applyOp(limited, ox, oz, ops, i * 6);
+                if (!applyOp(limited, ox, oz, ops, i * 6)) {
+                    // dropped: (x,y,z) triple for the native overlay sync
+                    if (ndrop * 3 + 2 >= drops.length) {
+                        drops = java.util.Arrays.copyOf(drops, drops.length * 2);
+                    }
+                    drops[ndrop * 3] = ops[i * 6];
+                    drops[ndrop * 3 + 1] = ops[i * 6 + 1];
+                    drops[ndrop * 3 + 2] = ops[i * 6 + 2];
+                    ndrop++;
+                }
             }
+            if (ndrop > 0) {
+                ChunkGenNative.decoOpsDropped(ctx, drops, ndrop);
+            }
+            ta += System.nanoTime() - ta0;
         }
+        DecoStats.RUN_TOTAL.addAndGet(tr);
+        DecoStats.APPLY_TOTAL.addAndGet(ta);
+        DecoStats.OPS_TOTAL.addAndGet(totalOps);
         if (first) {
             LOG.info("[deco-dbg] totalOps=" + totalOps);
         }
@@ -246,13 +322,24 @@ public final class DecoDriver extends BlockPopulator {
             return;
         }
         try {
-            var holders = reg.registryAccess().lookupOrThrow(Registries.PLACED_FEATURE)
-                    .get(ResourceLocation.parse(placedName));
-            if (holders.isEmpty()) {
-                LOG.warning("deco delegate: placed feature missing in registry: " + placedName);
-                return;
+            // Holder cache: registryAccess().lookupOrThrow(...).get(
+            // ResourceLocation.parse(name)) parsed the name + walked the
+            // registry PER DELEGATE (8206 tree features per pregen).
+            Holder.Reference<PlacedFeature> holder = DELEGATE_HOLDER.get(placedName);
+            if (holder == null) {
+                if (DELEGATE_MISSING.contains(placedName)) {
+                    return;
+                }
+                var holders = reg.registryAccess().lookupOrThrow(Registries.PLACED_FEATURE)
+                        .get(ResourceLocation.parse(placedName));
+                if (holders.isEmpty()) {
+                    LOG.warning("deco delegate: placed feature missing in registry: " + placedName);
+                    DELEGATE_MISSING.add(placedName);
+                    return;
+                }
+                holder = holders.get();
+                DELEGATE_HOLDER.put(placedName, holder);
             }
-            Holder.Reference<PlacedFeature> holder = holders.get();
             // vanilla addVanillaDecorations wraps an XoroshiroRandomSource — the
             // wrapped source MUST be xoro: setFeatureSeed -> setSeed ->
             // upgradeSeedTo128bit (an LCG LegacyRandomSource here would run the
@@ -278,10 +365,41 @@ public final class DecoDriver extends BlockPopulator {
         if (NMS_GEN == null || reg == null) {
             return;
         }
+        // Fast gate: no structure references in the 3x3 region -> no starts ->
+        // placeInChunk never runs. The srng draws are unobservable there (a
+        // FRESH random per populate; only placeInChunk consumes it) — skip
+        // the whole pass. Costs 3.44ms/chunk on structureless packs otherwise
+        // (startsForStructure x ~90 structures x 10 steps).
+        boolean anyRefs = false;
+        for (int dz = -1; dz <= 1 && !anyRefs; dz++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                if (reg.getChunk(cx + dx, cz + dz).hasAnyStructureReferences()) {
+                    anyRefs = true;
+                    break;
+                }
+            }
+        }
+        if (!anyRefs) {
+            return;
+        }
         try {
-            Registry<Structure> structReg = reg.registryAccess().lookupOrThrow(Registries.STRUCTURE);
-            Map<Integer, List<Structure>> map = structReg.stream()
-                    .collect(Collectors.groupingBy(s -> s.step().ordinal()));
+            // Cached step->structures grouping: structReg.stream().collect(
+            // groupingBy) ran PER CHUNK (a full registry stream + sort per
+            // chunk — 3.42ms of the deco wall). The registry is immutable at
+            // runtime; compute once.
+            Map<Integer, List<Structure>> map = STRUCT_BY_STEP;
+            if (map == null) {
+                Registry<Structure> structReg = reg.registryAccess()
+                        .lookupOrThrow(Registries.STRUCTURE);
+                map = structReg.stream()
+                        .collect(Collectors.groupingBy(s -> s.step().ordinal()));
+                STRUCT_BY_STEP = map;
+                java.util.Map<Structure, String> names = new java.util.HashMap<>();
+                for (net.minecraft.resources.ResourceKey<Structure> k : structReg.registryKeySet()) {
+                    names.put(structReg.getValue(k), k.toString());
+                }
+                STRUCT_NAMES = names;
+            }
             WorldgenRandom srng = new WorldgenRandom(
                     new XoroshiroRandomSource(RandomSupport.generateUniqueSeed()));
             SectionPos sp = SectionPos.of(new ChunkPos(cx, cz), reg.getMinSectionY());
@@ -298,8 +416,7 @@ public final class DecoDriver extends BlockPopulator {
                 for (Structure structure : map.getOrDefault(i, List.of())) {
                     srng.setFeatureSeed(decoSeed, i1, i);
                     try {
-                        reg.setCurrentlyGenerating(() -> structReg.getResourceKey(structure)
-                                .map(Object::toString).orElse(structure.toString()));
+                        reg.setCurrentlyGenerating(() -> structName(structure));
                     } catch (Throwable ignored) {
                         // diagnostics only
                     }
@@ -312,6 +429,14 @@ public final class DecoDriver extends BlockPopulator {
         } catch (Throwable t) {
             LOG.warning("deco structures failed (chunk " + cx + "," + cz + "): " + t);
         }
+    }
+
+    private static volatile Map<Integer, List<Structure>> STRUCT_BY_STEP;
+    private static volatile java.util.Map<Structure, String> STRUCT_NAMES = java.util.Map.of();
+
+    private static String structName(Structure structure) {
+        String n = STRUCT_NAMES.get(structure);
+        return n != null ? n : structure.toString();
     }
 
     /** vanilla ChunkGenerator.getWritableArea: the 3x3 chunk region box. */
@@ -332,7 +457,10 @@ public final class DecoDriver extends BlockPopulator {
         return n;
     }
 
-    private void applyOp(LimitedRegion limited,
+    /** Apply one op; false = DROPPED (no block write happened) — the caller
+     *  syncs the drop to the native overlay (a chunk-scoped overlay entry for
+     *  a dropped op is a phantom that would serve stale answers all chunk). */
+    private boolean applyOp(LimitedRegion limited,
                          int ox, int oz, int[] ops, int o) {
         int rx = ops[o];
         int y = ops[o + 1];
@@ -346,14 +474,14 @@ public final class DecoDriver extends BlockPopulator {
             // — chunk-level postprocessing mark, no block write.
             ChunkAccess ch = reg.getChunk((ox + rx) >> 4, (oz + rz) >> 4);
             ch.markPosForPostprocessing(new BlockPos(ox + rx, y, oz + rz));
-            return;
+            return false;
         }
         if (stateIdx < 0 || stateIdx >= states.length) {
-            return;
+            return false;
         }
         BlockState st = state(states[stateIdx]);
         if (st == null) {
-            return;
+            return false;
         }
         if ((flags & 2) != 0) { // FLAG_ROTATED: RotatedBlockProvider axis pick
             try {
@@ -386,16 +514,17 @@ public final class DecoDriver extends BlockPopulator {
             ChunkAccess ch = reg.getChunk((ox + rx) >> 4, (oz + rz) >> 4);
             int si = reg.getSectionIndex(y);
             if (si < 0 || si >= ch.getSectionsCount()) {
-                return;
+                return false;
             }
             LevelChunkSection sec = ch.getSection(si);
             sec.setBlockState((ox + rx) & 15, y & 15, (oz + rz) & 15, st, false);
-            return;
+            return true;
         }
         reg.setBlock(pos, st, 2);
         if ((flags & 1) != 0) { // FLAG_TICK
             reg.scheduleTick(pos, st.getBlock(), 0);
         }
+        return true;
     }
 
     /** State-string parser: "ns:block[k=v,k2=v2]" -> BlockState (cached). */
@@ -487,6 +616,7 @@ public final class DecoDriver extends BlockPopulator {
     // ------------------------------------------------------------------
 
     public int height(int ty, int x, int z) {
+        DecoStats.UP_HEIGHT.incrementAndGet();
         // Paper 1.21.8 (vantrace agent proof): ChunkStatus CARVERS/FEATURES
         // register FINAL_HEIGHTMAPS for setBlock updates, so the WG maps
         // (WORLD_SURFACE_WG/OCEAN_FLOOR_WG) are FROZEN at their pre-decoration
@@ -526,6 +656,7 @@ public final class DecoDriver extends BlockPopulator {
     }
 
     public boolean stateIs(int x, int y, int z, String[] names) {
+        DecoStats.UP_STATE_IS.incrementAndGet();
         BlockState st = reg.getBlockState(new BlockPos(x, y, z));
         String key = BuiltInRegistries.BLOCK.getKey(st.getBlock()).toString();
         for (String n : names) {
@@ -537,6 +668,7 @@ public final class DecoDriver extends BlockPopulator {
     }
 
     public boolean fluidIs(int x, int y, int z, String[] names) {
+        DecoStats.UP_FLUID_IS.incrementAndGet();
         BlockState st = reg.getBlockState(new BlockPos(x, y, z));
         String key = BuiltInRegistries.FLUID.getKey(st.getFluidState().getType()).toString();
         for (String n : names) {
@@ -549,6 +681,7 @@ public final class DecoDriver extends BlockPopulator {
 
     /** OreFeature isAdjacentToAir: state.isAir() at pos. */
     public boolean isAir(int x, int y, int z) {
+        DecoStats.UP_IS_AIR.incrementAndGet();
         return reg.getBlockState(new BlockPos(x, y, z)).isAir();
     }
 
@@ -599,26 +732,38 @@ public final class DecoDriver extends BlockPopulator {
     }
 
     public boolean isReplaceable(int x, int y, int z) {
+        DecoStats.UP_OTHER.incrementAndGet();
         return reg.getBlockState(new BlockPos(x, y, z)).is(BlockTags.REPLACEABLE);
     }
 
     public boolean isSolid(int x, int y, int z) {
+        DecoStats.UP_OTHER.incrementAndGet();
         return reg.getBlockState(new BlockPos(x, y, z)).isSolid();
     }
 
     public boolean hasSturdyFace(int x, int y, int z, int dir) {
+        DecoStats.UP_OTHER.incrementAndGet();
         return reg.getBlockState(new BlockPos(x, y, z))
                 .isFaceSturdy(reg, new BlockPos(x, y, z), DIRS[dir]);
     }
 
     public boolean wouldSurvive(String state, int x, int y, int z) {
+        DecoStats.UP_CAN_SURVIVE.incrementAndGet();
         BlockState st = state(state);
         return st != null && st.canSurvive(reg, new BlockPos(x, y, z));
     }
 
     public boolean biomeHasFeature(int x, int y, int z, String placed) {
+        DecoStats.UP_OTHER.incrementAndGet();
         Holder<Biome> h = reg.getBiomeManager().getBiome(new BlockPos(x, y, z));
         String name = biomeKey(h.value());
+        if (System.getenv("CRUS_BIOMECHK") != null
+                && DecoStats.UP_OTHER.get() < 200000
+                && (name.endsWith("test_a") || name.endsWith("test_b"))
+                && DecoStats.BIOMECHK_LOG.incrementAndGet() <= 8) {
+            LOG.info("[biomechk-java] (" + x + "," + y + "," + z + ") biome=" + name
+                    + " minSecY=" + reg.getMinSectionY());
+        }
         if ((x == 1615 && z == 1612) || (x == 1612 && z == 1665) || (x == 1612 && z == 1673)) {
             LOG.info("[f1trace] biomeHasFeature " + placed + " (" + x + "," + y + "," + z + ") biome=" + name);
         }
@@ -632,5 +777,189 @@ public final class DecoDriver extends BlockPopulator {
 
     public boolean outsideBuildHeight(int y) {
         return y < reg.getMinY() || y >= reg.getMaxY();
+    }
+
+    // ------------------------------------------------------------------
+    // 3x3 region snapshot (perf pass — kills the per-query JNI upcalls)
+    // ------------------------------------------------------------------
+
+    /** Reflected PalettedContainer.Data.storage / .palette / section biomes.
+     *  Data and section.states are public; Data's fields are private (moonrise
+     *  layout) — cache the Fields once. */
+    private static final java.lang.reflect.Field F_STORAGE;
+    private static final java.lang.reflect.Field F_PALETTE;
+    private static final java.lang.reflect.Field F_BIOMES;
+    static {
+        try {
+            F_STORAGE = PalettedContainer.Data.class.getDeclaredField("storage");
+            F_STORAGE.setAccessible(true);
+            F_PALETTE = PalettedContainer.Data.class.getDeclaredField("palette");
+            F_PALETTE.setAccessible(true);
+            F_BIOMES = LevelChunkSection.class.getDeclaredField("biomes");
+            F_BIOMES.setAccessible(true);
+        } catch (Throwable t) {
+            throw new ExceptionInInitializerError(t);
+        }
+    }
+
+    /** Palette-entry flag bits (exact vanilla semantics, computed in Java).
+     *  The native answers point queries from these — no string parsing. */
+    private static int stateFlags(BlockState st) {
+        int f = 0;
+        if (st.isAir()) {
+            f |= 1;
+        }
+        if (st.blocksMotion()) {
+            f |= 2;
+        }
+        if (!st.getFluidState().isEmpty()) {
+            f |= 4;
+            if (st.getFluidState().is(net.minecraft.world.level.material.Fluids.WATER)) {
+                f |= 1024;
+            }
+            if (st.getFluidState().is(net.minecraft.world.level.material.Fluids.LAVA)) {
+                f |= 2048;
+            }
+        }
+        if (st.is(BlockTags.LEAVES)) {
+            f |= 8;
+        }
+        if (st.is(BlockTags.REPLACEABLE)) {
+            f |= 16;
+        }
+        if (st.isSolid()) {
+            f |= 32;
+        }
+        if (st.isSolidRender()) {
+            f |= 64;
+        }
+        // sturdy faces: N(128) S(256) E(512) W(4096) UP(8192) DOWN(16384)
+        if (st.isFaceSturdy(net.minecraft.world.level.EmptyBlockGetter.INSTANCE,
+                net.minecraft.core.BlockPos.ZERO, Direction.NORTH)) {
+            f |= 128;
+        }
+        if (st.isFaceSturdy(net.minecraft.world.level.EmptyBlockGetter.INSTANCE,
+                net.minecraft.core.BlockPos.ZERO, Direction.SOUTH)) {
+            f |= 256;
+        }
+        if (st.isFaceSturdy(net.minecraft.world.level.EmptyBlockGetter.INSTANCE,
+                net.minecraft.core.BlockPos.ZERO, Direction.EAST)) {
+            f |= 512;
+        }
+        if (st.isFaceSturdy(net.minecraft.world.level.EmptyBlockGetter.INSTANCE,
+                net.minecraft.core.BlockPos.ZERO, Direction.WEST)) {
+            f |= 4096;
+        }
+        if (st.isFaceSturdy(net.minecraft.world.level.EmptyBlockGetter.INSTANCE,
+                net.minecraft.core.BlockPos.ZERO, Direction.UP)) {
+            f |= 8192;
+        }
+        if (st.isFaceSturdy(net.minecraft.world.level.EmptyBlockGetter.INSTANCE,
+                net.minecraft.core.BlockPos.ZERO, Direction.DOWN)) {
+            f |= 16384;
+        }
+        return f;
+    }
+
+    /** One section snapshot as a little-endian byte payload:
+     *  i32 secY, i32 blockBits, i32 palLen, palLen x {u16 nameIdx, u16 flags},
+     *  i32 rawLen, i64 raw[rawLen], i32 biomeBits, i32 bioPalLen,
+     *  bioPalLen x {u16 nameIdx}, i32 rawLen2, i64 raw2[rawLen2],
+     *  i32 nNames, nNames x {u16 len, utf8}, i32 nBio, nBio x {u16 len, utf8}.
+     *  nameIdx indexes the section-local block-name list (names of the block
+     *  palette entries); biome palette entries index the biome-name list.
+     *  bits==0 = single-value palette (raw empty, value = entry 0). */
+    public byte[] decoSnapSection(int cx, int cz, int secY) {
+        ChunkAccess ch = reg.getChunk(cx, cz);
+        int si = secY - reg.getMinSectionY();
+        java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(8192)
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        buf.putInt(secY);
+        if (si < 0 || si >= ch.getSectionsCount()) {
+            buf.putInt(-1);
+            return java.util.Arrays.copyOf(buf.array(), buf.position());
+        }
+        LevelChunkSection sec = ch.getSection(si);
+        ArrayList<String> names = new ArrayList<>();
+        HashMap<String, Integer> nameIdx = new HashMap<>();
+        // ---- blocks ----
+        PalettedContainer<?> pc = sec.states;
+        try {
+            Data<?> d = (Data<?>) pc.data;
+            BitStorage storage = (BitStorage) F_STORAGE.get(d);
+            Palette<?> pal = (Palette<?>) F_PALETTE.get(d);
+            int bits = storage.getBits();
+            long[] raw = storage.getRaw();
+            int n = pal.getSize();
+            buf.putInt(bits);
+            buf.putInt(n);
+            for (int i = 0; i < n; i++) {
+                BlockState st = (BlockState) pal.valueFor(i);
+                String key = BuiltInRegistries.BLOCK.getKey(st.getBlock()).toString();
+                Integer ix = nameIdx.get(key);
+                if (ix == null) {
+                    ix = names.size();
+                    nameIdx.put(key, ix);
+                    names.add(key);
+                }
+                buf.putShort((short) ix.intValue());
+                buf.putShort((short) stateFlags(st));
+            }
+            buf.putInt(raw.length);
+            for (long v : raw) {
+                buf.putLong(v);
+            }
+            // ---- biomes (4x4x4 quart cells per section) ----
+            PalettedContainer<?> bio = (PalettedContainer<?>) F_BIOMES.get(sec);
+            Data<?> bd = (Data<?>) bio.data;
+            BitStorage bs = (BitStorage) F_STORAGE.get(bd);
+            Palette<?> bp = (Palette<?>) F_PALETTE.get(bd);
+            int bbits = bs.getBits();
+            long[] braw = bs.getRaw();
+            int bn = bp.getSize();
+            buf.putInt(bbits);
+            buf.putInt(bn);
+            ArrayList<String> bnames = new ArrayList<>();
+            HashMap<String, Integer> bidx = new HashMap<>();
+            for (int i = 0; i < bn; i++) {
+                Object v = bp.valueFor(i);
+                Holder<Biome> h;
+                if (v instanceof Holder<?> hh) {
+                    h = (Holder<Biome>) hh;
+                } else {
+                    @SuppressWarnings("unchecked")
+                    Holder<Biome> h2 = (Holder<Biome>) v;
+                    h = h2;
+                }
+                String key = biomeKey(h.value());
+                Integer ix = bidx.get(key);
+                if (ix == null) {
+                    ix = bnames.size();
+                    bidx.put(key, ix);
+                    bnames.add(key);
+                }
+                buf.putShort((short) ix.intValue());
+            }
+            buf.putInt(braw.length);
+            for (long v : braw) {
+                buf.putLong(v);
+            }
+            buf.putInt(names.size());
+            for (String s : names) {
+                byte[] b = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                buf.putShort((short) b.length);
+                buf.put(b);
+            }
+            buf.putInt(bnames.size());
+            for (String s : bnames) {
+                byte[] b = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                buf.putShort((short) b.length);
+                buf.put(b);
+            }
+        } catch (Throwable t) {
+            LOG.warning("deco snap: section " + cx + "," + cz + "," + secY + " failed: " + t);
+            return null;
+        }
+        return java.util.Arrays.copyOf(buf.array(), buf.position());
     }
 }

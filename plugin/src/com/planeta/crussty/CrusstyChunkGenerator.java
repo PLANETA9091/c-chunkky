@@ -2173,6 +2173,19 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     bf.put(name, parseBiomeFeatureRefs(pd.blobs()[i]));
                 }
             }
+            // ship the FULL map to the native BiomeFilter path (border
+            // positions sample neighbor biomes outside possibleBiomes —
+            // their JSONs still list the feature; the possible-biomes-only
+            // native map would answer false where vanilla answers true)
+            String[] bfn = new String[bf.size()];
+            String[] bfr = new String[bf.size()];
+            int bfi = 0;
+            for (java.util.Map.Entry<String, java.util.Set<String>> e : bf.entrySet()) {
+                bfn[bfi] = e.getKey();
+                bfr[bfi] = String.join("\u0001", e.getValue());
+                bfi++;
+            }
+            ChunkGenNative.decoBiomeFeaturesFull(ctx0, bfn, bfr);
             String[] names = ChunkGenNative.ctxBiomeNames(ctx0);
             java.util.Set<String> possible = names == null
                     ? null

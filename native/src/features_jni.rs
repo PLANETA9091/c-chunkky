@@ -31,7 +31,7 @@
 use crate::features_deco::{DecoLevel, DecoLevelExt, HeightmapTy};
 use crate::features_master::{chunk_plan, decoration_seed, run_feature_master};
 use crate::features_placement::BlockPos;
-use jni_sys::{jint, jlong, jobject, jobjectArray};
+use jni_sys::{jint, jintArray, jlong, jobject, jobjectArray};
 
 // ---------------------------------------------------------------------------
 // JVM upcall bridge (DecoLevel impl over the real WorldGenRegion)
@@ -53,6 +53,7 @@ struct BridgeMids {
     outside_build_height: jni_sys::jmethodID,
     state_full: jni_sys::jmethodID,
     is_solid_render: jni_sys::jmethodID,
+    deco_snap_section: jni_sys::jmethodID,
 }
 
 pub struct JniLevel<'a> {
@@ -64,6 +65,10 @@ pub struct JniLevel<'a> {
     min_y: i32,
     max_y: i32,
     trace: std::cell::Cell<u32>,
+    /// CRUS_DECO_NOUPCALL=1: dummy every upcall (height->min_y, bools->false)
+    /// — measures the native-only floor of decoRunFeature. Output garbage,
+    /// timings honest.
+    no_upcall: bool,
 }
 
 impl<'a> JniLevel<'a> {
@@ -71,6 +76,10 @@ impl<'a> JniLevel<'a> {
         let t = self.trace.get();
         self.trace.set(t + 1);
         t < 5
+    }
+    #[inline]
+    fn noup(&self) -> bool {
+        self.no_upcall
     }
 }
 
@@ -109,6 +118,7 @@ impl<'a> JniLevel<'a> {
                 outside_build_height: mid("outsideBuildHeight", "(I)Z"),
                 state_full: mid("stateFull", "(III)Ljava/lang/String;"),
                 is_solid_render: mid("isSolidRender", "(III)Z"),
+                deco_snap_section: mid("decoSnapSection", "(III)[B"),
             };
             let ok = [
                 mids.is_air,
@@ -126,18 +136,31 @@ impl<'a> JniLevel<'a> {
                 mids.outside_build_height,
                 mids.state_full,
                 mids.is_solid_render,
+                mids.deco_snap_section,
             ]
             .iter()
             .all(|m| !m.is_null());
             if !ok {
                 return None;
             }
-            Some(JniLevel { env, obj, mids, uid_names, min_y, max_y, trace: std::cell::Cell::new(0) })
+            Some(JniLevel {
+                env,
+                obj,
+                mids,
+                uid_names,
+                min_y,
+                max_y,
+                trace: std::cell::Cell::new(0),
+                no_upcall: std::env::var("CRUS_DECO_NOUPCALL").ok().as_deref() == Some("1"),
+            })
         }
     }
 
     #[inline]
     fn z_call(&self, mid: jni_sys::jmethodID, args: &[jni_sys::jvalue]) -> bool {
+        if self.noup() {
+            return false;
+        }
         let tbl = unsafe { *self.env };
         unsafe {
             // A-variant takes a jvalue* — the plain Call*Method is C-varargs
@@ -148,6 +171,54 @@ impl<'a> JniLevel<'a> {
                 return false;
             }
             r
+        }
+    }
+
+    /// One section snapshot from the bridge (DecoDriver.decoSnapSection).
+    /// Returns the raw little-endian payload bytes.
+    fn snap_section(&self, cx: i32, cz: i32, sec_y: i32) -> Option<Vec<u8>> {
+        if self.noup() {
+            return None;
+        }
+        let tbl = unsafe { *self.env };
+        unsafe {
+            let ivals = [
+                Self::val_i(cx),
+                Self::val_i(cz),
+                Self::val_i(sec_y),
+            ];
+            let r = ((*tbl).v1_1.CallObjectMethodA)(
+                self.env,
+                self.obj,
+                self.mids.deco_snap_section,
+                ivals.as_ptr(),
+            ) as jni_sys::jbyteArray;
+            if ((*tbl).v1_2.ExceptionCheck)(self.env) {
+                ((*tbl).v1_1.ExceptionClear)(self.env);
+                return None;
+            }
+            if r.is_null() {
+                return None;
+            }
+            let len = ((*tbl).v1_1.GetArrayLength)(self.env, r as jni_sys::jarray) as usize;
+            if len == 0 {
+                ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+                return None;
+            }
+            let p = ((*tbl).v1_1.GetByteArrayElements)(self.env, r, std::ptr::null_mut());
+            if p.is_null() {
+                ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+                return None;
+            }
+            let out = std::slice::from_raw_parts(p as *const u8, len).to_vec();
+            ((*tbl).v1_2.ReleaseByteArrayElements)(
+                self.env,
+                r,
+                p,
+                jni_sys::JNI_ABORT,
+            );
+            ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+            Some(out)
         }
     }
 
@@ -201,6 +272,9 @@ impl<'a> DecoLevel for JniLevel<'a> {
         self.max_y
     }
     fn height(&self, ty: HeightmapTy, x: i32, z: i32) -> i32 {
+        if self.noup() {
+            return self.min_y;
+        }
         let tbl = unsafe { *self.env };
         unsafe {
             let ivals = [
@@ -433,6 +507,63 @@ impl<'a> DecoLevelExt for JniLevel<'a> {
 
 use crate::ffi::SESSIONS;
 
+/// decoBiomeFeaturesFull(ctx, String[] biomeNames, String[] joinedRefs) —
+/// the FULL pack biome -> placed-refs union map, matching the Java
+/// BiomeFilter source exactly (including biomes OUTSIDE possibleBiomes —
+/// border positions sample neighbor biomes whose JSONs still list the
+/// feature). joinedRefs[i] = "ref1\u{1}ref2..." (SOH-separated) or empty.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoBiomeFeaturesFull(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jlong,
+    names: jobjectArray,
+    joined: jobjectArray,
+) {
+    let tbl = *env;
+    let read_arr = |arr: jobjectArray| -> Vec<String> {
+        let mut out = Vec::new();
+        unsafe {
+            let len = ((*tbl).v1_1.GetArrayLength)(env, arr as jni_sys::jarray) as usize;
+            for i in 0..len {
+                let jo = ((*tbl).v1_1.GetObjectArrayElement)(env, arr, i as jni_sys::jsize);
+                if jo.is_null() {
+                    out.push(String::new());
+                    continue;
+                }
+                let chars = ((*tbl).v1_1.GetStringUTFChars)(env, jo as jni_sys::jstring, std::ptr::null_mut());
+                let s = if chars.is_null() {
+                    String::new()
+                } else {
+                    std::ffi::CStr::from_ptr(chars).to_string_lossy().into_owned()
+                };
+                if !chars.is_null() {
+                    ((*tbl).v1_1.ReleaseStringUTFChars)(env, jo as jni_sys::jstring, chars);
+                }
+                ((*tbl).v1_1.DeleteLocalRef)(env, jo);
+                out.push(s);
+            }
+        }
+        out
+    };
+    let names_v = read_arr(names);
+    let refs_v = read_arr(joined);
+    // GLOBAL (the chunk deco acquires any ctx from the pool — per-ctx storage
+    // would leave the other ctxs with an empty map)
+    let mut map = crate::features_snap::BIOME_FULL.write().unwrap();
+    map.clear();
+    for (i, name) in names_v.iter().enumerate() {
+        if name.is_empty() {
+            continue;
+        }
+        let refs: Vec<String> = refs_v
+            .get(i)
+            .map(|j| j.split('\u{1}').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        map.insert(name.clone(), refs);
+    }
+}
+
 /// decoStates(ctx) -> String[] — distinct block state strings of the decoded
 /// feature registry (first-appearance order, ops reference them by index).
 /// Null when the ctx has no native deco engine.
@@ -550,7 +681,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoChunkP
     if olen < runs.len() * 2 {
         return -1;
     }
-    let ptr = ((*tbl).v1_1.GetIntArrayElements)(env, out, std::ptr::null_mut());
+    let ptr = ((*tbl).v1_2.GetPrimitiveArrayCritical)(env, out as jni_sys::jarray, std::ptr::null_mut());
     if ptr.is_null() {
         return -1;
     }
@@ -559,7 +690,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoChunkP
         slice[k * 2] = *step as i32;
         slice[k * 2 + 1] = *idx as i32;
     }
-    ((*tbl).v1_1.ReleaseIntArrayElements)(env, out, ptr, 0);
+    ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
     runs.len() as jint
 }
 
@@ -609,23 +740,44 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
     let Some(level) = JniLevel::new(env, bridge, &d.uid_names, origin_y, max_y) else {
         return -1;
     };
-    // Intra-feature overlay: vanilla setBlock is live, our ops flush after the
-    // feature returns. Without this, scattered_ore re-visits of own writes see
-    // the RAW block (stone), consume an extra random_block match draw and
-    // cascade every later spos — the F2 probe's residual ore divergence.
-    let overlay = crate::features_deco::OverlayLevel::new(&level);
+    // Chunk-scoped level: overlay (ALL of this chunk's feature writes) ->
+    // lazy 3x3 section snapshot -> JNI bridge. The per-feature OverlayLevel
+    // is gone: later features must see earlier features' writes (vanilla
+    // setBlock is live) AND the point queries must not upcall per query —
+    // the snapshot serves them natively (flags computed in Java).
+    let ov: &std::cell::RefCell<crate::features_snap::OvMap> = &d.chunk_ov;
+    let snap: &std::cell::RefCell<crate::features_snap::SnapRegion> = &d.chunk_snap;
+    let zoom_seed = d.chunk_zoom_seed.get();
+    let level_ref = &level;
+    let loader = |cx: i32, cz: i32, sec_y: i32| -> Option<crate::features_snap::SnapSection> {
+        let bytes = level_ref.snap_section(cx, cz, sec_y)?;
+        crate::features_snap::parse_section(&bytes)
+    };
+    let chunk_level = crate::features_snap::ChunkLevel::new(
+        level_ref,
+        ov,
+        snap,
+        &loader,
+        &d.uid_names,
+        zoom_seed,
+    );
     let olen = ((*tbl).v1_1.GetArrayLength)(env, out as jni_sys::jarray) as usize;
     if olen < 5 {
         return -1;
     }
-    let ptr = ((*tbl).v1_1.GetIntArrayElements)(env, out, std::ptr::null_mut());
+    // GetPrimitiveArrayCritical: PIN the ops buffer (no copy). The old
+    // GetIntArrayElements copied the 1.5MB buffer TO and BACK per feature —
+    // 21818 features x 3MB traffic = ~65GB memcpy per 332-chunk pregen —
+    // the dominant cost of the native deco path (17ms of the 21.6ms run
+    // phase). Writes are short-lived (pin released at feature end).
+    let ptr = ((*tbl).v1_2.GetPrimitiveArrayCritical)(env, out as jni_sys::jarray, std::ptr::null_mut());
     if ptr.is_null() {
         return -1;
     }
     let slice = std::slice::from_raw_parts_mut(ptr as *mut i32, olen);
     let n = run_feature_master(
         &d.state,
-        &overlay,
+        &chunk_level,
         deco_seed as i64,
         if paper_seed == -1 { None } else { Some(paper_seed as i64) },
         BlockPos::new(origin_x as i32, origin_y as i32, origin_z as i32),
@@ -634,7 +786,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
         gid as usize,
         slice,
     );
-    ((*tbl).v1_1.ReleaseIntArrayElements)(env, out, ptr, 0);
+    ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
     n as jint
 }
 
@@ -649,4 +801,93 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoDecoSe
     origin_z: jint,
 ) -> jlong {
     decoration_seed(level_seed as i64, origin_x as i32, origin_z as i32) as jlong
+}
+
+/// decoChunkBegin(ctx, cx, cz, minSectionY) — reset the chunk-scoped overlay
+/// + snapshot grid before the feature loop of chunk (cx, cz).
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoChunkBegin(
+    _env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jlong,
+    cx: jint,
+    cz: jint,
+    min_sec_y: jint,
+    zoom_seed: jlong,
+) {
+    let guard = SESSIONS.lock().unwrap();
+    if let Some(d) = guard
+        .as_ref()
+        .and_then(|m| m.get(&(ctx as i64)))
+        .and_then(|c| c.deco.as_ref())
+    {
+        d.chunk_ov.borrow_mut().clear();
+        d.chunk_snap.borrow_mut().reset(cx, cz, min_sec_y);
+        d.chunk_zoom_seed.set(zoom_seed);
+    }
+}
+
+/// decoOpsDropped(ctx, coords, count) — ops the Java apply loop dropped
+/// (postproc marks / unparseable states / out-of-range sections): remove
+/// their pending-overlay entries so the chunk overlay stays exact (a phantom
+/// entry would serve stale answers for the rest of the chunk — the old
+/// per-feature overlay discarded them implicitly at feature end).
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoOpsDropped(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jlong,
+    coords: jintArray,
+    count: jint,
+) {
+    if coords.is_null() || count <= 0 {
+        return;
+    }
+    let tbl = *env;
+    unsafe {
+        let len = ((*tbl).v1_1.GetArrayLength)(env, coords as jni_sys::jarray) as usize;
+        if len < (count as usize) * 3 {
+            return;
+        }
+        let p = ((*tbl).v1_2.GetPrimitiveArrayCritical)(env, coords as jni_sys::jarray, std::ptr::null_mut());
+        if p.is_null() {
+            return;
+        }
+        let slice = std::slice::from_raw_parts(p as *const i32, len);
+        let guard = SESSIONS.lock().unwrap();
+        if let Some(d) = guard
+            .as_ref()
+            .and_then(|m| m.get(&(ctx as i64)))
+            .and_then(|c| c.deco.as_ref())
+        {
+            let mut ov = d.chunk_ov.borrow_mut();
+            for k in 0..count as usize {
+                ov.remove(&(slice[k * 3], slice[k * 3 + 1], slice[k * 3 + 2]));
+            }
+        }
+        ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, coords as jni_sys::jarray, p, jni_sys::JNI_ABORT);
+    }
+}
+
+/// decoDelegateMark(ctx) — a vanilla delegate feature ran (its writes went
+/// through the region directly, invisible to BOTH the overlay and the
+/// snapshot). Clear the chunk overlay (its entries may be stale where the
+/// delegate overwrote them; the flushed native writes live in the region and
+/// come back via the reloaded snapshot) AND bump the snapshot epoch (stale
+/// sections reload lazily on the next query).
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoDelegateMark(
+    _env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jlong,
+) {
+    let guard = SESSIONS.lock().unwrap();
+    if let Some(d) = guard
+        .as_ref()
+        .and_then(|m| m.get(&(ctx as i64)))
+        .and_then(|c| c.deco.as_ref())
+    {
+        d.chunk_ov.borrow_mut().clear();
+        d.chunk_snap.borrow().bump_epoch();
+    }
 }

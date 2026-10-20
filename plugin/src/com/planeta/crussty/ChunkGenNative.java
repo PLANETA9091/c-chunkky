@@ -101,6 +101,27 @@ public final class ChunkGenNative {
      *  decoration seed `l` (setDecorationSeed; every feature re-seeds from it). */
     public static native long decoDecoSeed(long levelSeed, int originX, int originZ);
 
+    /** decoChunkBegin(ctx, cx, cz, minSectionY) — reset the chunk-scoped
+     *  feature-write overlay + lazy 3x3 section snapshot before the feature
+     *  loop. Must precede the decoRunFeature calls of this chunk on the same
+     *  ctx (the populate threads hold exclusive ctx locks). */
+    public static native void decoChunkBegin(long ctx, int cx, int cz, int minSectionY,
+            long biomeZoomSeed);
+
+    /** decoOpsDropped(ctx, coords, count) — ops the Java apply loop DROPPED
+     *  (postproc marks, unparseable states, out-of-range sections): remove
+     *  their pending-overlay entries so the chunk overlay stays exact. */
+    public static native void decoOpsDropped(long ctx, int[] coords, int count);
+
+    /** decoDelegateMark(ctx) — a vanilla delegate feature ran and wrote via
+     *  the region directly; bumps the snapshot epoch (stale sections reload). */
+    public static native void decoDelegateMark(long ctx);
+
+    /** decoBiomeFeaturesFull(ctx, biomeNames, joinedRefs) — the FULL pack
+     *  biome -> placed-refs union (BiomeFilter native path). joinedRefs[i]
+     *  is \u0001-separated. Must run after decoStates/decoPlan at world load. */
+    public static native void decoBiomeFeaturesFull(long ctx, String[] biomeNames, String[] joinedRefs);
+
     public static native int fillMarked(long ctx, int chunkX, int chunkZ, short[] out, long[] marks);
 
     /**

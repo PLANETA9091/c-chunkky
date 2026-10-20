@@ -29,6 +29,7 @@ pub mod features_place;
 pub mod features_place_ffi;
 pub mod features_master;
 pub mod features_jni;
+pub mod features_snap;
 pub mod ffi;
 
 include!(concat!(env!("OUT_DIR"), "/assets_manifest.rs"));

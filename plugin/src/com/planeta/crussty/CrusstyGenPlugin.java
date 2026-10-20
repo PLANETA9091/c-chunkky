@@ -56,6 +56,7 @@ public final class CrusstyGenPlugin extends JavaPlugin {
         if (command.getName().equals("crusgenstats")) {
             if (args.length >= 1 && args[0].equalsIgnoreCase("reset")) {
                 GenStats.reset();
+                DecoStats.reset();
                 sender.sendMessage("[CrusstyGen] stats window reset");
                 return true;
             }
@@ -64,6 +65,10 @@ public final class CrusstyGenPlugin extends JavaPlugin {
             // lose [cpu] and jni_prof (observed 2026-10-15, prof sessions).
             StringBuilder sb = new StringBuilder(cpuLine())
                     .append(" | [CrusstyGen] native noise stage: ").append(GenStats.snapshot());
+            try {
+                sb.append(" | [CrusstyGen] native deco stage: ").append(DecoStats.snapshot());
+            } catch (Throwable ignored) {
+            }
             try {
                 sb.append(" | [CrusstyGen] ").append(ChunkGenNative.profStatsGlobal());
             } catch (Throwable ignored) {
