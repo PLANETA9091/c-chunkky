@@ -59,8 +59,7 @@ for fcz in $(seq -4 3); do
     EXPECT=$((EXPECT + 1))
     rcon "forceload add $((fcx * 16)) $((fcz * 16)) $((fcx * 16 + 15)) $((fcz * 16 + 15))" >/dev/null || true
     for i in $(seq 1 150); do
-      ST=$(rcon "crusstatus -4 -4 3 3" 2>/dev/null || echo "")
-      N=$(printf '%s\n' "$ST" | grep "^$WORLD:" | sed 's/.*region\[-4\.\.3,-4\.\.3\]=\([0-9]*\)\/.*/\1/' || true)
+      N=$(rcon "crusfull $((fcx * 16)) $((fcz * 16)) 63 63 $WORLD" 2>/dev/null | grep -oP 'FULL=\K[0-9]+' || true)
       if [ "${N:-0}" -ge "$EXPECT" ]; then break; fi
       sleep 1
     done
@@ -72,8 +71,7 @@ done
 # --- final poll: region complete --------------------------------------------
 N=""
 for i in $(seq 1 300); do
-  ST=$(rcon "crusstatus -4 -4 3 3" 2>/dev/null || echo "")
-  N=$(printf '%s\n' "$ST" | grep "^$WORLD:" | sed 's/.*region\[-4\.\.3,-4\.\.3\]=\([0-9]*\)\/.*/\1/' || true)
+  N=$(rcon "crusfull -64 -64 63 63 $WORLD" 2>/dev/null | grep -oP 'FULL=\K[0-9]+' || true)
   if [ "${N:-0}" = "64" ]; then
     T1=$(date +%s%3N)
     echo "[bench] $(date -u +%T) region complete (t1=$T1) after poll #$i"

@@ -157,6 +157,9 @@ rcon "crusgenstats reset" >/dev/null || true
 fi
 
 # --- pregen + measure -------------------------------------------------------
+# the per-chunk dumps land here DURING the loop — create it first (the CI run
+# of 98046a3 lost every dump: the dir was created after the pregen)
+mkdir -p "$OUT_DIR"
 # Judge determinism (post-gen simulation): kelp growth, amethyst buds and
 # crop/cave growth are RANDOM ticks — which chunks get ticked depends on the
 # world random draw sequence, which depends on WHEN chunks loaded — the fast
@@ -189,7 +192,7 @@ for cz in $(seq $X0 $X1); do
         # parse the counter AFTER '=': the naive [0-9]* match returned "4"
         # (the first number inside "[-4..3,-4..3]") — the loop then waited
         # forever on chunk #5. [0-9]+$ grabs the trailing counter only.
-        LOADED=$(rcon "crusstatus $X0 $X0 $X1 $X1" | grep -m1 -o "${REGION_TAG}=[0-9]*" | grep -oE "[0-9]+$" || true)
+        LOADED=$(rcon "crusfull $((X0 * 16)) $((X0 * 16)) $((X1 * 16 + 15)) $((X1 * 16 + 15))" | grep -oP 'FULL=\K[0-9]+' || true)
         if [ "${LOADED:-0}" -ge "$EXPECT" ]; then loaded_ok=1; STALL=0; break; fi
         if [ "$((i % 15))" -eq 0 ]; then
           echo "[pregen stall] chunk $cx $cz (attempt $attempt): wait ${i}s, loaded=${LOADED:-?}/$EXPECT"
