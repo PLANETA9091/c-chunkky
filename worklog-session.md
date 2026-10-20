@@ -1692,3 +1692,42 @@ Stage Summary:
   WG heightmap snapshot (the last cheap JNI); (c) the native compute profile
   (the string interning in state_is); (d) the dptt native parity track (the
   ore shapes/F6 tail) + the dptt 0.066% static floor investigation.
+
+---
+## Session cont-52b: per-chunk judge dumps — the simulation class eliminated
+
+Work Log:
+- The tick-settle protocol still failed CI (0.550%): the SIMULATION DEPTH is
+  per-chunk (the reference chunks sat through the slow vanilla pregen ~900
+  ticks; the native ~300) — bubble_column growth, ocean-floor settling and
+  seagrass compared different depths regardless of the settle arithmetic.
+- Fix (98046a3): PER-CHUNK DUMPS right after each chunk loads (crusstydump
+  inside the forceload loop, both lanes) — the gen->dump exposure ~10-25 ticks
+  on BOTH lanes; the post-dump simulation unused. The region dump removed.
+- CI 98046a3: every dump LOST — "no common chunk files" — OUT_DIR was created
+  AFTER the pregen. Fix (5dc44ab): mkdir before the loop + the crusfull polls
+  (single-message FULL=N/64, exact loaded count — the crusstatus region parse
+  returned nothing on CI).
+- CI 5dc44ab: vanilla 0.555% (34945) — the dumps now WORK, the tick classes
+  are gone, BUT the static CI-only divergence remains: water->bubble_column
+  (177), sand->dirt, stone->dirt/andesite, stone<->gravel, coal_ore->stone.
+  Locally the SAME protocol = 0.008% (524). The diff is stable to +-35 blocks
+  across every protocol/CPU/commit since e746d13.
+- ELIMINATED: SIMD paths (avx2 forced = clean locally), gen-parallelism, the
+  random ticks (frozen), the settle depth (per-chunk), the pregen asymmetry
+  (8x8 symmetric), the poll fragility (crusfull). The remaining suspect: the
+  CI-BUILT .so (the CI rustc/codegen vs the local one) or a CI-specific JVM
+  behavior — the native-vs-Java delta only manifests on the CI hardware.
+- NEXT (the decisive experiments): (1) a CI plugin-vs-plugin self-check (two
+  fresh judge runs diffed against each other — if they match, the CI is
+  deterministic and the divergence = the native-vs-Java codegen); (2) run the
+  CI judge with the .so artifact built LOCALLY and uploaded (cross-run
+  artifact reuse) — if the floor collapses to 0.008%, pin the CI toolchain.
+
+Stage Summary:
+- The judge protocol is now lane-consistent by construction (per-chunk dumps
+  at generation time). The local floor: vanilla 0.008%, dptt 0.060% (the
+  static pack-surface residual, gate 0.10).
+- The deco engine: probe p50 1.41ms / dptt p50 3.7ms (the snapshot pass).
+- The CI vanilla gate = the single remaining red; the investigation state is
+  fully reproducible from the harness + the artifacts.
