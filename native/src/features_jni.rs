@@ -8,7 +8,7 @@
 //!       out[2*k] = step, out[2*k+1] = index-in-step (step-major, index-ascending)
 //!   decoRunFeature(ctx, long decoSeed, long paperSeed, int originX, originY,
 //!       originZ, int step, int gid, DecoLevelBridge bridge, int[] out) -> int ops
-//!       out[5*k ..+5] = x, y(abs), z, stateIdx, flags
+//!       out[6*k ..+6] = x, y(abs), z, stateIdx, flags, aux
 //!   decoDecoSeed(long levelSeed, int originX, int originZ) -> long
 //!
 //! DecoLevelBridge upcalls (resolved per decoRunFeature call):
@@ -21,6 +21,8 @@
 //!   boolean wouldSurvive(String state, int x, int y, int z)
 //!   boolean biomeHasFeature(int x, int y, int z, String placed)
 //!   boolean outsideBuildHeight(int y)
+//!   String stateFull(int x, int y, int z)      — full "block[props]" read
+//!   boolean isSolidRender(int x, int y, int z) — PlaceOnGround decorator
 //!
 //! NOTE: the bridge methods must NOT call back into ChunkGenNative natives —
 //! SESSIONS is held for the duration of decoRunFeature (std Mutex is not
@@ -49,6 +51,8 @@ struct BridgeMids {
     would_survive: jni_sys::jmethodID,
     biome_has_feature: jni_sys::jmethodID,
     outside_build_height: jni_sys::jmethodID,
+    state_full: jni_sys::jmethodID,
+    is_solid_render: jni_sys::jmethodID,
 }
 
 pub struct JniLevel<'a> {
@@ -103,6 +107,8 @@ impl<'a> JniLevel<'a> {
                 would_survive: mid("wouldSurvive", "(Ljava/lang/String;III)Z"),
                 biome_has_feature: mid("biomeHasFeature", "(IIILjava/lang/String;)Z"),
                 outside_build_height: mid("outsideBuildHeight", "(I)Z"),
+                state_full: mid("stateFull", "(III)Ljava/lang/String;"),
+                is_solid_render: mid("isSolidRender", "(III)Z"),
             };
             let ok = [
                 mids.is_air,
@@ -118,6 +124,8 @@ impl<'a> JniLevel<'a> {
                 mids.would_survive,
                 mids.biome_has_feature,
                 mids.outside_build_height,
+                mids.state_full,
+                mids.is_solid_render,
             ]
             .iter()
             .all(|m| !m.is_null());
@@ -291,6 +299,48 @@ impl<'a> DecoLevel for JniLevel<'a> {
 }
 
 impl<'a> DecoLevelExt for JniLevel<'a> {
+    /// full state string for tree reads (props included). NOTE: the
+    /// OverlayLevel wrapper serves its own writes first — this is the
+    /// WORLD-side read only.
+    fn state_full(&self, pos: BlockPos) -> String {
+        let tbl = unsafe { *self.env };
+        unsafe {
+            let ivals = [
+                Self::val_i(pos.x),
+                Self::val_i(pos.y),
+                Self::val_i(pos.z),
+            ];
+            let r = ((*tbl).v1_1.CallObjectMethodA)(
+                self.env,
+                self.obj,
+                self.mids.state_full,
+                ivals.as_ptr(),
+            );
+            if r.is_null() {
+                return String::new();
+            }
+            let cstr = ((*tbl).v1_1.GetStringUTFChars)(self.env, r as jni_sys::jstring, std::ptr::null_mut());
+            let s = if cstr.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(cstr).to_string_lossy().into_owned()
+            };
+            if !cstr.is_null() {
+                ((*tbl).v1_1.ReleaseStringUTFChars)(self.env, r as jni_sys::jstring, cstr);
+            }
+            s
+        }
+    }
+
+    fn is_solid_render(&self, pos: BlockPos) -> bool {
+        let ivals = [
+            Self::val_i(pos.x),
+            Self::val_i(pos.y),
+            Self::val_i(pos.z),
+        ];
+        self.z_call(self.mids.is_solid_render, &ivals)
+    }
+
     /// Debug upcall: block registry key at pos (trace-only).
     fn state_name(&self, pos: BlockPos) -> String {
         let tbl = unsafe { *self.env };

@@ -196,7 +196,7 @@ public final class DecoDriver extends BlockPopulator {
             LOG.info("[deco-dbg] biomes(" + biomes.length + ")=" + bs + " runs=" + runs);
         }
 
-        int[] ops = new int[5 * 65536];
+        int[] ops = new int[6 * 65536];
         int totalOps = 0;
         runStructures(l, cx, cz);
         for (int k = 0; k < runs; k++) {
@@ -221,7 +221,7 @@ public final class DecoDriver extends BlockPopulator {
                 totalOps += n;
             }
             for (int i = 0; i < n; i++) {
-                applyOp(limited, ox, oz, ops, i * 5);
+                applyOp(limited, ox, oz, ops, i * 6);
             }
         }
         if (first) {
@@ -339,6 +339,7 @@ public final class DecoDriver extends BlockPopulator {
         int rz = ops[o + 2];
         int stateIdx = ops[o + 3];
         int flags = ops[o + 4];
+        int aux = ops[o + 5];
         String[] states = STATES;
         if ((flags & 32) != 0) {
             // FLAG_POSTPROC: vanilla markAboveForPostProcessing (DiskFeature)
@@ -360,6 +361,21 @@ public final class DecoDriver extends BlockPopulator {
                 st = st.trySetValue(RotatedPillarBlock.AXIS, AXES[axis]);
             } catch (Throwable ignored) {
                 // state without an axis property: trySetValue is a no-op anyway
+            }
+        }
+        if ((flags & 2) == 0 && aux != 0) {
+            // tree aux: bits 0-3 = leaf distance override (1..7), bit 4 =
+            // waterlogged=true (vanilla LeavesBlock/roots fluid override) —
+            // trySetValue is a no-op when the state lacks the property
+            try {
+                int dist = aux & 15;
+                if (dist >= 1 && dist <= 7) {
+                    st = st.trySetValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.DISTANCE, dist);
+                }
+                if ((aux & 16) != 0) {
+                    st = st.trySetValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED, Boolean.TRUE);
+                }
+            } catch (Throwable ignored) {
             }
         }
         BlockPos pos = new BlockPos(ox + rx, y, oz + rz);
@@ -554,6 +570,32 @@ public final class DecoDriver extends BlockPopulator {
     public String stateName(int x, int y, int z) {
         BlockState st = reg.getBlockState(new BlockPos(x, y, z));
         return BuiltInRegistries.BLOCK.getKey(st.getBlock()).toString();
+    }
+
+    /** Tree engine: FULL state string "block[k=v,...]" (props in definition
+     *  order) — leaves distance/persistent reads, vine face recomputes. */
+    public String stateFull(int x, int y, int z) {
+        BlockState st = reg.getBlockState(new BlockPos(x, y, z));
+        StringBuilder sb = new StringBuilder(
+                BuiltInRegistries.BLOCK.getKey(st.getBlock()).toString());
+        var props = st.getProperties();
+        if (!props.isEmpty()) {
+            sb.append('[');
+            boolean first = true;
+            for (var p : props) {
+                if (!first) sb.append(',');
+                first = false;
+                sb.append(p.getName()).append('=').append(st.getValue(p).toString());
+            }
+            sb.append(']');
+        }
+        return sb.toString();
+    }
+
+    /** Tree PlaceOnGround decorator: BlockStateBase.isSolidRender at pos. */
+    public boolean isSolidRender(int x, int y, int z) {
+        BlockState st = reg.getBlockState(new BlockPos(x, y, z));
+        return st.isSolidRender();
     }
 
     public boolean isReplaceable(int x, int y, int z) {

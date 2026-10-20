@@ -289,14 +289,15 @@ pub fn run_feature_master(
     place_placed(&ctx, name, &mut rng, origin, &mut ops, 0);
     let mut n = 0;
     for op in &ops {
-        if n * 5 + 4 >= out.len() {
+        if n * 6 + 5 >= out.len() {
             break;
         }
-        out[n * 5] = op.x as i32;
-        out[n * 5 + 1] = op.y as i32;
-        out[n * 5 + 2] = op.z as i32;
-        out[n * 5 + 3] = op.state as i32;
-        out[n * 5 + 4] = op.flags as i32;
+        out[n * 6] = op.x as i32;
+        out[n * 6 + 1] = op.y as i32;
+        out[n * 6 + 2] = op.z as i32;
+        out[n * 6 + 3] = op.state as i32;
+        out[n * 6 + 4] = op.flags as i32;
+        out[n * 6 + 5] = op.aux as i32;
         n += 1;
     }
     n

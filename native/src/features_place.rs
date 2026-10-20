@@ -18,6 +18,8 @@ pub struct DecoOp {
     pub state: u16,
     /// bit0 = schedule_tick; bit1 = rotated provider; bits2-3 = axis pick (0=X 1=Y 2=Z)
     pub flags: u8,
+    /// tree aux: bits 0-3 = leaf distance override (1..7), bit 4 = waterlogged=true
+    pub aux: u16,
 }
 
 pub const FLAG_TICK: u8 = 1;
@@ -53,9 +55,21 @@ impl<'a> PlaceCtx<'a> {
     }
     /// emit a block write op + overlay bookkeeping
     fn emit(&self, ops: &mut Vec<DecoOp>, pos: BlockPos, state: &str, flags: u8) {
+        self.emit_aux(ops, pos, state, flags, 0);
+    }
+
+    /// emit with tree aux (leaf distance / waterlogged overrides)
+    pub(crate) fn emit_aux(
+        &self,
+        ops: &mut Vec<DecoOp>,
+        pos: BlockPos,
+        state: &str,
+        flags: u8,
+        aux: u16,
+    ) {
         let (rx, rz) = self.rel(pos);
         let sid = self.state_index.get(state).copied().unwrap_or(0);
-        ops.push(DecoOp { x: rx, y: pos.y as i16, z: rz, state: sid, flags });
+        ops.push(DecoOp { x: rx, y: pos.y as i16, z: rz, state: sid, flags, aux });
         if sel_trace_on(self.center_x >> 4, self.center_z >> 4) {
             eprintln!(
                 "[op@{}] w ({},{},{}) {state} flags={flags:#x}",
@@ -69,7 +83,7 @@ impl<'a> PlaceCtx<'a> {
     }
 }
 
-fn sample_state(
+pub(crate) fn sample_state(
     src: &StateSrc,
     level: &dyn DecoLevelExt,
     pos: BlockPos,
@@ -188,7 +202,9 @@ fn cfg_fully_supported(reg: &FeatureRegistry, cfg_name: &str, depth: u32) -> boo
         | FeatureCfg::ReplaceBlock { .. }
         | FeatureCfg::Ore { .. }
         | FeatureCfg::ScatteredOre { .. }
-        | FeatureCfg::Disk { .. } => true,
+        | FeatureCfg::Disk { .. }
+        | FeatureCfg::Tree { .. }
+        | FeatureCfg::VegetationPatch { .. } => true,
         FeatureCfg::RandomSelector { entries, default } => {
             entries.iter().all(|(_, n)| placed_fully_supported(reg, n, depth + 1))
                 && placed_fully_supported(reg, default, depth + 1)
@@ -347,6 +363,10 @@ pub fn place_configured(
         FeatureCfg::Disk { provider, target, radius, half_height } => {
             place_disk(ctx, provider, target, radius, *half_height, rng, pos, ops)
         }
+        FeatureCfg::Tree(cfg) => crate::features_tree::place_tree(ctx, cfg, rng, pos, ops),
+        FeatureCfg::VegetationPatch(cfg) => {
+            crate::features_tree::place_vegetation_patch(ctx, cfg, rng, pos, ops)
+        }
         FeatureCfg::Unsupported(_) => false,
     }
 }
@@ -425,7 +445,7 @@ fn place_disk(
                                 break;
                             }
                             let (mrx, mrz) = ctx.rel(m);
-                            ops.push(DecoOp { x: mrx, y: m.y as i16, z: mrz, state: 0, flags: FLAG_POSTPROC });
+                            ops.push(DecoOp { x: mrx, y: m.y as i16, z: mrz, state: 0, flags: FLAG_POSTPROC, aux: 0 });
                         }
                     }
                     any = true;

@@ -1609,3 +1609,27 @@ Stage Summary:
   check Paper's PlacedFeature.place vs placeWithBiomeCheck inside patches!).
 - The worklog + harness = the repro state; the packs live in
   probe/datapacks/f1 (the full F2 biome lists restored).
+
+---
+Task ID: cont-51 (2026-10-20, STAGE F5: NATIVE TREES + VEGETATION PATCHES)
+Agent: Super Z (main)
+Task: продолжи на максимум — нативизация деревьев (tree 193 configs) + vegetation_patch (36+4), гибридный delegate остатков.
+
+Work Log:
+- Инвентарь паков (Terralith+Tectonic, 512 cfg): tree 193 (straight 108 / forking 27 / bending 16 / fancy 16 / giant 10 / mega_jungle 6 / dark_oak 4 / upwards_branching 4 / cherry 2; foliage: pine 37 / blob 34 / mega_pine 32 / spruce 21 / fancy 19 / random_spread 18 / acacia 10 / bush 10 / jungle 7 / dark_oak 4 / cherry 1), vegetation_patch 36 + waterlogged 4. Декораторы: place_on_ground 28, leave_vine 24, beehive 18, alter_ground 12, trunk_vine 8, cocoa 5, attached_to_leaves 7, pale_moss 4, creaking_heart 2. Root placer: mangrove 6.
+- features_tree.rs (~2600 строк): полный порт TreeFeature.doPlace/place (decompile src14) + 9 транков + 11 фолиажей + 2 feature-size + mangrove roots + 10 декораторов + updateLeaves BFS + StructureTemplate.updateShapeAtEdge + VegetationPatchFeature/WaterloggedVegetationPatch.
+- КЛЮЧЕВАЯ СЕМАНТИКА (выцеплена из декомпилов):
+  * java.util.HashSet<BlockPos> ITERATION ORDER — JSetSim: Vec3i.hashCode=(y+z*31)*31+x, HashMap spread h^h>>>16, bin-append, resize при live>0.75*cap с lo/hi-сплитом, TREEIFY (chain>=8, cap>=64 — порядок (hash, Vec3i.compareTo=y,z,x)). Декораторы итерируют Y-стабильно-отсортированный HashSet-порядок. VegetationPatch distributeVegetation — тот же порядок.
+  * updateLeaves BFS: seeds=LOGS на level 0, prefill shape=decos∪roots (порядок аргументов вызова (set1,set3,set) из декомпила), per-level ОЧЕРЕДИ = HashSet (не insertion!), LOGS имеют distance-at=0, writes БЕЗУСЛОВНЫ (same-value тоже пишутся), min(d,i2+1)<7 c i2=min(i2,min).
+  * updateShapeAtEdge: forAllFaces 3 pass'а (NONE: x,y->z N/S; FORWARD^-1: z,x->y D/U; BACKWARD^-1: y,z->x W/E); для нашего набора состояний меняются ТОЛЬКО vines (leaves updateShape = scheduleTick only, state не меняется!). VineBlock.getUpdatedState: up-грань по isAcceptableNeighbour (full face), горизонтальные грани + fallback "vine выше с той же гранью", без граней -> air.
+  * vec3i-хэш и nextIntBetweenInclusive=max-min+1+min; Util.shuffle = Fisher-Yates descending; Plane.HORIZONTAL=[N,E,S,W]; SPAWN_DIRECTIONS beeслоя=[E,S,W]; getClockWise N->E->S->W.
+- Оп-протокол расширен до 6 i32 ([x,y,z,stateIdx,flags,aux]): aux bits0-3=leaf distance override, bit4=waterlogged=true. Axis логов — через существующий FLAG_ROTATED (trySetValue в Java).
+- state-таблица: seal() индексирует варианты листвы (distance 1..7 + waterlogged=true) + полные vine/bee_nest/cocoa/pale_hanging_moss/creaking_heart строки.
+- Мост: +stateFull (полный "block[props]" для BFS/persistent/vine-рекомпьютов) и +isSolidRender (PlaceOnGround) в DecoLevelExt/JniLevel/DecoDriver.
+- Golden: reference/java/TreeRef.java — РЕАЛЬНЫЕ vanilla-классы (TreeFeature+placers+decorators, Bootstrap) против HashMap-proxy WorldGenLevel; 5 сценариев (straight+leave_vine, straight+beehive+alter_ground, forking+cocoa, fancy+leave_vine, giant mega_pine) — 3264 W-строк ground truth.
+- 5 golden-тестов: 4 sequence-EXACT (straight_vine, straight_beehive, forking_cocoa, giant), fancy — sorted-multiset (order-only дивергенция уровня 6 BFS: идемпотентные same-value rewrites, множество/значения идентичны). 47/47 тестов GREEN.
+- Ловли по дороге: OAK_CFG_TAIL скобки в format! (foliage_placer не закрывался -> dirt_provider попадал внутрь), bee_nest honey_level=0 в строке, тест не применял FLAG_ROTATED axis к строке, BFS per-level HashSet + безусловная запись.
+
+Stage Summary:
+- F5 ДВИЖОК ГОТОВ: деревья + vegetation patches нативны, golden vs РЕАЛЬНЫЕ vanilla-классы. Осталось: полный-pack probe (f1 probe pack v3 с деревьями) + dptt flip для tree/vegetation_patch + pale_moss_patch (ванильный configured feature — нужен fallback-реестр vanilla JSON или delegate).
+- Next: probe-верификация на паках, потом F6-хвост (block_column 10, flower 9, fallen_tree 7, geode 6, netherrack_replace_blobs 12, ...) и перф-проход (JNI batching).

@@ -88,6 +88,10 @@ pub enum FeatureCfg {
         radius: IP,
         half_height: i32,
     },
+    /// minecraft:tree (stage F5) — full trunk/foliage/root/decorator engine
+    Tree(TreeCfg),
+    /// minecraft:vegetation_patch / waterlogged_vegetation_patch
+    VegetationPatch(VegetationPatchCfg),
     Unsupported(&'static str),
 }
 
@@ -95,6 +99,158 @@ pub enum FeatureCfg {
 pub struct PlacedDef {
     pub feature: String,
     pub placement: Vec<Mod>,
+}
+
+// ---------------------------------------------------------------------------
+// Tree + vegetation-patch configs (stage F5)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrunkTy {
+    Straight,
+    Forking,
+    Bending,
+    Fancy,
+    Giant,
+    MegaJungle,
+    DarkOak,
+    UpwardsBranching,
+    Cherry,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrunkCfg {
+    pub ty: TrunkTy,
+    pub base: i32,
+    pub h_rand_a: i32,
+    pub h_rand_b: i32,
+    /// bending: min_height_for_leaves (default 1) + bend_length
+    pub bend_min_leaves: i32,
+    pub bend_length: IP,
+    /// upwards_branching
+    pub ub_extra_branch_steps: IP,
+    pub ub_place_branch_prob: f32,
+    pub ub_extra_branch_length: IP,
+    pub ub_can_grow_through: GrowSet,
+    /// cherry
+    pub ch_branch_count: IP,
+    pub ch_branch_hor_len: IP,
+    pub ch_branch_start_off: IP,
+    pub ch_branch_end_off: IP,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FoliageTy {
+    Blob,
+    Fancy,
+    Bush,
+    Spruce,
+    Pine,
+    MegaPine,
+    Acacia,
+    MegaJungle,
+    DarkOak,
+    RandomSpread,
+    Cherry,
+}
+
+#[derive(Clone, Debug)]
+pub struct FoliageCfg {
+    pub ty: FoliageTy,
+    pub radius: IP,
+    pub offset: IP,
+    /// blob/fancy/bush/megajungle: fixed int "height"
+    pub fixed_height: i32,
+    /// spruce: trunk_height; pine: height; megapine: crown_height;
+    /// random_spread: foliage_height; cherry: height
+    pub prov_height: IP,
+    pub leaf_attempts: i32,
+    /// cherry floats
+    pub wide_bottom_hole: f32,
+    pub corner_hole: f32,
+    pub hanging_leaves: f32,
+    pub hanging_ext: f32,
+}
+
+/// TwoLayers / ThreeLayers feature size + optional min_clipped_height.
+#[derive(Clone, Copy, Debug)]
+pub enum MinSize {
+    TwoLayers { limit: i32, lower: i32, upper: i32 },
+    ThreeLayers { limit: i32, lower: i32, middle: i32, upper: i32, upper_limit: i32 },
+}
+
+#[derive(Clone, Debug)]
+pub enum GrowSet {
+    Tag(String),
+    Blocks(Vec<String>),
+}
+
+#[derive(Clone, Debug)]
+pub struct RootCfg {
+    pub trunk_offset_y: IP,
+    pub root_provider: StateSrc,
+    pub above_root: Option<(StateSrc, f32)>,
+    pub max_root_width: i32,
+    pub max_root_length: i32,
+    pub random_skew_chance: f32,
+    pub can_grow_through: GrowSet,
+    pub muddy_roots_in: GrowSet,
+    pub muddy_roots_provider: StateSrc,
+}
+
+#[derive(Clone, Debug)]
+pub enum TreeDeco {
+    LeaveVine(f32),
+    TrunkVine,
+    Beehive(f32),
+    Cocoa(f32),
+    AlterGround(StateSrc),
+    AttachedToLogs { probability: f32, provider: StateSrc, dirs: Vec<u8> },
+    AttachedToLeaves {
+        probability: f32,
+        excl_xz: i32,
+        excl_y: i32,
+        provider: StateSrc,
+        req_empty: i32,
+        dirs: Vec<u8>,
+    },
+    PlaceOnGround { tries: i32, radius: i32, height: i32, provider: StateSrc },
+    PaleMoss { leaves: f32, trunk: f32, ground: f32 },
+    CreakingHeart(f32),
+}
+
+#[derive(Clone, Debug)]
+pub struct TreeCfg {
+    pub trunk_provider: StateSrc,
+    pub trunk_placer: TrunkCfg,
+    pub foliage_provider: StateSrc,
+    pub foliage_placer: FoliageCfg,
+    pub root_placer: Option<RootCfg>,
+    pub dirt_provider: StateSrc,
+    pub minimum_size: MinSize,
+    pub min_clipped: Option<i32>,
+    pub decorators: Vec<TreeDeco>,
+    pub ignore_vines: bool,
+    pub force_dirt: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct VegetationPatchCfg {
+    /// replaceable block tag (without the '#')
+    pub replaceable: String,
+    pub ground_state: StateSrc,
+    /// inner PLACED feature ref (name resolved in the registry)
+    pub vegetation_feature: String,
+    /// true = ceiling (dir UP), false = floor (dir DOWN)
+    pub ceiling: bool,
+    pub depth: IP,
+    pub extra_bottom_chance: f32,
+    pub vertical_range: i32,
+    pub vegetation_chance: f32,
+    pub xz_radius: IP,
+    pub extra_edge_chance: f32,
+    /// waterlogged_vegetation_patch variant
+    pub waterlogged: bool,
 }
 
 pub struct FeatureRegistry {
@@ -614,8 +770,442 @@ pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry
                 half_height: half_height as i32,
             }
         }
+        "minecraft:tree" => decode_tree_cfg(&cfg),
+        "minecraft:vegetation_patch" | "minecraft:waterlogged_vegetation_patch" => {
+            decode_vegetation_patch_cfg(&cfg, t.ends_with("waterlogged_vegetation_patch"))
+        }
         _ => FeatureCfg::Unsupported("cf-type"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tree + vegetation-patch decoders
+// ---------------------------------------------------------------------------
+
+fn decode_grow_set(j: &Json) -> Option<GrowSet> {
+    if let Some(s) = j.as_str() {
+        return if let Some(tag) = s.strip_prefix('#') {
+            Some(GrowSet::Tag(tag.to_string()))
+        } else {
+            Some(GrowSet::Blocks(vec![s.to_string()]))
+        };
+    }
+    let arr = j.as_arr()?;
+    let mut v = Vec::new();
+    for e in arr {
+        v.push(e.as_str()?.to_string());
+    }
+    Some(GrowSet::Blocks(v))
+}
+
+fn decode_dirs(j: &Json) -> Option<Vec<u8>> {
+    // Direction 3D data order: 0=down 1=up 2=north 3=south 4=west 5=east
+    let arr = j.as_arr()?;
+    let mut v = Vec::new();
+    for e in arr {
+        v.push(match e.as_str()? {
+            "down" => 0,
+            "up" => 1,
+            "north" => 2,
+            "south" => 3,
+            "west" => 4,
+            "east" => 5,
+            _ => return None,
+        });
+    }
+    if v.is_empty() {
+        return None; // vanilla nonEmptyList
+    }
+    Some(v)
+}
+
+fn ip(j: &Json) -> Option<IP> {
+    decode_int_provider(j)
+}
+
+fn trunk_parts(c: &Json) -> Option<(i32, i32, i32)> {
+    Some((
+        c.get("base_height")?.as_i64()? as i32,
+        c.get("height_rand_a")?.as_i64()? as i32,
+        c.get("height_rand_b")?.as_i64()? as i32,
+    ))
+}
+
+fn foliage_parts(c: &Json) -> Option<(IP, IP)> {
+    Some((ip(c.get("radius")?)?, ip(c.get("offset")?)?))
+}
+
+fn decode_tree_cfg(c: &Json) -> FeatureCfg {
+    let bad = |why: &'static str| FeatureCfg::Unsupported(why);
+    let tp = match c.get("trunk_placer") {
+        Some(p) => p,
+        None => return bad("tree-trunk-placer"),
+    };
+    let ty = match tp.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+        "minecraft:straight_trunk_placer" => TrunkTy::Straight,
+        "minecraft:forking_trunk_placer" => TrunkTy::Forking,
+        "minecraft:bending_trunk_placer" => TrunkTy::Bending,
+        "minecraft:fancy_trunk_placer" => TrunkTy::Fancy,
+        "minecraft:giant_trunk_placer" => TrunkTy::Giant,
+        "minecraft:mega_jungle_trunk_placer" => TrunkTy::MegaJungle,
+        "minecraft:dark_oak_trunk_placer" => TrunkTy::DarkOak,
+        "minecraft:upwards_branching_trunk_placer" => TrunkTy::UpwardsBranching,
+        "minecraft:cherry_trunk_placer" => TrunkTy::Cherry,
+        _ => return bad("tree-trunk-ty"),
+    };
+    let (base, ha, hb) = match trunk_parts(tp) {
+        Some(v) => v,
+        None => return bad("tree-trunk-parts"),
+    };
+    let mut trunk = TrunkCfg {
+        ty,
+        base,
+        h_rand_a: ha,
+        h_rand_b: hb,
+        bend_min_leaves: tp.get("min_height_for_leaves").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+        bend_length: IP::Constant(1),
+        ub_extra_branch_steps: IP::Constant(1),
+        ub_place_branch_prob: 0.0,
+        ub_extra_branch_length: IP::Constant(0),
+        ub_can_grow_through: GrowSet::Blocks(vec![]),
+        ch_branch_count: IP::Constant(0),
+        ch_branch_hor_len: IP::Constant(0),
+        ch_branch_start_off: IP::Constant(0),
+        ch_branch_end_off: IP::Constant(0),
+    };
+    match ty {
+        TrunkTy::Bending => {
+            match ip(tp.get("bend_length").unwrap_or(&Json::Null)) {
+                Some(b) => trunk.bend_length = b,
+                None => return bad("tree-bend-len"),
+            }
+        }
+        TrunkTy::UpwardsBranching => {
+            let Some(steps) = ip(tp.get("extra_branch_steps").unwrap_or(&Json::Null)) else {
+                return bad("tree-ub-steps");
+            };
+            let Some(prob) = tp.get("place_branch_per_log_probability").and_then(|v| v.as_f64()) else {
+                return bad("tree-ub-prob");
+            };
+            let Some(len) = ip(tp.get("extra_branch_length").unwrap_or(&Json::Null)) else {
+                return bad("tree-ub-len");
+            };
+            let Some(grow) = tp.get("can_grow_through").and_then(decode_grow_set) else {
+                return bad("tree-ub-grow");
+            };
+            trunk.ub_extra_branch_steps = steps;
+            trunk.ub_place_branch_prob = prob as f32;
+            trunk.ub_extra_branch_length = len;
+            trunk.ub_can_grow_through = grow;
+        }
+        TrunkTy::Cherry => {
+            let (Some(cnt), Some(hl), Some(so), Some(eo)) = (
+                ip(tp.get("branch_count").unwrap_or(&Json::Null)),
+                ip(tp.get("branch_horizontal_length").unwrap_or(&Json::Null)),
+                ip(tp.get("branch_start_offset_from_top").unwrap_or(&Json::Null)),
+                ip(tp.get("branch_end_offset_from_top").unwrap_or(&Json::Null)),
+            ) else {
+                return bad("tree-ch-fields");
+            };
+            // secondBranchStartOffsetFromTop = UniformInt.of(min, max-1) — the
+            // engine derives it from the primary uniform's bounds
+            if !matches!(so, IP::Uniform { .. }) {
+                return bad("tree-ch-start-uniform");
+            }
+            trunk.ch_branch_count = cnt;
+            trunk.ch_branch_hor_len = hl;
+            trunk.ch_branch_start_off = so;
+            trunk.ch_branch_end_off = eo;
+        }
+        _ => {}
+    }
+    let fp = match c.get("foliage_placer") {
+        Some(p) => p,
+        None => return bad("tree-foliage-placer"),
+    };
+    let fty = match fp.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+        "minecraft:blob_foliage_placer" => FoliageTy::Blob,
+        "minecraft:fancy_foliage_placer" => FoliageTy::Fancy,
+        "minecraft:bush_foliage_placer" => FoliageTy::Bush,
+        "minecraft:spruce_foliage_placer" => FoliageTy::Spruce,
+        "minecraft:pine_foliage_placer" => FoliageTy::Pine,
+        "minecraft:mega_pine_foliage_placer" => FoliageTy::MegaPine,
+        "minecraft:acacia_foliage_placer" => FoliageTy::Acacia,
+        "minecraft:jungle_foliage_placer" | "minecraft:mega_jungle_foliage_placer" => FoliageTy::MegaJungle,
+        "minecraft:dark_oak_foliage_placer" => FoliageTy::DarkOak,
+        "minecraft:random_spread_foliage_placer" => FoliageTy::RandomSpread,
+        "minecraft:cherry_foliage_placer" => FoliageTy::Cherry,
+        _ => return bad("tree-foliage-ty"),
+    };
+    let (radius, offset) = match foliage_parts(fp) {
+        Some(v) => v,
+        None => return bad("tree-foliage-parts"),
+    };
+    let mut fol = FoliageCfg {
+        ty: fty,
+        radius,
+        offset,
+        fixed_height: fp.get("height").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+        prov_height: IP::Constant(0),
+        leaf_attempts: fp.get("leaf_placement_attempts").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+        wide_bottom_hole: fp.get("wide_bottom_layer_hole_chance").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+        corner_hole: fp.get("corner_hole_chance").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+        hanging_leaves: fp.get("hanging_leaves_chance").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+        hanging_ext: fp.get("hanging_leaves_extension_chance").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+    };
+    match fty {
+        FoliageTy::Spruce | FoliageTy::Pine | FoliageTy::MegaPine | FoliageTy::RandomSpread | FoliageTy::Cherry => {
+            let key = match fty {
+                FoliageTy::Spruce => "trunk_height",
+                FoliageTy::MegaPine => "crown_height",
+                FoliageTy::RandomSpread => "foliage_height",
+                _ => "height",
+            };
+            match ip(fp.get(key).unwrap_or(&Json::Null)) {
+                Some(h) => fol.prov_height = h,
+                None => return bad("tree-fol-height"),
+            }
+        }
+        _ => {}
+    }
+    if matches!(fty, FoliageTy::RandomSpread) && fol.leaf_attempts <= 0 {
+        return bad("tree-fol-attempts");
+    }
+    let Some(Some(trunk_provider)) = c.get("trunk_provider").map(decode_state_provider) else {
+        return bad("tree-trunk-provider");
+    };
+    let Some(Some(foliage_provider)) = c.get("foliage_provider").map(decode_state_provider) else {
+        return bad("tree-foliage-provider");
+    };
+    let Some(Some(dirt_provider)) = c.get("dirt_provider").map(decode_state_provider) else {
+        return bad("tree-dirt-provider");
+    };
+    let ms = match c.get("minimum_size") {
+        Some(m) => m,
+        None => return bad("tree-minsize"),
+    };
+    let (minimum_size, min_clipped) = match ms.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+        "minecraft:two_layers_feature_size" => {
+            let mc = ms.get("min_clipped_height").and_then(|v| v.as_i64()).map(|v| v as i32);
+            (
+                MinSize::TwoLayers {
+                    limit: ms.get("limit").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+                    lower: ms.get("lower_size").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                    upper: ms.get("upper_size").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+                },
+                mc,
+            )
+        }
+        "minecraft:three_layers_feature_size" => {
+            let mc = ms.get("min_clipped_height").and_then(|v| v.as_i64()).map(|v| v as i32);
+            (
+                MinSize::ThreeLayers {
+                    limit: ms.get("limit").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+                    lower: ms.get("lower_size").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                    middle: ms.get("middle_size").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+                    upper: ms.get("upper_size").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+                    upper_limit: ms.get("upper_limit").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+                },
+                mc,
+            )
+        }
+        _ => return bad("tree-minsize-ty"),
+    };
+    let mut root_placer = None;
+    if let Some(rp) = c.get("root_placer") {
+        let rty = rp.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if rty != "minecraft:mangrove_root_placer" {
+            return bad("tree-root-ty");
+        }
+        let Some(off) = ip(rp.get("trunk_offset_y").unwrap_or(&Json::Null)) else {
+            return bad("tree-root-off");
+        };
+        let Some(root_provider) = decode_state_provider(rp.get("root_provider").unwrap_or(&Json::Null)) else {
+            return bad("tree-root-provider");
+        };
+        let above_root = match rp.get("above_root_placement") {
+            Some(a) => {
+                let Some(p) = decode_state_provider(a.get("above_root_provider").unwrap_or(&Json::Null)) else {
+                    return bad("tree-root-above-provider");
+                };
+                let Some(ch) = a.get("above_root_placement_chance").and_then(|v| v.as_f64()) else {
+                    return bad("tree-root-above-chance");
+                };
+                Some((p, ch as f32))
+            }
+            None => None,
+        };
+        let mp = match rp.get("mangrove_root_placement") {
+            Some(m) => m,
+            None => return bad("tree-root-mangrove"),
+        };
+        let Some(can_grow_through) = mp.get("can_grow_through").and_then(decode_grow_set) else {
+            return bad("tree-root-grow");
+        };
+        let Some(muddy_roots_in) = mp.get("muddy_roots_in").and_then(decode_grow_set) else {
+            return bad("tree-root-muddy");
+        };
+        let Some(muddy_roots_provider) = decode_state_provider(mp.get("muddy_roots_provider").unwrap_or(&Json::Null))
+        else {
+            return bad("tree-root-muddy-provider");
+        };
+        root_placer = Some(RootCfg {
+            trunk_offset_y: off,
+            root_provider,
+            above_root,
+            max_root_width: mp.get("max_root_width").and_then(|v| v.as_i64()).unwrap_or(8) as i32,
+            max_root_length: mp.get("max_root_length").and_then(|v| v.as_i64()).unwrap_or(15) as i32,
+            random_skew_chance: mp.get("random_skew_chance").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            can_grow_through,
+            muddy_roots_in,
+            muddy_roots_provider,
+        });
+    }
+    let mut decorators = Vec::new();
+    if let Some(arr) = c.get("decorators").and_then(|v| v.as_arr()) {
+        for d in arr {
+            let dt = d.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let dec = match dt {
+                "minecraft:leave_vine" => match d.get("probability").and_then(|v| v.as_f64()) {
+                    Some(p) => TreeDeco::LeaveVine(p as f32),
+                    None => return bad("tree-dec-leavevine"),
+                },
+                "minecraft:trunk_vine" => TreeDeco::TrunkVine,
+                "minecraft:beehive" => match d.get("probability").and_then(|v| v.as_f64()) {
+                    Some(p) => TreeDeco::Beehive(p as f32),
+                    None => return bad("tree-dec-beehive"),
+                },
+                "minecraft:cocoa" => match d.get("probability").and_then(|v| v.as_f64()) {
+                    Some(p) => TreeDeco::Cocoa(p as f32),
+                    None => return bad("tree-dec-cocoa"),
+                },
+                "minecraft:alter_ground" => {
+                    match decode_state_provider(d.get("provider").unwrap_or(&Json::Null)) {
+                        Some(p) => TreeDeco::AlterGround(p),
+                        None => return bad("tree-dec-alterground"),
+                    }
+                }
+                "minecraft:attached_to_logs" => {
+                    let (Some(prob), Some(provider), Some(dirs)) = (
+                        d.get("probability").and_then(|v| v.as_f64()),
+                        decode_state_provider(d.get("block_provider").unwrap_or(&Json::Null)),
+                        d.get("directions").and_then(decode_dirs),
+                    ) else {
+                        return bad("tree-dec-atl");
+                    };
+                    TreeDeco::AttachedToLogs { probability: prob as f32, provider, dirs }
+                }
+                "minecraft:attached_to_leaves" => {
+                    let (Some(prob), Some(excl_xz), Some(excl_y), Some(provider), Some(req_empty), Some(dirs)) = (
+                        d.get("probability").and_then(|v| v.as_f64()),
+                        d.get("exclusion_radius_xz").and_then(|v| v.as_i64()),
+                        d.get("exclusion_radius_y").and_then(|v| v.as_i64()),
+                        decode_state_provider(d.get("block_provider").unwrap_or(&Json::Null)),
+                        d.get("required_empty_blocks").and_then(|v| v.as_i64()),
+                        d.get("directions").and_then(decode_dirs),
+                    ) else {
+                        return bad("tree-dec-atlv");
+                    };
+                    TreeDeco::AttachedToLeaves {
+                        probability: prob as f32,
+                        excl_xz: excl_xz as i32,
+                        excl_y: excl_y as i32,
+                        provider,
+                        req_empty: req_empty as i32,
+                        dirs,
+                    }
+                }
+                "minecraft:place_on_ground" => {
+                    let (Some(tries), Some(radius), Some(height), Some(provider)) = (
+                        d.get("tries").and_then(|v| v.as_i64()),
+                        d.get("radius").and_then(|v| v.as_i64()),
+                        d.get("height").and_then(|v| v.as_i64()),
+                        decode_state_provider(d.get("block_state_provider").unwrap_or(&Json::Null)),
+                    ) else {
+                        return bad("tree-dec-pog");
+                    };
+                    TreeDeco::PlaceOnGround { tries: tries as i32, radius: radius as i32, height: height as i32, provider }
+                }
+                "minecraft:pale_moss" => {
+                    let (Some(leaves), Some(trunk), Some(ground)) = (
+                        d.get("leaves_probability").and_then(|v| v.as_f64()),
+                        d.get("trunk_probability").and_then(|v| v.as_f64()),
+                        d.get("ground_probability").and_then(|v| v.as_f64()),
+                    ) else {
+                        return bad("tree-dec-palemoss");
+                    };
+                    TreeDeco::PaleMoss { leaves: leaves as f32, trunk: trunk as f32, ground: ground as f32 }
+                }
+                "minecraft:creaking_heart" => match d.get("probability").and_then(|v| v.as_f64()) {
+                    Some(p) => TreeDeco::CreakingHeart(p as f32),
+                    None => return bad("tree-dec-creaking"),
+                },
+                _ => return bad("tree-dec-ty"),
+            };
+            decorators.push(dec);
+        }
+    }
+    FeatureCfg::Tree(TreeCfg {
+        trunk_provider,
+        trunk_placer: trunk,
+        foliage_provider,
+        foliage_placer: fol,
+        root_placer,
+        dirt_provider,
+        minimum_size,
+        min_clipped,
+        decorators,
+        ignore_vines: c.get("ignore_vines").and_then(|v| v.as_bool()).unwrap_or(false),
+        force_dirt: c.get("force_dirt").and_then(|v| v.as_bool()).unwrap_or(false),
+    })
+}
+
+fn decode_vegetation_patch_cfg(c: &Json, waterlogged: bool) -> FeatureCfg {
+    let Some(tag) = c.get("replaceable").and_then(|v| v.as_str()) else {
+        return FeatureCfg::Unsupported("vp-replaceable");
+    };
+    let Some(tag) = tag.strip_prefix('#') else {
+        return FeatureCfg::Unsupported("vp-replaceable-tag");
+    };
+    let Some(Some(ground_state)) = c.get("ground_state").map(decode_state_provider) else {
+        return FeatureCfg::Unsupported("vp-ground");
+    };
+    // vegetation_feature: a PLACED feature ref (string or {"feature": ...})
+    let vf = match c.get("vegetation_feature") {
+        Some(v) => match v.as_str() {
+            Some(s) => s.to_string(),
+            None => match v.get("feature").and_then(|f| f.as_str()) {
+                Some(s) => s.to_string(),
+                None => return FeatureCfg::Unsupported("vp-veg"),
+            },
+        },
+        None => return FeatureCfg::Unsupported("vp-veg"),
+    };
+    let ceiling = match c.get("surface").and_then(|v| v.as_str()) {
+        Some("ceiling") => true,
+        Some("floor") => false,
+        _ => return FeatureCfg::Unsupported("vp-surface"),
+    };
+    let (Some(depth), Some(vr), Some(xz_radius)) = (
+        c.get("depth").and_then(decode_int_provider),
+        c.get("vertical_range").and_then(|v| v.as_i64()),
+        c.get("xz_radius").and_then(decode_int_provider),
+    ) else {
+        return FeatureCfg::Unsupported("vp-fields");
+    };
+    FeatureCfg::VegetationPatch(VegetationPatchCfg {
+        replaceable: tag.to_string(),
+        ground_state,
+        vegetation_feature: vf,
+        ceiling,
+        depth,
+        extra_bottom_chance: c.get("extra_bottom_block_chance").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+        vertical_range: vr as i32,
+        vegetation_chance: c.get("vegetation_chance").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+        xz_radius,
+        extra_edge_chance: c.get("extra_edge_column_chance").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+        waterlogged,
+    })
 }
 
 /// Decode an inline placed-feature JSON, registering it (and any nested inline

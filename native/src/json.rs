@@ -300,3 +300,22 @@ mod tests {
         assert!(v.get("argument1").unwrap().get("type").is_some());
     }
 }
+
+#[cfg(test)]
+mod dbg_tree_json {
+    use super::parse;
+    #[test]
+    fn dbg_tree_parse() {
+        if let Ok(s) = std::fs::read_to_string("/tmp/dbgjson2.out") {
+            match parse(&s) {
+                Ok(v) => {
+                    let cfg = v.get("config").unwrap();
+                    println!("CONFIG KEYS: {:?}", cfg.as_obj().unwrap().iter().map(|(k, _)| k.clone()).collect::<Vec<_>>());
+                }
+                Err(e) => println!("PARSE ERR: {e}"),
+            }
+        } else {
+            println!("no file");
+        }
+    }
+}

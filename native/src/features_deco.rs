@@ -150,6 +150,19 @@ pub trait DecoLevelExt: DecoLevel {
         let _ = pos;
         String::new()
     }
+    /// FULL state string "ns:block[k=v,...]" at pos (empty when unknown).
+    /// Overlay entries win over the world read (own writes are live).
+    fn state_full(&self, pos: BlockPos) -> String {
+        if let Some(s) = self.read_overlay(pos) {
+            return s;
+        }
+        String::new()
+    }
+    /// BlockStateBase.isSolidRender at pos (PlaceOnGround decorator)
+    fn is_solid_render(&self, pos: BlockPos) -> bool {
+        let _ = pos;
+        false
+    }
 }
 
 /// level name of a state string ("ns:block[props]" -> "ns:block")
