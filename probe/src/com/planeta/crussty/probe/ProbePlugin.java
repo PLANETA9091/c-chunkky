@@ -51,7 +51,8 @@ public final class ProbePlugin extends JavaPlugin {
     @Override
     public boolean onCommand(CommandSender sender, Command cmd, String label, String[] args) {
         switch (cmd.getName()) {
-            case "crusstatus": return status(sender);
+            case "crusstatus": return status(sender, args);
+            case "crustick": return tick(sender);
             case "crusfull": return fullCount(sender, args);
             case "crusstydump": return dumpOne(sender, args);
             case "crusstydumpregion": return dumpRegion(sender, args);
@@ -103,15 +104,37 @@ public final class ProbePlugin extends JavaPlugin {
         return Bukkit.getWorlds().get(0);
     }
 
+    /** crustick — the overworld game time (tick counter) — the deterministic
+     *  settle signal: the judge settles by TICKS (300), not wall seconds; the
+     *  post-gen simulation (fluid spreads, growth) is tick-deterministic and
+     *  the CI runner wall-clock drifts (kelp/amethyst random-tick growth was
+     *  the 0.556% CI-only divergence). */
+    private boolean tick(CommandSender sender) {
+        World w = Bukkit.getWorlds().get(0);
+        sender.sendMessage("gametime=" + w.getGameTime());
+        return true;
+    }
+
     /** crusstatus — loaded chunk count + test-region summary, one line per world. */
-    private boolean status(CommandSender sender) {
+    private boolean status(CommandSender sender, String[] args) {
+        // optional rect override: crusstatus [minCx minCz maxCx maxCz] — the
+        // reference capture (bench.sh) counts its own 8x8 (-4..3) while the
+        // judge pregen counts the 12x12 (-6..5)
+        int rmin = REGION_MIN, rmax = REGION_MAX;
+        if (args != null && args.length >= 4) {
+            try {
+                rmin = Integer.parseInt(args[0]);
+                rmax = Integer.parseInt(args[2]);
+            } catch (NumberFormatException ignored) {
+            }
+        }
         for (World w : Bukkit.getWorlds()) {
             int total = w.getLoadedChunks().length;
             int region = 0;
             int forced = 0;
             StringBuilder flags = new StringBuilder();
-            for (int cx = REGION_MIN; cx <= REGION_MAX; cx++) {
-                for (int cz = REGION_MIN; cz <= REGION_MAX; cz++) {
+            for (int cx = rmin; cx <= rmax; cx++) {
+                for (int cz = rmin; cz <= rmax; cz++) {
                     if (w.isChunkLoaded(cx, cz)) region++;
                     if (w.isChunkForceLoaded(cx, cz)) forced++;
                 }
@@ -120,7 +143,7 @@ public final class ProbePlugin extends JavaPlugin {
                  .append(" f(0,0)=").append(w.isChunkForceLoaded(0, 0))
                  .append(" l(0,-4)=").append(w.isChunkLoaded(0, -4));
             sender.sendMessage(w.getName() + ": loaded=" + total
-                    + " region[" + REGION_MIN + ".." + REGION_MAX + "," + REGION_MIN + ".." + REGION_MAX + "]=" + region + "/64"
+                    + " region[" + rmin + ".." + rmax + "," + rmin + ".." + rmax + "]=" + region + "/64"
                     + " forced=" + forced
                     + flags
                     + " srvpid=" + ProcessHandle.current().pid());

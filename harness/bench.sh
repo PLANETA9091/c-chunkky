@@ -37,6 +37,12 @@ sed -i "s/^level-name=.*/level-name=$WORLD/" "$ROOT/server/server.properties"
 
 # minimise spawn-chunk pregen overlap with the measured region (vanilla gamerule, 1.20.5+)
 rcon "gamerule spawnChunkRadius 0" || true
+# freeze random ticks (kelp growth, amethyst buds, crops): which chunks get
+# random-ticked depends on the world random draw sequence = WHEN chunks
+# loaded — a timing artifact, not generation output. Both capture (this
+# script) and judge (plugin_bench.sh) run randomTickSpeed=0.
+rcon "gamerule randomTickSpeed 0" || true
+echo "[bench] gamerule randomTickSpeed=0 (random-tick freeze)"
 
 DUMPDIR="$ROOT/reference/dumps/$TAG"
 mkdir -p "$DUMPDIR"
@@ -53,8 +59,8 @@ for fcz in $(seq -4 3); do
     EXPECT=$((EXPECT + 1))
     rcon "forceload add $((fcx * 16)) $((fcz * 16)) $((fcx * 16 + 15)) $((fcz * 16 + 15))" >/dev/null || true
     for i in $(seq 1 150); do
-      ST=$(rcon crusstatus 2>/dev/null || echo "")
-      N=$(printf '%s\n' "$ST" | grep "^$WORLD:" | sed 's/.*region\[-4\.\.3,-4\.\.3\]=\([0-9]*\)\/64.*/\1/' || true)
+      ST=$(rcon "crusstatus -4 -4 3 3" 2>/dev/null || echo "")
+      N=$(printf '%s\n' "$ST" | grep "^$WORLD:" | sed 's/.*region\[-4\.\.3,-4\.\.3\]=\([0-9]*\)\/.*/\1/' || true)
       if [ "${N:-0}" -ge "$EXPECT" ]; then break; fi
       sleep 1
     done
@@ -64,8 +70,8 @@ done
 # --- final poll: region complete --------------------------------------------
 N=""
 for i in $(seq 1 300); do
-  ST=$(rcon crusstatus 2>/dev/null || echo "")
-  N=$(printf '%s\n' "$ST" | grep "^$WORLD:" | sed 's/.*region\[-4\.\.3,-4\.\.3\]=\([0-9]*\)\/64.*/\1/' || true)
+  ST=$(rcon "crusstatus -4 -4 3 3" 2>/dev/null || echo "")
+  N=$(printf '%s\n' "$ST" | grep "^$WORLD:" | sed 's/.*region\[-4\.\.3,-4\.\.3\]=\([0-9]*\)\/.*/\1/' || true)
   if [ "${N:-0}" = "64" ]; then
     T1=$(date +%s%3N)
     echo "[bench] $(date -u +%T) region complete (t1=$T1) after poll #$i"
@@ -80,11 +86,23 @@ if [ "${N:-0}" != "64" ]; then
 fi
 
 WALL_MS=$((T1 - T0))
-# settle: let fluid tick simulation reach steady state before snapshotting.
-# Bubble columns grow 1 block per 5 ticks (20-tick magma priming first) —
-# a ~19-block column needs ~6s of ticking after promotion; 15s covers the
-# whole region comfortably and is deterministic (steady state is unique).
-sleep 15
+# settle: TICK-matched (300 game ticks ~ the historical 15s at TPS 20).
+# The scheduled fluid/growth ticks fire in tick order — equal tick counts mean
+# equal simulation depth on any runner. randomTickSpeed=0 removes the random
+# component entirely (growth was the CI-only divergence class).
+SETTLE_T0=$(rcon "crustick" | grep -m1 -oE "gametime=[0-9]+" | cut -d= -f2 || true)
+echo "[bench] settle: tick-matched 300 from gametime=${SETTLE_T0:-?}"
+if [ -n "${SETTLE_T0:-}" ]; then
+  for i in $(seq 1 120); do
+    NOW=$(rcon "crustick" | grep -m1 -oE "gametime=[0-9]+" | cut -d= -f2 || true)
+    if [ -n "$NOW" ] && [ $((NOW - SETTLE_T0)) -ge 300 ]; then
+      echo "[bench] settle: reached gametime=$NOW (+$((NOW - SETTLE_T0)) ticks)"
+      break
+    fi
+    sleep 1
+  done
+fi
+sleep 2
 
 echo "[bench] dumping region to $DUMPDIR"
 DUMP_OUT=$(rcon "crusstydumpregion -4 -4 3 3 $DUMPDIR chunk $WORLD")

@@ -56,11 +56,13 @@ cp "$JAR" "$SRV/plugins/CrusstyGen.jar"
 echo "--- deployed.md5 ---"; cat "$SRV/deployed.md5"
 
 # --- config -----------------------------------------------------------------
-# measured region base chunk (8x8): CRUS_REGION_MIN moves the region away from
-# the boot-time spawn pregen (its deco order differs between the reference and
-# native lanes). Default -4 = the historical 8x8 around origin.
-X0="${CRUS_REGION_MIN:--6}"
-X1=$((X0 + 11))
+# Judge region: MUST match the reference capture region (bench.sh, 8x8 = -4..3)
+# EXACTLY. A larger pregen (the old -6..5 12x12) decorates the ring chunks
+# whose features spill into the judged edge columns — overwrites the reference
+# never had (the CI-only 0.556%: chunk_3_* = 1.4-1.9%). The spawn pregen sits
+# around chunk (-13,0) — the 7x7 spawn prep (-16..-10) does not overlap -4..3.
+X0="${CRUS_REGION_MIN:--4}"
+X1=$((X0 + 7))
 REGION_TAG="region\\[$X0\\.\\.$X1,$X0\\.\\.$X1\\]"
 
 # generator wiring (bukkit.yml applies at world creation)
@@ -155,6 +157,19 @@ rcon "crusgenstats reset" >/dev/null || true
 fi
 
 # --- pregen + measure -------------------------------------------------------
+# Judge determinism (post-gen simulation): kelp growth, amethyst buds and
+# crop/cave growth are RANDOM ticks — which chunks get ticked depends on the
+# world random draw sequence, which depends on WHEN chunks loaded — the fast
+# native lane loads them in a different pattern than the slow reference
+# capture. CI showed 0.556% (kelp +1-2 blocks, fresh small_amethyst_buds)
+# where the reference had none. randomTickSpeed=0 freezes ALL random ticks on
+# BOTH lanes (the reference captures run the same gamerule — bench.sh).
+# The remaining scheduled ticks (fluid spreads, bubble columns) are
+# tick-deterministic: the settle waits TICKS (300 = the capture's 15s at
+# TPS 20), not wall seconds — the CI wall-clock drift made the lanes compare
+# different simulation depths.
+rcon "gamerule randomTickSpeed 0" >/dev/null || true
+echo "gamerule randomTickSpeed=0 (judge freeze of random ticks)"
 # Sequential per-chunk forceload (cx asc, cz asc): ore/blob features write into
 # the 3x3 WorldGenRegion, so the final block at contested boundary positions
 # depends on the chunk DECORATION ORDER. The reference capture (bench.sh) uses
@@ -174,7 +189,7 @@ for cz in $(seq $X0 $X1); do
         # parse the counter AFTER '=': the naive [0-9]* match returned "4"
         # (the first number inside "[-4..3,-4..3]") — the loop then waited
         # forever on chunk #5. [0-9]+$ grabs the trailing counter only.
-        LOADED=$(rcon "crusstatus" | grep -m1 -o "${REGION_TAG}=[0-9]*" | grep -oE "[0-9]+$" || true)
+        LOADED=$(rcon "crusstatus $X0 $X0 $X1 $X1" | grep -m1 -o "${REGION_TAG}=[0-9]*" | grep -oE "[0-9]+$" || true)
         if [ "${LOADED:-0}" -ge "$EXPECT" ]; then loaded_ok=1; STALL=0; break; fi
         if [ "$((i % 15))" -eq 0 ]; then
           echo "[pregen stall] chunk $cx $cz (attempt $attempt): wait ${i}s, loaded=${LOADED:-?}/$EXPECT"
@@ -208,10 +223,22 @@ T1=$(date +%s%N)
 WALL_MS=$(( (T1 - T0) / 1000000 ))
 echo "=== pregen wall: ${WALL_MS}ms (sequential forceload, incl. poll granularity) ==="
 
-# settle: match bench.sh (reference capture, 15s) — in-world fluid ticks (bubble
-# column growth, spring spreads) need equal wall time on both sides or the
-# judge compares a mid-tick world against a settled reference.
-sleep 15
+# settle: TICK-matched (300 game ticks = the capture's 15s at TPS 20) — the
+# scheduled fluid/growth ticks fire in tick order, so equal tick counts mean
+# equal simulation depth regardless of the runner's wall-clock speed.
+SETTLE_T0=$(rcon "crustick" | grep -m1 -oE "gametime=[0-9]+" | cut -d= -f2)
+echo "settle: tick-matched 300 from gametime=${SETTLE_T0:-?}"
+if [ -n "${SETTLE_T0:-}" ]; then
+  for i in $(seq 1 90); do
+    NOW=$(rcon "crustick" | grep -m1 -oE "gametime=[0-9]+" | cut -d= -f2)
+    if [ -n "$NOW" ] && [ $((NOW - SETTLE_T0)) -ge 300 ]; then
+      echo "settle: reached gametime=$NOW (+$((NOW - SETTLE_T0)) ticks)"
+      break
+    fi
+    sleep 1
+  done
+fi
+sleep 2
 
 echo "=== crusgenstats ==="
 rcon "crusgenstats" | tee "reference/plugin_stats_$WORLD.txt" || true
