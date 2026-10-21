@@ -4,6 +4,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      use_local_so:
+        description: 'Integration: use the locally-built .so from release ci-local-so-exp (CI-codegen bisect)'
+        required: false
+        default: '0'
 
 jobs:
   native:
@@ -109,6 +114,25 @@ jobs:
       - name: Build native (release)
         working-directory: native
         run: cargo build --release --locked || cargo build --release
+      # Decisive bisect experiment (worklog cont-52b): the CI-only vanilla
+      # residual (0.555% vs local 0.008%) appeared with e746d13 and is stable
+      # across protocols. Suspects: CI rustc/codegen of the .so or CI JVM
+      # behavior. This step (workflow_dispatch input use_local_so=1) replaces
+      # the CI-built .so with the LOCALLY built one (md5
+      # b2d32d5fd569e66bc29b8452ac794589, max glibc 2.34 < runner 2.39).
+      # If the vanilla diff collapses to ~0.008%, the CI codegen is the cause
+      # -> pin the toolchain/flags. If it stays 0.555%, the cause is CI-side
+      # JVM/protocol behavior.
+      - name: Swap in locally-built .so (codegen bisect)
+        if: ${{ github.event.inputs.use_local_so == '1' }}
+        run: |
+          curl -sL -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -o /tmp/local.so \
+            "https://github.com/PLANETA9091/c-chunkky/releases/download/ci-local-so-exp/libcrussty_chunkgen.so"
+          echo "downloaded md5: $(md5sum /tmp/local.so | awk '{print $1}')"
+          echo "ci-built md5 (pre-swap): $(md5sum native/target/release/libcrussty_chunkgen.so | awk '{print $1}')"
+          cp /tmp/local.so native/target/release/libcrussty_chunkgen.so
+          file native/target/release/libcrussty_chunkgen.so
       - name: Build plugin
         run: |
           chmod +x plugin/build.sh
