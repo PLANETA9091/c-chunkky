@@ -1,6 +1,10 @@
 # c-faster
 
-Vanilla-exact chunk generation for Paper 1.21.8 at target **1 ms / full chunk end-to-end** (even with custom-generation datapacks).
+Vanilla-exact chunk generation for Paper 1.21.8, targeting **1 ms/chunk for the native decoration stage end-to-end** (p50, incl. all JNI bridges), even with custom-generation datapacks.
+
+Measurement precision (what the 1 ms numbers are and are NOT):
+- **Reached** (2026-10-21): deco-stage p50 0.96-1.01 ms on the f1 probe pack; 2.9 ms on the heavy Terralith+Tectonic track (still shrinking). These are DecoStats `populate` wall numbers for the FEATURES pipeline only.
+- **NOT covered by the 1 ms claim**: the native noise/fill stage (~10 ms/chunk p50) and the full-chunk generation wall (~40-85 ms/chunk incl. layout, lighting and server plumbing). "1 ms / full chunk" was the original aspirational wording; the honest current split is documented above and in `worklog-session.md`.
 
 Judge: block-for-block equality against reference dumps captured from a REAL vanilla server.
 An optimization is accepted only if the block match percentage does NOT drop.
