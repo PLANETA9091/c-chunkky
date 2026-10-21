@@ -1731,3 +1731,25 @@ Stage Summary:
 - The deco engine: probe p50 1.41ms / dptt p50 3.7ms (the snapshot pass).
 - The CI vanilla gate = the single remaining red; the investigation state is
   fully reproducible from the harness + the artifacts.
+
+---
+Task ID: cont-53 (2026-10-21, DECO PERF: to-1ms pass — native survive + heightmaps)
+Agent: Super Z (main)
+Task: продолжи до 1мс в end2end — убрать остаточные JNI-апколлы deco-пути (survive 97/chunk, heights 45/chunk), верифицировать бит-точность.
+
+Work Log:
+- Baseline (f1 probe, 196 chunks): deco p50 1370us, run 1.32ms, upcalls 160.6/chunk (h=45, survive=107, other=8.6). survive-hist: bone_block 9955 (default-true), цветы/grass/fern — 0/3 true (below = stone/water/air в основном).
+- Семантика выцеплена из paper-1.21.8.jar байткода: VegetationBlock.canSurvive = mayPlaceOn(below) = DIRT-tag||FARMLAND (dirt.json: dirt, grass_block, podzol, coarse_dirt, mycelium, rooted_dirt, moss_block, pale_moss_block, mud, muddy_mangrove_roots); CactusBlock (соседи не solid/lava; below cactus|SAND; !above.liquid); SugarCaneBlock (below sugar_cane || DIRT|SAND с водой/frosted_ice у соседей below); NetherWart (soul_sand); Waterlily (water|ice ниже + air-fluid выше); Seagrass (sturdy_up && !magma); GrowingPlantBlock (head/body|sturdy-up).
+- features_survive.rs: нативная таблица (white-list; неизвестное -> JNI fallback — точность гарантирована). survive=20964 -> 0.
+- decoHeightmaps handshake (512 i32 = WS_WG+OF_WG per region chunk; DecoCtx.chunk_hms кэш, очищается в decoChunkBegin): frozen WG-карты снапшот из блоков не восстанавливает (margin-спилы). Первый вариант имел баг off = t*256 (512 для OF_WG -> AIOOBE -> вечный fallback, h не падал) — фикс off = t/2*256.
+- FINAL-типы: снапшот-скан колонки с точными флаг-предикатами (WS: !air; OF/MB: motion|fluid; MBNL: (motion&&!leaves)|fluid), старт = ws_wg+48 (деревья <=33 над замороженной WS_WG; FINAL >= WS_WG всегда — блоки только добавляются), fallback на JNI если секция вне сетки. Java scanHeight (~200 getBlockState/колонка) -> 0 апколлов.
+- Java decoSnapSection: Unsafe.copyMemory bulk long[]->byte[] + ThreadLocal растущий буфер + empty-section single-air fast path (без registry lookups) + biomeKey identity-кэш. Секции: 7.2 -> 6.4us/шт (5219 -> 5720 из-за новых скан-снятий), snap-hm=717 (3.7/чанк).
+- Декомпозиция floor: CRUS_DECO_NOUPCALL native-only run=0.17ms (JNI-масса ~90% run). After: upcalls 160.6 -> 5.7/чанк; p50 1350 -> ~1150-1230us (окно шумит), p99 39 -> 14ms.
+- Bit-exact: f1 probe A/B = 4/3,539,444 = 0.000% (HEIGHTMAP 0/9216) — noise floor маргинов.
+- Сессия пережила 2 отката песочницы (локальные правки потеряны, восстановлены вручную по памяти контекста; данные прогонов идентичны — h=0, survive=0, ops=30325).
+- Tests 51/51 (3 новые survive-тесты). Commit 22efcb8.
+
+Stage Summary:
+- Деко-движок: h=0, survive=0, stateis=0, isair=0 — ВСЕ point/height запросы снапшотные; остаток other=5.7/чанк (state_full деревья + edge-fallbacks), секции 29/чанк (6.4us Java-сборка), план 0.30ms (regionBiomes 216 секций + нативный union).
+- До 1мс осталось: батч/ускорение секций + plan; native compute floor 0.17ms.
+- Next: (a) CI-вердикт 22efcb8; (b) регион-батч снапшота (1 JNI вместо 29) при необходимости; (c) dptt native-parity track (ore shapes/F6 tail) и флип деревьев/vegetation_patch.
