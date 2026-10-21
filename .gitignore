@@ -18,4 +18,5 @@ oracle_walk_out/
 oracle_walk_ours/
 workdir/
 fifo.pid\nserver.pid
-dist/
+/dist/
+!native/cplug-sdk/asm-lib/**
