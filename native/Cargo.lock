@@ -3,9 +3,23 @@
 version = 4
 
 [[package]]
+name = "cplug-abi"
+version = "2.0.0"
+
+[[package]]
+name = "cplug-sdk"
+version = "0.1.0"
+dependencies = [
+ "cplug-abi",
+ "jvmti-bindings",
+]
+
+[[package]]
 name = "crussty_chunkgen"
 version = "0.1.0"
 dependencies = [
+ "cplug-abi",
+ "cplug-sdk",
  "jni-sys",
 ]
 
@@ -27,6 +41,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "jvmti-bindings"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e35a49e28b0f470ac943c3539889cce31f3553690655dbf4eebc2d1b5aa0209b"
 
 [[package]]
 name = "proc-macro2"

@@ -16,7 +16,55 @@ package com.planeta.crussty;
  */
 public final class ChunkGenNative {
     static {
-        System.loadLibrary("crussty_chunkgen");
+        // CRUSSTY module mode first: the module's cplugin_init writes
+        // plugins/CrusstyGen.crussty-native (absolute path of the module .so,
+        // which carries BOTH cplugin_init and every JNI native). System.load
+        // binds the library to THIS class's loader — no java.library.path.
+        // Standalone harness/probe runs (no marker) keep the classic
+        // System.loadLibrary via -Djava.library.path.
+        Throwable first = null;
+        String marker = null;
+        try {
+            marker = moduleNativePath();
+        } catch (Throwable ignored) {
+        }
+        boolean loaded = false;
+        if (marker != null) {
+            try {
+                System.load(marker);
+                loaded = true;
+                System.err.println("[CrusstyGen] natives bound via CRUSSTY module: " + marker);
+            } catch (Throwable t) {
+                first = t;
+            }
+        }
+        if (!loaded) {
+            try {
+                System.loadLibrary("crussty_chunkgen");
+            } catch (Throwable t) {
+                if (first != null) t.addSuppressed(first);
+                throw t;
+            }
+        }
+    }
+
+    /** Marker file next to this plugin jar -> absolute path of the module
+     *  .so (written by the CRUSSTY module bootstrap at boot). Null when
+     *  absent — standalone deployment. */
+    private static String moduleNativePath() {
+        try {
+            var cs = ChunkGenNative.class.getProtectionDomain().getCodeSource();
+            if (cs == null || cs.getLocation() == null) return null;
+            var jar = java.nio.file.Path.of(cs.getLocation().toURI());
+            var marker = jar.getParent() == null ? null
+                    : jar.getParent().resolve("CrusstyGen.crussty-native");
+            if (marker != null && java.nio.file.Files.isRegularFile(marker)) {
+                String p = java.nio.file.Files.readString(marker).trim();
+                return p.isEmpty() ? null : p;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 
     public static native long newCtx(long seed, int minY, int height, int seaLevel);

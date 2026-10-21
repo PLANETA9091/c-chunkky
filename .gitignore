@@ -18,3 +18,4 @@ oracle_walk_out/
 oracle_walk_ours/
 workdir/
 fifo.pid\nserver.pid
+dist/

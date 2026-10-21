@@ -9,6 +9,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 jni-sys = "0.4.1"
+cplug-abi = { path = "cplug-abi" }
+cplug-sdk = { path = "cplug-sdk" }
 
 [profile.release]
 lto = "fat"

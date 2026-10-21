@@ -1,0 +1,6 @@
+{
+  "id": "faster",
+  "version": "1.0.0",
+  "main": "libcrussty_chunkgen.so",
+  "description": "Vanilla-exact native chunk generation for Paper 1.21.8: noise/biomes/surface/features in Rust (this .so doubles as the JNI library; the bundled CrusstyGen.jar is installed into plugins/ automatically at boot)."
+}
