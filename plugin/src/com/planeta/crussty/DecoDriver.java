@@ -219,7 +219,9 @@ public final class DecoDriver extends BlockPopulator {
         ChunkGenNative.decoChunkBegin(ctx, cx, cz, reg.getMinSectionY(), zoomSeed);
 
         long tp0 = System.nanoTime();
+        long tb0 = System.nanoTime();
         String[] biomes = regionBiomes(cx, cz);
+        DecoStats.PLAN_BIOMES.addAndGet(System.nanoTime() - tb0);
         int[] runsBuf = new int[PLAN_TOTAL() * 2 + 16];
         int runs = ChunkGenNative.decoChunkPlan(ctx, biomes, runsBuf);
         DecoStats.PLAN_TOTAL.addAndGet(System.nanoTime() - tp0);
@@ -579,27 +581,53 @@ public final class DecoDriver extends BlockPopulator {
 
     // ------------------------------------------------------------------
     // 3x3 biome union (vanilla: section palettes of the 9 chunks, deduped,
-    // filtered to possibleBiomes)
+    // filtered to possibleBiomes). Biomes are FROZEN once the biomes stage
+    // completes — decoration never touches them — so the per-chunk palette
+    // union is memoized: each chunk's 24-section getAll walk happens ONCE,
+    // then every region that includes the chunk re-uses the cached set
+    // (9 region unions/chunk become 8 cached merges + 1 fresh walk).
     // ------------------------------------------------------------------
 
-    private String[] regionBiomes(int cx, int cz) {
+    /** chunk key -> biome-name union (bounded; pregen walks forward) */
+    private final java.util.HashMap<Long, java.util.Set<String>> CHUNK_BIOMES =
+            new java.util.HashMap<>();
+
+    private static long chunkKey(int cx, int cz) {
+        return ((long) cx << 32) | (cz & 0xffffffffL);
+    }
+
+    private java.util.Set<String> chunkBiomes(int cx, int cz) {
+        long key = chunkKey(cx, cz);
+        java.util.Set<String> c = CHUNK_BIOMES.get(key);
+        if (c != null) {
+            return c;
+        }
         Set<String> possible = POSSIBLE_BIOMES;
-        Set<String> out = new TreeSet<>();
+        c = new java.util.HashSet<>();
+        ChunkAccess ch = reg.getChunk(cx, cz);
         List<Holder<Biome>> sink = new ArrayList<>(8);
+        for (LevelChunkSection sec : ch.getSections()) {
+            sink.clear();
+            sec.getBiomes().getAll(sink::add);
+            for (Holder<Biome> h : sink) {
+                String name = biomeKey(h.value());
+                if (possible == null || possible.contains(name)) {
+                    c.add(name);
+                }
+            }
+        }
+        if (CHUNK_BIOMES.size() > 128) {
+            CHUNK_BIOMES.clear();
+        }
+        CHUNK_BIOMES.put(key, c);
+        return c;
+    }
+
+    private String[] regionBiomes(int cx, int cz) {
+        Set<String> out = new TreeSet<>();
         for (int dx = -1; dx <= 1; dx++) {
             for (int dz = -1; dz <= 1; dz++) {
-                ChunkAccess ch = reg.getChunk(cx + dx, cz + dz);
-                for (LevelChunkSection sec : ch.getSections()) {
-                    PalettedContainerRO<Holder<Biome>> biomes = sec.getBiomes();
-                    sink.clear();
-                    biomes.getAll(sink::add);
-                    for (Holder<Biome> h : sink) {
-                        String name = biomeKey(h.value());
-                        if (possible == null || possible.contains(name)) {
-                            out.add(name);
-                        }
-                    }
-                }
+                out.addAll(chunkBiomes(cx + dx, cz + dz));
             }
         }
         return out.toArray(new String[0]);
@@ -826,6 +854,27 @@ public final class DecoDriver extends BlockPopulator {
 
     /** Palette-entry flag bits (exact vanilla semantics, computed in Java).
      *  The native answers point queries from these — no string parsing. */
+    /** (flags, registry key) per BlockState — the states are registry-interned
+     *  and StateHolder caches its hashCode, so the CHM lookup is a field read
+     *  + probe; the 14-predicate stateFlags walk ran PER PALETTE ENTRY PER
+     *  SECTION (31.6 sections/chunk x ~8 entries) and was the main cost of
+     *  the snap-section build. Bounded: distinct deco-visible states ~10^2. */
+    private record StateMeta(int flags, String key) {
+    }
+
+    private static final java.util.concurrent.ConcurrentHashMap<BlockState, StateMeta>
+            STATE_META = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static StateMeta stateMeta(BlockState st) {
+        StateMeta m = STATE_META.get(st);
+        if (m == null) {
+            String key = BuiltInRegistries.BLOCK.getKey(st.getBlock()).toString();
+            m = new StateMeta(stateFlags(st), key);
+            STATE_META.putIfAbsent(st, m);
+        }
+        return m;
+    }
+
     private static int stateFlags(BlockState st) {
         int f = 0;
         if (st.isAir()) {
@@ -920,6 +969,46 @@ public final class DecoDriver extends BlockPopulator {
         }
     }
 
+    /**
+     * Batch variant: `n` consecutive sections of ONE chunk column in a single
+     * JNI crossing (the native loader prefetches sy-1..sy+1 on every miss —
+     * deco queries cluster in narrow y bands, so ~3x fewer crossings for the
+     * same data). Wire format: n x [int len][section payload] (len 0 = absent).
+     */
+    public byte[] decoSnapSectionRange(int cx, int cz, int secY, int n) {
+        long t0 = System.nanoTime();
+        DecoStats.SNAP_SECTIONS.incrementAndGet();
+        // DEDICATED buffer: decoSnapSection0 serializes into the shared
+        // SNAP_BUF ThreadLocal (snapBuf clears it) — reusing that buffer here
+        // would wipe the range prefix mid-assembly.
+        try {
+            java.nio.ByteBuffer out = RANGE_BUF.get();
+            if (out.capacity() < 49152) {
+                out = java.nio.ByteBuffer.allocate(65536)
+                        .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                RANGE_BUF.set(out);
+            }
+            out.clear();
+            for (int i = 0; i < n; i++) {
+                byte[] sec = decoSnapSection0(cx, cz, secY + i);
+                if (sec == null) {
+                    out.putInt(0);
+                } else {
+                    DecoStats.SNAP_SECTION_BLOCKS.incrementAndGet();
+                    out.putInt(sec.length);
+                    out.put(sec);
+                }
+            }
+            return java.util.Arrays.copyOf(out.array(), out.position());
+        } finally {
+            DecoStats.SNAP_SECTION_NS.addAndGet(System.nanoTime() - t0);
+        }
+    }
+
+    private static final ThreadLocal<java.nio.ByteBuffer> RANGE_BUF =
+            ThreadLocal.withInitial(() -> java.nio.ByteBuffer.allocate(65536)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN));
+
     /** Unsafe bulk long[]->byte[] copy (LE x86: identical bytes). Avoids the
      *  per-element putLong loop (14ns/elem) — one memcpy instead. */
     private static final sun.misc.Unsafe U;
@@ -1010,7 +1099,8 @@ public final class DecoDriver extends BlockPopulator {
             buf.putInt(n);
             for (int i = 0; i < n; i++) {
                 BlockState st = (BlockState) pal.valueFor(i);
-                String key = BuiltInRegistries.BLOCK.getKey(st.getBlock()).toString();
+                StateMeta m = stateMeta(st);
+                String key = m.key();
                 Integer ix = nameIdx.get(key);
                 if (ix == null) {
                     ix = names.size();
@@ -1018,7 +1108,7 @@ public final class DecoDriver extends BlockPopulator {
                     names.add(key);
                 }
                 buf.putShort((short) ix.intValue());
-                buf.putShort((short) stateFlags(st));
+                buf.putShort((short) m.flags());
             }
             buf.putInt(raw.length);
             copyLongs(buf, raw);

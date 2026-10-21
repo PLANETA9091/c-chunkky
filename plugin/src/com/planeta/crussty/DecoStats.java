@@ -45,6 +45,8 @@ public final class DecoStats {
     static final AtomicLong FEATURES_TOTAL = new AtomicLong();
     static final AtomicLong DELEGATE_TOTAL = new AtomicLong();
     static final AtomicLong DELEGATE_COUNT = new AtomicLong();
+    /** plan-phase split: the regionBiomes Java wall (palette walk) */
+    static final AtomicLong PLAN_BIOMES = new AtomicLong();
 
     // upcall counters (Java side; they measure the JNI traffic, not the time)
     static final AtomicLong UP_HEIGHT = new AtomicLong();
@@ -57,6 +59,8 @@ public final class DecoStats {
     static final AtomicLong SNAP_SECTIONS = new AtomicLong();
     static final AtomicLong SNAP_SECTION_NS = new AtomicLong();
     static final AtomicLong SNAP_HM = new AtomicLong();
+    /** individual sections built across snap calls (batch = up to 3 each) */
+    static final AtomicLong SNAP_SECTION_BLOCKS = new AtomicLong();
     static final AtomicLong UP_STATE_IS = new AtomicLong();
     static final AtomicLong UP_FLUID_IS = new AtomicLong();
     static final AtomicLong UP_IS_AIR = new AtomicLong();
@@ -78,6 +82,7 @@ public final class DecoStats {
         FEATURES_TOTAL.set(0);
         DELEGATE_TOTAL.set(0);
         DELEGATE_COUNT.set(0);
+        PLAN_BIOMES.set(0);
         UP_HEIGHT.set(0);
         for (AtomicLong a : UP_H_TY) {
             a.set(0);
@@ -85,6 +90,7 @@ public final class DecoStats {
         SNAP_SECTIONS.set(0);
         SNAP_SECTION_NS.set(0);
         SNAP_HM.set(0);
+        SNAP_SECTION_BLOCKS.set(0);
         UP_STATE_IS.set(0);
         UP_FLUID_IS.set(0);
         UP_IS_AIR.set(0);
@@ -132,8 +138,10 @@ public final class DecoStats {
                 DELEGATE_COUNT.get(),
                 upcalls, UP_HEIGHT.get(), UP_STATE_IS.get(), UP_FLUID_IS.get(),
                 UP_IS_AIR.get(), UP_CAN_SURVIVE.get(), UP_OTHER.get())
-                .concat(String.format(" snap-sec=%d/%.2fms snap-hm=%d",
-                SNAP_SECTIONS.get(), SNAP_SECTION_NS.get() / 1e6, SNAP_HM.get()));
+                .concat(String.format(" snap-sec=%d/%.2fms blocks=%d snap-hm=%d planbio=%.2fms",
+                SNAP_SECTIONS.get(), SNAP_SECTION_NS.get() / 1e6,
+                SNAP_SECTION_BLOCKS.get(), SNAP_HM.get(),
+                PLAN_BIOMES.get() / 1e6));
     }
 
     /** wouldSurvive histogram tail (top 12 each), CRUS_SURVIVE_HIST=1. */

@@ -34,6 +34,90 @@ use crate::features_placement::BlockPos;
 use jni_sys::{jint, jintArray, jlong, jobject, jobjectArray};
 
 // ---------------------------------------------------------------------------
+// run-phase split profiler (CRUS_RUN_PROF=1): where does the decoRunFeature
+// wall go — native compute vs the snapshot loader JNI (sections) vs the other
+// bridge upcalls. Accumulated across calls; printed + reset at decoChunkBegin
+// every PROF_EVERY chunks.
+// ---------------------------------------------------------------------------
+static PROF_LOADER_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROF_LOADER_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROF_PARSE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROF_NATIVE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROF_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROF_STATE_FULL_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROF_STATE_FULL_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROF_SOLIDR_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROF_SOLIDR_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROF_CHUNKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const PROF_EVERY: u64 = 16;
+
+static PROF_EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+#[inline]
+fn prof_now() -> u64 {
+    PROF_EPOCH.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
+}
+
+fn prof_chunk_tick() {
+    let n = PROF_CHUNKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if n % PROF_EVERY != PROF_EVERY - 1 {
+        return;
+    }
+    let l = PROF_LOADER_NS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let ln = PROF_LOADER_N.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let p = PROF_PARSE_NS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let nat = PROF_NATIVE_NS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let runs = PROF_RUNS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let sf = PROF_STATE_FULL_NS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let sfn = PROF_STATE_FULL_N.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let sr = PROF_SOLIDR_NS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let srn = PROF_SOLIDR_N.swap(0, std::sync::atomic::Ordering::Relaxed);
+    crate::ffi::log_warn(&format!(
+        "[run-prof] chunks=16 runs={} native={:.3}ms loader={:.3}ms/{}sec (jni={:.3} parse={:.3}) state_full={:.3}ms/{} solid_render={:.3}ms/{}",
+        runs,
+        nat as f64 / 16.0 / 1e6,
+        l as f64 / 16.0 / 1e6,
+        ln / 16,
+        l.saturating_sub(p) as f64 / 16.0 / 1e6,
+        p as f64 / 16.0 / 1e6,
+        sf as f64 / 16.0 / 1e6,
+        sfn / 16,
+        sr as f64 / 16.0 / 1e6,
+        srn / 16,
+    ));
+    // top-10 features by accumulated native wall (window only)
+    let mut top: Vec<(String, u64, u64)> = PROF_FEAT
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.0, v.1))
+        .collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut s = String::from("[run-prof-top]");
+    for (i, (name, ns, cnt)) in top.iter().take(10).enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!(" {}={:.1}us/{}", trim_name(name), *ns as f64 / 16.0 / 1e3, cnt / 16));
+    }
+    crate::ffi::log_warn(&s);
+    PROF_FEAT.lock().unwrap().clear();
+}
+
+fn trim_name(n: &str) -> String {
+    let short = n.rsplit(':').next().unwrap_or(n);
+    short.chars().take(24).collect()
+}
+
+/// feature name -> (ns, calls) for the current prof window
+static PROF_FEAT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, (u64, u64)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// CRUS_SNAP_RANGE=1 — the sy-1..sy+1 batch loader A/B (default OFF, see the
+/// loader comment for the measured numbers).
+static SNAP_RANGE_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+// ---------------------------------------------------------------------------
 // JVM upcall bridge (DecoLevel impl over the real WorldGenRegion)
 // ---------------------------------------------------------------------------
 
@@ -54,6 +138,7 @@ struct BridgeMids {
     state_full: jni_sys::jmethodID,
     is_solid_render: jni_sys::jmethodID,
     deco_snap_section: jni_sys::jmethodID,
+    deco_snap_section_range: jni_sys::jmethodID,
     deco_heightmaps: jni_sys::jmethodID,
 }
 
@@ -120,6 +205,7 @@ impl<'a> JniLevel<'a> {
                 state_full: mid("stateFull", "(III)Ljava/lang/String;"),
                 is_solid_render: mid("isSolidRender", "(III)Z"),
                 deco_snap_section: mid("decoSnapSection", "(III)[B"),
+                deco_snap_section_range: mid("decoSnapSectionRange", "(IIII)[B"),
                 deco_heightmaps: mid("decoHeightmaps", "(II)[I"),
             };
             let ok = [
@@ -139,6 +225,7 @@ impl<'a> JniLevel<'a> {
                 mids.state_full,
                 mids.is_solid_render,
                 mids.deco_snap_section,
+                mids.deco_snap_section_range,
                 mids.deco_heightmaps,
             ]
             .iter()
@@ -194,6 +281,55 @@ impl<'a> JniLevel<'a> {
                 self.env,
                 self.obj,
                 self.mids.deco_snap_section,
+                ivals.as_ptr(),
+            ) as jni_sys::jbyteArray;
+            if ((*tbl).v1_2.ExceptionCheck)(self.env) {
+                ((*tbl).v1_1.ExceptionClear)(self.env);
+                return None;
+            }
+            if r.is_null() {
+                return None;
+            }
+            let len = ((*tbl).v1_1.GetArrayLength)(self.env, r as jni_sys::jarray) as usize;
+            if len == 0 {
+                ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+                return None;
+            }
+            let p = ((*tbl).v1_1.GetByteArrayElements)(self.env, r, std::ptr::null_mut());
+            if p.is_null() {
+                ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+                return None;
+            }
+            let out = std::slice::from_raw_parts(p as *const u8, len).to_vec();
+            ((*tbl).v1_2.ReleaseByteArrayElements)(
+                self.env,
+                r,
+                p,
+                jni_sys::JNI_ABORT,
+            );
+            ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+            Some(out)
+        }
+    }
+
+    /// Batch variant: n consecutive sections of one chunk column, one JNI
+    /// crossing (DecoDriver.decoSnapSectionRange; length-prefixed payloads).
+    fn snap_section_range(&self, cx: i32, cz: i32, sec_y: i32, n: i32) -> Option<Vec<u8>> {
+        if self.noup() {
+            return None;
+        }
+        let tbl = unsafe { *self.env };
+        unsafe {
+            let ivals = [
+                Self::val_i(cx),
+                Self::val_i(cz),
+                Self::val_i(sec_y),
+                Self::val_i(n),
+            ];
+            let r = ((*tbl).v1_1.CallObjectMethodA)(
+                self.env,
+                self.obj,
+                self.mids.deco_snap_section_range,
                 ivals.as_ptr(),
             ) as jni_sys::jbyteArray;
             if ((*tbl).v1_2.ExceptionCheck)(self.env) {
@@ -424,6 +560,7 @@ impl<'a> DecoLevelExt for JniLevel<'a> {
     /// OverlayLevel wrapper serves its own writes first — this is the
     /// WORLD-side read only.
     fn state_full(&self, pos: BlockPos) -> String {
+        let t0 = prof_now();
         let tbl = unsafe { *self.env };
         unsafe {
             let ivals = [
@@ -438,6 +575,7 @@ impl<'a> DecoLevelExt for JniLevel<'a> {
                 ivals.as_ptr(),
             );
             if r.is_null() {
+                PROF_STATE_FULL_NS.fetch_add(prof_now() - t0, std::sync::atomic::Ordering::Relaxed);
                 return String::new();
             }
             let cstr = ((*tbl).v1_1.GetStringUTFChars)(self.env, r as jni_sys::jstring, std::ptr::null_mut());
@@ -449,17 +587,23 @@ impl<'a> DecoLevelExt for JniLevel<'a> {
             if !cstr.is_null() {
                 ((*tbl).v1_1.ReleaseStringUTFChars)(self.env, r as jni_sys::jstring, cstr);
             }
+            PROF_STATE_FULL_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            PROF_STATE_FULL_NS.fetch_add(prof_now() - t0, std::sync::atomic::Ordering::Relaxed);
             s
         }
     }
 
     fn is_solid_render(&self, pos: BlockPos) -> bool {
+        let t0 = prof_now();
         let ivals = [
             Self::val_i(pos.x),
             Self::val_i(pos.y),
             Self::val_i(pos.z),
         ];
-        self.z_call(self.mids.is_solid_render, &ivals)
+        let r = self.z_call(self.mids.is_solid_render, &ivals);
+        PROF_SOLIDR_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        PROF_SOLIDR_NS.fetch_add(prof_now() - t0, std::sync::atomic::Ordering::Relaxed);
+        r
     }
 
     /// Debug upcall: block registry key at pos (trace-only).
@@ -798,9 +942,62 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
         &d.chunk_hms;
     let zoom_seed = d.chunk_zoom_seed.get();
     let level_ref = &level;
+    let run_loader: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    // A/B: sy-1..sy+1 batch prefetch (CRUS_SNAP_RANGE=1). MEASURED NEGATIVE on
+    // the 2-core sandbox: the per-section Java build (~3.5-4.8us) dominates the
+    // JNI crossing (~2us), so the 1.78x section overbuild (11013 built vs 6188
+    // useful) costs more than the 1.7x fewer crossings save (loader 0.22-0.37ms
+    // vs 0.14-0.20ms single). Kept for cross-hardware A/B only; default OFF.
+    let snap_range = *SNAP_RANGE_ON.get_or_init(|| {
+        std::env::var("CRUS_SNAP_RANGE").as_deref() == Ok("1")
+    });
     let loader = |cx: i32, cz: i32, sec_y: i32| -> Option<crate::features_snap::SnapSection> {
-        let bytes = level_ref.snap_section(cx, cz, sec_y)?;
-        crate::features_snap::parse_section(&bytes)
+        let t0 = prof_now();
+        PROF_LOADER_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let r = if snap_range {
+            let range = level_ref.snap_section_range(cx, cz, sec_y - 1, 3);
+            let mut target: Option<crate::features_snap::SnapSection> = None;
+            if let Some(bytes) = range {
+                let mut s = snap.borrow_mut();
+                let epoch = s.epoch.get();
+                let mut p = 0usize;
+                for _ in 0..3 {
+                    if p + 4 > bytes.len() {
+                        break;
+                    }
+                    let mut lb = [0u8; 4];
+                    lb.copy_from_slice(&bytes[p..p + 4]);
+                    let len32 = i32::from_le_bytes(lb);
+                    p += 4;
+                    if len32 <= 0 || len32 as usize > bytes.len() - p {
+                        break; // absent (null build) / malformed — stop, stay lazy
+                    }
+                    let len = len32 as usize;
+                    if let Some(sec) = crate::features_snap::parse_section(&bytes[p..p + len]) {
+                        let sy = sec.sec_y;
+                        if let Some(slot) = s.slot(cx, cz, sy) {
+                            if sy == sec_y {
+                                target = Some(sec);
+                            } else if s.secs[slot].is_none() {
+                                let mut sec2 = sec;
+                                sec2.epoch = epoch;
+                                s.secs[slot] = Some(sec2);
+                            }
+                        }
+                    }
+                    p += len;
+                }
+            }
+            target
+        } else {
+            let bytes = level_ref.snap_section(cx, cz, sec_y);
+            let p0 = prof_now();
+            let parsed = bytes.and_then(|b| crate::features_snap::parse_section(&b));
+            PROF_PARSE_NS.fetch_add(prof_now() - p0, std::sync::atomic::Ordering::Relaxed);
+            parsed
+        };
+        run_loader.set(run_loader.get() + (prof_now() - t0));
+        r
     };
     let hm_loader = |cx: i32, cz: i32| -> Option<std::sync::Arc<Vec<i32>>> {
         if let Some(cached) = hms.borrow().get(&(cx, cz)) {
@@ -844,6 +1041,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
         return -1;
     }
     let slice = std::slice::from_raw_parts_mut(ptr as *mut i32, olen);
+    let t_run = prof_now();
     let n = run_feature_master(
         &d.state,
         &chunk_level,
@@ -855,6 +1053,19 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
         gid as usize,
         slice,
     );
+    let t_run_ns = prof_now() - t_run;
+    PROF_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let rl = run_loader.get();
+    PROF_LOADER_NS.fetch_add(rl, std::sync::atomic::Ordering::Relaxed);
+    PROF_NATIVE_NS.fetch_add(
+        t_run_ns.saturating_sub(rl),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    if let Ok(mut m) = PROF_FEAT.lock() {
+        let e = m.entry(name.clone()).or_insert((0, 0));
+        e.0 += t_run_ns.saturating_sub(rl);
+        e.1 += 1;
+    }
     ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
     n as jint
 }
@@ -884,6 +1095,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoChunkB
     min_sec_y: jint,
     zoom_seed: jlong,
 ) {
+    prof_chunk_tick();
     let guard = SESSIONS.lock().unwrap();
     if let Some(d) = guard
         .as_ref()

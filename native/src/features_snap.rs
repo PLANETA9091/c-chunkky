@@ -110,7 +110,7 @@ impl SnapRegion {
     }
 
     #[inline]
-    fn slot(&self, cx: i32, cz: i32, sec_y: i32) -> Option<usize> {
+    pub fn slot(&self, cx: i32, cz: i32, sec_y: i32) -> Option<usize> {
         let dcx = cx - self.origin_cx;
         let dcz = cz - self.origin_cz;
         if !(-1..=1).contains(&dcx) || !(-1..=1).contains(&dcz) {
@@ -191,6 +191,13 @@ impl SnapRegion {
             _ => flags::STURDY_E,
         };
         self.flag(x, y, z, bit)
+    }
+
+    /// block NAME at pos as a BORROW (hot path: the ore tag test runs per
+    /// vein cell — to_string() here was a heap allocation per query).
+    pub fn name_ref_at(&self, x: i32, y: i32, z: i32) -> Option<&str> {
+        let (n, _) = self.block(x, y, z)?;
+        Some(n)
     }
 
     /// the block NAME at pos (owned copy — no borrow lifetime leakage)
@@ -624,11 +631,18 @@ impl DecoLevel for ChunkLevel<'_> {
         self.inner.can_survive(state, pos)
     }
     fn is_air(&self, pos: BlockPos) -> bool {
-        if let Some(st) = self.ov.borrow().get(&(pos.x, pos.y, pos.z)) {
-            let name = crate::features_deco::state_block_name(st);
-            return name == "minecraft:air" || name == "minecraft:cave_air"
-                || name == "minecraft:void_air";
+        // empty-overlay fast path: non-writing features (regular ore veins are
+        // the whole mass) otherwise pay a SipHash of the (x,y,z) triple per
+        // query for nothing
+        let ov = self.ov.borrow();
+        if !ov.is_empty() {
+            if let Some(st) = ov.get(&(pos.x, pos.y, pos.z)) {
+                let name = crate::features_deco::state_block_name(st);
+                return name == "minecraft:air" || name == "minecraft:cave_air"
+                    || name == "minecraft:void_air";
+            }
         }
+        drop(ov);
         self.ensure(pos.x, pos.y, pos.z);
         if let Some(b) = self.snap.borrow().flag(pos.x, pos.y, pos.z, flags::IS_AIR) {
             return b;
@@ -706,25 +720,31 @@ impl DecoLevelExt for ChunkLevel<'_> {
         self.inner.fluid_is(pos, ids)
     }
     fn tag_is(&self, pos: BlockPos, tag: &str) -> bool {
-        if let Some(st) = self.ov.borrow().get(&(pos.x, pos.y, pos.z)) {
-            // The chunk-scoped overlay holds PRIOR features' writes too —
-            // those must answer with the real region semantics (vanilla reads
-            // the live BlockState: andesite written by an earlier ore DOES
-            // match stone_ore_replaceables for a later vein). The old
-            // per-feature bare-name lists only ever saw the current feature's
-            // re-visits; for cross-feature reads they'd answer false where
-            // vanilla answers true (the dptt 2.128% missing-ore divergence).
-            let name = crate::features_deco::state_block_name(st);
-            return match tag_matches_name(tag, name) {
-                Some(b) => b,
-                None => self.inner.tag_is(pos, tag),
-            };
+        {
+            let ov = self.ov.borrow();
+            if !ov.is_empty() {
+                if let Some(st) = ov.get(&(pos.x, pos.y, pos.z)) {
+                    // The chunk-scoped overlay holds PRIOR features' writes too —
+                    // those must answer with the real region semantics (vanilla
+                    // reads the live BlockState: andesite written by an earlier
+                    // ore DOES match stone_ore_replaceables for a later vein).
+                    // The old per-feature bare-name lists only ever saw the
+                    // current feature's re-visits; for cross-feature reads they'd
+                    // answer false where vanilla answers true (the dptt 2.128%
+                    // missing-ore divergence).
+                    let name = crate::features_deco::state_block_name(st);
+                    return match tag_matches_name(tag, name) {
+                        Some(b) => b,
+                        None => self.inner.tag_is(pos, tag),
+                    };
+                }
+            }
         }
         self.ensure(pos.x, pos.y, pos.z);
         // world blocks can match exotic tags — only the ore sets are native;
         // exotic tags take the exact bridge path
-        if let Some(name) = self.snap.borrow().name_at(pos.x, pos.y, pos.z) {
-            return match tag_matches_name(tag, &name) {
+        if let Some(name) = self.snap.borrow().name_ref_at(pos.x, pos.y, pos.z) {
+            return match tag_matches_name(tag, name) {
                 Some(b) => b,
                 None => self.inner.tag_is(pos, tag),
             };

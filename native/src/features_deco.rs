@@ -485,7 +485,7 @@ fn pure_expand_one(
             let x = pos.x + xz.sample(rng);
             let ny = pos.y + y.sample(rng);
             let z = pos.z + xz.sample(rng);
-            if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+            if crate::features_place::draw_trace_on() {
                 eprintln!("[off] {} {} {} -> {} {} {}", pos.x, pos.y, pos.z, x, ny, z);
             }
             out.push(BlockPos::new(x, ny, z));
@@ -513,7 +513,7 @@ pub fn expand_deco(
     top_uid: u32,
 ) {
     if idx == mods.len() {
-        if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+        if crate::features_place::draw_trace_on() {
             eprintln!("[leaf] uid={top_uid} {} {} {}", pos.x, pos.y, pos.z);
         }
         leaf(pos, rng);
@@ -530,7 +530,7 @@ pub fn expand_deco(
         }
         Mod::Heightmap { ty } => {
             let h = level.height(*ty, pos.x, pos.z);
-            if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+            if crate::features_place::draw_trace_on() {
                 eprintln!("[hm] {} {} {} ty={ty:?} h={h} -> {}", pos.x, pos.y, pos.z, h > level.min_y());
             }
             if h > level.min_y() {
@@ -541,7 +541,7 @@ pub fn expand_deco(
             // vanilla BiomeFilter reads PlacementContext.topFeature — the placed
             // feature currently being placed (passed through the expansion)
             let ok = level.biome_has_feature(pos, top_uid);
-            if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+            if crate::features_place::draw_trace_on() {
                 eprintln!("[biomef] {} {} {} uid={top_uid} -> {ok}", pos.x, pos.y, pos.z);
             }
             if ok {
@@ -557,7 +557,7 @@ pub fn expand_deco(
         Mod::SurfaceWaterDepth { max } => {
             let of = level.height(HeightmapTy::OceanFloor, pos.x, pos.z);
             let ws = level.height(HeightmapTy::WorldSurface, pos.x, pos.z);
-            if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+            if crate::features_place::draw_trace_on() {
                 eprintln!("[swd] {} {} {} of={of} ws={ws} max={max} -> {}", pos.x, pos.y, pos.z, ws - of <= *max);
             }
             if ws - of <= *max {

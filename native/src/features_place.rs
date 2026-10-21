@@ -457,6 +457,16 @@ fn place_disk(
     any
 }
 
+
+/// CRUS_DRAW_TRACE cached once (std::env::var takes an environ lock + scan —
+/// per-cell/per-position calls in the deco hot loops cost ~0.1-0.5us each;
+/// ore veins and placement modifiers made this the single largest native
+/// deco cost).
+pub fn draw_trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CRUS_DRAW_TRACE").is_ok())
+}
+
 /// isAdjacentToAir (vanilla OreFeature): any of the 6 neighbors is air.
 /// Result is neighbor-order independent (no RNG involved).
 fn is_adjacent_to_air(level: &dyn DecoLevelExt, pos: BlockPos) -> bool {
@@ -482,7 +492,7 @@ fn is_adjacent_to_air(level: &dyn DecoLevelExt, pos: BlockPos) -> bool {
 #[inline]
 fn should_skip_air_check(rng: &mut WorldgenRandom, chance: f32) -> bool {
     let r = chance <= 0.0 || (chance < 1.0 && rng.next_f32() >= chance);
-    if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+    if crate::features_place::draw_trace_on() {
         eprintln!("[skip] chance={chance} -> {r}");
     }
     r
@@ -499,7 +509,7 @@ fn rule_test_matches(
         RuleTest::BlockMatch(b) => level.state_is(pos, std::slice::from_ref(b)),
         RuleTest::TagMatch(t) => {
             let r = level.tag_is(pos, t);
-            if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+            if crate::features_place::draw_trace_on() {
                 eprintln!("[tag] {} {} {} {t} -> {r} state={}", pos.x, pos.y, pos.z, level.state_name(pos));
             }
             r
@@ -631,7 +641,7 @@ fn place_ore(
     let max_z = origin.z as f64 - cos_f * f1 as f64;
     let min_y = (origin.y + rng.next_int_bound(3) - 2) as f64;
     let max_y = (origin.y + rng.next_int_bound(3) - 2) as f64;
-    if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+    if crate::features_place::draw_trace_on() {
         eprintln!("[vein] discard={discard} f={f:.9} minx={min_x:.17} maxx={max_x:.17} miny={min_y:.17} maxy={max_y:.17} minz={min_z:.17} maxz={max_z:.17}");
     }
 
@@ -662,7 +672,7 @@ fn place_ore(
             ctx.center_x >> 4, origin.x, origin.y, origin.z
         );
     }
-    if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+    if crate::features_place::draw_trace_on() {
         eprintln!("[gate] ox={} oy={} oz={} y0={y0} -> {ok}", origin.x, origin.y, origin.z);
     }
     if !ok {
@@ -680,7 +690,7 @@ fn place_ore(
         let s = mth_sin(std::f32::consts::PI * fr);
         let d4 = ((s + 1.0f32) as f64 * d3 + 1.0) / 2.0;
         pts.push((d, d1, d2, d4));
-        if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+        if crate::features_place::draw_trace_on() {
             eprintln!("[node {i2}] d={d:.17} y={d1:.17} z={d2:.17} r={d4:.17}");
         }
     }
@@ -739,7 +749,7 @@ fn place_ore(
                     if !seen.insert((ix, iy, iz)) {
                         continue;
                     }
-                    if std::env::var("CRUS_DRAW_TRACE").is_ok() {
+                    if crate::features_place::draw_trace_on() {
                         eprintln!("[cand] {ix} {iy} {iz}");
                     }
                     let pos = BlockPos::new(ix, iy, iz);
@@ -750,18 +760,30 @@ fn place_ore(
                     for (rt, st) in targets {
                         let tag_hit = rule_test_matches(rt, ctx.level, pos, rng);
                         // vanilla short-circuit: the discard draw happens ONLY
-                        // when the target test matched
+                        // when the target test matched, and isAdjacentToAir is
+                        // evaluated ONLY when the discard draw says "check"
+                        // (Java || is lazy — for discard<=0 ores, e.g. the f1
+                        // iron vein, the 6-neighbor scan NEVER runs; the old
+                        // eager air read burned 6 snapshot queries per cell).
                         let hit = tag_hit && {
                             let skip = should_skip_air_check(rng, discard);
-                            let air = is_adjacent_to_air(ctx.level, pos);
+                            let w = skip || {
+                                let air = is_adjacent_to_air(ctx.level, pos);
+                                !air
+                            };
                             if vein_trace {
+                                let air = if skip {
+                                    None
+                                } else {
+                                    Some(!is_adjacent_to_air(ctx.level, pos))
+                                };
                                 eprintln!(
-                                    "O cand {} {} {} tag={} skip={} air={} w={}",
+                                    "O cand {} {} {} tag={} skip={} air={:?} w={}",
                                     pos.x, pos.y, pos.z, tag_hit, skip, air,
-                                    if skip || !air { st.as_str() } else { "-" }
+                                    if w { st.as_str() } else { "-" }
                                 );
                             }
-                            skip || !air
+                            w
                         };
                         if vein_trace && !tag_hit {
                             eprintln!(
