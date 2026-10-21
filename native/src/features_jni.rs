@@ -54,6 +54,7 @@ struct BridgeMids {
     state_full: jni_sys::jmethodID,
     is_solid_render: jni_sys::jmethodID,
     deco_snap_section: jni_sys::jmethodID,
+    deco_heightmaps: jni_sys::jmethodID,
 }
 
 pub struct JniLevel<'a> {
@@ -119,6 +120,7 @@ impl<'a> JniLevel<'a> {
                 state_full: mid("stateFull", "(III)Ljava/lang/String;"),
                 is_solid_render: mid("isSolidRender", "(III)Z"),
                 deco_snap_section: mid("decoSnapSection", "(III)[B"),
+                deco_heightmaps: mid("decoHeightmaps", "(II)[I"),
             };
             let ok = [
                 mids.is_air,
@@ -137,6 +139,7 @@ impl<'a> JniLevel<'a> {
                 mids.state_full,
                 mids.is_solid_render,
                 mids.deco_snap_section,
+                mids.deco_heightmaps,
             ]
             .iter()
             .all(|m| !m.is_null());
@@ -212,6 +215,50 @@ impl<'a> JniLevel<'a> {
             }
             let out = std::slice::from_raw_parts(p as *const u8, len).to_vec();
             ((*tbl).v1_2.ReleaseByteArrayElements)(
+                self.env,
+                r,
+                p,
+                jni_sys::JNI_ABORT,
+            );
+            ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+            Some(out)
+        }
+    }
+
+    /// WG heightmap handshake: 512 i32 (WS_WG 256 + OF_WG 256, +1
+    /// semantics) per region chunk — replaces the per-column height upcalls.
+    fn heightmaps(&self, cx: i32, cz: i32) -> Option<Vec<i32>> {
+        if self.noup() {
+            return None;
+        }
+        let tbl = unsafe { *self.env };
+        unsafe {
+            let ivals = [Self::val_i(cx), Self::val_i(cz)];
+            let r = ((*tbl).v1_1.CallObjectMethodA)(
+                self.env,
+                self.obj,
+                self.mids.deco_heightmaps,
+                ivals.as_ptr(),
+            ) as jni_sys::jintArray;
+            if ((*tbl).v1_2.ExceptionCheck)(self.env) {
+                ((*tbl).v1_1.ExceptionClear)(self.env);
+                return None;
+            }
+            if r.is_null() {
+                return None;
+            }
+            let len = ((*tbl).v1_1.GetArrayLength)(self.env, r as jni_sys::jarray) as usize;
+            if len < 512 {
+                ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+                return None;
+            }
+            let p = ((*tbl).v1_1.GetIntArrayElements)(self.env, r, std::ptr::null_mut());
+            if p.is_null() {
+                ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+                return None;
+            }
+            let out = std::slice::from_raw_parts(p, 512).to_vec();
+            ((*tbl).v1_2.ReleaseIntArrayElements)(
                 self.env,
                 r,
                 p,
@@ -747,17 +794,39 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
     // the snapshot serves them natively (flags computed in Java).
     let ov: &std::cell::RefCell<crate::features_snap::OvMap> = &d.chunk_ov;
     let snap: &std::cell::RefCell<crate::features_snap::SnapRegion> = &d.chunk_snap;
+    let hms: &std::cell::RefCell<std::collections::HashMap<(i32, i32), Option<std::sync::Arc<Vec<i32>>>>> =
+        &d.chunk_hms;
     let zoom_seed = d.chunk_zoom_seed.get();
     let level_ref = &level;
     let loader = |cx: i32, cz: i32, sec_y: i32| -> Option<crate::features_snap::SnapSection> {
         let bytes = level_ref.snap_section(cx, cz, sec_y)?;
         crate::features_snap::parse_section(&bytes)
     };
+    let hm_loader = |cx: i32, cz: i32| -> Option<std::sync::Arc<Vec<i32>>> {
+        if let Some(cached) = hms.borrow().get(&(cx, cz)) {
+            return cached.clone();
+        }
+        // the WG handshake must always succeed: 512 ints, O(1) Java
+        let loaded = level_ref.heightmaps(cx, cz).map(std::sync::Arc::new);
+        if loaded.is_none() {
+            static LOGGED: std::sync::atomic::AtomicU32 =
+                std::sync::atomic::AtomicU32::new(0);
+            let n = LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 3 {
+                crate::ffi::log_warn(&format!(
+                    "[deco-hm] heightmaps handshake failed cx={cx} cz={cz} (fallback to per-column JNI)"
+                ));
+            }
+        }
+        hms.borrow_mut().insert((cx, cz), loaded.clone());
+        loaded
+    };
     let chunk_level = crate::features_snap::ChunkLevel::new(
         level_ref,
         ov,
         snap,
         &loader,
+        &hm_loader,
         &d.uid_names,
         zoom_seed,
     );
@@ -823,6 +892,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoChunkB
     {
         d.chunk_ov.borrow_mut().clear();
         d.chunk_snap.borrow_mut().reset(cx, cz, min_sec_y);
+        d.chunk_hms.borrow_mut().clear();
         d.chunk_zoom_seed.set(zoom_seed);
     }
 }

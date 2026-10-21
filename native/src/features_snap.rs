@@ -342,6 +342,10 @@ pub struct ChunkLevel<'a> {
     snap: &'a std::cell::RefCell<SnapRegion>,
     /// bridge fallback loader for missing sections
     loader: &'a dyn Fn(i32, i32, i32) -> Option<SnapSection>,
+    /// WG heightmap handshake loader: (cx, cz) -> 512 i32 (WS_WG 256 +
+    /// OF_WG 256, +1 semantics) — one JNI per chunk, cached by the caller
+    /// (DecoCtx.chunk_hms survives the whole chunk deco)
+    hm_loader: &'a dyn Fn(i32, i32) -> Option<std::sync::Arc<Vec<i32>>>,
     /// uid -> placed name (BiomeFilter) — native answer path
     uid_names: &'a [String],
     /// BiomeManager.obfuscateSeed(world seed) — the zoom fiddle seed
@@ -357,11 +361,67 @@ impl<'a> ChunkLevel<'a> {
         ov: &'a std::cell::RefCell<OvMap>,
         snap: &'a std::cell::RefCell<SnapRegion>,
         loader: &'a dyn Fn(i32, i32, i32) -> Option<SnapSection>,
+        hm_loader: &'a dyn Fn(i32, i32) -> Option<std::sync::Arc<Vec<i32>>>,
         uid_names: &'a [String],
         zoom_seed: i64,
     ) -> Self {
         let no_snap = std::env::var("CRUS_DECO_NOSNAP").ok().as_deref() == Some("1");
-        ChunkLevel { inner, ov, snap, loader, uid_names, zoom_seed, no_snap }
+        ChunkLevel { inner, ov, snap, loader, hm_loader, uid_names, zoom_seed, no_snap }
+    }
+
+    /// WG heightmap snapshot for a region chunk (cached by the hm_loader's
+    /// owner — DecoCtx.chunk_hms). None = load failed → JNI fallback.
+    fn ensure_hm(&self, cx: i32, cz: i32) -> Option<std::sync::Arc<Vec<i32>>> {
+        (self.hm_loader)(cx, cz)
+    }
+
+    /// The world-side block NAME at pos (NO overlay — can_survive semantics
+    /// match the live region the JNI path reads, which cannot see the
+    /// pending apply either). None = not snapshotted → the caller falls back.
+    pub fn world_name_at(&self, pos: BlockPos) -> Option<String> {
+        self.ensure(pos.x, pos.y, pos.z);
+        self.snap.borrow().name_at(pos.x, pos.y, pos.z)
+    }
+
+    /// The world-side flag bits at pos (NO overlay). None = not snapshotted.
+    pub fn world_flag_at(&self, pos: BlockPos, mask: u16) -> Option<bool> {
+        self.ensure(pos.x, pos.y, pos.z);
+        self.snap.borrow().flag(pos.x, pos.y, pos.z, mask)
+    }
+
+    /// Snapshot column scan for the FINAL heightmap types; None = a needed
+    /// section is not snapshotted (caller falls back to the JNI bridge).
+    fn scan_final_height(&self, ty: HeightmapTy, x: i32, z: i32) -> Option<i32> {
+        debug_assert!(!matches!(
+            ty,
+            HeightmapTy::WorldSurfaceWg | HeightmapTy::OceanFloorWg
+        ));
+        let ws_wg = self.height(HeightmapTy::WorldSurfaceWg, x, z);
+        let top = (ws_wg + 48).min(self.max_y() - 1);
+        if top < self.min_y() {
+            return None;
+        }
+        for y in (self.min_y()..=top).rev() {
+            self.ensure(x, y, z);
+            let (_, f) = self.snap.borrow().block(x, y, z)?;
+            let hit = match ty {
+                HeightmapTy::WorldSurface => f & flags::IS_AIR == 0,
+                // vanilla switch: OCEAN_FLOOR and MOTION_BLOCKING share the
+                // predicate blocksMotion() || !fluid.isEmpty()
+                HeightmapTy::OceanFloor | HeightmapTy::MotionBlocking => {
+                    f & (flags::BLOCKS_MOTION | flags::HAS_FLUID) != 0
+                }
+                HeightmapTy::MotionBlockingNoLeaves => {
+                    (f & flags::BLOCKS_MOTION != 0 && f & flags::LEAVES == 0)
+                        || f & flags::HAS_FLUID != 0
+                }
+                HeightmapTy::WorldSurfaceWg | HeightmapTy::OceanFloorWg => unreachable!(),
+            };
+            if hit {
+                return Some(y + 1);
+            }
+        }
+        Some(self.min_y())
     }
 
     /// vanilla BiomeManager.getBiome: the 8-neighbor zoom over the snapshot
@@ -486,6 +546,35 @@ impl DecoLevel for ChunkLevel<'_> {
         self.inner.max_y()
     }
     fn height(&self, ty: HeightmapTy, x: i32, z: i32) -> i32 {
+        // WG types (WORLD_SURFACE_WG/OCEAN_FLOOR_WG): the frozen pre-deco
+        // heightmaps are chunk-scoped data that the block snapshot CANNOT
+        // reconstruct (margin spills changed blocks but not the WG maps).
+        // One JNI handshake pulls 2x256 columns per chunk (lazily, cached).
+        if matches!(ty, HeightmapTy::WorldSurfaceWg | HeightmapTy::OceanFloorWg)
+            && !self.no_snap
+        {
+            if let Some(hm) = self.ensure_hm(x >> 4, z >> 4) {
+                let off = if ty == HeightmapTy::WorldSurfaceWg { 0 } else { 256 };
+                let idx = off + ((z & 15) as usize) * 16 + (x & 15) as usize;
+                if let Some(v) = hm.get(idx) {
+                    return *v;
+                }
+            }
+            return self.inner.height(ty, x, z);
+        }
+        // FINAL types: the vanilla lane (WorldGenRegion.getHeight) recomputes
+        // them from the blocks — a snapshot column scan with the exact flag
+        // predicates is bit-identical and kills the per-column Java scan
+        // (~200 getBlockState each). The scan starts at ws_wg + 48: the
+        // FINAL top can only exceed the frozen WS_WG by margin feature
+        // spills (vanilla tree height <= 33), and it can never sit BELOW
+        // ws_wg. Above the start there is provably nothing; if a section in
+        // the scan range is missing (outside the snap grid), fall back.
+        if !self.no_snap {
+            if let Some(h) = self.scan_final_height(ty, x, z) {
+                return h;
+            }
+        }
         self.inner.height(ty, x, z)
     }
     fn state(&self, pos: BlockPos) -> u32 {
@@ -524,6 +613,14 @@ impl DecoLevel for ChunkLevel<'_> {
     }
 
     fn can_survive(&self, state: &str, pos: BlockPos) -> bool {
+        // Native wouldSurvive table (bytecode-verified vs 1.21.8
+        // paper-1.21.8.jar). Unknown states fall back to the JNI bridge, so
+        // an untabled override can never answer wrongly.
+        if !self.no_snap {
+            if let Some(b) = crate::features_survive::survive_native(state, pos, self) {
+                return b;
+            }
+        }
         self.inner.can_survive(state, pos)
     }
     fn is_air(&self, pos: BlockPos) -> bool {

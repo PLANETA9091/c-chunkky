@@ -44,6 +44,10 @@ pub struct DecoCtx {
     pub chunk_ov: std::cell::RefCell<crate::features_snap::OvMap>,
     /// lazy 3x3 region section snapshot (perf pass — no per-query JNI)
     pub chunk_snap: std::cell::RefCell<crate::features_snap::SnapRegion>,
+    /// WG heightmap snapshots per region chunk: (cx, cz) -> 512 i32 (WS_WG+OF_WG,
+    /// +1 semantics). Cached across the whole chunk deco (ChunkLevel is
+    /// re-created per feature); cleared in decoChunkBegin. None = load failed.
+    pub chunk_hms: std::cell::RefCell<HashMap<(i32, i32), Option<std::sync::Arc<Vec<i32>>>>>,
     /// BiomeManager.obfuscateSeed(world seed) — the biome zoom fiddle seed
     pub chunk_zoom_seed: std::cell::Cell<i64>,
 }
@@ -168,6 +172,7 @@ pub fn build_deco_ctx(
         uid_names,
         chunk_ov: std::cell::RefCell::new(crate::features_snap::OvMap::new()),
         chunk_snap: std::cell::RefCell::new(crate::features_snap::SnapRegion::new(0, 0, -1024, 26)),
+        chunk_hms: std::cell::RefCell::new(HashMap::new()),
         chunk_zoom_seed: std::cell::Cell::new(0),
     })
 }

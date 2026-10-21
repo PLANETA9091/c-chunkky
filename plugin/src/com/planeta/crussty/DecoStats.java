@@ -20,6 +20,20 @@ public final class DecoStats {
 
     private static final int RING = 4096;
     private static final long[] NANOS = new long[RING];
+    // wouldSurvive histogram (CRUS_SURVIVE_HIST=1): state -> {count, trueCount}
+    static final java.util.concurrent.ConcurrentHashMap<String, long[]> SURVIVE_HIST
+            = new java.util.concurrent.ConcurrentHashMap<>();
+    // below-block name -> count (the environment the rules must classify)
+    static final java.util.concurrent.ConcurrentHashMap<String, long[]> SURVIVE_BELOW_HIST
+            = new java.util.concurrent.ConcurrentHashMap<>();
+
+    static void surviveSample(String state, boolean ok, String below) {
+        SURVIVE_HIST.computeIfAbsent(state, k -> new long[2])[0]++;
+        if (ok) {
+            SURVIVE_HIST.get(state)[1]++;
+        }
+        SURVIVE_BELOW_HIST.computeIfAbsent(below, k -> new long[2])[0]++;
+    }
     private static final AtomicLong COUNT = new AtomicLong();
     private static final AtomicLong TOTAL = new AtomicLong();
 
@@ -34,6 +48,15 @@ public final class DecoStats {
 
     // upcall counters (Java side; they measure the JNI traffic, not the time)
     static final AtomicLong UP_HEIGHT = new AtomicLong();
+    /** height upcalls by ty (WG=0/2, FINAL=1/3/4/5) — the native-split decision data */
+    static final AtomicLong[] UP_H_TY = new AtomicLong[] {
+            new AtomicLong(), new AtomicLong(), new AtomicLong(),
+            new AtomicLong(), new AtomicLong(), new AtomicLong()
+    };
+    /** region-snapshot section loads (decoSnapSection JNI) + nanos + HM handshakes */
+    static final AtomicLong SNAP_SECTIONS = new AtomicLong();
+    static final AtomicLong SNAP_SECTION_NS = new AtomicLong();
+    static final AtomicLong SNAP_HM = new AtomicLong();
     static final AtomicLong UP_STATE_IS = new AtomicLong();
     static final AtomicLong UP_FLUID_IS = new AtomicLong();
     static final AtomicLong UP_IS_AIR = new AtomicLong();
@@ -56,6 +79,12 @@ public final class DecoStats {
         DELEGATE_TOTAL.set(0);
         DELEGATE_COUNT.set(0);
         UP_HEIGHT.set(0);
+        for (AtomicLong a : UP_H_TY) {
+            a.set(0);
+        }
+        SNAP_SECTIONS.set(0);
+        SNAP_SECTION_NS.set(0);
+        SNAP_HM.set(0);
         UP_STATE_IS.set(0);
         UP_FLUID_IS.set(0);
         UP_IS_AIR.set(0);
@@ -102,6 +131,43 @@ public final class DecoStats {
                 OPS_TOTAL.get(), FEATURES_TOTAL.get(),
                 DELEGATE_COUNT.get(),
                 upcalls, UP_HEIGHT.get(), UP_STATE_IS.get(), UP_FLUID_IS.get(),
-                UP_IS_AIR.get(), UP_CAN_SURVIVE.get(), UP_OTHER.get());
+                UP_IS_AIR.get(), UP_CAN_SURVIVE.get(), UP_OTHER.get())
+                .concat(String.format(" snap-sec=%d/%.2fms snap-hm=%d",
+                SNAP_SECTIONS.get(), SNAP_SECTION_NS.get() / 1e6, SNAP_HM.get()));
+    }
+
+    /** wouldSurvive histogram tail (top 12 each), CRUS_SURVIVE_HIST=1. */
+    static String surviveHist() {
+        if (SURVIVE_HIST.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder(" | [survive-hist]");
+        SURVIVE_HIST.entrySet().stream()
+                .sorted((a, b) -> Long.compare(b.getValue()[0], a.getValue()[0]))
+                .limit(12)
+                .forEach(e -> sb.append(' ').append(e.getKey()).append('=')
+                        .append(e.getValue()[0]).append('/').append(e.getValue()[1]));
+        sb.append(" | [survive-below]");
+        SURVIVE_BELOW_HIST.entrySet().stream()
+                .sorted((a, b) -> Long.compare(b.getValue()[0], a.getValue()[0]))
+                .limit(16)
+                .forEach(e -> sb.append(' ').append(e.getKey()).append('=').append(e.getValue()[0]));
+        return sb.toString();
+    }
+
+    /** height ty histogram tail. */
+    static String hTyHist() {
+        long total = 0;
+        for (AtomicLong a : UP_H_TY) {
+            total += a.get();
+        }
+        if (total == 0) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder(" | [h-ty]");
+        for (int i = 0; i < UP_H_TY.length; i++) {
+            sb.append(i == 0 ? "" : " ").append(i).append('=').append(UP_H_TY[i].get());
+        }
+        return sb.toString();
     }
 }

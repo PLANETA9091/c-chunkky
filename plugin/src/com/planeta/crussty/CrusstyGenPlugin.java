@@ -66,7 +66,8 @@ public final class CrusstyGenPlugin extends JavaPlugin {
             StringBuilder sb = new StringBuilder(cpuLine())
                     .append(" | [CrusstyGen] native noise stage: ").append(GenStats.snapshot());
             try {
-                sb.append(" | [CrusstyGen] native deco stage: ").append(DecoStats.snapshot());
+                sb.append(" | [CrusstyGen] native deco stage: ").append(DecoStats.snapshot())
+                        .append(DecoStats.surviveHist()).append(DecoStats.hTyHist());
             } catch (Throwable ignored) {
             }
             try {

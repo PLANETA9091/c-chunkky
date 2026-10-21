@@ -606,9 +606,19 @@ public final class DecoDriver extends BlockPopulator {
     }
 
     /** 1.21.8: the biome registry is data-driven-only — resolve keys through
-     *  the region's registry access. */
+     *  the region's registry access. Biome does not override equals — this is
+     *  an identity cache; populate is serial (gen-parallelism=false). */
+    private final java.util.HashMap<Biome, String> BIOME_KEY_CACHE =
+            new java.util.HashMap<>();
+
     private String biomeKey(Biome biome) {
-        return reg.registryAccess().lookupOrThrow(Registries.BIOME).getKey(biome).toString();
+        String c = BIOME_KEY_CACHE.get(biome);
+        if (c != null) {
+            return c;
+        }
+        String k = reg.registryAccess().lookupOrThrow(Registries.BIOME).getKey(biome).toString();
+        BIOME_KEY_CACHE.put(biome, k);
+        return k;
     }
 
     // ------------------------------------------------------------------
@@ -617,6 +627,9 @@ public final class DecoDriver extends BlockPopulator {
 
     public int height(int ty, int x, int z) {
         DecoStats.UP_HEIGHT.incrementAndGet();
+        if (ty >= 0 && ty < DecoStats.UP_H_TY.length) {
+            DecoStats.UP_H_TY[ty].incrementAndGet();
+        }
         // Paper 1.21.8 (vantrace agent proof): ChunkStatus CARVERS/FEATURES
         // register FINAL_HEIGHTMAPS for setBlock updates, so the WG maps
         // (WORLD_SURFACE_WG/OCEAN_FLOOR_WG) are FROZEN at their pre-decoration
@@ -750,8 +763,17 @@ public final class DecoDriver extends BlockPopulator {
     public boolean wouldSurvive(String state, int x, int y, int z) {
         DecoStats.UP_CAN_SURVIVE.incrementAndGet();
         BlockState st = state(state);
-        return st != null && st.canSurvive(reg, new BlockPos(x, y, z));
+        boolean r = st != null && st.canSurvive(reg, new BlockPos(x, y, z));
+        if (SURVIVE_HIST_ON) {
+            BlockState below = reg.getBlockState(new BlockPos(x, y - 1, z));
+            DecoStats.surviveSample(state, r,
+                    BuiltInRegistries.BLOCK.getKey(below.getBlock()).toString());
+        }
+        return r;
     }
+
+    private static final boolean SURVIVE_HIST_ON =
+            System.getenv("CRUS_SURVIVE_HIST") != null;
 
     public boolean biomeHasFeature(int x, int y, int z, String placed) {
         DecoStats.UP_OTHER.incrementAndGet();
@@ -869,11 +891,91 @@ public final class DecoDriver extends BlockPopulator {
      *  nameIdx indexes the section-local block-name list (names of the block
      *  palette entries); biome palette entries index the biome-name list.
      *  bits==0 = single-value palette (raw empty, value = entry 0). */
+    /** WG heightmap handshake: 512 i32 = WORLD_SURFACE_WG 256 + OCEAN_FLOOR_WG
+     *  256 (column order z*16+x), +1 semantics matching height(). The WG maps
+     *  are FROZEN pre-deco data — one JNI per region chunk replaces the
+     *  per-column height upcalls (45/chunk -> <=9/chunk). */
+    public int[] decoHeightmaps(int cx, int cz) {
+        DecoStats.SNAP_HM.incrementAndGet();
+        ChunkAccess ch = reg.getChunk(cx, cz);
+        int[] out = new int[512];
+        for (int t = 0; t <= 2; t += 2) {
+            int off = t / 2 * 256;
+            for (int z = 0; z < 16; z++) {
+                for (int x = 0; x < 16; x++) {
+                    out[off + z * 16 + x] = ch.getHeight(TYPES[t], x, z) + 1;
+                }
+            }
+        }
+        return out;
+    }
+
     public byte[] decoSnapSection(int cx, int cz, int secY) {
+        long t0 = System.nanoTime();
+        DecoStats.SNAP_SECTIONS.incrementAndGet();
+        try {
+            return decoSnapSection0(cx, cz, secY);
+        } finally {
+            DecoStats.SNAP_SECTION_NS.addAndGet(System.nanoTime() - t0);
+        }
+    }
+
+    /** Unsafe bulk long[]->byte[] copy (LE x86: identical bytes). Avoids the
+     *  per-element putLong loop (14ns/elem) — one memcpy instead. */
+    private static final sun.misc.Unsafe U;
+    private static final long L_BASE;
+    private static final long B_BASE;
+    static {
+        sun.misc.Unsafe u = null;
+        long lb = 0;
+        long bb = 0;
+        try {
+            var f = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+            f.setAccessible(true);
+            u = (sun.misc.Unsafe) f.get(null);
+            lb = u.arrayBaseOffset(long[].class);
+            bb = u.arrayBaseOffset(byte[].class);
+        } catch (Throwable t) {
+            u = null;
+        }
+        U = u;
+        L_BASE = lb;
+        B_BASE = bb;
+    }
+
+    private static void copyLongs(java.nio.ByteBuffer buf, long[] raw) {
+        if (U != null && buf.hasArray()) {
+            // one memcpy into the heap buffer's backing array
+            U.copyMemory(raw, L_BASE, buf.array(), B_BASE + buf.arrayOffset()
+                    + buf.position(), (long) raw.length * 8L);
+            buf.position(buf.position() + raw.length * 8);
+        } else {
+            buf.asLongBuffer().put(raw);
+            buf.position(buf.position() + raw.length * 8);
+        }
+    }
+
+    /** Growing thread-local snap buffer (a section deco thread serializes its
+     *  own builds; the buffer only lives within one decoSnapSection call). */
+    private static final ThreadLocal<java.nio.ByteBuffer> SNAP_BUF =
+            ThreadLocal.withInitial(() -> java.nio.ByteBuffer.allocate(16384)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN));
+
+    private static java.nio.ByteBuffer snapBuf(int minCap) {
+        java.nio.ByteBuffer b = SNAP_BUF.get();
+        if (b.capacity() < minCap) {
+            b = java.nio.ByteBuffer.allocate(Math.max(minCap, b.capacity() * 2))
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            SNAP_BUF.set(b);
+        }
+        b.clear();
+        return b;
+    }
+
+    private byte[] decoSnapSection0(int cx, int cz, int secY) {
         ChunkAccess ch = reg.getChunk(cx, cz);
         int si = secY - reg.getMinSectionY();
-        java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(8192)
-                .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        java.nio.ByteBuffer buf = snapBuf(16384);
         buf.putInt(secY);
         if (si < 0 || si >= ch.getSectionsCount()) {
             buf.putInt(-1);
@@ -882,13 +984,26 @@ public final class DecoDriver extends BlockPopulator {
         LevelChunkSection sec = ch.getSection(si);
         ArrayList<String> names = new ArrayList<>();
         HashMap<String, Integer> nameIdx = new HashMap<>();
-        // ---- blocks ----
+        // ---- blocks (empty-section fast path: getNonEmptyBlockCount==0 ->
+        // single-air palette with NO storage reflect / registry lookups;
+        // biomes are still needed — 3D quart palette feeds the zoom) ----
         PalettedContainer<?> pc = sec.states;
         try {
             Data<?> d = (Data<?>) pc.data;
             BitStorage storage = (BitStorage) F_STORAGE.get(d);
             Palette<?> pal = (Palette<?>) F_PALETTE.get(d);
             int bits = storage.getBits();
+            // empty-section fast path: single-value palette that IS air ->
+            // emit the (bits=0, one air entry, no raw) header directly with
+            // NO registry lookups; biomes below are still needed (3D zoom).
+            if (bits == 0 && ((BlockState) pal.valueFor(0)).isAir()) {
+                buf.putInt(0);
+                buf.putInt(1);
+                buf.putShort((short) 0);
+                buf.putShort((short) 1);
+                buf.putInt(0); // rawLen = 0
+                names.add("minecraft:air");
+            } else {
             long[] raw = storage.getRaw();
             int n = pal.getSize();
             buf.putInt(bits);
@@ -906,8 +1021,7 @@ public final class DecoDriver extends BlockPopulator {
                 buf.putShort((short) stateFlags(st));
             }
             buf.putInt(raw.length);
-            for (long v : raw) {
-                buf.putLong(v);
+            copyLongs(buf, raw);
             }
             // ---- biomes (4x4x4 quart cells per section) ----
             PalettedContainer<?> bio = (PalettedContainer<?>) F_BIOMES.get(sec);
@@ -941,9 +1055,7 @@ public final class DecoDriver extends BlockPopulator {
                 buf.putShort((short) ix.intValue());
             }
             buf.putInt(braw.length);
-            for (long v : braw) {
-                buf.putLong(v);
-            }
+            copyLongs(buf, braw);
             buf.putInt(names.size());
             for (String s : names) {
                 byte[] b = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
