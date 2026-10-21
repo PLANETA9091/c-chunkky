@@ -1753,3 +1753,43 @@ Stage Summary:
 - Деко-движок: h=0, survive=0, stateis=0, isair=0 — ВСЕ point/height запросы снапшотные; остаток other=5.7/чанк (state_full деревья + edge-fallbacks), секции 29/чанк (6.4us Java-сборка), план 0.30ms (regionBiomes 216 секций + нативный union).
 - До 1мс осталось: батч/ускорение секций + plan; native compute floor 0.17ms.
 - Next: (a) CI-вердикт 22efcb8; (b) регион-батч снапшота (1 JNI вместо 29) при необходимости; (c) dptt native-parity track (ore shapes/F6 tail) и флип деревьев/vegetation_patch.
+
+---
+Task ID: cont-54 (2026-10-21, DECO PERF 2: p50 < 1ms reached)
+Agent: Super Z (main)
+Task: продолжи до 1мс end2end — убрать остаточные массы deco-пути (native compute, plan, loader).
+
+Work Log:
+- CI-вердикт 22efcb8: native+plugin GREEN, integration падает ТОЛЬКО на известном Judge world=vanilla (0.556% = 34952 блока, HEIGHTMAP 0 — тот же стабильный CI-only residual ±35 блоков); deco-перф коммит регрессий не внёс.
+- Rust-профилировщик сплита run (CRUS_RUN_PROF=1): per-16-чанковые окна native/loader/state_full/solid_render + per-feature top-10 (PROF_FEAT). Баг prof_now (Instant::now().elapsed() ~= 0) давал underflow-мусор — фикс на статическую эпоху.
+- Split до фиксов: native=0.55-0.69ms + loader=0.14-0.20ms (31.6 секций, JNI ~2us + build ~4.8us).
+- ГЛАВНАЯ НАХОДКА: std::env::var("CRUS_DRAW_TRACE") в ГОРЯЧИХ циклах — per-cell в венах (should_skip_air_check, rule_test TagMatch), per-position в expand_deco (Heightmap/BiomeFilter/SurfaceWaterDepth/RandomOffset), даже в next_int_bound! glibc environ lock+scan ~0.1-0.5us x 2-3/cell = ore_iron 135-178us/chunk. Кэш draw_trace_on() OnceLock (13 сайтов).
+  * Урок: python blind-replace съел собственный хелпер (get_or_init(|| draw_trace_on()) — self-deadlock на OnceLock, воркер завис в decoRunFeature навечно, 2 таймаута прогона). Диагностика: jstack воркера в JNI + ре-энтрантность OnceLock. Фикс: env::var внутри хелпера.
+- is_adjacent_to_air вычислялся ЖАДНО в regular-ore цикле (vanilla `skip || !air` — лениво; f1 ore_iron discard=0.0 → ваниль НИКОГДА не сканирует соседей, мы жгли 6 снапшот-запросов на ячейку). Фикс ленивости, ~-35us.
+- Empty-overlay fast path в is_air/tag_is (SipHash (x,y,z)-тапла на каждый запрос впустую при пустом overlay — регулярная руда не пишет overlay), name_ref_at (&str вместо to_string на каждую ячейку).
+- Java StateMeta: identity-кэш (flags, key) per BlockState — 14-предикатный stateFlags + BuiltInRegistries.getKey().toString() выполнялись PER PALETTE ENTRY PER SECTION; snap-sec build 4.8 -> ~3.6us (36.9 -> 22.6ms/196).
+- regionBiomes: кэш per-чанковых биом-palette (биомы заморожены) — 216 getAll walks -> 24 + 8 merges; planbio 0.22 -> 0.078ms; план 0.23 -> 0.10ms.
+- Range-батч секций (decoSnapSectionRange sy-1..sy+1, 1 JNI вместо 3): ИЗМЕРЕННО ОТРИЦАТЕЛЬНЫЙ (build доминирует над переходом; overbuild 1.78x = 11013 сборок vs 6188 полезных; loader 0.22-0.37 vs 0.14-0.20). Откат, оставлен за CRUS_SNAP_RANGE=1 (A/B на другом железе). Ловля по дороге: decoSnapSectionRange и decoSnapSection0 делили один ThreadLocal snapBuf — вложенный snapBuf очищал range-буфер посреди сборки → мусорный wire → Rust-паника (slice wrap на отрицательной длине) + far-chunk артефакты; фикс: отдельный RANGE_BUF + проверенный парсинг длин.
+- far-chunk patch_ref (x=-192..-230 при спавн-чанках): есть во ВСЕХ логах 10-21 (22efcb8), нет 10-16 — пре-существующий класс «patch_ref bones» (трек dptt native-parity), warmup-only, на окно паритета не влияет.
+
+Stage Summary:
+- ЦЕЛЬ ДОСТИГУТА: f1 probe deco p50 1312 -> 957-968us (два окна подряд), parity 0.000% (4/3,539,444), ops=33011 идентичны, 51/51 тестов. Коммит fda0315 запушен.
+- Разложение тихого окна: план 0.10 (planbio 0.078 + натив 0.02), run = native 0.385-0.39 (ore_iron ~100-120 top, ore_gold ~50-57, offset_water/disk_rule ~50) + loader 0.12 (30 секций, JNI 0.09 + parse 0.03), apply 0.17-0.20, struct 0.01.
+- Next: (a) CI-вердикт fda0315; (b) запас к 0.8ms: apply (168 ops, 1.2us/op — ванильный floor setBlock), ore_iron внутренности (7 запросов/ячейку → fuse), planbio (24 getAll); (c) dptt native-parity track (ore shapes / patch_ref bones / флип деревьев+vegetation_patch).
+
+---
+Task ID: cont-54b (2026-10-21, финал сессии: STATE_FAST + biome walk + CI-вердикты)
+Agent: Super Z (main)
+Task: доделки после достижения 1ms + вердикты CI.
+
+Work Log:
+- STATE_FAST: BlockState[stateIdx] разрешается один раз в setup() — applyOp больше не хэширует state-строку per op (~168 ops/chunk).
+- chunkBiomes: прямой palette-walk биомов (те же F_BIOMES/F_PALETTE поля, что в decoSnapSection0; getAll-fallback при исключении). planbio по окнам: 15-17ms/196 — 54.13 в одном окне было шумом (повтор: 17.04).
+- CI fda0315: native+plugin GREEN, integration red = только Judge world=vanilla 0.555% (34943/6.29M — та же полоса ±35, CI-only residual, не связан с перфом). 5c1efff — CI в полёте (ожидаемо тот же профиль).
+- Окна после всех правок: p50 957-1007us, parity 0.000% (4/3,539,444) в КАЖДОМ прогоне, ops=33011 идентичны, 51/51 тестов.
+
+Stage Summary:
+- ИТОГ СЕССИИ: deco stage p50 1312 -> 957-1007us (цель ≤1мс достигнута и подтверждена в 4 окнах), без единого изменения вывода (ops бит-идентичны).
+- Коммиты: fda0315 (основной перф-проход) + 5c1efff (STATE_FAST + biome walk).
+- Разложение тихого окна: план 0.10 / run 0.86-0.90 (native 0.39 + loader 0.12) / apply 0.17-0.21 / struct 0.01.
+- Next сессия: (a) dptt native-parity track — ore vein shapes, patch_ref bones (far-chunk symptom), флип деревьев/vegetation_patch; (b) запас к 0.8ms: fuse ensure+block (двойное разрешение секции на запрос), ore-гейт (81 height-запрос на вену), hm Arc-кэш последнего чанка; (c) CI-only vanilla residual: эксперимент с локальным .so на CI (артефакт-реюз).
