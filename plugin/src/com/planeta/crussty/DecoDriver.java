@@ -76,6 +76,9 @@ public final class DecoDriver extends BlockPopulator {
 
     /** decoStates table (index -> canonical state string). */
     private static volatile String[] STATES;
+    /** stateIdx -> resolved BlockState (built at setup; null entries for
+     *  unparseable states keep the drop semantics of applyOp) */
+    private static volatile BlockState[] STATE_FAST;
     /** featuresPerStep (FeatureSorter order, index within step = vanilla i3). */
     private static volatile String[][] PLAN;
     /** biome name -> union of placed feature refs (BiomeFilter source). */
@@ -143,6 +146,14 @@ public final class DecoDriver extends BlockPopulator {
                              Map<String, Set<String>> biomeFeatures, Set<String> possibleBiomes,
                              Object nmsGenRaw) {
         STATES = states;
+        // ops carry a stateIdx: pre-resolve every state string once at setup
+        // (the per-op HashMap<String,..> SipHash in applyOp was measurable at
+        // ~168 ops/chunk).
+        BlockState[] fast = new BlockState[states.length];
+        for (int i = 0; i < states.length; i++) {
+            fast[i] = state(states[i]);
+        }
+        STATE_FAST = fast;
         PLAN = plan;
         BIOME_FEATURES = biomeFeatures;
         POSSIBLE_BIOMES = possibleBiomes;
@@ -481,7 +492,10 @@ public final class DecoDriver extends BlockPopulator {
         if (stateIdx < 0 || stateIdx >= states.length) {
             return false;
         }
-        BlockState st = state(states[stateIdx]);
+        BlockState[] fast = STATE_FAST;
+        BlockState st = fast != null && stateIdx < fast.length
+                ? fast[stateIdx]
+                : state(states[stateIdx]);
         if (st == null) {
             return false;
         }
@@ -608,7 +622,24 @@ public final class DecoDriver extends BlockPopulator {
         List<Holder<Biome>> sink = new ArrayList<>(8);
         for (LevelChunkSection sec : ch.getSections()) {
             sink.clear();
-            sec.getBiomes().getAll(sink::add);
+            // direct palette walk (same fields as decoSnapSection0's biome
+            // half) — getAll() pays container machinery per section; the
+            // palette is 1-4 entries and the chunk union walks 24 sections
+            try {
+                PalettedContainer<?> bio = (PalettedContainer<?>) F_BIOMES.get(sec);
+                Data<?> bd = (Data<?>) bio.data;
+                Palette<?> bp = (Palette<?>) F_PALETTE.get(bd);
+                int bn = bp.getSize();
+                for (int i = 0; i < bn; i++) {
+                    Object v = bp.valueFor(i);
+                    Holder<Biome> h = (v instanceof Holder<?> hh)
+                            ? (Holder<Biome>) hh
+                            : (Holder<Biome>) v;
+                    sink.add(h);
+                }
+            } catch (Throwable t) {
+                sec.getBiomes().getAll(sink::add);
+            }
             for (Holder<Biome> h : sink) {
                 String name = biomeKey(h.value());
                 if (possible == null || possible.contains(name)) {
