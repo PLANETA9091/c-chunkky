@@ -1,0 +1,18 @@
+# prof session dptt_vis 2026-10-22T12:51:37Z
+world=dptt datapacks_dir=server_datapacks fill_threads=2 parallel=1 heap=-Xms1G -Xmx2G
+18c29f1c871f71a96961af2664d7ae2e  01_tectonic.zip
+ee7f451a8d1a13b29090a08543bda46a  02_terralith.zip
+052b8c9b5415f660127ef31fa1382b8e  server/paper.jar
+066e3de4d22d79b5ca92379422d5f2c8  server/plugins/CrusstyGen.jar
+508520438c5002cbbee78d5bc5e7df78  native/target/release/libcrussty_chunkgen.so
+--- measured window: 12x12 cx 32..43 cz 32..43 ---
+batch cz 32..34: 36 chunks in 5266 ms -> 146.2 ms/chunk
+batch cz 35..37: 36 chunks in 2532 ms -> 70.3 ms/chunk
+batch cz 38..40: 36 chunks in 2868 ms -> 79.6 ms/chunk
+batch cz 41..43: 36 chunks in 1224 ms -> 34.0 ms/chunk
+window_ms=11918 chunks=144 ms_per_chunk=82.76
+--- crusgenstats (final) ---
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=396  mean=13624.8us  min=4901.5us  p50=9504.2us  p99=44559.4us  max=58152.5us  [native=13.03ms nat_p50=9.16ms layout=0.47ms beard=0.09ms marks=0.02ms]  [lay setup=0.01 sec=0.39 hmap=0.07 verify=0.00 | uni=0.00/0.4 lin=0.00/0.0 glob=0.00/8.0 pb=0.00/0.00]  [sections filled=0 mixed=3168 air=6336 v1fallback=0 bulk=ok]  swapfail=null  marks_seen=17153 marks_landed=17153 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] native deco stage: native deco stage: chunks=324  mean=4523.2us  min=1792.7us  p50=2626.1us  p99=36185.8us  max=43652.3us  [plan=0.08ms struct=0.93ms run=1.75ms apply=0.01ms deleg=1.61ms]  ops=10958 features=23620 delegate=8416  upcalls=18360 (h=0 stateis=0 fluidis=11 isair=0 survive=2 other=18347) snap-sec=39642/30.72ms blocks=0 snap-hm=778 planbio=13.12ms | [struct-split] starts=1.11ms place=118.32ms | [deleg-names] terralith:cave/fuck_art_just_need_performance/split/granite=324 minecraft:monster_room=324 minecraft:lake_lava_surface=324 minecraft:monster_room_deep=324 minecraft:lush_caves_clay=324 minecraft:classic_vines_cave_feature=324 minecraft:flower_default=324 minecraft:freeze_top_layer=324 terralith:cave/fuck_art_just_need_performance/split/diorite=324 minecraft:spring_lava=324 minecraft:seagrass_deep_warm=324 minecraft:rooted_azalea_tree=324 terralith:cave/stone/andesite_boulders=324 minecraft:glow_lichen=324 terralith:cave/stone/granite_roots=324 minecraft:kelp_warm=324 minecraft:spring_water=324 minecraft:patch_sugar_cane=324 minecraft:cave_vines=324 terralith:cave/fuck_art_just_need_performance/split/andesite=324 minecraft:underwater_magma=324 terralith:cave/stone/diorite_clearing=324 minecraft:lake_lava_underground=324 minecraft:amethyst_geode=324 | [CrusstyGen] jni_prof[fills=740 wall=11.04ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=4.50 par_strips=2.92]
+
+--- spark links in console ---
+https://spark.lucko.me/e2QuO92Z2T

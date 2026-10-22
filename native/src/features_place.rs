@@ -3,8 +3,9 @@
 //! path; RandomBooleanSelector = next(1); RandomSelector = nextFloat()<chance, first hit
 //! returns; WeightedStateProvider = nextInt(totalWeight) + linear walk (probe-verify).
 
-use crate::features_deco::{expand_deco, DecoLevelExt, Mod};
+use crate::features_deco::{expand_deco, BlockPredicate, DecoLevelExt, HeightmapTy, Mod};
 use crate::features_json::{FeatureCfg, FeatureRegistry, PlacedDef, RuleTest, StateSrc};
+use crate::features_placement::IntProvider as IP;
 use crate::features_placement::BlockPos;
 use crate::features_rng::WorldgenRandom;
 
@@ -29,6 +30,11 @@ pub const AXIS_SHIFT: u8 = 2;
 pub const FLAG_RAW: u8 = 16;
 /// markPosForPostprocessing (vanilla DiskFeature markAboveForPostProcessing)
 pub const FLAG_POSTPROC: u8 = 32;
+/// spawner op: aux bits 8-15 = entity ordinal (0=skeleton 1=zombie 2=zombie
+/// 3=spider); Java must setBlock + SpawnerBlockEntity.setEntityId
+pub const FLAG_SPAWNER: u8 = 64;
+/// chest op (monster_room): Java must attach the SIMPLE_DUNGEON loot table
+pub const FLAG_CHEST: u8 = 128;
 
 pub struct PlaceCtx<'a> {
     pub reg: &'a FeatureRegistry,
@@ -126,6 +132,11 @@ pub(crate) fn sample_state(
             };
             return sample_state(leaf, level, pos, rng, flags);
         }
+        StateSrc::RandomizedInt { source, property, values } => {
+            let raw = sample_state(source, level, pos, rng, flags)?;
+            let v = values.sample(rng);
+            return Some(crate::features_json::state_set_prop(&raw, property, &v.to_string()));
+        }
         StateSrc::Unsupported(_) => return None,
     };
     // RotatedBlockProvider.getState: Axis.getRandom(random) = VALUES[nextInt(3)]
@@ -138,6 +149,26 @@ pub(crate) fn sample_state(
         }
         None => Some(raw),
     }
+}
+
+/// Direction helpers (vanilla Direction.values() ordinals):
+/// 0=down 1=up 2=north 3=south 4=west 5=east
+#[inline]
+pub(crate) fn dir_offset(dir: u8) -> (i32, i32, i32) {
+    match dir {
+        0 => (0, -1, 0),
+        1 => (0, 1, 0),
+        2 => (0, 0, -1),
+        3 => (0, 0, 1),
+        4 => (-1, 0, 0),
+        _ => (1, 0, 0),
+    }
+}
+
+#[inline]
+fn pos_offset(pos: BlockPos, dir: u8) -> BlockPos {
+    let (dx, dy, dz) = dir_offset(dir);
+    BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz)
 }
 
 /// Recursively place a placed feature by name. Returns "any op placed" (vanilla place()).
@@ -204,7 +235,28 @@ fn cfg_fully_supported(reg: &FeatureRegistry, cfg_name: &str, depth: u32) -> boo
         | FeatureCfg::ScatteredOre { .. }
         | FeatureCfg::Disk { .. }
         | FeatureCfg::Tree { .. }
-        | FeatureCfg::VegetationPatch { .. } => true,
+        | FeatureCfg::VegetationPatch { .. }
+        | FeatureCfg::NetherrackReplaceBlobs { .. }
+        | FeatureCfg::Seagrass { .. }
+        | FeatureCfg::Spring { .. }
+        | FeatureCfg::BlockPile { .. }
+        | FeatureCfg::Kelp
+        | FeatureCfg::UnderwaterMagma { .. }
+        | FeatureCfg::Vines => true,
+        FeatureCfg::BlockColumn { layers, allowed, .. } => {
+            !matches!(allowed, BlockPredicate::Unsupported(_))
+                && layers.iter().all(|(_, sp)| state_src_supported(sp))
+        }
+        FeatureCfg::RootSystem { tree_feature, allowed_tree_position, root_state, hanging_root_state, .. } => {
+            !matches!(allowed_tree_position, BlockPredicate::Unsupported(_))
+                && state_src_supported(root_state)
+                && state_src_supported(hanging_root_state)
+                && placed_fully_supported(reg, tree_feature, depth + 1)
+        }
+        // MonsterRoom delegates: the chest loot seed (64-bit nextLong) and
+        // spawner entity draws live inside the vanilla RNG stream — parity
+        // first until the op protocol can carry them.
+        FeatureCfg::MonsterRoom => false,
         FeatureCfg::RandomSelector { entries, default } => {
             entries.iter().all(|(_, n)| placed_fully_supported(reg, n, depth + 1))
                 && placed_fully_supported(reg, default, depth + 1)
@@ -218,6 +270,20 @@ fn cfg_fully_supported(reg: &FeatureRegistry, cfg_name: &str, depth: u32) -> boo
         }
         FeatureCfg::RandomPatch { inner, .. } => placed_fully_supported(reg, inner, depth + 1),
         FeatureCfg::Unsupported(_) => false,
+    }
+}
+
+/// state-provider support walk (RandomizedInt source chains etc.)
+fn state_src_supported(src: &StateSrc) -> bool {
+    match src {
+        StateSrc::Simple(_) | StateSrc::Weighted(_) => true,
+        StateSrc::RuleBased { fallback, rules } => {
+            state_src_supported(fallback) && rules.iter().all(|(p, s)| {
+                !matches!(p, BlockPredicate::Unsupported(_)) && state_src_supported(s)
+            })
+        }
+        StateSrc::RandomizedInt { source, .. } => state_src_supported(source),
+        StateSrc::Unsupported(_) => false,
     }
 }
 
@@ -366,6 +432,42 @@ pub fn place_configured(
         FeatureCfg::Tree(cfg) => crate::features_tree::place_tree(ctx, cfg, rng, pos, ops),
         FeatureCfg::VegetationPatch(cfg) => {
             crate::features_tree::place_vegetation_patch(ctx, cfg, rng, pos, ops)
+        }
+        // --- batch-1 simple types (dptt delegate killers) -------------------
+        FeatureCfg::NetherrackReplaceBlobs { radius, state, target_block } => {
+            place_replace_blobs(ctx, radius, state, target_block, rng, pos, ops)
+        }
+        FeatureCfg::Seagrass { probability } => {
+            place_seagrass(ctx, *probability, rng, pos, ops)
+        }
+        FeatureCfg::Spring { valid_blocks, requires_block_below, rock_count, hole_count, state } => {
+            place_spring(ctx, valid_blocks, *requires_block_below, *rock_count, *hole_count, state, pos, ops)
+        }
+        FeatureCfg::BlockPile { state_provider } => {
+            place_block_pile(ctx, state_provider, rng, pos, ops)
+        }
+        FeatureCfg::Kelp => place_kelp(ctx, rng, pos, ops),
+        // MonsterRoom stays a hybrid delegate: the chest loot seed (a 64-bit
+        // nextLong) and the spawner entity draws sit INSIDE the vanilla RNG
+        // stream and cannot travel through the 6-int op protocol without
+        // widening it — parity first (see worklog cont-56).
+        FeatureCfg::MonsterRoom => false,
+        FeatureCfg::UnderwaterMagma { floor_search_range, placement_radius, prob } => {
+            place_underwater_magma(ctx, *floor_search_range, *placement_radius, *prob, rng, pos, ops)
+        }
+        // --- batch-2 (dptt census round 2) ---------------------------------
+        FeatureCfg::Vines => place_vines(ctx, pos, ops),
+        FeatureCfg::BlockColumn { direction, layers, prioritize_tip, allowed } => {
+            place_block_column(ctx, *direction, layers, *prioritize_tip, allowed, rng, pos, ops)
+        }
+        FeatureCfg::RootSystem { tree_feature, allowed_tree_position, required_vertical_space_for_tree, allowed_vertical_water_for_tree, root_column_max_height, root_radius, root_placement_attempts, root_replaceable_tag, root_state, hanging_root_radius, hanging_root_placement_attempts, hanging_roots_vertical_span, hanging_root_state } => {
+            place_root_system(
+                ctx, tree_feature, allowed_tree_position, *required_vertical_space_for_tree,
+                *allowed_vertical_water_for_tree, *root_column_max_height, *root_radius,
+                *root_placement_attempts, root_replaceable_tag, root_state,
+                *hanging_root_radius, *hanging_root_placement_attempts, *hanging_roots_vertical_span,
+                hanging_root_state, rng, pos, ops,
+            )
         }
         FeatureCfg::Unsupported(_) => false,
     }
@@ -549,6 +651,616 @@ fn sel_trace_on(cx: i32, cz: i32) -> bool {
 fn in_writable(rel_x: i32, rel_z: i32) -> bool {
     (-16..=31).contains(&rel_x) && (-16..=31).contains(&rel_z)
 }
+
+// ---------------------------------------------------------------------------
+// Batch-1 simple configured-feature types (dptt delegate killers).
+// All semantics from the CFR decompile of paper-1.21.8 (mojmap names kept in
+// comments). RNG draw order is the parity-critical part of each.
+// ---------------------------------------------------------------------------
+
+/// ReplaceBlobsFeature (minecraft:netherrack_replace_blobs):
+/// 1. clamp origin y to [minY+1, maxY], scan DOWN for target block (no RNG);
+/// 2. radius.sample() x3 -> xr,yr,zr; max = the largest;
+/// 3. BlockPos.withinManhattan(pos, xr, yr, zr) — ring-by-ring, exact order —
+///    stop at the first ring > max; replace target blocks with state.
+fn place_replace_blobs(
+    ctx: &PlaceCtx,
+    radius: &crate::features_placement::IntProvider,
+    state: &str,
+    target_block: &str,
+    rng: &mut WorldgenRandom,
+    origin: BlockPos,
+    ops: &mut Vec<DecoOp>,
+) -> bool {
+    let min_y = ctx.level.min_y();
+    let max_y = ctx.level.max_y();
+    // BlockPos.MutableBlockPos.clamp(Y, min+1, max)
+    let top = BlockPos::new(origin.x, origin.y.clamp(min_y + 1, max_y), origin.z);
+    // findTarget: walk DOWN while y > min+1, first target match wins
+    let mut target_pos: Option<BlockPos> = None;
+    let mut y = top.y;
+    while y > min_y + 1 {
+        if ctx.level.state_name(BlockPos::new(top.x, y, top.z)) == target_block {
+            target_pos = Some(BlockPos::new(top.x, y, top.z));
+            break;
+        }
+        y -= 1;
+    }
+    let Some(center) = target_pos else {
+        return false; // no RNG consumed on failure (vanilla findTarget=null)
+    };
+    let xr = radius.sample(rng).max(0);
+    let yr = radius.sample(rng).max(0);
+    let zr = radius.sample(rng).max(0);
+    let max = xr.max(yr.max(zr));
+    let mut any = false;
+    for d in 0..=max {
+        // withinManhattan ring d: |x|<=xr, |y|<=yr, |z|<=zr, |x|+|y|+|z|==d;
+        // vanilla order: x ascending, y ascending, z=+d-|x|-|y| then mirror -z
+        let x_max = xr.min(d);
+        for x in -x_max..=x_max {
+            let y_max = yr.min(d - x.abs());
+            for yv in -y_max..=y_max {
+                let z = d - x.abs() - yv.abs();
+                if z > zr {
+                    continue;
+                }
+                let p = BlockPos::new(center.x + x, center.y + yv, center.z + z);
+                if ctx.level.state_name(p) == target_block {
+                    ctx.emit(ops, p, state, 0);
+                    any = true;
+                }
+                if z != 0 {
+                    let p = BlockPos::new(center.x + x, center.y + yv, center.z - z);
+                    if ctx.level.state_name(p) == target_block {
+                        ctx.emit(ops, p, state, 0);
+                        any = true;
+                    }
+                }
+            }
+        }
+    }
+    any
+}
+
+/// SeagrassFeature: dx/dz offsets (2 draws each), OCEAN_FLOOR height, water
+/// check, tall vs short roll, canSurvive, optional upper half.
+fn place_seagrass(
+    ctx: &PlaceCtx,
+    probability: f32,
+    rng: &mut WorldgenRandom,
+    origin: BlockPos,
+    ops: &mut Vec<DecoOp>,
+) -> bool {
+    let dx = rng.next_int_bound(8) - rng.next_int_bound(8);
+    let dz = rng.next_int_bound(8) - rng.next_int_bound(8);
+    let h = ctx.level.height(HeightmapTy::OceanFloor, origin.x + dx, origin.z + dz);
+    let p = BlockPos::new(origin.x + dx, h, origin.z + dz);
+    if ctx.level.state_name(p) != "minecraft:water" {
+        return false;
+    }
+    let tall = rng.next_f64() < probability as f64;
+    let (lower, upper) = if tall {
+        (
+            "minecraft:tall_seagrass[half=lower]",
+            "minecraft:tall_seagrass[half=upper]",
+        )
+    } else {
+        ("minecraft:seagrass", "")
+    };
+    if !ctx.level.can_survive(lower, p) {
+        return false;
+    }
+    // vanilla sets flag=true as soon as canSurvive passes — even when the
+    // tall upper half had no water above and NOTHING was written, the
+    // feature reports success (patch counters see it).
+    if tall {
+        let p2 = BlockPos::new(p.x, p.y + 1, p.z);
+        if ctx.level.state_name(p2) == "minecraft:water" {
+            ctx.emit(ops, p, lower, 0);
+            ctx.emit(ops, p2, upper, 0);
+        }
+    } else {
+        ctx.emit(ops, p, lower, 0);
+    }
+    true
+}
+
+/// SpringFeature: valid-block membership checks (no RNG), rock/hole counts,
+/// then the state write + scheduleTick (FLAG_TICK).
+fn place_spring(
+    ctx: &PlaceCtx,
+    valid_blocks: &[String],
+    requires_block_below: bool,
+    rock_count: i32,
+    hole_count: i32,
+    state: &str,
+    pos: BlockPos,
+    ops: &mut Vec<DecoOp>,
+) -> bool {
+    let valid = |p: BlockPos| valid_blocks.iter().any(|b| *b == ctx.level.state_name(p));
+    if !valid(BlockPos::new(pos.x, pos.y + 1, pos.z)) {
+        return false;
+    }
+    if requires_block_below && !valid(BlockPos::new(pos.x, pos.y - 1, pos.z)) {
+        return false;
+    }
+    if !ctx.level.is_air(pos) && !valid(pos) {
+        return false;
+    }
+    let sides = [
+        BlockPos::new(pos.x - 1, pos.y, pos.z),
+        BlockPos::new(pos.x + 1, pos.y, pos.z),
+        BlockPos::new(pos.x, pos.y, pos.z - 1),
+        BlockPos::new(pos.x, pos.y, pos.z + 1),
+        BlockPos::new(pos.x, pos.y - 1, pos.z),
+    ];
+    let mut rocks = 0;
+    let mut holes = 0;
+    for s in sides {
+        if valid(s) {
+            rocks += 1;
+        }
+        if ctx.level.is_air(s) {
+            holes += 1;
+        }
+    }
+    if rocks == rock_count && holes == hole_count {
+        ctx.emit(ops, pos, state, FLAG_TICK);
+        return true;
+    }
+    false
+}
+
+/// BlockPileFeature: radius draws, betweenClosed box iterate (x fast, y, z
+/// slow), distance-vs-random test, optional second-chance roll, mayPlaceOn.
+fn place_block_pile(
+    ctx: &PlaceCtx,
+    state_provider: &StateSrc,
+    rng: &mut WorldgenRandom,
+    origin: BlockPos,
+    ops: &mut Vec<DecoOp>,
+) -> bool {
+    if origin.y < ctx.level.min_y() + 5 {
+        return false;
+    }
+    let i = 2 + rng.next_int_bound(2);
+    let i1 = 2 + rng.next_int_bound(2);
+    // BlockPos.betweenClosed(min, max): x = index % nx (FASTEST), then y, z slow
+    let (x1, y1, z1) = (origin.x - i, origin.y, origin.z - i1);
+    let (x2, y2, z2) = (origin.x + i, origin.y + 1, origin.z + i1);
+    for z in z1..=z2 {
+        for y in y1..=y2 {
+            for x in x1..=x2 {
+                let dx = origin.x - x;
+                let dz = origin.z - z;
+                if (dx * dx + dz * dz) as f32 <= rng.next_f32() * 10.0 - rng.next_f32() * 6.0 {
+                    pile_try_place(ctx, state_provider, rng, BlockPos::new(x, y, z), ops);
+                } else if rng.next_f32() < 0.031 {
+                    pile_try_place(ctx, state_provider, rng, BlockPos::new(x, y, z), ops);
+                }
+            }
+        }
+    }
+    true
+}
+
+fn pile_try_place(
+    ctx: &PlaceCtx,
+    state_provider: &StateSrc,
+    rng: &mut WorldgenRandom,
+    pos: BlockPos,
+    ops: &mut Vec<DecoOp>,
+) {
+    if !ctx.level.is_air(pos) {
+        return;
+    }
+    // mayPlaceOn: below is DIRT_PATH -> nextBoolean(); else isFaceSturdy(UP)
+    let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
+    let ok = if ctx.level.state_name(below) == "minecraft:dirt_path" {
+        rng.next_bool()
+    } else {
+        ctx.level.has_sturdy_face(below, 1) // dir 1 = UP
+    };
+    if !ok {
+        return;
+    }
+    let mut flags: u8 = 0;
+    if let Some(state) = sample_state(state_provider, ctx.level, pos, rng, &mut flags) {
+        ctx.emit(ops, pos, &state, flags);
+    }
+}
+
+/// KelpFeature: OCEAN_FLOOR column, 1+nextInt(10) height, water checks,
+/// kelp_plant body + head with AGE=nextInt(4)+20 (state picked from the
+/// pre-indexed age variants), the below-fallback tail.
+fn place_kelp(
+    ctx: &PlaceCtx,
+    rng: &mut WorldgenRandom,
+    origin: BlockPos,
+    ops: &mut Vec<DecoOp>,
+) -> bool {
+    let mut count = 0;
+    let h = ctx.level.height(HeightmapTy::OceanFloor, origin.x, origin.z);
+    let mut p = BlockPos::new(origin.x, h, origin.z);
+    if ctx.level.state_name(p) != "minecraft:water" {
+        return false;
+    }
+    let i1 = 1 + rng.next_int_bound(10);
+    for i2 in 0..=i1 {
+        let above = BlockPos::new(p.x, p.y + 1, p.z);
+        if ctx.level.state_name(p) == "minecraft:water"
+            && ctx.level.state_name(above) == "minecraft:water"
+            && ctx.level.can_survive("minecraft:kelp_plant", p)
+        {
+            if i2 == i1 {
+                let age = rng.next_int_bound(4) + 20;
+                let state = format!("minecraft:kelp[age={age}]");
+                ctx.emit(ops, p, &state, 0);
+                count += 1;
+            } else {
+                ctx.emit(ops, p, "minecraft:kelp_plant", 0);
+            }
+        } else if i2 > 0 {
+            let p2 = BlockPos::new(p.x, p.y - 1, p.z);
+            let p2below = BlockPos::new(p.x, p.y - 2, p.z);
+            if !ctx.level.can_survive("minecraft:kelp", p2)
+                || ctx.level.state_name(p2below) == "minecraft:kelp"
+            {
+                break;
+            }
+            let age = rng.next_int_bound(4) + 20;
+            let state = format!("minecraft:kelp[age={age}]");
+            ctx.emit(ops, p2, &state, 0);
+            count += 1;
+            break;
+        }
+        p = above;
+    }
+    count > 0
+}
+
+/// UnderwaterMagmaFeature: Column.scan (water above + non-water floor), then
+/// the placement-radius box iterate with a per-cell nextFloat draw and the
+/// water-or-air validity rule.
+fn place_underwater_magma(
+    ctx: &PlaceCtx,
+    floor_search_range: i32,
+    placement_radius: i32,
+    prob: f32,
+    rng: &mut WorldgenRandom,
+    origin: BlockPos,
+    ops: &mut Vec<DecoOp>,
+) -> bool {
+    let is_water = |p: BlockPos| ctx.level.state_name(p) == "minecraft:water";
+    if !is_water(origin) {
+        return false;
+    }
+    // Column.scanDirection UP: walk while water, tip must be non-water
+    let scan = |dir: i32| -> Option<i32> {
+        let mut y = origin.y;
+        let mut i = 1;
+        while i < floor_search_range && is_water(BlockPos::new(origin.x, y, origin.z)) {
+            y += dir;
+            i += 1;
+        }
+        if is_water(BlockPos::new(origin.x, y, origin.z)) {
+            None
+        } else {
+            Some(y)
+        }
+    };
+    // UP scan validity (unused value) + DOWN floor
+    if scan(1).is_none() {
+        return false;
+    }
+    let Some(floor_y) = scan(-1) else {
+        return false;
+    };
+    // betweenClosedStream over the box: x fast, y, z slow
+    let r = placement_radius;
+    let (x1, y1, z1) = (origin.x - r, floor_y - r, origin.z - r);
+    let (x2, y2, z2) = (origin.x + r, floor_y + r, origin.z + r);
+    let mut count = 0;
+    for z in z1..=z2 {
+        for y in y1..=y2 {
+            for x in x1..=x2 {
+                if rng.next_f32() >= prob {
+                    continue;
+                }
+                let p = BlockPos::new(x, y, z);
+                if !magma_valid(ctx, p) {
+                    continue;
+                }
+                ctx.emit(ops, p, "minecraft:magma_block", 0);
+                count += 1;
+            }
+        }
+    }
+    count > 0
+}
+
+/// VineBlock face attach (VinesFeature): first acceptable neighbor in
+/// Direction.values() order minus DOWN wins; NO RNG consumed.
+/// canAttachTo(dir) = isFaceFull(getBlockSupportShape(neighbor), dir.opposite())
+/// (= isFaceSturdy for worldgen full cubes) — has_sturdy_face(neighbor, opp).
+fn place_vines(ctx: &PlaceCtx, pos: BlockPos, ops: &mut Vec<DecoOp>) -> bool {
+    if !ctx.level.is_air(pos) {
+        return false;
+    }
+    // vine canonical property order: east, north, south, up, west
+    const FACES: [(u8, usize); 5] = [(1, 3), (2, 1), (3, 2), (4, 4), (5, 0)];
+    for (dir, slot) in FACES {
+        let nb = pos_offset(pos, dir);
+        if ctx.level.has_sturdy_face(nb, dir ^ 1) {
+            let mut kv = Vec::with_capacity(5);
+            for (i, f) in ["east", "north", "south", "up", "west"].iter().enumerate() {
+                kv.push(format!("{f}={}", if i == slot { "true" } else { "false" }));
+            }
+            ctx.emit(ops, pos, &format!("minecraft:vine[{}]", kv.join(",")), 0);
+            return true;
+        }
+    }
+    false
+}
+
+/// BlockColumnFeature: heights sampled per layer (in JSON order), probe walk
+/// from origin+dir for `sum` allowed cells (truncate on the first blocked
+/// cell), then place from ORIGIN stepping dir. truncate cuts from layer 0
+/// (non-tip side) first when prioritizeTip.
+fn place_block_column(
+    ctx: &PlaceCtx,
+    direction: u8,
+    layers: &[(IP, StateSrc)],
+    prioritize_tip: bool,
+    allowed: &BlockPredicate,
+    rng: &mut WorldgenRandom,
+    origin: BlockPos,
+    ops: &mut Vec<DecoOp>,
+) -> bool {
+    let mut heights = Vec::with_capacity(layers.len());
+    let mut sum = 0i32;
+    for (hp, _) in layers {
+        let h = hp.sample(rng);
+        heights.push(h);
+        sum += h;
+    }
+    if sum == 0 {
+        return false;
+    }
+    let (dx, dy, dz) = dir_offset(direction);
+    // probe: scan cells from origin+dir while allowed; stop after `sum` cells
+    // or at the first disallowed (truncate the remainder, tip side first
+    // when prioritizeTip means "keep the tip" -> cut index 0 first)
+    let mut fit = 0i32;
+    {
+        let mut probe = BlockPos::new(origin.x + dx, origin.y + dy, origin.z + dz);
+        while fit < sum {
+            let st = ctx.level.state(probe);
+            if crate::features_deco::pred_matches(allowed, ctx.level, probe, st) != Some(true) {
+                // vanilla truncate(heights, sum-fit, prioritizeTip): walk
+                // index 0..len (tip=true, cut the non-tip layers first) or
+                // len-1..0 (tip=false, cut the last layer first)
+                let mut cut = sum - fit;
+                let n = heights.len();
+                let mut k = if prioritize_tip { 0usize } else { n - 1 };
+                for _ in 0..n {
+                    if cut == 0 {
+                        break;
+                    }
+                    let take = heights[k].min(cut);
+                    heights[k] -= take;
+                    cut -= take;
+                    if prioritize_tip {
+                        k += 1;
+                    } else {
+                        k = k.wrapping_sub(1);
+                    }
+                }
+                break;
+            }
+            probe = BlockPos::new(probe.x + dx, probe.y + dy, probe.z + dz);
+            fit += 1;
+        }
+    }
+    let mut any = false;
+    let mut p = origin;
+    for (i, (hp, sp)) in layers.iter().enumerate() {
+        let _ = hp;
+        for _ in 0..heights[i] {
+            let mut flags: u8 = 0;
+            if let Some(state) = sample_state(sp, ctx.level, p, rng, &mut flags) {
+                ctx.emit(ops, p, &state, flags);
+                any = true;
+            }
+            p = BlockPos::new(p.x + dx, p.y + dy, p.z + dz);
+        }
+    }
+    any
+}
+
+/// RootSystemFeature: origin must be air; climb up to rootColumnMaxHeight
+/// until allowedTreePosition + spaceForTree hold, place the tree placed
+/// feature there, fill rooted-dirt disks down the climbed column, then
+/// hanging-root attempts around the origin. Lava below the tree slot aborts.
+#[allow(clippy::too_many_arguments)]
+fn place_root_system(
+    ctx: &PlaceCtx,
+    tree_feature: &str,
+    allowed_tree_position: &BlockPredicate,
+    required_vertical_space_for_tree: i32,
+    allowed_vertical_water_for_tree: i32,
+    root_column_max_height: i32,
+    root_radius: i32,
+    root_placement_attempts: i32,
+    root_replaceable_tag: &str,
+    root_state: &StateSrc,
+    hanging_root_radius: i32,
+    hanging_root_placement_attempts: i32,
+    hanging_roots_vertical_span: i32,
+    hanging_root_state: &StateSrc,
+    rng: &mut WorldgenRandom,
+    origin: BlockPos,
+    ops: &mut Vec<DecoOp>,
+) -> bool {
+    if !ctx.level.is_air(origin) {
+        return false;
+    }
+    // placeDirtAndTree: mpos climbs UP every iteration (failed candidates too)
+    let mut placed_tree = false;
+    let mut climbed = 0i32;
+    let mut mpos = origin;
+    for i in 0..root_column_max_height {
+        mpos = BlockPos::new(mpos.x, mpos.y + 1, mpos.z);
+        let st = ctx.level.state(mpos);
+        if crate::features_deco::pred_matches(allowed_tree_position, ctx.level, mpos, st)
+            == Some(true)
+            && space_for_tree(
+                ctx,
+                mpos,
+                required_vertical_space_for_tree,
+                allowed_vertical_water_for_tree,
+            )
+        {
+            let below = BlockPos::new(mpos.x, mpos.y - 1, mpos.z);
+            if ctx.level.fluid_is(below, &["minecraft:lava".to_string()]) {
+                return false;
+            }
+            if !ctx.level.is_solid(below) {
+                return false;
+            }
+            if place_placed(ctx, tree_feature, rng, mpos, ops, 0) {
+                place_dirt_column(
+                    ctx, origin, origin.y + i, root_radius, root_placement_attempts,
+                    root_replaceable_tag, root_state, rng, ops,
+                );
+                placed_tree = true;
+                climbed = i;
+                break;
+            }
+        }
+    }
+    let _ = climbed;
+    if placed_tree {
+        place_hanging_roots(
+            ctx, origin, hanging_root_radius, hanging_root_placement_attempts,
+            hanging_roots_vertical_span, hanging_root_state, rng, ops,
+        );
+    }
+    // vanilla returns true even when the tree never placed (place() body:
+    // placeDirtAndTree(...) ? placeRoots(...) : {}; return true)
+    true
+}
+
+/// spaceForTree: `required` blocks above the candidate must be air (or water
+/// within allowedVerticalWaterForTree).
+fn space_for_tree(
+    ctx: &PlaceCtx,
+    pos: BlockPos,
+    required: i32,
+    allowed_water: i32,
+) -> bool {
+    let mut p = pos;
+    for i in 1..=required {
+        p = BlockPos::new(p.x, p.y + 1, p.z);
+        let st = ctx.level.state(p);
+        if ctx.level.is_air(p) {
+            continue;
+        }
+        if i + 1 <= allowed_water && ctx.level.fluid_is(p, &["minecraft:water".to_string()]) {
+            continue;
+        }
+        let _ = st;
+        return false;
+    }
+    true
+}
+
+/// placeDirt column: rooted-dirt disks from origin.y up to the tree base.
+#[allow(clippy::too_many_arguments)]
+fn place_dirt_column(
+    ctx: &PlaceCtx,
+    origin: BlockPos,
+    max_y: i32,
+    radius: i32,
+    attempts: i32,
+    replaceable_tag: &str,
+    state: &StateSrc,
+    rng: &mut WorldgenRandom,
+    ops: &mut Vec<DecoOp>,
+) {
+    let mut y = origin.y;
+    while y < max_y {
+        // placeRootedDirt: attempts x [nextInt(r) - nextInt(r)] on x and z
+        for _ in 0..attempts {
+            let ox = rng.next_int_bound(radius) - rng.next_int_bound(radius);
+            let oz = rng.next_int_bound(radius) - rng.next_int_bound(radius);
+            let p = BlockPos::new(origin.x + ox, y, origin.z + oz);
+            if ctx.level.tag_is(p, replaceable_tag) {
+                let mut flags: u8 = 0;
+                if let Some(st) = sample_state(state, ctx.level, p, rng, &mut flags) {
+                    ctx.emit(ops, p, &st, flags);
+                }
+            }
+        }
+        y += 1;
+    }
+}
+
+/// hanging roots: attempts around the origin (y span nextInt(span) pairs),
+/// empty cell + canSurvive + block above sturdy-DOWN.
+#[allow(clippy::too_many_arguments)]
+fn place_hanging_roots(
+    ctx: &PlaceCtx,
+    origin: BlockPos,
+    radius: i32,
+    attempts: i32,
+    span: i32,
+    state: &StateSrc,
+    rng: &mut WorldgenRandom,
+    ops: &mut Vec<DecoOp>,
+) {
+    for _ in 0..attempts {
+        let ox = rng.next_int_bound(radius) - rng.next_int_bound(radius);
+        let oy = rng.next_int_bound(span) - rng.next_int_bound(span);
+        let oz = rng.next_int_bound(radius) - rng.next_int_bound(radius);
+        let p = BlockPos::new(origin.x + ox, origin.y + oy, origin.z + oz);
+        if !ctx.level.is_air(p) {
+            continue;
+        }
+        let mut flags: u8 = 0;
+        let Some(st) = sample_state(state, ctx.level, p, rng, &mut flags) else {
+            continue;
+        };
+        if !ctx.level.can_survive(&st, p) {
+            continue;
+        }
+        if !ctx.level.has_sturdy_face(BlockPos::new(p.x, p.y + 1, p.z), 0) {
+            continue;
+        }
+        ctx.emit(ops, p, &st, flags);
+    }
+}
+
+fn magma_is_water_or_air(ctx: &PlaceCtx, p: BlockPos) -> bool {
+    ctx.level.state_name(p) == "minecraft:water" || ctx.level.is_air(p)
+}
+
+fn magma_valid(ctx: &PlaceCtx, p: BlockPos) -> bool {
+    if magma_is_water_or_air(ctx, p) {
+        return false;
+    }
+    if magma_is_water_or_air(ctx, BlockPos::new(p.x, p.y - 1, p.z)) {
+        return false;
+    }
+    for (dx, dz) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
+        if magma_is_water_or_air(ctx, BlockPos::new(p.x + dx, p.y, p.z + dz)) {
+            return false;
+        }
+    }
+    true
+}
+
 
 /// OreFeature / ScatteredOreFeature.
 /// Regular ore: BulkSectionAccess writes (FLAG_RAW, no heightmap updates).

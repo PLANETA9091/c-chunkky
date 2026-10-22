@@ -1,0 +1,26 @@
+=== [A] native-substrate + vanilla deco reference run ===
+[f1] datapacks wired:
+crussty-f1
+--- deployed.md5 ---
+# deployed.md5 2026-10-22T16:52:55Z (plugin_bench)
+052b8c9b5415f660127ef31fa1382b8e  server/paper.jar
+14d5edaa7316cd2cbc3cf74d41d08f84  server/plugins/CrusstyGen.jar
+f9d9507e1e6aaa1f321cefb125ed3b4e  native/target/release/libcrussty_chunkgen.so
+server/bukkit.yml written:
+worlds:
+  f1probe:
+    generator: CrusstyGen
+
+level-name=f1probe
+level-seed=3257840388504953787
+gen-parallelism=false (judge serial semantics):
+chunk-system:
+  gen-parallelism: 'false'
+  io-threads: -1
+  worker-threads: -1
+--- deployed.md5 ---
+# deployed.md5 2026-10-22T16:52:58Z
+052b8c9b5415f660127ef31fa1382b8e  paper.jar
+14d5edaa7316cd2cbc3cf74d41d08f84  plugins/CrusstyGen.jar
+c4cc87941008ed52e2c2d1fdc2676c72  plugins/CrusstyProbe.jar
+paper started pid=6837 fifo_holder=6835

@@ -352,7 +352,7 @@ pub struct ChunkLevel<'a> {
     /// WG heightmap handshake loader: (cx, cz) -> 512 i32 (WS_WG 256 +
     /// OF_WG 256, +1 semantics) — one JNI per chunk, cached by the caller
     /// (DecoCtx.chunk_hms survives the whole chunk deco)
-    hm_loader: &'a dyn Fn(i32, i32) -> Option<std::sync::Arc<Vec<i32>>>,
+    hm_loader: &'a dyn Fn(i32, i32) -> Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>>,
     /// uid -> placed name (BiomeFilter) — native answer path
     uid_names: &'a [String],
     /// BiomeManager.obfuscateSeed(world seed) — the zoom fiddle seed
@@ -360,6 +360,16 @@ pub struct ChunkLevel<'a> {
     /// CRUS_DECO_NOSNAP=1: bypass the snapshot (all queries -> the JNI
     /// bridge — the pre-snapshot semantics; bisect tool)
     no_snap: bool,
+    /// CRUS_DECO_NOHANDSHAKE=1: skip the frozen WG heightmap handshake (all
+    /// WG height queries -> the JNI bridge = the live region heightmaps,
+    /// vanilla-exact including mid-deco updates; cont-56 bisect tool — the
+    /// frozen maps diverge once an earlier feature writes into the column,
+    /// e.g. tree trunks raising OCEAN_FLOOR_WG under later disks).
+    no_hm: bool,
+    /// written-state flags lookup: name -> bit0=isAir, bit1=blocksMotion.
+    /// Fed by the decoStates/decoSetFlags handshake (one JNI at boot, zero
+    /// runtime cost). None = unknown state (skip the WG-map update).
+    st_flags: &'a dyn Fn(&str) -> Option<u8>,
 }
 
 impl<'a> ChunkLevel<'a> {
@@ -368,18 +378,104 @@ impl<'a> ChunkLevel<'a> {
         ov: &'a std::cell::RefCell<OvMap>,
         snap: &'a std::cell::RefCell<SnapRegion>,
         loader: &'a dyn Fn(i32, i32, i32) -> Option<SnapSection>,
-        hm_loader: &'a dyn Fn(i32, i32) -> Option<std::sync::Arc<Vec<i32>>>,
+        hm_loader: &'a dyn Fn(i32, i32) -> Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>>,
         uid_names: &'a [String],
         zoom_seed: i64,
+        st_flags: &'a dyn Fn(&str) -> Option<u8>,
     ) -> Self {
         let no_snap = std::env::var("CRUS_DECO_NOSNAP").ok().as_deref() == Some("1");
-        ChunkLevel { inner, ov, snap, loader, hm_loader, uid_names, zoom_seed, no_snap }
+        let no_hm = std::env::var("CRUS_DECO_NOHANDSHAKE").ok().as_deref() == Some("1");
+        ChunkLevel { inner, ov, snap, loader, hm_loader, uid_names, zoom_seed, no_snap, no_hm, st_flags }
     }
 
     /// WG heightmap snapshot for a region chunk (cached by the hm_loader's
     /// owner — DecoCtx.chunk_hms). None = load failed → JNI fallback.
-    fn ensure_hm(&self, cx: i32, cz: i32) -> Option<std::sync::Arc<Vec<i32>>> {
+    fn ensure_hm(&self, cx: i32, cz: i32) -> Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>> {
         (self.hm_loader)(cx, cz)
+    }
+
+    /// The live-view flag byte at pos (overlay first — the native writes —
+    /// then the world-side snapshot). bit0=isAir, bit1=blocksMotion.
+    /// None = neither the overlay nor the snapshot knows this pos (abort the
+    /// caller's rescan — keeping the frozen value beats a wrong answer).
+    fn col_flags_at(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        if let Some(st) = self.ov.borrow().get(&(x, y, z)) {
+            return (self.st_flags)(st);
+        }
+        let air = self.snap.borrow().flag(x, y, z, flags::IS_AIR)?;
+        let motion = self
+            .snap
+            .borrow()
+            .flag(x, y, z, flags::BLOCKS_MOTION)
+            .unwrap_or(false);
+        Some((air as u8) | ((motion as u8) << 1))
+    }
+
+    /// vanilla Heightmap.update (1.21.8 decompile) on BOTH WG maps for a
+    /// feature write. WS_WG predicate = NOT_AIR, OF_WG = blocksMotion.
+    /// Called from write_overlay — the native ops are buffered until the
+    /// apply phase, so the WG maps must track the overlay or every later
+    /// height() in the same column diverges from vanilla (the 0.555% judge
+    /// residual: disks after trees).
+    fn hm_update(&self, x: i32, y: i32, z: i32, st: u8) {
+        if self.no_hm || self.no_snap || y < self.min_y() || y > self.max_y() {
+            return;
+        }
+        let Some(arc) = self.ensure_hm(x >> 4, z >> 4) else {
+            return;
+        };
+        let opaque_ws = st & 1 == 0;
+        let opaque_of = st & 2 != 0;
+        let min_y = self.inner.min_y();
+        let mut hm = arc.lock().unwrap();
+        if hm.len() < 512 {
+            return;
+        }
+        Self::vanilla_hm_update(&mut hm, 0, x, z, y, opaque_ws, min_y, &|xx, yy, zz| {
+            self.col_flags_at(xx, yy, zz).map(|f| f & 1 == 0)
+        });
+        Self::vanilla_hm_update(&mut hm, 256, x, z, y, opaque_of, min_y, &|xx, yy, zz| {
+            self.col_flags_at(xx, yy, zz).map(|f| f & 2 != 0)
+        });
+    }
+
+    /// verbatim vanilla Heightmap.update: raise on opaque write at/above the
+    /// top, rescan down when a non-opaque write lands exactly at top-1. The
+    /// rescan aborts (value unchanged) if the probe hits unsnapshotted space.
+    fn vanilla_hm_update(
+        hm: &mut Vec<i32>,
+        off: usize,
+        x: i32,
+        z: i32,
+        y: i32,
+        opaque: bool,
+        min_y: i32,
+        probe: &dyn Fn(i32, i32, i32) -> Option<bool>,
+    ) {
+        let idx = off + ((z & 15) as usize) * 16 + (x & 15) as usize;
+        let first = hm[idx];
+        if y <= first - 2 {
+            return;
+        }
+        if opaque {
+            if y >= first {
+                hm[idx] = y + 1;
+            }
+        } else if first - 1 == y {
+            let mut yy = y - 1;
+            while yy >= min_y {
+                match probe(x, yy, z) {
+                    Some(true) => {
+                        hm[idx] = yy + 1;
+                        return;
+                    }
+                    Some(false) => yy -= 1,
+                    // unsnapshotted space: abort, keep the frozen value
+                    None => return,
+                }
+            }
+            hm[idx] = min_y;
+        }
     }
 
     /// The world-side block NAME at pos (NO overlay — can_survive semantics
@@ -413,14 +509,17 @@ impl<'a> ChunkLevel<'a> {
             let (_, f) = self.snap.borrow().block(x, y, z)?;
             let hit = match ty {
                 HeightmapTy::WorldSurface => f & flags::IS_AIR == 0,
-                // vanilla switch: OCEAN_FLOOR and MOTION_BLOCKING share the
-                // predicate blocksMotion() || !fluid.isEmpty()
-                HeightmapTy::OceanFloor | HeightmapTy::MotionBlocking => {
+                // 1.21.8 Heightmap.Types (decompile, src14):
+                // OCEAN_FLOOR = MATERIAL_MOTION_BLOCKING = blocksMotion ONLY
+                // (no fluid!), MOTION_BLOCKING = blocksMotion || fluid,
+                // MOTION_BLOCKING_NO_LEAVES = (blocksMotion || fluid) && !leaves.
+                HeightmapTy::OceanFloor => f & flags::BLOCKS_MOTION != 0,
+                HeightmapTy::MotionBlocking => {
                     f & (flags::BLOCKS_MOTION | flags::HAS_FLUID) != 0
                 }
                 HeightmapTy::MotionBlockingNoLeaves => {
-                    (f & flags::BLOCKS_MOTION != 0 && f & flags::LEAVES == 0)
-                        || f & flags::HAS_FLUID != 0
+                    (f & (flags::BLOCKS_MOTION | flags::HAS_FLUID) != 0)
+                        && f & flags::LEAVES == 0
                 }
                 HeightmapTy::WorldSurfaceWg | HeightmapTy::OceanFloorWg => unreachable!(),
             };
@@ -559,12 +658,13 @@ impl DecoLevel for ChunkLevel<'_> {
         // One JNI handshake pulls 2x256 columns per chunk (lazily, cached).
         if matches!(ty, HeightmapTy::WorldSurfaceWg | HeightmapTy::OceanFloorWg)
             && !self.no_snap
+            && !self.no_hm
         {
             if let Some(hm) = self.ensure_hm(x >> 4, z >> 4) {
                 let off = if ty == HeightmapTy::WorldSurfaceWg { 0 } else { 256 };
                 let idx = off + ((z & 15) as usize) * 16 + (x & 15) as usize;
-                if let Some(v) = hm.get(idx) {
-                    return *v;
+                if let Some(v) = hm.lock().unwrap().get(idx).copied() {
+                    return v;
                 }
             }
             return self.inner.height(ty, x, z);
@@ -756,6 +856,9 @@ impl DecoLevelExt for ChunkLevel<'_> {
     }
     fn write_overlay(&self, pos: BlockPos, state: &str) {
         self.ov.borrow_mut().insert((pos.x, pos.y, pos.z), state.to_string());
+        if let Some(st) = (self.st_flags)(state) {
+            self.hm_update(pos.x, pos.y, pos.z, st);
+        }
     }
     fn read_overlay(&self, pos: BlockPos) -> Option<String> {
         self.ov.borrow().get(&(pos.x, pos.y, pos.z)).cloned()

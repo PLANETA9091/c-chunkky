@@ -938,8 +938,12 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
     // the snapshot serves them natively (flags computed in Java).
     let ov: &std::cell::RefCell<crate::features_snap::OvMap> = &d.chunk_ov;
     let snap: &std::cell::RefCell<crate::features_snap::SnapRegion> = &d.chunk_snap;
-    let hms: &std::cell::RefCell<std::collections::HashMap<(i32, i32), Option<std::sync::Arc<Vec<i32>>>>> =
-        &d.chunk_hms;
+    let hms: &std::cell::RefCell<
+        std::collections::HashMap<
+            (i32, i32),
+            Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>>,
+        >,
+    > = &d.chunk_hms;
     let zoom_seed = d.chunk_zoom_seed.get();
     let level_ref = &level;
     let run_loader: std::cell::Cell<u64> = std::cell::Cell::new(0);
@@ -999,12 +1003,14 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
         run_loader.set(run_loader.get() + (prof_now() - t0));
         r
     };
-    let hm_loader = |cx: i32, cz: i32| -> Option<std::sync::Arc<Vec<i32>>> {
+    let hm_loader = |cx: i32, cz: i32| -> Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>> {
         if let Some(cached) = hms.borrow().get(&(cx, cz)) {
             return cached.clone();
         }
         // the WG handshake must always succeed: 512 ints, O(1) Java
-        let loaded = level_ref.heightmaps(cx, cz).map(std::sync::Arc::new);
+        let loaded = level_ref
+            .heightmaps(cx, cz)
+            .map(|v| std::sync::Arc::new(std::sync::Mutex::new(v)));
         if loaded.is_none() {
             static LOGGED: std::sync::atomic::AtomicU32 =
                 std::sync::atomic::AtomicU32::new(0);
@@ -1018,6 +1024,10 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
         hms.borrow_mut().insert((cx, cz), loaded.clone());
         loaded
     };
+    let st_flags = |name: &str| -> Option<u8> {
+        let idx = *d.state.state_index.get(name)?;
+        d.state.state_flags.lock().unwrap().get(idx as usize).copied()
+    };
     let chunk_level = crate::features_snap::ChunkLevel::new(
         level_ref,
         ov,
@@ -1026,6 +1036,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
         &hm_loader,
         &d.uid_names,
         zoom_seed,
+        &st_flags,
     );
     let olen = ((*tbl).v1_1.GetArrayLength)(env, out as jni_sys::jarray) as usize;
     if olen < 5 {
@@ -1142,9 +1153,61 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoOpsDro
             .and_then(|m| m.get(&(ctx as i64)))
             .and_then(|c| c.deco.as_ref())
         {
-            let mut ov = d.chunk_ov.borrow_mut();
+            {
+                let mut ov = d.chunk_ov.borrow_mut();
+                for k in 0..count as usize {
+                    ov.remove(&(slice[k * 3], slice[k * 3 + 1], slice[k * 3 + 2]));
+                }
+            }
+            // revert the WG heightmap raise the dropped write may have caused
+            // (the op never lands in the region — vanilla Heightmap.update
+            // would never have seen it). Treat each dropped pos as a removal:
+            // rescan down when it sat exactly at top-1. Rare path (drops are
+            // zero in healthy runs) — correctness over speed.
+            let st_flags = |name: &str| -> Option<u8> {
+                let idx = *d.state.state_index.get(name)?;
+                d.state.state_flags.lock().unwrap().get(idx as usize).copied()
+            };
+            let probe = |x: i32, y: i32, z: i32, mask: u8| -> Option<bool> {
+                if let Some(st) = d.chunk_ov.borrow().get(&(x, y, z)) {
+                    return st_flags(st).map(|f| f & mask != 0);
+                }
+                d.chunk_snap.borrow().flag(x, y, z, mask as u16)
+            };
+            let mut hms = d.chunk_hms.borrow_mut();
             for k in 0..count as usize {
-                ov.remove(&(slice[k * 3], slice[k * 3 + 1], slice[k * 3 + 2]));
+                let (x, y, z) = (slice[k * 3], slice[k * 3 + 1], slice[k * 3 + 2]);
+                let Some(Some(arc)) = hms.get_mut(&(x >> 4, z >> 4)) else {
+                    continue;
+                };
+                let mut hm = arc.lock().unwrap();
+                if hm.len() < 512 {
+                    continue;
+                }
+                let min_y = d.chunk_snap.borrow().min_sec_y * 16;
+                for (off, mask) in [(0usize, 1u8), (256, 2)] {
+                    let idx = off + ((z & 15) as usize) * 16 + (x & 15) as usize;
+                    let first = hm[idx];
+                    if first - 1 != y {
+                        continue;
+                    }
+                    let mut yy = y - 1;
+                    let mut done = false;
+                    while yy >= min_y {
+                        match probe(x, yy, z, mask) {
+                            Some(true) => {
+                                hm[idx] = yy + 1;
+                                done = true;
+                                break;
+                            }
+                            Some(false) => yy -= 1,
+                            None => break, // unsnapshotted: keep the frozen value
+                        }
+                    }
+                    if !done && yy < min_y {
+                        hm[idx] = min_y;
+                    }
+                }
             }
         }
         ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, coords as jni_sys::jarray, p, jni_sys::JNI_ABORT);
@@ -1155,8 +1218,11 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoOpsDro
 /// through the region directly, invisible to BOTH the overlay and the
 /// snapshot). Clear the chunk overlay (its entries may be stale where the
 /// delegate overwrote them; the flushed native writes live in the region and
-/// come back via the reloaded snapshot) AND bump the snapshot epoch (stale
-/// sections reload lazily on the next query).
+/// come back via the reloaded snapshot), bump the snapshot epoch (stale
+/// sections reload lazily on the next query) AND drop the cached WG
+/// heightmaps (the region maps moved under them — vanilla updates the WG
+/// heightmaps on every setBlock, so the next query re-handshakes with the
+/// post-delegate values; the cont-56 0.555% judge residual).
 #[no_mangle]
 pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoDelegateMark(
     _env: *mut jni_sys::JNIEnv,
@@ -1171,5 +1237,47 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoDelega
     {
         d.chunk_ov.borrow_mut().clear();
         d.chunk_snap.borrow().bump_epoch();
+        d.chunk_hms.borrow_mut().clear();
     }
+}
+
+/// decoSetFlags(ctx, byte[] flags) — the decoStates handshake tail: one flag
+/// byte per state string (bit0=isAir, bit1=blocksMotion), computed Java-side
+/// from the resolved BlockStates. Feeds the WG heightmap update-on-write.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoSetFlags(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jlong,
+    flags: jni_sys::jbyteArray,
+) {
+    let tbl = *env;
+    let guard = SESSIONS.lock().unwrap();
+    let Some(d) = guard
+        .as_ref()
+        .and_then(|m| m.get(&(ctx as i64)))
+        .and_then(|c| c.deco.as_ref())
+    else {
+        return;
+    };
+    let len = ((*tbl).v1_1.GetArrayLength)(env, flags as jni_sys::jarray) as usize;
+    if len != d.state.states.len() {
+        crate::ffi::log_warn(&format!(
+            "[deco-flags] length mismatch: got {len}, want {} (flags ignored)",
+            d.state.states.len()
+        ));
+        return;
+    }
+    let p = ((*tbl).v1_1.GetByteArrayElements)(env, flags as jni_sys::jarray, std::ptr::null_mut());
+    if p.is_null() {
+        return;
+    }
+    let bytes = std::slice::from_raw_parts(p as *const u8, len);
+    d.state.state_flags.lock().unwrap().copy_from_slice(bytes);
+    ((*tbl).v1_1.ReleaseByteArrayElements)(
+        env,
+        flags as jni_sys::jarray,
+        p as *mut i8,
+        0,
+    );
 }

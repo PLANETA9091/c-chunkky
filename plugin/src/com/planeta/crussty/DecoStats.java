@@ -45,8 +45,14 @@ public final class DecoStats {
     static final AtomicLong FEATURES_TOTAL = new AtomicLong();
     static final AtomicLong DELEGATE_TOTAL = new AtomicLong();
     static final AtomicLong DELEGATE_COUNT = new AtomicLong();
+    /** delegate placed-name -> count (dynamic delegate census; reset per dump) */
+    static final java.util.concurrent.ConcurrentHashMap<String, Long> DELEGATE_NAMES
+            = new java.util.concurrent.ConcurrentHashMap<>();
     /** plan-phase split: the regionBiomes Java wall (palette walk) */
     static final AtomicLong PLAN_BIOMES = new AtomicLong();
+    /** struct-phase split: startsForStructure vs placeInChunk walls */
+    static final AtomicLong STRUCT_STARTS_NS = new AtomicLong();
+    static final AtomicLong STRUCT_PLACE_NS = new AtomicLong();
 
     // upcall counters (Java side; they measure the JNI traffic, not the time)
     static final AtomicLong UP_HEIGHT = new AtomicLong();
@@ -82,6 +88,7 @@ public final class DecoStats {
         FEATURES_TOTAL.set(0);
         DELEGATE_TOTAL.set(0);
         DELEGATE_COUNT.set(0);
+        DELEGATE_NAMES.clear();
         PLAN_BIOMES.set(0);
         UP_HEIGHT.set(0);
         for (AtomicLong a : UP_H_TY) {
@@ -97,6 +104,8 @@ public final class DecoStats {
         UP_CAN_SURVIVE.set(0);
         UP_OTHER.set(0);
         BIOMECHK_LOG.set(0);
+        STRUCT_STARTS_NS.set(0);
+        STRUCT_PLACE_NS.set(0);
         java.util.Arrays.fill(NANOS, 0L);
     }
 
@@ -123,7 +132,7 @@ public final class DecoStats {
                 + UP_IS_AIR.get() + UP_CAN_SURVIVE.get() + UP_OTHER.get();
         return String.format(
                 "native deco stage: chunks=%d  mean=%.1fus  min=%.1fus  p50=%.1fus  p99=%.1fus  max=%.1fus"
-                        + "  [plan=%.2fms struct=%.2fms run=%.2fms apply=%.2fms]"
+                        + "  [plan=%.2fms struct=%.2fms run=%.2fms apply=%.2fms deleg=%.2fms]"
                         + "  ops=%d features=%d delegate=%d"
                         + "  upcalls=%d (h=%d stateis=%d fluidis=%d isair=%d survive=%d other=%d)",
                 COUNT.get(),
@@ -134,6 +143,7 @@ public final class DecoStats {
                 STRUCT_TOTAL.get() / (double) cnt / 1e6,
                 RUN_TOTAL.get() / (double) cnt / 1e6,
                 APPLY_TOTAL.get() / (double) cnt / 1e6,
+                DELEGATE_TOTAL.get() / (double) cnt / 1e6,
                 OPS_TOTAL.get(), FEATURES_TOTAL.get(),
                 DELEGATE_COUNT.get(),
                 upcalls, UP_HEIGHT.get(), UP_STATE_IS.get(), UP_FLUID_IS.get(),
@@ -141,7 +151,23 @@ public final class DecoStats {
                 .concat(String.format(" snap-sec=%d/%.2fms blocks=%d snap-hm=%d planbio=%.2fms",
                 SNAP_SECTIONS.get(), SNAP_SECTION_NS.get() / 1e6,
                 SNAP_SECTION_BLOCKS.get(), SNAP_HM.get(),
-                PLAN_BIOMES.get() / 1e6));
+                PLAN_BIOMES.get() / 1e6))
+                .concat(String.format(" | [struct-split] starts=%.2fms place=%.2fms",
+                STRUCT_STARTS_NS.get() / 1e6, STRUCT_PLACE_NS.get() / 1e6));
+    }
+
+    /** top-24 delegate placed names (dynamic census tail). */
+    static String delegateNames() {
+        if (DELEGATE_NAMES.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder(" | [deleg-names]");
+        DELEGATE_NAMES.entrySet().stream()
+                .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
+                .limit(24)
+                .forEach(e -> sb.append(' ').append(e.getKey())
+                        .append('=').append(e.getValue()));
+        return sb.toString();
     }
 
     /** wouldSurvive histogram tail (top 12 each), CRUS_SURVIVE_HIST=1. */

@@ -32,7 +32,32 @@ pub enum StateSrc {
         fallback: Box<StateSrc>,
         rules: Vec<(BlockPredicate, StateSrc)>,
     },
+    /// RandomizedIntStateProvider: source provider, then property=<values
+    /// provider> set on the sampled state (cave_vines age 23..25).
+    RandomizedInt {
+        source: Box<StateSrc>,
+        property: String,
+        values: &'static IP,
+    },
     Unsupported(&'static str),
+}
+
+/// "ns:block[a=1,b=2]" -> set/replace one property value (keeps the
+/// canonical property order; appends when absent).
+pub fn state_set_prop(state: &str, prop: &str, val: &str) -> String {
+    let Some(open) = state.find('[') else {
+        return format!("{state}[{prop}={val}]");
+    };
+    let name = &state[..open];
+    let body = &state[open + 1..state.len() - 1];
+    for kv in body.split(',') {
+        if let Some(eq) = kv.split_once('=') {
+            if eq.0 == prop {
+                return format!("{name}[{}]", body.replacen(kv, &format!("{prop}={val}"), 1));
+            }
+        }
+    }
+    format!("{name}[{body},{prop}={val}]")
 }
 
 #[derive(Clone, Debug)]
@@ -92,6 +117,65 @@ pub enum FeatureCfg {
     Tree(TreeCfg),
     /// minecraft:vegetation_patch / waterlogged_vegetation_patch
     VegetationPatch(VegetationPatchCfg),
+    // --- batch-1 simple types (dptt delegate killers) --------------------
+    /// ReplaceBlobsFeature: radius sampled x3 (xr,yr,zr), target scan from
+    /// the clamped origin downward, withinManhattan iterate + replace.
+    NetherrackReplaceBlobs {
+        radius: IP,
+        state: String,
+        target_block: String,
+    },
+    Seagrass {
+        probability: f32,
+    },
+    Spring {
+        valid_blocks: Vec<String>,
+        requires_block_below: bool,
+        rock_count: i32,
+        hole_count: i32,
+        state: String,
+    },
+    BlockPile {
+        state_provider: StateSrc,
+    },
+    Kelp,
+    MonsterRoom,
+    UnderwaterMagma {
+        floor_search_range: i32,
+        placement_radius: i32,
+        prob: f32,
+    },
+    // --- batch-2 (dptt census round 2) ---------------------------------
+    /// minecraft:flower == RandomPatchFeature (registered twice in vanilla;
+    /// identical class + codec). Decoded as RandomPatch by the alias arm.
+    /// minecraft:vines — single vine attach (no RNG); face = first sturdy
+    /// neighbor in Direction.values() order minus DOWN.
+    Vines,
+    /// minecraft:block_column — layered column from origin along direction.
+    BlockColumn {
+        /// vanilla Direction ordinal (0=down 1=up 2=north 3=south 4=west 5=east)
+        direction: u8,
+        layers: Vec<(IP, StateSrc)>,
+        prioritize_tip: bool,
+        allowed: BlockPredicate,
+    },
+    /// minecraft:root_system — climb the column, place the tree placed-feature,
+    /// rooted-dirt disks + hanging roots.
+    RootSystem {
+        tree_feature: String,
+        allowed_tree_position: BlockPredicate,
+        required_vertical_space_for_tree: i32,
+        allowed_vertical_water_for_tree: i32,
+        root_column_max_height: i32,
+        root_radius: i32,
+        root_placement_attempts: i32,
+        root_replaceable_tag: String,
+        root_state: &'static StateSrc,
+        hanging_root_radius: i32,
+        hanging_root_placement_attempts: i32,
+        hanging_roots_vertical_span: i32,
+        hanging_root_state: &'static StateSrc,
+    },
     Unsupported(&'static str),
 }
 
@@ -253,6 +337,7 @@ pub struct VegetationPatchCfg {
     pub waterlogged: bool,
 }
 
+// batch-1 simple configured-feature types (dptt delegate killers)
 pub struct FeatureRegistry {
     pub placed: HashMap<String, PlacedDef>,
     pub configured: HashMap<String, FeatureCfg>,
@@ -277,6 +362,46 @@ fn decode_int_provider(j: &Json) -> Option<IP> {
             let lo = j.get("min_inclusive").and_then(|v| v.as_i64())?;
             let hi = j.get("max_inclusive").and_then(|v| v.as_i64())?;
             Some(IP::Uniform { lo: lo as i32, hi: hi as i32 })
+        }
+        "minecraft:weighted_list" => {
+            // vanilla WeightedListInt: nextInt(totalWeight) + linear walk, the
+            // entry "data" is ITSELF an IntProvider (uniform object, int, ...)
+            let dist = j.get("distribution")?.as_arr()?;
+            let mut entries: Vec<(&'static IP, u32)> = Vec::new();
+            for e in dist {
+                let d = decode_int_provider(e.get("data")?)?;
+                let w = e.get("weight").and_then(|v| v.as_i64())?;
+                if w <= 0 {
+                    return None;
+                }
+                entries.push((Box::leak(Box::new(d)), w as u32));
+            }
+            if entries.is_empty() {
+                return None;
+            }
+            Some(IP::WeightedList { entries: entries.leak() })
+        }
+        "minecraft:biased_to_bottom" => {
+            // BiasedToBottomInt: min + nextInt(nextInt(range+1) + 1) (nested)
+            let lo = j.get("min_inclusive").and_then(|v| v.as_i64())?;
+            let hi = j.get("max_inclusive").and_then(|v| v.as_i64())?;
+            Some(IP::BiasedToBottom { lo: lo as i32, hi: hi as i32 })
+        }
+        "minecraft:clamped" => {
+            // vanilla ClampedInt: inner sample then clamp (ALWAYS draws through
+            // the inner provider, even when the value is already in range)
+            let inner = decode_int_provider(j.get("value")?)?;
+            let lo = j.get("min").and_then(|v| v.as_i64())? as i32;
+            let hi = j.get("max").and_then(|v| v.as_i64())? as i32;
+            Some(IP::Clamped { inner: Box::leak(Box::new(inner)), lo, hi })
+        }
+        "minecraft:clamped_normal" => {
+            // ClampedNormalInt: (int) clamp(mean + deviation * nextGaussian)
+            let mean = j.get("mean").and_then(|v| v.as_f64())? as f32;
+            let dev = j.get("deviation").and_then(|v| v.as_f64())? as f32;
+            let lo = j.get("min_inclusive").and_then(|v| v.as_i64())? as i32;
+            let hi = j.get("max_inclusive").and_then(|v| v.as_i64())? as i32;
+            Some(IP::ClampedNormal { mean, deviation: dev, lo, hi })
         }
         _ => None,
     }
@@ -375,6 +500,17 @@ fn decode_state_provider(j: &Json) -> Option<StateSrc> {
             // RotatedBlockProvider codec: BlockState.CODEC.fieldOf("state")
             let s = j.get("state")?;
             Some(StateSrc::Simple(format!("ROTATED\0{}", state_string(s)?)))
+        }
+        "minecraft:randomized_int_state_provider" => {
+            // RandomizedIntStateProvider: source + property + IntProvider
+            let src = decode_state_provider(j.get("source")?)?;
+            let prop = j.get("property")?.as_str()?.to_string();
+            let vals = decode_int_provider(j.get("values")?)?;
+            Some(StateSrc::RandomizedInt {
+                source: Box::new(src),
+                property: prop,
+                values: Box::leak(Box::new(vals)),
+            })
         }
         _ => Some(StateSrc::Unsupported("state_provider")),
     }
@@ -594,6 +730,124 @@ pub fn decode_placement_modifier(j: &Json) -> Mod {
     }
 }
 
+/// random_patch body shared by random_patch + flower (same vanilla class).
+fn decode_random_patch(name: &str, cfg: &Json, reg: &mut FeatureRegistry) -> FeatureCfg {
+    let tries = cfg.get("tries").and_then(|v| v.as_i64()).unwrap_or(128) as i32;
+    let xz_spread = cfg.get("xz_spread").and_then(|v| v.as_i64()).unwrap_or(7) as i32;
+    let y_spread = cfg.get("y_spread").and_then(|v| v.as_i64()).unwrap_or(3) as i32;
+    let Some(fj) = cfg.get("feature") else {
+        return FeatureCfg::Unsupported("patch-feature");
+    };
+    // vanilla: the inner is a PLACED feature — a string ref or an
+    // inline {feature, placement} object. A string ref resolves
+    // through reg.placed at place time (place_placed by name); inline
+    // objects register under synthetic $-names and are NOT in any
+    // biome's feature list (no FeatureSorter uid, BiomeFilter would
+    // fail in vanilla too — parity by construction).
+    if let Some(s) = fj.as_str() {
+        return FeatureCfg::RandomPatch { tries, xz_spread, y_spread, inner: s.to_string() };
+    }
+    let inner = format!("{name}$/inner");
+    if !decode_inline_placed(&inner, fj, reg) {
+        return FeatureCfg::Unsupported("patch-inner");
+    }
+    FeatureCfg::RandomPatch { tries, xz_spread, y_spread, inner }
+}
+
+/// BlockColumnConfiguration: direction (defaults UP), layers, allowed_placement
+/// predicate, prioritizeTip (defaults true).
+fn decode_block_column(cfg: &Json) -> FeatureCfg {
+    let dir = match cfg.get("direction").and_then(|v| v.as_str()).unwrap_or("up") {
+        "down" => 0,
+        "up" => 1,
+        "north" => 2,
+        "south" => 3,
+        "west" => 4,
+        "east" => 5,
+        _ => return FeatureCfg::Unsupported("bc-dir"),
+    };
+    let Some(arr) = cfg.get("layers").and_then(|v| v.as_arr()) else {
+        return FeatureCfg::Unsupported("bc-layers");
+    };
+    let mut layers = Vec::new();
+    for l in arr {
+        let Some(hp) = l
+            .get("height")
+            .and_then(decode_int_provider)
+            .or_else(|| l.get("height").and_then(|v| v.as_i64()).map(|v| IP::Constant(v as i32)))
+        else {
+            return FeatureCfg::Unsupported("bc-height");
+        };
+        let Some(sp) = l.get("provider").and_then(decode_state_provider) else {
+            return FeatureCfg::Unsupported("bc-provider");
+        };
+        layers.push((hp, sp));
+    }
+    if layers.is_empty() {
+        return FeatureCfg::Unsupported("bc-layers");
+    }
+    let Some(allowed) = cfg.get("allowed_placement").and_then(decode_predicate) else {
+        return FeatureCfg::Unsupported("bc-allowed");
+    };
+    if matches!(allowed, BlockPredicate::Unsupported(_)) {
+        return FeatureCfg::Unsupported("bc-allowed-unsupported");
+    }
+    FeatureCfg::BlockColumn {
+        direction: dir,
+        layers,
+        prioritize_tip: cfg.get("prioritize_tip").and_then(|v| v.as_bool()).unwrap_or(true),
+        allowed,
+    }
+}
+
+/// RootSystemConfiguration. treeFeature = placed ref (string or inline object;
+/// terralith uses inline {feature, placement: []}).
+fn decode_root_system(name: &str, cfg: &Json, reg: &mut FeatureRegistry) -> FeatureCfg {
+    let tree = if let Some(s) = cfg.get("feature").and_then(|v| v.as_str()) {
+        s.to_string()
+    } else {
+        let inner = format!("{name}$/tree");
+        let Some(fj) = cfg.get("feature") else {
+            return FeatureCfg::Unsupported("rs-tree");
+        };
+        if !decode_inline_placed(&inner, fj, reg) {
+            return FeatureCfg::Unsupported("rs-tree");
+        }
+        inner
+    };
+    let Some(allowed_tree_position) = cfg.get("allowed_tree_position").and_then(decode_predicate) else {
+        return FeatureCfg::Unsupported("rs-atp");
+    };
+    if matches!(allowed_tree_position, BlockPredicate::Unsupported(_)) {
+        return FeatureCfg::Unsupported("rs-atp-unsupported");
+    }
+    let Some(root_state) = cfg.get("root_state_provider").and_then(decode_state_provider) else {
+        return FeatureCfg::Unsupported("rs-root-state");
+    };
+    let Some(hanging_root_state) = cfg.get("hanging_root_state_provider").and_then(decode_state_provider)
+    else {
+        return FeatureCfg::Unsupported("rs-hang-state");
+    };
+    let Some(rr) = cfg.get("root_replaceable").and_then(|v| v.as_str()).map(|s| s.trim_start_matches('#').to_string()) else {
+        return FeatureCfg::Unsupported("rs-repl");
+    };
+    FeatureCfg::RootSystem {
+        tree_feature: tree,
+        allowed_tree_position,
+        required_vertical_space_for_tree: cfg.get("required_vertical_space_for_tree").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+        allowed_vertical_water_for_tree: cfg.get("allowed_vertical_water_for_tree").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+        root_column_max_height: cfg.get("root_column_max_height").and_then(|v| v.as_i64()).unwrap_or(20) as i32,
+        root_radius: cfg.get("root_radius").and_then(|v| v.as_i64()).unwrap_or(2) as i32,
+        root_placement_attempts: cfg.get("root_placement_attempts").and_then(|v| v.as_i64()).unwrap_or(12) as i32,
+        root_replaceable_tag: rr,
+        root_state: Box::leak(Box::new(root_state)),
+        hanging_root_radius: cfg.get("hanging_root_radius").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+        hanging_root_placement_attempts: cfg.get("hanging_root_placement_attempts").and_then(|v| v.as_i64()).unwrap_or(20) as i32,
+        hanging_roots_vertical_span: cfg.get("hanging_roots_vertical_span").and_then(|v| v.as_i64()).unwrap_or(3) as i32,
+        hanging_root_state: Box::leak(Box::new(hanging_root_state)),
+    }
+}
+
 pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry) -> FeatureCfg {
     let t = match j.get("type").and_then(|v| v.as_str()) {
         Some(t) => t,
@@ -641,18 +895,42 @@ pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry
             }
         }
         "minecraft:random_selector" => {
-            let default = match cfg.get("default").and_then(|v| v.as_str()) {
-                Some(s) => s.to_string(),
-                None => return FeatureCfg::Unsupported("rs-default"),
+            // default + entries: placed features — string refs OR inline
+            // {"feature": ref|inline-cfg, "placement": [...]} objects; inline
+            // objects register under synthetic $-names (same protocol as the
+            // random_patch inner — uid extension happens at master build).
+            let default = match cfg.get("default") {
+                Some(v) if v.as_str().is_some() => v.as_str().unwrap().to_string(),
+                Some(v) if v.get("feature").is_some() => {
+                    let inner = format!("{name}$def");
+                    if !decode_inline_placed(&inner, v, reg) {
+                        return FeatureCfg::Unsupported("rs-default");
+                    }
+                    inner
+                }
+                _ => return FeatureCfg::Unsupported("rs-default"),
             };
             let mut entries = Vec::new();
             match cfg.get("features").and_then(|v| v.as_arr()) {
                 Some(arr) => {
-                    for e in arr {
+                    for (i, e) in arr.iter().enumerate() {
                         let c = e.get("chance").and_then(|v| v.as_f64());
-                        let f = e.get("feature").and_then(|v| v.as_str());
+                        let f = e.get("feature");
                         match (c, f) {
-                            (Some(c), Some(f)) => entries.push((c as f32, f.to_string())),
+                            (Some(c), Some(fj)) => {
+                                let fname = if let Some(s) = fj.as_str() {
+                                    s.to_string()
+                                } else if fj.get("feature").is_some() {
+                                    let inner = format!("{name}$e{i}");
+                                    if !decode_inline_placed(&inner, fj, reg) {
+                                        return FeatureCfg::Unsupported("rs-entry");
+                                    }
+                                    inner
+                                } else {
+                                    return FeatureCfg::Unsupported("rs-entry");
+                                };
+                                entries.push((c as f32, fname));
+                            }
                             _ => return FeatureCfg::Unsupported("rs-entry"),
                         }
                     }
@@ -662,13 +940,25 @@ pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry
             }
         }
         "minecraft:simple_random_selector" => {
+            // entries: placed features — string refs OR placed objects
+            // ({"feature": ref|inline-cfg, "placement": [...]}).
             let mut entries = Vec::new();
             match cfg.get("features").and_then(|v| v.as_arr()) {
                 Some(arr) => {
-                    for e in arr {
-                        match e.as_str().or_else(|| e.get("feature").and_then(|f| f.as_str())) {
+                    for (i, e) in arr.iter().enumerate() {
+                        match e.as_str() {
                             Some(s) => entries.push(s.to_string()),
-                            None => return FeatureCfg::Unsupported("srs-entry"),
+                            None => {
+                                if e.get("feature").is_some() {
+                                    let inner = format!("{name}$e{i}");
+                                    if !decode_inline_placed(&inner, e, reg) {
+                                        return FeatureCfg::Unsupported("srs-entry");
+                                    }
+                                    entries.push(inner);
+                                } else {
+                                    return FeatureCfg::Unsupported("srs-entry");
+                                }
+                            }
                         }
                     }
                     FeatureCfg::SimpleRandomSelector { entries }
@@ -678,11 +968,26 @@ pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry
         }
         "minecraft:random_boolean_selector" => {
             // vanilla codec keys: feature_true / feature_false (if_true/if_false
-            // were the decomposed-class field names, not the registry form)
-            let if_true = cfg.get("feature_true").and_then(|v| v.as_str()).or_else(|| cfg.get("if_true").and_then(|v| v.as_str())).or_else(|| cfg.get("feature_true").and_then(|v| v.get("feature").and_then(|f| f.as_str())));
-            let if_false = cfg.get("feature_false").and_then(|v| v.as_str()).or_else(|| cfg.get("if_false").and_then(|v| v.as_str())).or_else(|| cfg.get("feature_false").and_then(|v| v.get("feature").and_then(|f| f.as_str())));
+            // were the decomposed-class field names, not the registry form);
+            // each side: string ref OR placed object (ref or inline)
+            let mut side = |key: &str, suffix: &str| -> Option<String> {
+                let v = cfg.get(key)?;
+                if let Some(s) = v.as_str() {
+                    return Some(s.to_string());
+                }
+                if v.get("feature").is_some() {
+                    let inner = format!("{name}{suffix}");
+                    if !decode_inline_placed(&inner, v, reg) {
+                        return None;
+                    }
+                    return Some(inner);
+                }
+                None
+            };
+            let if_true = side("feature_true", "$t").or_else(|| side("if_true", "$t"));
+            let if_false = side("feature_false", "$f").or_else(|| side("if_false", "$f"));
             match (if_true, if_false) {
-                (Some(t), Some(f)) => FeatureCfg::RandomBoolSelector { chance: 0.5, if_true: t.to_string(), if_false: f.to_string() },
+                (Some(t), Some(f)) => FeatureCfg::RandomBoolSelector { chance: 0.5, if_true: t, if_false: f },
                 _ => FeatureCfg::Unsupported("rbs"),
             }
         }
@@ -725,27 +1030,11 @@ pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry
                 FeatureCfg::ScatteredOre { discard, size: size as i32, targets }
             }
         }
-        "minecraft:random_patch" => {
-            let tries = cfg.get("tries").and_then(|v| v.as_i64()).unwrap_or(128) as i32;
-            let xz_spread = cfg.get("xz_spread").and_then(|v| v.as_i64()).unwrap_or(7) as i32;
-            let y_spread = cfg.get("y_spread").and_then(|v| v.as_i64()).unwrap_or(3) as i32;
-            let Some(fj) = cfg.get("feature") else {
-                return FeatureCfg::Unsupported("patch-feature");
-            };
-            // vanilla: the inner is a PLACED feature — a string ref or an
-            // inline {feature, placement} object. A string ref resolves
-            // through reg.placed at place time (place_placed by name); inline
-            // objects register under synthetic $-names and are NOT in any
-            // biome's feature list (no FeatureSorter uid, BiomeFilter would
-            // fail in vanilla too — parity by construction).
-            if let Some(s) = fj.as_str() {
-                return FeatureCfg::RandomPatch { tries, xz_spread, y_spread, inner: s.to_string() };
-            }
-            let inner = format!("{name}$/inner");
-            if !decode_inline_placed(&inner, fj, reg) {
-                return FeatureCfg::Unsupported("patch-inner");
-            }
-            FeatureCfg::RandomPatch { tries, xz_spread, y_spread, inner }
+        "minecraft:random_patch" | "minecraft:flower" => {
+            // NOTE: minecraft:flower registers the SAME RandomPatchFeature
+            // class + RandomPatchConfiguration codec as random_patch (vanilla
+            // Feature.java static init: FLOWER = new RandomPatchFeature(...))
+            return decode_random_patch(name, &cfg, reg);
         }
         "minecraft:disk" => {
             let Some(Some(radius)) = cfg.get("radius").map(decode_int_provider) else {
@@ -774,6 +1063,69 @@ pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry
         "minecraft:vegetation_patch" | "minecraft:waterlogged_vegetation_patch" => {
             decode_vegetation_patch_cfg(&cfg, t.ends_with("waterlogged_vegetation_patch"))
         }
+        // --- batch-1 simple types (dptt delegate killers) -------------------
+        "minecraft:netherrack_replace_blobs" => {
+            // ReplaceSphereConfiguration: radius IntProvider, target + replace
+            // plain states. ReplaceBlobsFeature consumes NO rng before the
+            // target scan (a failed scan draws nothing).
+            let Some(Some(radius)) = cfg.get("radius").map(decode_int_provider) else {
+                return FeatureCfg::Unsupported("rb-radius");
+            };
+            let Some(Some(state)) = cfg.get("state").map(state_string) else {
+                return FeatureCfg::Unsupported("rb-state");
+            };
+            let Some(Some(target)) = cfg.get("target").map(state_string) else {
+                return FeatureCfg::Unsupported("rb-target");
+            };
+            FeatureCfg::NetherrackReplaceBlobs {
+                radius,
+                state,
+                target_block: crate::features_deco::state_block_name(&target).to_string(),
+            }
+        }
+        "minecraft:seagrass" => {
+            let p = cfg.get("probability").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
+            FeatureCfg::Seagrass { probability: p }
+        }
+        "minecraft:spring_feature" => {
+            let Some(arr) = cfg.get("valid_blocks").and_then(|v| v.as_arr()) else {
+                return FeatureCfg::Unsupported("spring-valid");
+            };
+            let mut valid = Vec::new();
+            for e in arr {
+                let Some(s) = e.as_str() else {
+                    return FeatureCfg::Unsupported("spring-valid");
+                };
+                valid.push(s.to_string());
+            }
+            let Some(Some(state)) = cfg.get("state").map(state_string) else {
+                return FeatureCfg::Unsupported("spring-state");
+            };
+            FeatureCfg::Spring {
+                valid_blocks: valid,
+                requires_block_below: cfg.get("requires_block_below").and_then(|v| v.as_bool()).unwrap_or(false),
+                rock_count: cfg.get("rock_count").and_then(|v| v.as_i64()).unwrap_or(4) as i32,
+                hole_count: cfg.get("hole_count").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+                state,
+            }
+        }
+        "minecraft:block_pile" => {
+            let Some(Some(sp)) = cfg.get("state_provider").map(decode_state_provider) else {
+                return FeatureCfg::Unsupported("pile-state");
+            };
+            FeatureCfg::BlockPile { state_provider: sp }
+        }
+        "minecraft:kelp" => FeatureCfg::Kelp,
+        "minecraft:monster_room" => FeatureCfg::MonsterRoom,
+        "minecraft:underwater_magma" => FeatureCfg::UnderwaterMagma {
+            floor_search_range: cfg.get("floor_search_range").and_then(|v| v.as_i64()).unwrap_or(5) as i32,
+            placement_radius: cfg.get("placement_radius_around_floor").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+            prob: cfg.get("placement_probability_per_valid_position").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32,
+        },
+        // --- batch-2 (dptt census round 2) ---------------------------------
+        "minecraft:vines" => FeatureCfg::Vines,
+        "minecraft:block_column" => decode_block_column(&cfg),
+        "minecraft:root_system" => decode_root_system(name, &cfg, reg),
         _ => FeatureCfg::Unsupported("cf-type"),
     }
 }
@@ -1275,6 +1627,22 @@ pub fn decode_registry(
         reg.total_placed += 1;
         match json::parse(&text) {
             Ok(j) => {
+                // placed features carry a string configured-ref OR an inline
+                // configured object; the inline form registers under
+                // synthetic $-names via decode_inline_placed (same protocol
+                // as random_patch inners). Previously inline objects were
+                // DROPPED here, which forced every such placed feature into
+                // the hybrid delegate (Terralith split/*, ~77 entries).
+                let inline = j.get("feature").and_then(|v| v.as_str()).is_none()
+                    && j.get("feature").is_some();
+                // CRUS_DECO_NO_INLINE=1: A/B gate — inline placed stay dropped
+                // (delegate), restoring the pre-cont56 registry shape.
+                if inline && std::env::var("CRUS_DECO_NO_INLINE").as_deref() != Ok("1") {
+                    if !decode_inline_placed(name.as_str(), &j, &mut reg) {
+                        reg.unsupported_placed += 1;
+                    }
+                    continue;
+                }
                 let feature = match j.get("feature").and_then(|v| v.as_str()) {
                     Some(f) => f.to_string(),
                     None => {

@@ -126,6 +126,7 @@ fn main() {
                 || path.contains("/worldgen/density_function/")
                 || path.contains("/worldgen/noise/")
                 || path.contains("/worldgen/biome/")
+                || path.contains("/worldgen/multi_noise_biome_source_parameter_list/")
                 || path.ends_with("/dimension/overworld.json");
             if keep {
                 assets.insert(path, bytes);

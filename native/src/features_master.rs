@@ -46,8 +46,13 @@ pub struct DecoCtx {
     pub chunk_snap: std::cell::RefCell<crate::features_snap::SnapRegion>,
     /// WG heightmap snapshots per region chunk: (cx, cz) -> 512 i32 (WS_WG+OF_WG,
     /// +1 semantics). Cached across the whole chunk deco (ChunkLevel is
-    /// re-created per feature); cleared in decoChunkBegin. None = load failed.
-    pub chunk_hms: std::cell::RefCell<HashMap<(i32, i32), Option<std::sync::Arc<Vec<i32>>>>>,
+    /// re-created per feature); cleared in decoChunkBegin AND on every
+    /// decoDelegateMark (vanilla delegate writes update the real region maps
+    /// behind the cache — re-handshake at the next query). The inner
+    /// RefCell allows in-place vanilla Heightmap.update bookkeeping on the
+    /// overlay writes (update-on-write keeps later height() reads exact).
+    pub chunk_hms:
+        std::cell::RefCell<HashMap<(i32, i32), Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>>>>,
     /// BiomeManager.obfuscateSeed(world seed) — the biome zoom fiddle seed
     pub chunk_zoom_seed: std::cell::Cell<i64>,
 }

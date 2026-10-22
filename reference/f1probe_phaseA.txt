@@ -1,0 +1,40 @@
+=== [A] native-substrate + vanilla deco reference run ===
+[f1] datapacks wired:
+crussty-f1
+--- deployed.md5 ---
+# deployed.md5 2026-10-22T16:53:54Z (plugin_bench)
+052b8c9b5415f660127ef31fa1382b8e  server/paper.jar
+14d5edaa7316cd2cbc3cf74d41d08f84  server/plugins/CrusstyGen.jar
+f9d9507e1e6aaa1f321cefb125ed3b4e  native/target/release/libcrussty_chunkgen.so
+server/bukkit.yml written:
+worlds:
+  f1probe:
+    generator: CrusstyGen
+
+level-name=f1probe
+level-seed=3257840388504953787
+gen-parallelism=false (judge serial semantics):
+chunk-system:
+  gen-parallelism: 'false'
+  io-threads: -1
+  worker-threads: -1
+--- deployed.md5 ---
+# deployed.md5 2026-10-22T16:53:57Z
+052b8c9b5415f660127ef31fa1382b8e  paper.jar
+14d5edaa7316cd2cbc3cf74d41d08f84  plugins/CrusstyGen.jar
+c4cc87941008ed52e2c2d1fdc2676c72  plugins/CrusstyProbe.jar
+paper started pid=7016 fifo_holder=7014
+>   [16:54:21 INFO]: Done (23.452s)! For help, type "help"
+SERVER UP
+=== server pid check: crusstatus must report srvpid=7016 ===
+f1probe: loaded=49 region[98..109,98..109]=0/64 forced=0 f(0,-4)=false f(0,0)=false l(0,-4)=false srvpid=7016
+f1probe_the_end: loaded=49 region[98..109,98..109]=0/64 forced=0 f(0,-4)=false f(0,0)=false l(0,-4)=false srvpid=7016
+
+gamerule randomTickSpeed=0 (judge freeze of random ticks)
+=== pregen wall: 64845ms (sequential forceload, incl. poll granularity) ===
+=== crusgenstats ===
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=377  mean=11370.8us  min=3133.3us  p50=8495.1us  p99=41658.5us  max=318464.6us  [native=9.65ms nat_p50=7.91ms layout=0.81ms beard=0.06ms marks=0.13ms]  [lay setup=0.02 sec=0.75 hmap=0.01 verify=0.02 | uni=0.00/0.6 lin=0.00/0.0 glob=0.00/9.6 pb=0.00/0.00]  [sections filled=0 mixed=3616 air=5432 v1fallback=0 bulk=ok]  swapfail=null  marks_seen=28457 marks_landed=28457 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] native deco stage: deco: no chunks decorated yet | [CrusstyGen] jni_prof[fills=377 wall=7.29ms slice=0.00 cellfill=0.34 material=2.12 select=0.07 par_planes=2.52 par_strips=2.67]
+
+64
+SERVER DOWN (rcon stop)
+[f1] inner 8x8 reference: 36 chunks (100..107)

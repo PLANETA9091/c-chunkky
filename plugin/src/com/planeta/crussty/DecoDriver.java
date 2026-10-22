@@ -205,8 +205,33 @@ public final class DecoDriver extends BlockPopulator {
     }
 
     private static volatile boolean FIRST_LOGGED = false;
+    /** decoSetFlags sent once (states resolved -> per-state flag bytes). */
+    private static volatile boolean FLAGS_SENT = false;
+
+    /** One-time decoStates tail: resolve every state string once (the
+     *  STATE_FAST array is built anyway) and send bit0=isAir bit1=blocksMotion
+     *  per state — the native WG heightmap update-on-write needs the exact
+     *  vanilla predicates (1.21.8: WS_WG=NOT_AIR, OF_WG=blocksMotion). */
+    private static void sendStateFlags(long ctx) {
+        try {
+            byte[] flags = new byte[STATES.length];
+            for (int i = 0; i < STATES.length; i++) {
+                BlockState st = state(STATES[i]);
+                if (st != null) {
+                    flags[i] = (byte) ((st.isAir() ? 1 : 0) | (st.blocksMotion() ? 2 : 0));
+                }
+            }
+            ChunkGenNative.decoSetFlags(ctx, flags);
+        } catch (Throwable t) {
+            LOG.warning("deco: state-flags handshake failed (WG hm update-on-write off): " + t);
+        }
+    }
 
     private void runChunk(long ctx, int cx, int cz, LimitedRegion limited) {
+        if (!FLAGS_SENT) {
+            FLAGS_SENT = true;
+            sendStateFlags(ctx);
+        }
         final boolean first = !FIRST_LOGGED;
         FIRST_LOGGED = true;
         int ox = cx << 4;
@@ -283,6 +308,7 @@ public final class DecoDriver extends BlockPopulator {
                 ChunkGenNative.decoDelegateMark(ctx);
                 DecoStats.DELEGATE_TOTAL.addAndGet(System.nanoTime() - td0);
                 DecoStats.DELEGATE_COUNT.incrementAndGet();
+                DecoStats.DELEGATE_NAMES.merge(PLAN[step][gid], 1L, Long::sum);
                 continue;
             }
             if (first && (n < 0 || k == 0)) {
@@ -433,8 +459,13 @@ public final class DecoDriver extends BlockPopulator {
                     } catch (Throwable ignored) {
                         // diagnostics only
                     }
-                    for (StructureStart ss : sm.startsForStructure(sp, structure)) {
+                    long ts0 = System.nanoTime();
+                    java.util.List<StructureStart> starts = sm.startsForStructure(sp, structure);
+                    DecoStats.STRUCT_STARTS_NS.addAndGet(System.nanoTime() - ts0);
+                    for (StructureStart ss : starts) {
+                        long tp0 = System.nanoTime();
                         ss.placeInChunk(reg, sm, NMS_GEN, srng, writable, new ChunkPos(cx, cz));
+                        DecoStats.STRUCT_PLACE_NS.addAndGet(System.nanoTime() - tp0);
                     }
                     i1++;
                 }

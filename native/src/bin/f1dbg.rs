@@ -223,6 +223,16 @@ fn main() {
                     crussty_chunkgen::features_json::FeatureCfg::VegetationPatch(_) => "VegPatch".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::RandomPatch { tries, inner, .. } => format!("RandomPatch(tries={tries} -> {inner})"),
                     crussty_chunkgen::features_json::FeatureCfg::Disk { target: _, radius: _, .. } => "Disk".to_string(),
+                    crussty_chunkgen::features_json::FeatureCfg::NetherrackReplaceBlobs { .. } => "ReplaceBlobs".to_string(),
+                    crussty_chunkgen::features_json::FeatureCfg::Seagrass { .. } => "Seagrass".to_string(),
+                    crussty_chunkgen::features_json::FeatureCfg::Spring { .. } => "Spring".to_string(),
+                    crussty_chunkgen::features_json::FeatureCfg::BlockPile { .. } => "BlockPile".to_string(),
+                    crussty_chunkgen::features_json::FeatureCfg::Kelp => "Kelp".to_string(),
+                    crussty_chunkgen::features_json::FeatureCfg::MonsterRoom => "MonsterRoom".to_string(),
+                    crussty_chunkgen::features_json::FeatureCfg::UnderwaterMagma { .. } => "UnderwaterMagma".to_string(),
+                    crussty_chunkgen::features_json::FeatureCfg::Vines => "Vines".to_string(),
+                    crussty_chunkgen::features_json::FeatureCfg::BlockColumn { layers, .. } => format!("BlockColumn({})", layers.len()),
+                    crussty_chunkgen::features_json::FeatureCfg::RootSystem { .. } => "RootSystem".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::Unsupported(e) => format!("Unsupported({e})"),
                 };
                 println!("  cfg {n}: {k}");

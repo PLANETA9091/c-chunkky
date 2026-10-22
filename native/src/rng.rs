@@ -4,11 +4,15 @@
 #[derive(Clone)]
 pub struct LegacyRandom {
     seed: u64, // 48 bits used
+    /// java.util.Random.nextGaussian polar-method state (used by
+    /// clamped_normal placement providers on the worldgen rng stream)
+    have_next_gaussian: bool,
+    next_next_gaussian: f64,
 }
 
 impl LegacyRandom {
     pub fn new(seed: i64) -> Self {
-        let mut r = LegacyRandom { seed: 0 };
+        let mut r = LegacyRandom { seed: 0, have_next_gaussian: false, next_next_gaussian: 0.0 };
         r.set_seed(seed);
         r
     }
@@ -71,6 +75,26 @@ impl LegacyRandom {
         let hi = self.next(26) as u64;
         let lo = self.next(27) as u64;
         ((hi << 27) | lo) as f64 * (1.0 / ((1i64 << 53) as f64))
+    }
+
+    /// java.util.Random.nextGaussian (stateful polar method — the cached
+    /// next-next value persists across draws on the same rng instance).
+    pub fn next_gaussian(&mut self) -> f64 {
+        if self.have_next_gaussian {
+            self.have_next_gaussian = false;
+            return self.next_next_gaussian;
+        }
+        loop {
+            let v1 = 2.0 * self.next_f64() - 1.0;
+            let v2 = 2.0 * self.next_f64() - 1.0;
+            let s = v1 * v1 + v2 * v2;
+            if s < 1.0 && s != 0.0 {
+                let mul = (-2.0 * s.ln() / s).sqrt();
+                self.next_next_gaussian = v2 * mul;
+                self.have_next_gaussian = true;
+                return v1 * mul;
+            }
+        }
     }
 
     pub fn fork_positional(&mut self) -> LegacyPositionalRandomFactory {

@@ -162,8 +162,14 @@ public final class ChunkGenNative {
     public static native void decoOpsDropped(long ctx, int[] coords, int count);
 
     /** decoDelegateMark(ctx) — a vanilla delegate feature ran and wrote via
-     *  the region directly; bumps the snapshot epoch (stale sections reload). */
+     *  the region directly; bumps the snapshot epoch (stale sections reload)
+     *  AND drops the cached WG heightmaps (the region maps moved — re-handshake). */
     public static native void decoDelegateMark(long ctx);
+
+    /** decoSetFlags(ctx, flags) — one byte per decoStates entry
+     *  (bit0=isAir, bit1=blocksMotion). Feeds the native WG heightmap
+     *  update-on-write (vanilla Heightmap.update bookkeeping on buffered ops). */
+    public static native void decoSetFlags(long ctx, byte[] flags);
 
     /** decoBiomeFeaturesFull(ctx, biomeNames, joinedRefs) — the FULL pack
      *  biome -> placed-refs union (BiomeFilter native path). joinedRefs[i]

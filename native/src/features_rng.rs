@@ -96,6 +96,20 @@ impl WorldgenRandom {
         f as f64
     }
 
+    /// RandomSource.nextGaussian DEFAULT (stateless polar) — XoroshiroRandomSource
+    /// does not override it; Terralith random_offset(clamped_normal) hits this
+    /// on the decoration stream (granite_roots/diorite_clearing pillars).
+    pub fn next_gaussian(&mut self) -> f64 {
+        loop {
+            let d = 2.0 * self.next_f64() - 1.0;
+            let d1 = 2.0 * self.next_f64() - 1.0;
+            let d2 = d * d + d1 * d1;
+            if d2 < 1.0 && d2 != 0.0 {
+                return d * (-2.0 * d2.ln() / d2).sqrt();
+            }
+        }
+    }
+
     /// XoroshiroRandomSource.nextGaussian is not used by any dptt top feature; guarded accessor.
     pub fn count(&self) -> u32 {
         self.count

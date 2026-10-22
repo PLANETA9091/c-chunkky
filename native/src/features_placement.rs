@@ -24,11 +24,23 @@ impl BlockPos {
     }
 }
 
-/// IntProvider subset (ConstantInt, UniformInt). ConstantInt consumes NO RNG.
+/// IntProvider subset (ConstantInt, UniformInt, WeightedListInt, ClampedInt).
+/// ConstantInt consumes NO RNG. Weighted/clamped entries are leaked into
+/// &'static — the feature registry is built once per process anyway.
 #[derive(Clone, Copy, Debug)]
 pub enum IntProvider {
     Constant(i32),
     Uniform { lo: i32, hi: i32 }, // inclusive bounds
+    /// BiasedToBottomInt: min + nextInt(nextInt(range+1) + 1) (nested draw)
+    BiasedToBottom { lo: i32, hi: i32 },
+    /// WeightedListInt: nextInt(totalWeight) + linear walk -> inner provider
+    /// sample (the JSON "data" is itself a provider, not a constant).
+    WeightedList { entries: &'static [(&'static IntProvider, u32)] },
+    /// ClampedInt: ALWAYS draws through the inner provider, then clamps
+    Clamped { inner: &'static IntProvider, lo: i32, hi: i32 },
+    /// ClampedNormalInt: (int) clamp(mean + deviation * nextGaussian, lo, hi)
+    /// — f32 mean/deviation, f64 gaussian; Mth.clamp on f32.
+    ClampedNormal { mean: f32, deviation: f32, lo: i32, hi: i32 },
 }
 
 impl IntProvider {
@@ -40,6 +52,28 @@ impl IntProvider {
         match *self {
             IntProvider::Constant(v) => v,
             IntProvider::Uniform { lo, hi } => rng.next_int_bound((hi - lo + 1).max(1)) + lo,
+            IntProvider::BiasedToBottom { lo, hi } => {
+                let range = (hi - lo + 1).max(1);
+                let inner = rng.next_int_bound(range) + 1;
+                lo + rng.next_int_bound(inner)
+            }
+            IntProvider::WeightedList { entries } => {
+                let total: u32 = entries.iter().map(|(_, w)| *w).sum();
+                let mut roll = rng.next_int_bound(total.max(1) as i32) as u32;
+                for (v, w) in entries {
+                    if roll < *w {
+                        return v.sample(rng);
+                    }
+                    roll -= *w;
+                }
+                entries.last().map(|(v, _)| v.sample(rng)).unwrap_or(0)
+            }
+            IntProvider::Clamped { inner, lo, hi } => inner.sample(rng).clamp(lo, hi),
+            IntProvider::ClampedNormal { mean, deviation, lo, hi } => {
+                let g = rng.next_gaussian();
+                let v = (mean as f64 + deviation as f64 * g) as f32;
+                v.clamp(lo as f32, hi as f32) as i32
+            }
         }
     }
 }

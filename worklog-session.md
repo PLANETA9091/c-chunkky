@@ -1813,3 +1813,48 @@ Stage Summary:
 - Все 5 пунктов аудита подтверждены/уточнены с фактами; запись исправлена (README + этот раздел).
 - CI-эксперимент с локальным .so в полёте (run 39651246897) — вердикт следующей сессии.
 - dptt: p50 2920us стартовая точка, цель 1мс; главные массы: delegate-деревья (26/чанк), other-upcalls (57.5/чанк), struct 0.97ms, reload-каскад снапшота после каждого delegate (123 секции/чанк).
+
+---
+Task ID: cont-57 (2026-10-23, BATCH-1+2 dptt delegate killers: census 26 -> 9/chunk)
+Agent: Super Z (main)
+Task: продолжить dptt→1ms трек (прерванная сессия): batch-1 WIP верифицировать, batch-2 реализовать по census.
+
+Work Log:
+- Рекогносцировка: проект в /home/z/my-project/c-faster (не /workspace); WIP batch-1 в дереве
+  (NetherrackReplaceBlobs/Seagrass/Spring/BlockPile/Kelp/MonsterRoom/UnderwaterMagma + weighted_list/clamped IP).
+- f1 A/B после batch-1: 4/3,539,444 = 0.000%, HEIGHTMAP 0/9216 (batch-1 паритетен).
+- Оружие декомпиляции: /tmp/my-project/scripts/javap (jdk.jdeps wrapper); семантика снята из
+  paper-1.21.8.jar: SnowAndFreeze, Vines(VineBlock.canAttachTo=isFaceFull(supportShape,opp) — на
+  full-cube == isFaceSturdy), BlockColumn (truncate: tip=true режет слой 0 первым), RootSystem
+  (climb+spaceForTree+lava-abort+disks+hangRoots), MultifaceGrowth, Geode (полный разбор: слои
+  d18/d20/d22/d24=1/sqrt(...), crack AIR + scheduleTick fluid — РЕШЕНИЕ: geode нативен только при
+  generate_crack_chance=0, amethyst остаётся делегатом), flower == RandomPatchFeature (Feature.java:
+  FLOWER = new RandomPatchFeature — тот же класс/кодек), Biome.getTemperature (высотная поправка
+  TEMPERATURE_NOISE(1234)/FROZEN(3456)/BIOME_INFO(2345) PerlinSimplexNoise[0] — SimplexNoise НЕ
+  реализован; freeze_top_layer отложен: нужна температура биома на позиции, в deco нет per-pos биома).
+- BATCH-2 РЕАЛИЗОВАН: flower (alias random_patch), vines (place_vines, 5 граней, sturdy через
+  has_sturdy_face), block_column (probe+truncate+prioritizeTip), root_system (climb/space/dirt/hanging),
+  StateSrc::RandomizedInt (+state_set_prop), IP::BiasedToBottom (ВЛОЖЕННЫЙ: min+nextInt(nextInt(r+1)+1)),
+  IP::WeightedList переработан (data = ВЛОЖЕННЫЙ провайдер, не константа!), IP::ClampedNormal +
+  WorldgenRandom::next_gaussian (stateless polar Xoroshiro-default; LegacyRandom получил stateful
+  версию — не используется деком, оставлен), randcensus зеркалит новые армы.
+- ГЛАВНЫЙ БАГ ЦЕНЗА: terralith pillars (granite_pillar_small/large) = random_offset с
+  minecraft:clamped_normal xz_spread → Mod::Unsupported → decode_inline_placed drop → placed-missing
+  → granite_roots/diorite_clearing делегировались. census-дебаг пошагово нашёл mod[7/8].
+- Верификация: 53/53 тестов; f1 A/B 0.000% (4/3,539,444) после batch-2; dptt профиль (dpttb4):
+  delegate 8416 -> 2831 (26 -> 9/чанк), deleg 1.61 -> 0.73ms, p50 2626 -> 2465us, snap-sec 123 -> 74/чанк.
+- НО: other-upcalls 57.5 -> 107/чанк, run 1.75 -> 2.58ms — нативные pillar-сканы (count 74..200 ×
+  env_scan 32+32 шага) и root-диски теперь в нативном CPU + снапшот-промахи. Чистый win ~-160us p50,
+  структура лучше (меньше JNI-переходов и инвалидаций), но следующий фронт — оптимизация самих сканов.
+- Остаток census (9/чанк): monster_room×2 (BE-seeds, осознанно), lake×2 (fluid re-tick — паритет
+  непереносим нативно), andesite_boulders+amethyst_geode (geode: boulders возможен при crack=0 —
+  реализация geode готова на бумаге, нужен world_seed для NormalNoise(seed,-4,[1.0]) через
+  LegacyRandom fork_positional + from_hash_of(String.hashCode) — from_hash_of в LegacyFactory НЕТ),
+  glow_lichen (multiface spread), freeze_top_layer (нужен биом-климат), trees_plains (F6-трек).
+
+Stage Summary:
+- Census делегатов dptt: 26 -> 9/чанк (batch-1 + batch-2 + clamped_normal фикс). Паритет f1 0.000%.
+- p50 deco 2626 -> 2465us; следующая цель — нативная оптимизация pillar-сканов (run 2.58ms) +
+  geode(crack=0) для boulders; amethyst/lake/freeze/glow_lichen остаются делегатами по паритет-риску.
+- Инструмент: native/target/release/delegcensus <vanilla_root> <pack_roots...> — зеркалит гейт,
+  пошаговый mod-дебаг встроен.

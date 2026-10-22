@@ -1,0 +1,81 @@
+=== [B] native deco run ===
+[f1] datapacks wired:
+crussty-f1
+--- deployed.md5 ---
+# deployed.md5 2026-10-22T16:57:39Z (plugin_bench)
+052b8c9b5415f660127ef31fa1382b8e  server/paper.jar
+14d5edaa7316cd2cbc3cf74d41d08f84  server/plugins/CrusstyGen.jar
+f9d9507e1e6aaa1f321cefb125ed3b4e  native/target/release/libcrussty_chunkgen.so
+server/bukkit.yml written:
+worlds:
+  f1probe:
+    generator: CrusstyGen
+
+level-name=f1probe
+level-seed=3257840388504953787
+datapacks wired from DATAPACKS_DIR=/home/z/my-project/c-faster/probe/datapacks/f1:
+crussty-f1
+gen-parallelism=false (judge serial semantics):
+chunk-system:
+  gen-parallelism: 'false'
+  io-threads: -1
+  worker-threads: -1
+--- deployed.md5 ---
+# deployed.md5 2026-10-22T16:57:42Z
+052b8c9b5415f660127ef31fa1382b8e  paper.jar
+14d5edaa7316cd2cbc3cf74d41d08f84  plugins/CrusstyGen.jar
+c4cc87941008ed52e2c2d1fdc2676c72  plugins/CrusstyProbe.jar
+paper started pid=3487 fifo_holder=3485
+>   [16:58:07 INFO]: Done (23.987s)! For help, type "help"
+SERVER UP
+=== server pid check: crusstatus must report srvpid=3487 ===
+f1probe: loaded=49 region[98..109,98..109]=0/64 forced=0 f(0,-4)=false f(0,0)=false l(0,-4)=false srvpid=3487
+f1probe_the_end: loaded=49 region[98..109,98..109]=0/64 forced=0 f(0,-4)=false f(0,0)=false l(0,-4)=false srvpid=3487
+
+gamerule randomTickSpeed=0 (judge freeze of random ticks)
+=== pregen wall: 64934ms (sequential forceload, incl. poll granularity) ===
+=== crusgenstats ===
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=377  mean=11404.8us  min=1947.4us  p50=8624.3us  p99=43658.3us  max=213028.3us  [native=10.15ms nat_p50=8.19ms layout=0.53ms beard=0.05ms marks=0.14ms]  [lay setup=0.02 sec=0.47 hmap=0.01 verify=0.02 | uni=0.00/0.3 lin=0.00/0.0 glob=0.00/9.6 pb=0.00/0.00]  [sections filled=0 mixed=3616 air=5432 v1fallback=0 bulk=ok]  swapfail=null  marks_seen=28457 marks_landed=28457 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] native deco stage: native deco stage: chunks=196  mean=1593.7us  min=612.8us  p50=1000.1us  p99=23639.7us  max=39379.7us  [plan=0.12ms struct=0.05ms run=1.16ms apply=0.17ms deleg=0.00ms]  ops=32965 features=3528 delegate=0  upcalls=1225 (h=0 stateis=0 fluidis=0 isair=0 survive=0 other=1225) snap-sec=6034/77.18ms blocks=0 snap-hm=1288 planbio=19.96ms | [struct-split] starts=0.00ms place=0.00ms | [CrusstyGen] jni_prof[fills=377 wall=7.70ms slice=0.00 cellfill=0.42 material=2.37 select=0.05 par_planes=2.29 par_strips=3.00]
+
+64
+SERVER DOWN (rcon stop)
+=== parity: plugin world vs /home/z/my-project/c-faster/reference/dumps/f1probe_vanilla ===
+only in /home/z/my-project/c-faster/reference/dumps_plugin/f1probe: ['chunk_100_98.crsf', 'chunk_100_99.crsf', 'chunk_101_98.crsf', 'chunk_101_99.crsf', 'chunk_102_98.crsf']... (28)
+  chunk_100_100.crsf: diff 0/98304 = 0.00%
+  chunk_100_101.crsf: diff 0/98304 = 0.00%
+  chunk_100_102.crsf: diff 0/98304 = 0.00%
+  chunk_100_103.crsf: diff 0/98304 = 0.00%
+  chunk_100_104.crsf: diff 0/98304 = 0.00%
+  chunk_100_105.crsf: diff 1/98304 = 0.00%
+  chunk_101_100.crsf: diff 1/98304 = 0.00%
+  chunk_101_101.crsf: diff 0/98304 = 0.00%
+  chunk_101_102.crsf: diff 0/98304 = 0.00%
+  chunk_101_103.crsf: diff 0/98304 = 0.00%
+  chunk_101_104.crsf: diff 1/98304 = 0.00%
+  chunk_101_105.crsf: diff 0/98304 = 0.00%
+  chunk_102_100.crsf: diff 0/98304 = 0.00%
+  chunk_102_101.crsf: diff 0/98304 = 0.00%
+  chunk_102_102.crsf: diff 0/98304 = 0.00%
+  chunk_102_103.crsf: diff 0/98304 = 0.00%
+  chunk_102_104.crsf: diff 0/98304 = 0.00%
+  chunk_102_105.crsf: diff 0/98304 = 0.00%
+  chunk_103_100.crsf: diff 0/98304 = 0.00%
+  chunk_103_101.crsf: diff 0/98304 = 0.00%
+  chunk_103_102.crsf: diff 0/98304 = 0.00%
+  chunk_103_103.crsf: diff 0/98304 = 0.00%
+  chunk_103_104.crsf: diff 0/98304 = 0.00%
+  chunk_103_105.crsf: diff 0/98304 = 0.00%
+  chunk_104_100.crsf: diff 0/98304 = 0.00%
+  chunk_104_101.crsf: diff 0/98304 = 0.00%
+  chunk_104_102.crsf: diff 0/98304 = 0.00%
+  chunk_104_103.crsf: diff 0/98304 = 0.00%
+  chunk_104_104.crsf: diff 1/98304 = 0.00%
+  chunk_104_105.crsf: diff 0/98304 = 0.00%
+  chunk_105_100.crsf: diff 0/98304 = 0.00%
+  chunk_105_101.crsf: diff 0/98304 = 0.00%
+  chunk_105_102.crsf: diff 0/98304 = 0.00%
+  chunk_105_103.crsf: diff 0/98304 = 0.00%
+  chunk_105_104.crsf: diff 0/98304 = 0.00%
+  chunk_105_105.crsf: diff 0/98304 = 0.00%
+OVERALL: 4/3538944 blocks differ = 0.000% across 36 chunks
+HEIGHTMAP: 0/9216 columns changed; mean |dh| = 0.00
