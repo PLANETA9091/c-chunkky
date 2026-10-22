@@ -1858,3 +1858,59 @@ Stage Summary:
   geode(crack=0) для boulders; amethyst/lake/freeze/glow_lichen остаются делегатами по паритет-риску.
 - Инструмент: native/target/release/delegcensus <vanilla_root> <pack_roots...> — зеркалит гейт,
   пошаговый mod-дебаг встроен.
+
+---
+Task ID: cont-58 (2026-10-23, WATER-MATCHING PARITY FIX + fused snapshot queries + native multiface_growth)
+Agent: Super Z (main)
+Task: «БОЛЬШЕ И ЛУЧШЕ» — продолжение dptt→1ms трека: перф pillar-сканов, паритет, следующий delegate-killer.
+
+Work Log:
+- Рекогносцировка: проект /home/z/my-project/c-faster; состояние cont-57 (5fc3360 не был запушен).
+  dpttb4-база: deco p50 2464.7us, run=2.58ms, deleg=0.73ms, upcalls other=107/чанк, census 9/чанк.
+- ПАРИТЕТ-ФИКС (главная находка): bare-id'ы в matching_blocks/matching_fluids/block_match
+  ("water", "air" без namespace) НЕ резолвились в minecraft:* — vanilla ResourceLocation.parse
+  матчит их в minecraft-namespace. Snapshot/bridge block-ключи = полные registry-ключи
+  ("minecraft:water"), поэтому "water" НИКОГДА не матчился: terralith pillar-фильтры
+  ([air, water] x4 офсета на y-4) молча отбрасывали водные хиты — pillar'ы ставились там,
+  где ваниль их запрещает. normalize_block_id() на decode (matching_blocks/fluids,
+  block_match, random_block_match, replace_single_block); тест bare_ids_normalize_to_minecraft
+  (54/54). dptt judge residual 0.066% -> 0.041% (HEIGHTMAP 0/16384, judge dptt_cont58);
+  ГЕЙТ dptt ужат 0.10 -> 0.05 (закрыт долг cont-55 по ослаблению гейта).
+- ПЕРФ (бит-точность, f1 4/3,539,444=0.000%, HEIGHTMAP 0/9216, ops-идентичность):
+  (1) is_outside_build_height: JNI-апколл -> арифметика y<min_y||y>=max_y (min_y/max_y = те же
+  reg.getMinY/getMaxY, что в DecoDriver.outsideBuildHeight; Java-мост сверен). Каждый шаг
+  env_scan (pillar: 32+32 шага x ~1300 размещений) жёг апколл зря.
+  (2) ChunkLevel.with_snap: fused decode — slot+epoch+borrow РАЗ на запрос (было ensure()+fresh()
+  = двойной slot-расчёт), flag-запросы без name-fetch (flag() декодировал имя палитры впустую),
+  is_replaceable/is_solid/state_is/fluid_is получили is_empty-гард оверлея (is_air имел с cont-54).
+  (3) col_flags_at: один decode на air+motion (было два полных block()).
+- DELEGATE KILLER batch-3: minecraft:multiface_growth (glow lichen) НАТИВ. Байткод paper-1.21.8:
+  MultifaceGrowthFeature.place (isAirOrWater гейт; validDirections=[UP если ceiling, DOWN если
+  floor, N,S,W,E если wall]; Util.shuffle = Fisher-Yates for i=size..2: swap(i-1,nextInt(i));
+  getShuffledDirectionsExcept фильтрует КОНФИГ-порядок (не внешний шаффл!), затем шаффл хвоста;
+  i-цикл searchRange СХЛОПЫВАЕТСЯ в одну пробу: на фейле нет ни записей, ни RNG, на успехе —
+  return; break во внутреннем цикле = continue внешнего). placeGrowthIfPossible: первый
+  canBePlacedOn-сосед; newState = lichen-пропсы источника | waterlogged в source-воде | default;
+  nextFloat<chance → spread. Spread: Direction.allShuffled (FY по [D,U,N,S,W,E]), ось-гейт,
+  hasFace(state,D), первый из [SAME_POSITION(pos,d), SAME_PLANE(pos+d,face),
+  WRAP_AROUND(pos+d+face,d^1)] через canSpreadInto = stateCanBeReplaced(air|lichen|source-water)
+  && !(lichen&&hasFace(cur,face)) && canAttachTo(=has_sturdy_face — corner: glass-класс).
+  can_be_placed_on тег-сеты -> Unsupported (delegate-safe: terralith fungal/lichen_patch остался).
+  Snapshot-lichen пропсы через JVM state_full (редко: только margin-записи соседей).
+- Замеры: dpttb6: deco p50 1769.3us (-28% от 2464.7), mean 3528, min 1355, run 2.16, deleg
+  0.74->0.25ms, snap-sec 24061->20455/окно (glow_lichen больше не бампает эпоху), ops 10703->11026
+  (водный фикс меняет вывод). deleg-names: glow_lichen исчез; census 9 -> 8/чанк
+  (monster_room x2, lake x2, andesite_boulders, freeze_top_layer, amethyst_geode, trees_plains).
+- f1 probe: 4/3,539,444 = 0.000%, HEIGHTMAP 0/9216 — после КАЖДОГО из трёх шагов.
+- Промежуточный dpttb5 (до multiface): p50 2033.9, run 1.99 — снапшот-фьюжн дал ~-430us.
+
+Stage Summary:
+- Коммит b8ab1cb запушен (+5fc3360 cont-57). Тесты 54/54. CI в полёте.
+- Трек dptt→1ms: p50 2465 -> 1769us за сессию; остаток: run 2.16ms (pillar/root сканы в нативном
+  CPU), struct 0.86ms (starts+place=74.4ms/324=230us — расхождение ~0.6мс/чанк НЕ покрыто
+  таймерами: gate+forWorldGenRegion+setCurrentlyGenerating — инструментировать в след. сессии),
+  planbio 0.16, other-upcalls 106/чанк.
+- Next: (a) CI-вердикт b8ab1cb (dptt гейт 0.05 — следить); (b) struct-misc инструментация +
+  EnvScan колонка-фастпат (ov-индекс по колонке?) к run 2.16; (c) geode(crack=0) для
+  andesite_boulders (нужен LegacyRandom from_hash_of(String.hashCode) + NormalNoise(seed,-4));
+  (d) freeze_top_layer ждёт SimplexNoise + биом-климат.
