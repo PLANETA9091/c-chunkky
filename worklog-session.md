@@ -1914,3 +1914,26 @@ Stage Summary:
   EnvScan колонка-фастпат (ov-индекс по колонке?) к run 2.16; (c) geode(crack=0) для
   andesite_boulders (нужен LegacyRandom from_hash_of(String.hashCode) + NormalNoise(seed,-4));
   (d) freeze_top_layer ждёт SimplexNoise + биом-климат.
+
+---
+Task ID: cont-58b (2026-10-23, struct-фаза: таймеры + решённый остаток)
+Agent: Super Z (main)
+Task: инструментировать необъяснённый разрыв STRUCT_TOTAL (~700us/чанк vs 230us starts+place).
+
+Work Log:
+- Таймеры: STRUCT_GATE (3x3 refs), STRUCT_SETUP (sm build), STRUCT_LOOP (тело цикла),
+  STRUCT_FUNC (стена runStructures целиком), STRUCT_ITER/START_CALLS.
+- dpttb7: gate+setup+loop = 55.13ms при STRUCT_TOTAL 273ms (314 чанков). dpttb8 (func):
+  func=382.27ms == STRUCT_TOTAL 1.18ms×324 ✓ — остаток ВНУТРИ func, вне внутренних таймеров.
+- ПРИЧИНА: ~12 margin-чанков/окно бросают ReportedException «Exception generating new chunk»
+  из startsForStructure/placeInChunk — при throw внутренние addAndGet пропускаются, func ловит
+  всю стену (~20ms/чанк — глубокие exception-цепи). 22 фейла в логе (warmup + маргины 28..46).
+- ВЫВОД: struct-«масса» ~наполовину фантомна: реальная цена = starts+place ~350us/чанк
+  (placeInChunk ванильных структур), mean/p99 DecoStats загрязнены фейлящими маргиналами,
+  p50 центра 12x12 их не видит. Никакого скрытого 0.6мс в setCurrentlyGenerating/init НЕТ.
+
+Stage Summary:
+- Коммит 316936f. dpttb8: deco p50 1739.8us (стабильно с dpttb6 1769 / dpttb7 1715 — шум ±3%).
+- Следующие фронты: (a) EnvScan колонка-фастпат / ov-колонка-индекс к run 2.0-2.16ms;
+  (b) место placeInChunk 108ms/окно — vanilla structure placement, вне нашего контроля кроме
+  как гейтить лучше; (c) margin-фейлы — отдельный паритет-трек (vanilla ли тоже фейлит их?).
