@@ -402,13 +402,11 @@ impl<'a> ChunkLevel<'a> {
         if let Some(st) = self.ov.borrow().get(&(x, y, z)) {
             return (self.st_flags)(st);
         }
-        let air = self.snap.borrow().flag(x, y, z, flags::IS_AIR)?;
-        let motion = self
-            .snap
-            .borrow()
-            .flag(x, y, z, flags::BLOCKS_MOTION)
-            .unwrap_or(false);
-        Some((air as u8) | ((motion as u8) << 1))
+        // one fused decode serves both flags (was: two full block() lookups)
+        self.with_snap(x, y, z, |sec, v| {
+            let f = sec.pal.get(v)?.1;
+            Some((f & flags::IS_AIR != 0) as u8 | (((f & flags::BLOCKS_MOTION != 0) as u8) << 1))
+        })
     }
 
     /// vanilla Heightmap.update (1.21.8 decompile) on BOTH WG maps for a
@@ -591,6 +589,62 @@ impl<'a> ChunkLevel<'a> {
             }
         }
     }
+
+    /// FUSED snapshot cell decode: resolve the section ONCE (slot + epoch +
+    /// borrow) and decode the raw cell for the closure. The old path
+    /// (ensure() + snap.borrow().block()) computed the slot twice and the
+    /// pillar/env_scan mass ran it per scan step. None = not snapshotted
+    /// (caller falls back to the bridge — identical observable semantics).
+    #[inline]
+    fn with_snap<T>(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        f: impl Fn(&SnapSection, usize) -> Option<T>,
+    ) -> Option<T> {
+        if self.no_snap {
+            return None;
+        }
+        let sec_y = y >> 4;
+        let cx = x >> 4;
+        let cz = z >> 4;
+        {
+            let s = self.snap.borrow();
+            if let Some(slot) = s.slot(cx, cz, sec_y) {
+                if let Some(sec) = s.secs[slot].as_ref() {
+                    if sec.epoch == s.epoch.get() {
+                        let idx = ((y & 15) as usize) << 8
+                            | ((z & 15) as usize) << 4
+                            | (x & 15) as usize;
+                        let v = unpack(&sec.bits, &sec.raw, idx)? as usize;
+                        return f(sec, v);
+                    }
+                }
+            }
+        }
+        // slow path: section missing/stale — load, then decode
+        self.ensure(x, y, z);
+        let s = self.snap.borrow();
+        let slot = s.slot(cx, cz, sec_y)?;
+        let sec = s.secs.get(slot)?.as_ref()?;
+        if sec.epoch != s.epoch.get() {
+            return None;
+        }
+        let idx =
+            ((y & 15) as usize) << 8 | ((z & 15) as usize) << 4 | (x & 15) as usize;
+        let v = unpack(&sec.bits, &sec.raw, idx)? as usize;
+        f(sec, v)
+    }
+
+    /// flag-only cell query (no name fetch — the old flag() decoded the
+    /// palette name it never used)
+    #[inline]
+    fn snap_flag(&self, x: i32, y: i32, z: i32, mask: u16) -> Option<bool> {
+        self.with_snap(x, y, z, |sec, v| {
+            Some(sec.pal.get(v)?.1 & mask != 0)
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -743,54 +797,61 @@ impl DecoLevel for ChunkLevel<'_> {
             }
         }
         drop(ov);
-        self.ensure(pos.x, pos.y, pos.z);
-        if let Some(b) = self.snap.borrow().flag(pos.x, pos.y, pos.z, flags::IS_AIR) {
-            return b;
-        }
-        self.inner.is_air(pos)
+        self.snap_flag(pos.x, pos.y, pos.z, flags::IS_AIR)
+            .unwrap_or_else(|| self.inner.is_air(pos))
     }
     fn is_replaceable(&self, pos: BlockPos) -> bool {
-        if let Some(st) = self.ov.borrow().get(&(pos.x, pos.y, pos.z)) {
-            // VERBATIM OverlayLevel semantics (F2 goldens pinned them — the
-            // bare-name list is intentionally kept as-is, incl. dead branches:
-            // overlay strings carry the "minecraft:" prefix).
-            let name = crate::features_deco::state_block_name(st);
-            return matches!(
-                name,
-                "poppy"
-                    | "oxeye_daisy"
-                    | "cornflower"
-                    | "lily_of_the_valley"
-                    | "dandelion"
-                    | "allium"
-                    | "azure_bluet"
-                    | "short_grass"
-                    | "fern"
-            );
+        // empty-overlay guard: the pillar env_scan mass queries REPLACEABLE
+        // up to 64 steps per placement — the SipHash overlay probe is waste
+        // while the chunk overlay is empty
+        let ov = self.ov.borrow();
+        if !ov.is_empty() {
+            if let Some(st) = ov.get(&(pos.x, pos.y, pos.z)) {
+                // VERBATIM OverlayLevel semantics (F2 goldens pinned them — the
+                // bare-name list is intentionally kept as-is, incl. dead branches:
+                // overlay strings carry the "minecraft:" prefix).
+                let name = crate::features_deco::state_block_name(st);
+                return matches!(
+                    name,
+                    "poppy"
+                        | "oxeye_daisy"
+                        | "cornflower"
+                        | "lily_of_the_valley"
+                        | "dandelion"
+                        | "allium"
+                        | "azure_bluet"
+                        | "short_grass"
+                        | "fern"
+                );
+            }
         }
-        self.ensure(pos.x, pos.y, pos.z);
-        if let Some(b) = self.snap.borrow().flag(pos.x, pos.y, pos.z, flags::REPLACEABLE) {
-            return b;
-        }
-        self.inner.is_replaceable(pos)
+        drop(ov);
+        self.snap_flag(pos.x, pos.y, pos.z, flags::REPLACEABLE)
+            .unwrap_or_else(|| self.inner.is_replaceable(pos))
     }
     fn is_solid(&self, pos: BlockPos) -> bool {
-        if let Some(st) = self.ov.borrow().get(&(pos.x, pos.y, pos.z)) {
-            let name = crate::features_deco::state_block_name(st);
-            return self.inner.name_is_solid(name);
+        let ov = self.ov.borrow();
+        if !ov.is_empty() {
+            if let Some(st) = ov.get(&(pos.x, pos.y, pos.z)) {
+                let name = crate::features_deco::state_block_name(st);
+                return self.inner.name_is_solid(name);
+            }
         }
-        self.ensure(pos.x, pos.y, pos.z);
-        if let Some(b) = self.snap.borrow().flag(pos.x, pos.y, pos.z, flags::SOLID) {
-            return b;
-        }
-        self.inner.is_solid(pos)
+        drop(ov);
+        self.snap_flag(pos.x, pos.y, pos.z, flags::SOLID)
+            .unwrap_or_else(|| self.inner.is_solid(pos))
     }
     fn has_sturdy_face(&self, pos: BlockPos, dir: u8) -> bool {
-        self.ensure(pos.x, pos.y, pos.z);
-        if let Some(b) = self.snap.borrow().sturdy(pos.x, pos.y, pos.z, dir) {
-            return b;
-        }
-        self.inner.has_sturdy_face(pos, dir)
+        let bit = match dir {
+            0 => flags::STURDY_DOWN,
+            1 => flags::STURDY_UP,
+            2 => flags::STURDY_N,
+            3 => flags::STURDY_S,
+            4 => flags::STURDY_W,
+            _ => flags::STURDY_E,
+        };
+        self.snap_flag(pos.x, pos.y, pos.z, bit)
+            .unwrap_or_else(|| self.inner.has_sturdy_face(pos, dir))
     }
     fn is_outside_build_height(&self, y: i32) -> bool {
         self.inner.is_outside_build_height(y)
@@ -799,25 +860,41 @@ impl DecoLevel for ChunkLevel<'_> {
 
 impl DecoLevelExt for ChunkLevel<'_> {
     fn state_is(&self, pos: BlockPos, ids: &[String]) -> bool {
-        if let Some(st) = self.ov.borrow().get(&(pos.x, pos.y, pos.z)) {
-            let name = crate::features_deco::state_block_name(st);
-            return ids.iter().any(|i| i == name);
+        {
+            let ov = self.ov.borrow();
+            if !ov.is_empty() {
+                if let Some(st) = ov.get(&(pos.x, pos.y, pos.z)) {
+                    let name = crate::features_deco::state_block_name(st);
+                    return ids.iter().any(|i| i == name);
+                }
+            }
         }
-        self.ensure(pos.x, pos.y, pos.z);
-        if let Some(b) = self.snap.borrow().state_is(pos.x, pos.y, pos.z, ids) {
-            return b;
-        }
-        self.inner.state_is(pos, ids)
+        self.with_snap(pos.x, pos.y, pos.z, |sec, v| {
+            let (ni, _) = *sec.pal.get(v)?;
+            let name = sec.names.get(ni as usize)?;
+            Some(ids.iter().any(|i| i == name.as_ref()))
+        })
+        .unwrap_or_else(|| self.inner.state_is(pos, ids))
     }
     fn fluid_is(&self, pos: BlockPos, ids: &[String]) -> bool {
-        if self.ov.borrow().contains_key(&(pos.x, pos.y, pos.z)) {
-            return false; // feature writes are never fluids
+        {
+            let ov = self.ov.borrow();
+            if !ov.is_empty() && ov.contains_key(&(pos.x, pos.y, pos.z)) {
+                return false; // feature writes are never fluids
+            }
         }
-        self.ensure(pos.x, pos.y, pos.z);
-        if let Some(b) = self.snap.borrow().fluid_is(pos.x, pos.y, pos.z, ids) {
-            return b;
-        }
-        self.inner.fluid_is(pos, ids)
+        // flag-only decode (the old SnapRegion.fluid_is never used the name)
+        self.with_snap(pos.x, pos.y, pos.z, |sec, v| {
+            let f = sec.pal.get(v)?.1;
+            if f & flags::FLUID_WATER != 0 {
+                Some(ids.iter().any(|i| i == "minecraft:water"))
+            } else if f & flags::FLUID_LAVA != 0 {
+                Some(ids.iter().any(|i| i == "minecraft:lava"))
+            } else {
+                Some(false)
+            }
+        })
+        .unwrap_or_else(|| self.inner.fluid_is(pos, ids))
     }
     fn tag_is(&self, pos: BlockPos, tag: &str) -> bool {
         {

@@ -242,6 +242,7 @@ fn cfg_fully_supported(reg: &FeatureRegistry, cfg_name: &str, depth: u32) -> boo
         | FeatureCfg::BlockPile { .. }
         | FeatureCfg::Kelp
         | FeatureCfg::UnderwaterMagma { .. }
+        | FeatureCfg::MultifaceGrowth { .. }
         | FeatureCfg::Vines => true,
         FeatureCfg::BlockColumn { layers, allowed, .. } => {
             !matches!(allowed, BlockPredicate::Unsupported(_))
@@ -457,6 +458,10 @@ pub fn place_configured(
         }
         // --- batch-2 (dptt census round 2) ---------------------------------
         FeatureCfg::Vines => place_vines(ctx, pos, ops),
+        // --- batch-3 (cont-58): multiface growth (glow lichen) -------------
+        FeatureCfg::MultifaceGrowth { block, search_range, can_floor, can_ceiling, can_wall, chance, can_place_on } => {
+            place_multiface_growth(ctx, block, *search_range, *can_floor, *can_ceiling, *can_wall, *chance, can_place_on, rng, pos, ops)
+        }
         FeatureCfg::BlockColumn { direction, layers, prioritize_tip, allowed } => {
             place_block_column(ctx, *direction, layers, *prioritize_tip, allowed, rng, pos, ops)
         }
@@ -998,6 +1003,320 @@ fn place_vines(ctx: &PlaceCtx, pos: BlockPos, ops: &mut Vec<DecoOp>) -> bool {
                 kv.push(format!("{f}={}", if i == slot { "true" } else { "false" }));
             }
             ctx.emit(ops, pos, &format!("minecraft:vine[{}]", kv.join(",")), 0);
+            return true;
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
+// batch-3 (cont-58): MultifaceGrowthFeature (glow lichen family)
+// Bytecode-pinned vs paper-1.21.8.jar: MultifaceGrowthFeature + MultifaceBlock
+// + MultifaceSpreader (+ SpreadType/DefaultSpreaderConfig).
+// ---------------------------------------------------------------------------
+
+/// Util.shuffle(List, RandomSource): for i=size..2: swap(i-1, nextInt(i))
+fn shuffle_dirs(rng: &mut WorldgenRandom, dirs: &mut [u8]) {
+    let mut i = dirs.len() as i32;
+    while i > 1 {
+        let j = rng.next_int_bound(i) as usize;
+        dirs.swap((i - 1) as usize, j);
+        i -= 1;
+    }
+}
+
+/// state string with every multiface-family property, alphabetical order
+/// (matches the vine emit convention; the Java state() parser is order-free).
+const MF_PROPS: [&str; 6] = ["down", "east", "north", "south", "up", "west"];
+
+fn multiface_state(block: &str, faces: &[bool; 6], waterlogged: bool) -> String {
+    let mut s = String::with_capacity(block.len() + 56);
+    s.push_str(block);
+    s.push('[');
+    for i in 0..6 {
+        s.push_str(MF_PROPS[i]);
+        s.push('=');
+        s.push_str(if faces[i] { "true" } else { "false" });
+        s.push(',');
+    }
+    s.push_str("waterlogged=");
+    s.push_str(if waterlogged { "true" } else { "false" });
+    s.push(']');
+    s
+}
+
+/// parse "ns:block[k=v,...]" props into (faces[by dir 0..6], waterlogged);
+/// absent props = false (vanilla getValueOrElse(prop, FALSE))
+fn multiface_parse_faces(state: &str, faces: &mut [bool; 6], wl: &mut bool) {
+    *wl = false;
+    *faces = [false; 6];
+    let Some((_, props)) = state.split_once('[') else { return };
+    for kv in props.trim_end_matches(']').split(',') {
+        let Some((k, v)) = kv.split_once('=') else { continue };
+        if k == "waterlogged" {
+            *wl = v == "true";
+        } else if let Some(i) = MF_PROPS.iter().position(|p| *p == k) {
+            faces[i] = v == "true";
+        }
+    }
+}
+
+/// isAirOrWater(state): st.isAir() || st.is(Blocks.WATER) — any water block
+/// level matches the bare block key
+fn multiface_is_air_or_water(ctx: &PlaceCtx, pos: BlockPos, water_ids: &[String]) -> bool {
+    ctx.level.is_air(pos) || ctx.level.state_is(pos, water_ids)
+}
+
+/// full state string at pos when the block IS the multiface block (props
+/// preserved): overlay first (own writes carry props); the snapshot palette
+/// carries BARE registry keys, so a snapshot lichen (neighbor-margin write)
+/// resolves through the JVM bridge once — precise, and rare enough that the
+/// upcall is noise
+fn multiface_lichen_full(
+    ctx: &PlaceCtx,
+    pos: BlockPos,
+    block: &str,
+    block_ids: &[String],
+) -> Option<String> {
+    if let Some(s) = ctx.level.read_overlay(pos) {
+        return if s.starts_with(block) { Some(s) } else { None };
+    }
+    if !ctx.level.state_is(pos, block_ids) {
+        return None;
+    }
+    let full = ctx.level.state_full(pos);
+    Some(if full.is_empty() { block.to_string() } else { full })
+}
+
+/// DefaultSpreaderConfig.canSpreadInto: stateCanBeReplaced(cur at spos) &&
+/// isValidStateForPlacement(cur, spos, sface)
+fn multiface_can_spread_into(
+    ctx: &PlaceCtx,
+    block: &str,
+    block_ids: &[String],
+    water_ids: &[String],
+    spos: BlockPos,
+    sface: u8,
+) -> bool {
+    // stateCanBeReplaced: cur.isAir || cur.is(lichen) || (cur.is(WATER) &&
+    // fluidState.isSource()) — the FLUID_WATER flag is exactly source water
+    // (DecoDriver.stateFlags uses getFluidState().is(Fluids.WATER))
+    let cur_is_lichen = ctx.level.state_is(spos, block_ids);
+    let replaceable = ctx.level.is_air(spos)
+        || cur_is_lichen
+        || (ctx.level.state_is(spos, water_ids) && ctx.level.fluid_is(spos, water_ids));
+    if !replaceable {
+        return false;
+    }
+    // isValidStateForPlacement: cur.is(lichen) && hasFace(cur, sface) → null
+    if cur_is_lichen {
+        if let Some(full) = multiface_lichen_full(ctx, spos, block, block_ids) {
+            let mut f = [false; 6];
+            let mut wl = false;
+            multiface_parse_faces(&full, &mut f, &mut wl);
+            if f[sface as usize] {
+                return false;
+            }
+        }
+    }
+    // canAttachTo(host = spos.relative(sface)): isFaceFull(blockSupportShape
+    // | collisionShape, sface.opposite) — has_sturdy_face on full cubes (the
+    // vine engine pinned the same equivalence; glass-class support is the
+    // known corner, caves are stone-family)
+    ctx.level.has_sturdy_face(pos_offset(spos, sface), sface ^ 1)
+}
+
+/// MultifaceBlock.getStateForPlacement(cur, level, spos, sface) — lichen keeps
+/// its props; source water → waterlogged=true; else the default state
+fn multiface_build_spread_state(
+    ctx: &PlaceCtx,
+    block: &str,
+    block_ids: &[String],
+    water_ids: &[String],
+    spos: BlockPos,
+    sface: u8,
+) -> Option<String> {
+    let mut faces = [false; 6];
+    let mut wl = false;
+    if let Some(full) = multiface_lichen_full(ctx, spos, block, block_ids) {
+        multiface_parse_faces(&full, &mut faces, &mut wl);
+    } else if ctx.level.fluid_is(spos, water_ids) {
+        wl = true;
+    }
+    faces[sface as usize] = true;
+    Some(multiface_state(block, &faces, wl))
+}
+
+/// MultifaceSpreader.spreadFromFaceTowardRandomDirection (default config):
+/// Direction.allShuffled = Fisher-Yates over [D,U,N,S,W,E] (5 nextInt); per
+/// dir: axis gate, source-face gate, then the FIRST spread type in
+/// [SAME_POSITION, SAME_PLANE, WRAP_AROUND] whose target passes
+/// canSpreadInto wins (stream findFirst — stops everything). No RNG inside
+/// the search; a spread write never backtracks.
+fn multiface_spread(
+    ctx: &PlaceCtx,
+    block: &str,
+    block_ids: &[String],
+    water_ids: &[String],
+    pos: BlockPos,
+    face: u8,
+    src_faces: &[bool; 6],
+    rng: &mut WorldgenRandom,
+    ops: &mut Vec<DecoOp>,
+) {
+    let mut all: Vec<u8> = vec![0, 1, 2, 3, 4, 5];
+    shuffle_dirs(rng, &mut all);
+    for &d in &all {
+        if d >> 1 == face >> 1 {
+            continue; // getSpreadFromFaceTowardDirection axis gate
+        }
+        if src_faces[d as usize] {
+            continue; // hasFace(state, D) — the source already has this face
+        }
+        // DEFAULT_SPREAD_ORDER = [SAME_POSITION, SAME_PLANE, WRAP_AROUND];
+        // getSpreadPos(pos, toward=d, sourceFace=face):
+        //   SAME_POSITION: (pos, d)          SAME_PLANE: (pos+d, face)
+        //   WRAP_AROUND:   (pos+d+face, d.opposite())
+        let cands = [
+            (pos, d),
+            (pos_offset(pos, d), face),
+            (pos_offset(pos_offset(pos, d), face), d ^ 1),
+        ];
+        for (spos, sface) in cands {
+            if !multiface_can_spread_into(ctx, block, block_ids, water_ids, spos, sface) {
+                continue;
+            }
+            let Some(ns) = multiface_build_spread_state(ctx, block, block_ids, water_ids, spos, sface)
+            else {
+                continue;
+            };
+            ctx.emit(ops, spos, &ns, 0);
+            return; // findFirst — the whole spread ends at the first write
+        }
+    }
+}
+
+/// vanilla placeGrowthIfPossible: the FIRST canBePlacedOn neighbor (in dir
+/// order) wins; the placed state keeps the source cell's lichen props (or
+/// starts default / waterlogged in source water); RNG = none on failure,
+/// one nextFloat (+ spread shuffle) on success.
+#[allow(clippy::too_many_arguments)]
+fn multiface_growth_if_possible(
+    ctx: &PlaceCtx,
+    block: &str,
+    block_ids: &[String],
+    water_ids: &[String],
+    pos: BlockPos,
+    can_place_on: &[String],
+    chance: f32,
+    dirs: &[u8],
+    src_full: Option<&str>,
+    rng: &mut WorldgenRandom,
+    ops: &mut Vec<DecoOp>,
+) -> bool {
+    for &dir in dirs {
+        let host = pos_offset(pos, dir);
+        if !ctx.level.state_is(host, can_place_on) {
+            continue;
+        }
+        // getStateForPlacement → isValidStateForPlacement → canAttachTo(host):
+        // the canBePlacedOn sets are full cubes → isFaceFull always true
+        let mut faces = [false; 6];
+        let mut wl = false;
+        match src_full {
+            Some(full) => multiface_parse_faces(full, &mut faces, &mut wl),
+            None => wl = ctx.level.fluid_is(pos, water_ids),
+        }
+        faces[dir as usize] = true;
+        ctx.emit(ops, pos, &multiface_state(block, &faces, wl), 0);
+        if rng.next_f32() < chance {
+            multiface_spread(ctx, block, block_ids, water_ids, pos, dir, &faces, rng, ops);
+        }
+        return true;
+    }
+    false
+}
+
+/// MultifaceGrowthFeature.place (vanilla 1.21.8, bytecode-pinned):
+/// origin must be air-or-water; validDirections = [UP if ceiling, DOWN if
+/// floor, N,S,W,E if wall] shuffled once for the origin growth; on failure
+/// every shuffled dir gets an independent reshuffle of the CONFIG-order
+/// validDirections minus dir.opposite() (getShuffledDirectionsExcept filters
+/// the unshuffled field!) and ONE effective probe at origin+dir — the
+/// searchRange i-loop collapses: nothing is written and no RNG is consumed
+/// on a failed probe, and any success returns from the whole feature.
+#[allow(clippy::too_many_arguments)]
+fn place_multiface_growth(
+    ctx: &PlaceCtx,
+    block: &str,
+    _search_range: i32,
+    can_floor: bool,
+    can_ceiling: bool,
+    can_wall: bool,
+    chance: f32,
+    can_place_on: &[String],
+    rng: &mut WorldgenRandom,
+    origin: BlockPos,
+    ops: &mut Vec<DecoOp>,
+) -> bool {
+    let block_ids = [block.to_string()];
+    let water_ids = ["minecraft:water".to_string()];
+    if !multiface_is_air_or_water(ctx, origin, &water_ids) {
+        return false;
+    }
+    // constructor order (bytecode): ceiling → UP, floor → DOWN, wall → plane
+    // HORIZONTAL forEach (N,S,W,E)
+    let mut orig: Vec<u8> = Vec::with_capacity(6);
+    if can_ceiling {
+        orig.push(1);
+    }
+    if can_floor {
+        orig.push(0);
+    }
+    if can_wall {
+        orig.extend_from_slice(&[2, 3, 4, 5]);
+    }
+    let mut dirs = orig.clone();
+    shuffle_dirs(rng, &mut dirs); // getShuffledDirections
+    // origin is air-or-water by the gate above → the source state is never
+    // the lichen itself (src_full = None, kept explicit for the probe below)
+    if multiface_growth_if_possible(
+        ctx,
+        block,
+        &block_ids,
+        &water_ids,
+        origin,
+        can_place_on,
+        chance,
+        &dirs,
+        None,
+        rng,
+        ops,
+    ) {
+        return true;
+    }
+    for &dir in &dirs {
+        let excluded = dir ^ 1; // down<->up, north<->south, west<->east
+        let mut except: Vec<u8> = orig.iter().copied().filter(|d| *d != excluded).collect();
+        shuffle_dirs(rng, &mut except);
+        let cell = pos_offset(origin, dir);
+        let cell_full = multiface_lichen_full(ctx, cell, block, &block_ids);
+        if cell_full.is_none() && !multiface_is_air_or_water(ctx, cell, &water_ids) {
+            continue; // break the (collapsed) i-loop → next direction
+        }
+        if multiface_growth_if_possible(
+            ctx,
+            block,
+            &block_ids,
+            &water_ids,
+            cell,
+            can_place_on,
+            chance,
+            &except,
+            cell_full.as_deref(),
+            rng,
+            ops,
+        ) {
             return true;
         }
     }

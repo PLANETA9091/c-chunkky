@@ -231,6 +231,7 @@ fn main() {
                     crussty_chunkgen::features_json::FeatureCfg::MonsterRoom => "MonsterRoom".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::UnderwaterMagma { .. } => "UnderwaterMagma".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::Vines => "Vines".to_string(),
+                    crussty_chunkgen::features_json::FeatureCfg::MultifaceGrowth { .. } => "MultifaceGrowth".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::BlockColumn { layers, .. } => format!("BlockColumn({})", layers.len()),
                     crussty_chunkgen::features_json::FeatureCfg::RootSystem { .. } => "RootSystem".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::Unsupported(e) => format!("Unsupported({e})"),

@@ -551,7 +551,13 @@ impl<'a> DecoLevel for JniLevel<'a> {
         )
     }
     fn is_outside_build_height(&self, y: i32) -> bool {
-        self.z_call(self.mids.outside_build_height, &[Self::val_i(y)])
+        // The Java bridge computes `y < reg.getMinY() || y >= reg.getMaxY()`
+        // (DecoDriver.outsideBuildHeight) — pure arithmetic over constants
+        // that are ALREADY the min_y/max_y JNI args of this run (runChunk
+        // passes oy=reg.getMinY(), maxY=reg.getMaxY()). Every env_scan step
+        // calls this (pillar scans: up to 32+32 steps x ~1300 placements per
+        // pillar placed-feature) — the JNI crossing was pure waste.
+        y < self.min_y || y >= self.max_y
     }
 }
 

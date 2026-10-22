@@ -162,12 +162,14 @@ jobs:
           echo "dptt diff% = $D"
           python3 harness/judge_gate.py "${D:-999}" "${CRUS_GATE_DPTT:-35.0}" dptt
         env:
-          # 0.066% static residual with the frozen-tick judge protocol
-          # (randomTickSpeed=0 + tick-matched settle, ref recaptured 2026-10-20):
-          # ocean-floor gravel/stone patches on Tectonic surface rules + kelp
-          # placement margins — the old growth-masked comparison hid them.
-          # Investigation continues; the vanilla gate stays 0.05 (0.002% floor).
-          CRUS_GATE_DPTT: 0.10
+          # cont-58 tightened 0.10 -> 0.05: the water-matching fix
+          # (bare ids in matching_blocks resolve to minecraft:* — vanilla
+          # ResourceLocation default-namespace semantics) + native
+          # glow_lichen dropped the local residual 0.066% -> 0.041%
+          # (HEIGHTMAP 0/16384, judge dptt_cont58). The residual remains
+          # the static pack-surface band (ocean-floor gravel/stone patches
+          # on Tectonic surface rules + kelp placement margins).
+          CRUS_GATE_DPTT: 0.05
 
       - name: Timing summary
         if: always()

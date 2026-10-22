@@ -176,6 +176,18 @@ pub enum FeatureCfg {
         hanging_roots_vertical_span: i32,
         hanging_root_state: &'static StateSrc,
     },
+    /// minecraft:multiface_growth (glow lichen family) — validDirections =
+    /// [UP if ceiling, DOWN if floor, N,S,W,E if wall]; can_be_placed_on is
+    /// a plain block holder-set (tag sets stay Unsupported — delegate-safe).
+    MultifaceGrowth {
+        block: String,
+        search_range: i32,
+        can_floor: bool,
+        can_ceiling: bool,
+        can_wall: bool,
+        chance: f32,
+        can_place_on: Vec<String>,
+    },
     Unsupported(&'static str),
 }
 
@@ -534,6 +546,20 @@ pub fn state_string(j: &Json) -> Option<String> {
     Some(name.to_string())
 }
 
+/// Vanilla holder-set id resolution (ResourceLocation.parse default-namespace
+/// semantics): an id WITHOUT ':' resolves to "minecraft:<id>". Packs write
+/// bare ids ("water", "air") into matching_blocks/matching_fluids; the
+/// snapshot/bridge block keys are full registry keys ("minecraft:water") —
+/// without this normalization a bare id could NEVER match (vanilla does),
+/// silently dropping every water/air hit (terralith pillar filters, ...).
+fn normalize_block_id(id: String) -> String {
+    if id.contains(':') {
+        id
+    } else {
+        format!("minecraft:{id}")
+    }
+}
+
 /// RuleTest codec (ore targets + replace_single_block targets):
 /// always_true / block_match / tag_match / random_block_match /
 /// random_blockstate_match / blockstate_match.
@@ -541,10 +567,10 @@ fn decode_rule_test(j: &Json) -> Option<RuleTest> {
     let t = j.get("predicate_type").or_else(|| j.get("type"))?.as_str()?;
     Some(match t {
         "minecraft:always_true" => RuleTest::True,
-        "minecraft:block_match" => RuleTest::BlockMatch(j.get("block")?.as_str()?.to_string()),
+        "minecraft:block_match" => RuleTest::BlockMatch(normalize_block_id(j.get("block")?.as_str()?.to_string())),
         "minecraft:tag_match" => RuleTest::TagMatch(j.get("tag")?.as_str()?.to_string()),
         "minecraft:random_block_match" => RuleTest::RandomBlock {
-            block: j.get("block")?.as_str()?.to_string(),
+            block: normalize_block_id(j.get("block")?.as_str()?.to_string()),
             probability: j.get("probability")?.as_f64()? as f32,
         },
         _ => return None,
@@ -587,10 +613,10 @@ fn decode_predicate(j: &Json) -> Option<BlockPredicate> {
             // "blocks" may be a single string or a list (ExtraCodecs fast paths)
             let mut v = Vec::new();
             if let Some(s) = j.get("blocks").and_then(|x| x.as_str()) {
-                v.push(s.to_string());
+                v.push(normalize_block_id(s.to_string()));
             } else {
                 for e in j.get("blocks")?.as_arr()? {
-                    v.push(state_string(e)?);
+                    v.push(normalize_block_id(state_string(e)?));
                 }
             }
             BlockPredicate::MatchingBlocks { ids: v, off: decode_offset(j) }
@@ -598,10 +624,10 @@ fn decode_predicate(j: &Json) -> Option<BlockPredicate> {
         "minecraft:matching_fluids" => {
             let mut v = Vec::new();
             if let Some(s) = j.get("fluids").and_then(|x| x.as_str()) {
-                v.push(s.to_string());
+                v.push(normalize_block_id(s.to_string()));
             } else {
                 for e in j.get("fluids")?.as_arr()? {
-                    v.push(state_string(e)?);
+                    v.push(normalize_block_id(state_string(e)?));
                 }
             }
             BlockPredicate::MatchingFluids { ids: v, off: decode_offset(j) }
@@ -876,7 +902,7 @@ pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry
                         let pred = match e.get("target").map(decode_rule_test) {
                             Some(Some(rt)) => match rt {
                                 RuleTest::True => BlockPredicate::True,
-                                RuleTest::BlockMatch(b) => BlockPredicate::MatchingBlocks { ids: vec![b], off: (0, 0, 0) },
+                                RuleTest::BlockMatch(b) => BlockPredicate::MatchingBlocks { ids: vec![normalize_block_id(b)], off: (0, 0, 0) },
                                 _ => return FeatureCfg::Unsupported("replace-target"),
                             },
                             _ => return FeatureCfg::Unsupported("replace-target"),
@@ -1126,6 +1152,52 @@ pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry
         "minecraft:vines" => FeatureCfg::Vines,
         "minecraft:block_column" => decode_block_column(&cfg),
         "minecraft:root_system" => decode_root_system(name, &cfg, reg),
+        // --- batch-3 (cont-58): multiface growth (glow lichen) -------------
+        "minecraft:multiface_growth" => {
+            // "block" defaults to glow_lichen (codec optional field — the
+            // terralith highlands/dark/flora lichens omit it)
+            let block = cfg
+                .get("block")
+                .and_then(|v| v.as_str())
+                .unwrap_or("minecraft:glow_lichen")
+                .to_string();
+            let can_place_on = match cfg.get("can_be_placed_on") {
+                Some(v) => {
+                    if let Some(s) = v.as_str() {
+                        // "#tag" holder sets cannot be resolved natively —
+                        // keep the feature on the vanilla delegate lane
+                        if s.starts_with('#') {
+                            return FeatureCfg::Unsupported("multiface-tag-set");
+                        }
+                        vec![normalize_block_id(s.to_string())]
+                    } else if let Some(arr) = v.as_arr() {
+                        let mut ids = Vec::with_capacity(arr.len());
+                        for e in arr {
+                            let Some(s) = e.as_str() else {
+                                return FeatureCfg::Unsupported("multiface-set-elem");
+                            };
+                            if s.starts_with('#') {
+                                return FeatureCfg::Unsupported("multiface-tag-set");
+                            }
+                            ids.push(normalize_block_id(s.to_string()));
+                        }
+                        ids
+                    } else {
+                        return FeatureCfg::Unsupported("multiface-set");
+                    }
+                }
+                None => return FeatureCfg::Unsupported("multiface-set"),
+            };
+            FeatureCfg::MultifaceGrowth {
+                block,
+                search_range: cfg.get("search_range").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                can_floor: cfg.get("can_place_on_floor").and_then(|v| v.as_bool()).unwrap_or(false),
+                can_ceiling: cfg.get("can_place_on_ceiling").and_then(|v| v.as_bool()).unwrap_or(false),
+                can_wall: cfg.get("can_place_on_wall").and_then(|v| v.as_bool()).unwrap_or(false),
+                chance: cfg.get("chance_of_spreading").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32,
+                can_place_on,
+            }
+        }
         _ => FeatureCfg::Unsupported("cf-type"),
     }
 }
@@ -1677,6 +1749,47 @@ pub fn decode_registry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cont-58: bare ids in matching_blocks/matching_fluids/block_match MUST
+    /// resolve to the minecraft namespace (vanilla ResourceLocation.parse
+    /// default-namespace semantics). Regression: terralith pillar filters
+    /// wrote ["minecraft:air", "water"] — "water" never matched the snapshot
+    /// block key "minecraft:water", silently dropping water hits vs vanilla.
+    #[test]
+    fn bare_ids_normalize_to_minecraft() {
+        let j = crate::json::parse(
+            r#"{"type":"minecraft:matching_blocks","blocks":["minecraft:air","water"],"offset":[-1,-4,0]}"#,
+        )
+        .expect("parse");
+        let p = decode_predicate(&j).expect("decode");
+        match p {
+            BlockPredicate::MatchingBlocks { ids, off } => {
+                assert_eq!(ids, vec!["minecraft:air".to_string(), "minecraft:water".to_string()]);
+                assert_eq!(off, (-1, -4, 0));
+            }
+            _ => panic!("wrong predicate"),
+        }
+        // single-string form + fluids
+        let j2 = crate::json::parse(
+            r#"{"type":"minecraft:matching_fluids","fluids":"lava"}"#,
+        )
+        .expect("parse");
+        match decode_predicate(&j2).expect("decode") {
+            BlockPredicate::MatchingFluids { ids, .. } => {
+                assert_eq!(ids, vec!["minecraft:lava".to_string()]);
+            }
+            _ => panic!("wrong predicate"),
+        }
+        // already-namespaced ids pass through untouched
+        let j3 = crate::json::parse(
+            r#"{"type":"minecraft:block_match","block":"terralith:crypt_stone"}"#,
+        )
+        .expect("parse");
+        match decode_rule_test(&j3).expect("decode") {
+            RuleTest::BlockMatch(b) => assert_eq!(b, "terralith:crypt_stone"),
+            _ => panic!("wrong rule test"),
+        }
+    }
 
     /// Decode the REAL dptt packs (Tectonic+Terralith) and report vanilla-subset coverage.
     /// Packs extracted to /tmp/dptt_packs (see worklog); test skips gracefully if absent.

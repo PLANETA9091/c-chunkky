@@ -1,0 +1,18 @@
+# prof session dpttb6 2026-10-22T19:14:14Z
+world=dptt datapacks_dir=server_datapacks fill_threads=2 parallel=1 heap=-Xms1G -Xmx2G
+18c29f1c871f71a96961af2664d7ae2e  01_tectonic.zip
+ee7f451a8d1a13b29090a08543bda46a  02_terralith.zip
+052b8c9b5415f660127ef31fa1382b8e  server/paper.jar
+14d5edaa7316cd2cbc3cf74d41d08f84  server/plugins/CrusstyGen.jar
+b382a2e99baab7eeba952c569ebf7168  native/target/release/libcrussty_chunkgen.so
+--- measured window: 12x12 cx 32..43 cz 32..43 ---
+batch cz 32..34: 36 chunks in 4748 ms -> 131.8 ms/chunk
+batch cz 35..37: 36 chunks in 2960 ms -> 82.2 ms/chunk
+batch cz 38..40: 36 chunks in 2328 ms -> 64.6 ms/chunk
+batch cz 41..43: 36 chunks in 1457 ms -> 40.4 ms/chunk
+window_ms=11508 chunks=144 ms_per_chunk=79.92
+--- crusgenstats (final) ---
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=396  mean=12413.4us  min=4827.2us  p50=9624.6us  p99=42581.7us  max=52015.1us  [native=11.97ms nat_p50=9.28ms layout=0.37ms beard=0.03ms marks=0.02ms]  [lay setup=0.01 sec=0.28 hmap=0.07 verify=0.00 | uni=0.00/0.2 lin=0.00/0.0 glob=0.00/8.0 pb=0.00/0.00]  [sections filled=0 mixed=3168 air=6336 v1fallback=0 bulk=ok]  swapfail=null  marks_seen=17153 marks_landed=17153 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] native deco stage: native deco stage: chunks=324  mean=3528.0us  min=1355.4us  p50=1769.3us  p99=29169.4us  max=37770.1us  [plan=0.20ms struct=0.86ms run=2.16ms apply=0.01ms deleg=0.25ms]  ops=11026 features=23620 delegate=2588  upcalls=34267 (h=0 stateis=0 fluidis=11 isair=0 survive=2 other=34254) snap-sec=20455/20.48ms blocks=0 snap-hm=1766 planbio=51.71ms | [struct-split] starts=1.79ms place=72.56ms | [deleg-names] minecraft:monster_room=324 minecraft:lake_lava_surface=324 terralith:cave/stone/andesite_boulders=324 minecraft:freeze_top_layer=324 minecraft:monster_room_deep=324 minecraft:lake_lava_underground=324 minecraft:amethyst_geode=324 minecraft:trees_plains=320 | [CrusstyGen] jni_prof[fills=746 wall=11.15ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=4.65 par_strips=3.17]
+
+--- spark links in console ---
+https://spark.lucko.me/vuk9Pkv3GF

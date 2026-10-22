@@ -203,6 +203,7 @@ fn main() {
             | FeatureCfg::BlockPile { .. }
             | FeatureCfg::Kelp
             | FeatureCfg::UnderwaterMagma { .. }
+            | FeatureCfg::MultifaceGrowth { .. }
             | FeatureCfg::Vines => None,
             FeatureCfg::BlockColumn { layers, allowed, .. } => {
                 if matches!(allowed, BlockPredicate::Unsupported(_)) {
