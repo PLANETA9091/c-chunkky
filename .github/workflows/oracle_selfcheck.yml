@@ -1,0 +1,74 @@
+# Oracle self-check: does VANILLA Paper worldgen on a CI runner match the
+# committed reference dumps (captured locally)?
+#
+# Context (cont-56): the judge vanilla gate is red on CI (0.555%) while the
+# same artifacts give 0.008% locally. Two decisive experiments already ran:
+#   #1 plugin-vs-plugin self-check — inconclusive;
+#   #2 local .so on CI (run 39651246897, Turin avx2) — still 0.555%, so the
+#     CI rustc/codegen hypothesis is DEAD.
+# Native kernel parity 4-wide AVX2 vs 8-wide AVX-512 vs generic: verified
+# bit-identical locally (colparity: 4800 PerlinNoise + 2000 BlendedNoise
+# calls, 0 mismatches) — the AVX-width hypothesis is DEAD too.
+#
+# This job tests the LAST structural suspect: the reference side itself.
+# reference/dumps/vanilla was captured on the local sandbox (2 cores, Debian
+# OpenJDK 21.0.12, Intel Xeon avx512). If VANILLA Paper on a CI runner
+# (4 cores, Temurin 21, AMD EPYC) produces ~0.5% block diffs vs those static
+# dumps, the residual is an environment-dependent vanilla worldgen delta
+# (JVM build / core count / CPU) — not our native stages (which this job
+# never loads: no CrusstyGen, no .so, CrusstyProbe dumper only).
+#
+# Protocol parity: harness/bench.sh is the same script that captured the
+# committed reference (sequential forceload, randomTickSpeed=0, per-chunk
+# dumps at generation time).
+name: oracle-selfcheck
+on:
+  workflow_dispatch: {}
+
+jobs:
+  oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Cache paper server (paperclip extraction)
+        uses: actions/cache@v4
+        with:
+          path: |
+            server/versions
+            server/libraries
+            server/paper.jar
+          key: paper-1.21.8-b60
+      - name: Bootstrap server dir
+        run: |
+          chmod +x harness/bootstrap_server.sh
+          bash harness/bootstrap_server.sh 60
+      - name: Deploy vanilla oracle (probe ONLY — no CrusstyGen, no .so)
+        run: |
+          find server/plugins -maxdepth 1 -name '*.jar' -delete
+          cp probe/CrusstyProbe.jar server/plugins/
+          ls -la server/plugins/
+      - name: Capture vanilla region on CI (reference protocol)
+        run: |
+          set -o pipefail
+          CRUS_FRESH=1 bash harness/bench.sh vanilla oracleci 2>&1 | tee oracleci.log
+      - name: Diff CI-vanilla vs committed reference
+        run: |
+          python3 harness/diff_dumps.py reference/dumps/oracleci reference/dumps/vanilla \
+            | tee oracleci_diff.log || true
+          echo "=== verdict ==="
+          grep OVERALL oracleci_diff.log || true
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracleci-${{ github.run_id }}
+          path: |
+            oracleci.log
+            oracleci_diff.log
+            reference/baseline_oracleci.txt
+          retention-days: 14
