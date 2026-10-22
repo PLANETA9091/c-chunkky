@@ -53,6 +53,18 @@ public final class DecoStats {
     /** struct-phase split: startsForStructure vs placeInChunk walls */
     static final AtomicLong STRUCT_STARTS_NS = new AtomicLong();
     static final AtomicLong STRUCT_PLACE_NS = new AtomicLong();
+    /** cont-58: struct-phase residual hunters. FINDING (dpttb7/8): the four
+     * inner timers cover ~55% of STRUCT_TOTAL; the rest is the ~12/window
+     * ReportedException margin chunks ("Exception generating new chunk") —
+     * inner timers skip their addAndGet on the throw path while FUNC catches
+     * the full wall (~20ms each). The struct mass is therefore ~half phantom
+     * for the measured window (means polluted, center p50 unaffected). */
+    static final AtomicLong STRUCT_GATE_NS = new AtomicLong();
+    static final AtomicLong STRUCT_SETUP_NS = new AtomicLong();
+    static final AtomicLong STRUCT_LOOP_NS = new AtomicLong();
+    static final AtomicLong STRUCT_FUNC_NS = new AtomicLong();
+    static final AtomicLong STRUCT_ITER = new AtomicLong();
+    static final AtomicLong STRUCT_START_CALLS = new AtomicLong();
 
     // upcall counters (Java side; they measure the JNI traffic, not the time)
     static final AtomicLong UP_HEIGHT = new AtomicLong();
@@ -106,6 +118,12 @@ public final class DecoStats {
         BIOMECHK_LOG.set(0);
         STRUCT_STARTS_NS.set(0);
         STRUCT_PLACE_NS.set(0);
+        STRUCT_GATE_NS.set(0);
+        STRUCT_SETUP_NS.set(0);
+        STRUCT_LOOP_NS.set(0);
+        STRUCT_FUNC_NS.set(0);
+        STRUCT_ITER.set(0);
+        STRUCT_START_CALLS.set(0);
         java.util.Arrays.fill(NANOS, 0L);
     }
 
@@ -152,8 +170,12 @@ public final class DecoStats {
                 SNAP_SECTIONS.get(), SNAP_SECTION_NS.get() / 1e6,
                 SNAP_SECTION_BLOCKS.get(), SNAP_HM.get(),
                 PLAN_BIOMES.get() / 1e6))
-                .concat(String.format(" | [struct-split] starts=%.2fms place=%.2fms",
-                STRUCT_STARTS_NS.get() / 1e6, STRUCT_PLACE_NS.get() / 1e6));
+                .concat(String.format(" | [struct-split] starts=%.2fms place=%.2fms"
+                        + " [gate=%.2fms setup=%.2fms loop=%.2fms func=%.2fms iters=%d startCalls=%d]",
+                STRUCT_STARTS_NS.get() / 1e6, STRUCT_PLACE_NS.get() / 1e6,
+                STRUCT_GATE_NS.get() / 1e6, STRUCT_SETUP_NS.get() / 1e6,
+                STRUCT_LOOP_NS.get() / 1e6, STRUCT_FUNC_NS.get() / 1e6,
+                STRUCT_ITER.get(), STRUCT_START_CALLS.get()));
     }
 
     /** top-24 delegate placed names (dynamic census tail). */

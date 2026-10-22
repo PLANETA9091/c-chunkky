@@ -404,12 +404,14 @@ public final class DecoDriver extends BlockPopulator {
         if (NMS_GEN == null || reg == null) {
             return;
         }
+        long tf0 = System.nanoTime();
         // Fast gate: no structure references in the 3x3 region -> no starts ->
         // placeInChunk never runs. The srng draws are unobservable there (a
         // FRESH random per populate; only placeInChunk consumes it) — skip
         // the whole pass. Costs 3.44ms/chunk on structureless packs otherwise
         // (startsForStructure x ~90 structures x 10 steps).
         boolean anyRefs = false;
+        long tg0 = System.nanoTime();
         for (int dz = -1; dz <= 1 && !anyRefs; dz++) {
             for (int dx = -1; dx <= 1; dx++) {
                 if (reg.getChunk(cx + dx, cz + dz).hasAnyStructureReferences()) {
@@ -418,6 +420,7 @@ public final class DecoDriver extends BlockPopulator {
                 }
             }
         }
+        DecoStats.STRUCT_GATE_NS.addAndGet(System.nanoTime() - tg0);
         if (!anyRefs) {
             return;
         }
@@ -444,12 +447,15 @@ public final class DecoDriver extends BlockPopulator {
             SectionPos sp = SectionPos.of(new ChunkPos(cx, cz), reg.getMinSectionY());
             // Paper: WorldGenRegion lacks structureManager(); build one over
             // the region exactly like StructureManager.forWorldGenRegion does.
+            long tu0 = System.nanoTime();
             StructureManager sm = reg.getLevel().structureManager().forWorldGenRegion(reg);
             if (!sm.shouldGenerateStructures()) {
                 return;
             }
             BoundingBox writable = writableArea();
             int max = Math.max(GenerationStep.Decoration.values().length, PLAN.length);
+            DecoStats.STRUCT_SETUP_NS.addAndGet(System.nanoTime() - tu0);
+            long tl0 = System.nanoTime();
             for (int i = 0; i < max; i++) {
                 int i1 = 0;
                 for (Structure structure : map.getOrDefault(i, List.of())) {
@@ -462,17 +468,24 @@ public final class DecoDriver extends BlockPopulator {
                     long ts0 = System.nanoTime();
                     java.util.List<StructureStart> starts = sm.startsForStructure(sp, structure);
                     DecoStats.STRUCT_STARTS_NS.addAndGet(System.nanoTime() - ts0);
+                    DecoStats.STRUCT_START_CALLS.incrementAndGet();
                     for (StructureStart ss : starts) {
                         long tp0 = System.nanoTime();
                         ss.placeInChunk(reg, sm, NMS_GEN, srng, writable, new ChunkPos(cx, cz));
                         DecoStats.STRUCT_PLACE_NS.addAndGet(System.nanoTime() - tp0);
                     }
                     i1++;
+                    DecoStats.STRUCT_ITER.incrementAndGet();
                 }
             }
+            DecoStats.STRUCT_LOOP_NS.addAndGet(System.nanoTime() - tl0);
         } catch (Throwable t) {
             LOG.warning("deco structures failed (chunk " + cx + "," + cz + "): " + t);
         }
+        // FUNC residual: full runStructures wall — the inner timers (gate,
+        // setup, loop incl. starts/place) skip chunks that exit early or throw
+        // (margin-chunk ReportedException walls land HERE, ~20ms each)
+        DecoStats.STRUCT_FUNC_NS.addAndGet(System.nanoTime() - tf0);
     }
 
     private static volatile Map<Integer, List<Structure>> STRUCT_BY_STEP;
