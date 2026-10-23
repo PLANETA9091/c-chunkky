@@ -188,6 +188,17 @@ public final class ChunkGenNative {
      */
     public static native int fillBeard(long ctx, int chunkX, int chunkZ, short[] out, long[] marks, int[] beard);
 
+    /**
+     * baseHeight(ctx, x, z, mode) -> int — native replica of vanilla
+     * NoiseBasedChunkGenerator.getBaseHeight (iterateNoiseColumn, 1-cell
+     * NoiseChunk walk, always beard-less). mode 0 = WORLD_SURFACE_WG /
+     * WORLD_SURFACE (stop at the first non-air state), mode 1 =
+     * OCEAN_FLOOR_WG / OCEAN_FLOOR (stop at the first blocksMotion state).
+     * Returns Integer.MIN_VALUE when the ctx is unknown or the walk failed —
+     * the caller must fall back to the NMS delegate (vanilla) path.
+     */
+    public static native int baseHeight(long ctx, int x, int z, int mode);
+
     /** Global per-fill phase snapshot from the native (JNI diagnostics). */
     public static native String profStatsGlobal();
 

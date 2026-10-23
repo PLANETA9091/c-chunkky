@@ -83,10 +83,8 @@ rcon "crusgenstats reset" >/dev/null
 # --- sampled window ----------------------------------------------------------
 # JFR around the window via jcmd attach (started AFTER warmup => clean slice).
 # profile settings: ExecutionSample 10ms, NativeMethodSample 20ms (JNI fills).
-# Sandbox JRE has no launcher binaries; module classes work directly
-# (java -m jdk.jcmd/sun.tools.jcmd.JCmd), and `jfr print` equivalent:
-#   java -m jdk.jfr/jdk.jfr.internal.tool.Main print <file.jfr>
-JC="java -m jdk.jcmd/sun.tools.jcmd.JCmd"
+JC="$(ls -d /home/z/tools/jdk-21*/bin/jcmd 2>/dev/null | tail -1)"
+[ -z "$JC" ] && JC=jcmd
 JPID="$(cat "$SRV/server.pid")"
 WIN_T0=$(date +%s%3N)
 $JC "$JPID" JFR.start name=prof settings=profile filename="$ROOT/reference/jfr_${TAG}.jfr" >/dev/null 2>&1 || echo "[sampler] JFR.start FAILED"

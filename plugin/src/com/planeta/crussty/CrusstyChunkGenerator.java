@@ -2323,6 +2323,15 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
      *  single-threaded, but the fill workers read these arrays live. */
     static synchronized short[] extendPalette(String[] stateStrings,
             java.util.function.Function<String, Object> resolver) {
+        // Surface handshake can fire at WORLD LOAD (before the first fill
+        // lazily inits the bulk palette) — force the init here, otherwise
+        // sectionStatesById is still null and we'd silently return null,
+        // leaving the vanilla Java surface engine in charge of the world.
+        if (sectionStatesById == null && !initBulk()) {
+            Logger.getLogger("CrusstyGen").warning(
+                    "native surface: bulk init failed: " + bulkFailReason);
+            return null;
+        }
         Object[] cur = sectionStatesById;
         if (cur == null || matAir == null || globalIdById == null || palIdxScratch == null) {
             LOG.warning("extendPalette: palette globals null (states="

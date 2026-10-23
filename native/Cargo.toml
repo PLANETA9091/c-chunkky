@@ -21,3 +21,11 @@ opt-level = 3
 [[bin]]
 name = "bench"
 path = "src/bin/bench.rs"
+
+[[bin]]
+name = "baseref"
+path = "src/bin/baseref.rs"
+
+[[bin]]
+name = "bhdebug"
+path = "src/bin/bhdebug.rs"

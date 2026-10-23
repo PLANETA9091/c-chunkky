@@ -365,6 +365,9 @@ pub struct ChunkGen<'e> {
     /// ~0 gap — there the prefetch thread would just fight the fill workers).
     prefetch_enabled: bool,
     last_fill_end: Option<std::time::Instant>,
+    /// True inside the base-height walk: suppress fluid-update mark pushing
+    /// (a height query must not leak marks into the next fill's buffer).
+    bh_mode: bool,
     cellfill_stack: Vec<f64>,
     /// Per-(dx,dy) hoisted trilinear rows: per slot [row1, row2] so the
     /// per-block cost is a single z-lerp per Lerp3 slot (bit-exact: the
@@ -838,6 +841,7 @@ impl<'e> ChunkGen<'e> {
             prefetch: None,
             prefetch_enabled: false,
             last_fill_end: None,
+            bh_mode: false,
             cellfill_stack: Vec::with_capacity(16),
             cellfill_rows: vec![0.0; compiled.interp_slots as usize * 4],
             cellfill_rows8: vec![0.0; compiled.interp_slots as usize * 16],
@@ -1612,6 +1616,7 @@ impl<'e> ChunkGen<'e> {
             prefetch: None,
             prefetch_enabled: false,
             last_fill_end: None,
+            bh_mode: false,
             cellfill_stack: Vec::with_capacity(16),
             cellfill_rows: vec![0.0; self.cellfill_rows.len()],
             cellfill_rows8: vec![0.0; self.cellfill_rows8.len()],
@@ -1956,6 +1961,240 @@ impl<'e> ChunkGen<'e> {
         self.fill_inner(cx, cz, out);
         self.last_fill_end = Some(std::time::Instant::now());
         jni_prof_accum(&jni_before, &self.prof, jni_t0.elapsed().as_nanos() as u64);
+    }
+
+    /// Native replica of vanilla NoiseBasedChunkGenerator.getBaseHeight
+    /// (iterateNoiseColumn): a 1-cell-wide NoiseChunk walk top-down that
+    /// stops at the first state matching the heightmap predicate and
+    /// returns y+1. Always beard-less (BeardifierMarker.INSTANCE).
+    ///
+    /// mode: 0 = WORLD_SURFACE_WG/WORLD_SURFACE (stop when !state.isAir()),
+    ///       1 = OCEAN_FLOOR_WG/OCEAN_FLOOR (stop when state.blocksMotion()).
+    ///       MOTION_BLOCKING(_NO_LEAVES) maps to 0: the pre-surface material
+    ///       set is {AIR, STONE, ores, WATER, LAVA} — blocksMotion() is true
+    ///       for every non-air state, so `!isAir` and
+    ///       `blocksMotion || !fluid.isEmpty()` coincide there.
+    ///
+    /// Bit-parity contract: same corner evals (Mode::Slice, SIMD-laned for
+    /// slot 0 exactly like the fill's slice path), same in-cell lerp3
+    /// fractions (Mode::CellFill via a LOCAL InterpState with
+    /// cell_count_xz = 1 — vanilla NoiseChunk(1, ...)), same material chain.
+    /// Speed: the fill's per-cell interval verdict gate (cell_interval)
+    /// classifies each cell AllNeg/AllPos so whole air/water cells are
+    /// skipped without density evals and solid cells answer immediately.
+    pub fn base_height(&mut self, x: i32, z: i32, mode: u8) -> i32 {
+        let cw = self.cell_width;
+        let ch = self.cell_height;
+        let ncy = self.cell_count_y;
+        let nslots = self.interp_children.len();
+        // vanilla: NoiseChunk(1, ...) cellX = floorDiv(x, cellWidth)
+        let cell_x = floor_div(x, cw as i32);
+        let cell_z = floor_div(z, cw as i32);
+        let mut interp = InterpState::new(nslots as u16, 1, ncy);
+        // corner slices: 2 x-planes (cell_x*cw, +cw) x 2 z-planes x (ncy+1)
+        // y-corners. Slot 0 (the final-density tree — ~88% of corner cost)
+        // goes through the same eval8/eval4 batched lane path as the fill's
+        // slice eval; slots 1.. are memoized scalar per corner.
+        let child0 = self.interp_children[0];
+        let ny1 = ncy + 1;
+        let total = 2 * ny1;
+        for (sx, px) in [(0usize, cell_x * cw as i32), (1usize, cell_x * cw as i32 + cw as i32)] {
+            let mut slot0 = vec![0f64; total];
+            match self.slice_lanes {
+                8 => Self::slice_slot0::<8>(
+                    self.env,
+                    &self.compiled,
+                    child0,
+                    &interp,
+                    px,
+                    cell_z,
+                    cw as i32,
+                    ch as i32,
+                    ny1,
+                    self.cell_noise_min_y,
+                    0,
+                    total,
+                    &mut slot0,
+                ),
+                _ => Self::slice_slot0::<4>(
+                    self.env,
+                    &self.compiled,
+                    child0,
+                    &interp,
+                    px,
+                    cell_z,
+                    cw as i32,
+                    ch as i32,
+                    ny1,
+                    self.cell_noise_min_y,
+                    0,
+                    total,
+                    &mut slot0,
+                ),
+            }
+            for i in 0..2usize {
+                for y in 0..=ncy {
+                    let v = slot0[i * ny1 + y];
+                    if sx == 0 {
+                        interp.slice0_set(0, i, y, v);
+                    } else {
+                        interp.slice1_set(0, i, y, v);
+                    }
+                }
+            }
+            if nslots > 1 {
+                let compiled = &self.compiled;
+                let env = self.env;
+                let children = &self.interp_children;
+                let mut memo = MemoCtx::new(compiled.arena.len());
+                for p in 0..total {
+                    let i = p / ny1;
+                    let y = p % ny1;
+                    let corner_z = (cell_z + i as i32) * cw as i32;
+                    let corner_y = (y as i32 + self.cell_noise_min_y) * ch as i32;
+                    let pt = Pt {
+                        x: px,
+                        y: corner_y,
+                        z: corner_z,
+                    };
+                    memo.next_serial();
+                    for slot in 1..nslots {
+                        let child = children[slot];
+                        let v = match slot_corner_const(compiled, slot, child, corner_y) {
+                            Some(c) => c,
+                            None => env.eval(compiled, child, pt, Mode::Slice, &interp, Some(&memo)),
+                        };
+                        if sx == 0 {
+                            interp.slice0_set(slot as u16, i, y, v);
+                        } else {
+                            interp.slice1_set(slot as u16, i, y, v);
+                        }
+                    }
+                }
+            }
+        }
+        // Swap the local 1-cell interp in for the walk (aquifer/ore evals and
+        // the Interpolated wrapper read self.interp), restore afterwards so
+        // fills keep their full-size state. The aquifer caches are re-based
+        // onto the query's own chunk (vanilla getBaseHeight builds a FRESH
+        // NoiseChunk per call — its aquifer state covers exactly that chunk's
+        // 3x3 base-cell neighborhood), and mark pushing is suppressed.
+        let saved = std::mem::replace(&mut self.interp, interp);
+        self.bh_mode = true;
+        self.aquifer
+            .begin_chunk(floor_div(x, 16), floor_div(z, 16));
+        let out = self.base_height_walk(x, z, mode, ch as i32);
+        self.bh_mode = false;
+        self.interp = saved;
+        out
+    }
+
+    fn base_height_walk(&mut self, x: i32, z: i32, mode: u8, ch: i32) -> i32 {
+        let cw = self.cell_width as i32;
+        let ix0 = x.rem_euclid(cw);
+        let iz0 = z.rem_euclid(cw);
+        let dx_step = 1.0 / cw as f64;
+        let dy_step = 1.0 / ch as f64;
+        // vanilla iterateNoiseColumn: d = floorMod(x, cellWidth) / cellWidth
+        // (cellWidth is a power of two, so i * (1/cw) is bit-identical).
+        let dx = ix0 as f64 * dx_step;
+        let dz = iz0 as f64 * dx_step;
+        let lava_line = self.sea_level.min(-54);
+        for cy in (0..self.cell_count_y).rev() {
+            // vanilla selectCellYZ(i8, 0)
+            self.interp.select_cell_yz(cy, 0);
+            let cell_base_y = (cy as i32 + self.cell_noise_min_y) * ch;
+            let cell_top_y = cell_base_y + ch - 1;
+            // Per-cell interval verdict (same gate the fill uses, beard is
+            // always empty here). AllPos => every y in the cell is solid:
+            // both heightmap modes stop at the cell's top block. AllNeg =>
+            // material is aquifer-driven (air/water/lava): cells fully below
+            // the lava line are all LAVA (WORLD mode stops there — non-air),
+            // cells fully in the uniform-air zone are all AIR; anything else
+            // needs exact per-y evals for the aquifer pressure path.
+            let verdict = match self.cellfill_prog.as_deref() {
+                Some(prog) => {
+                    if self.skip_material || self.skip_cellfill {
+                        0i8
+                    } else {
+                        match crate::density::cell_interval(prog, &self.interp, cell_base_y) {
+                            Some((lo, hi)) if hi < 0.0 => 1i8, // AllNeg
+                            Some((lo, _hi)) if lo > 0.0 => 2,  // AllPos
+                            _ => 0,
+                        }
+                    }
+                }
+                None => 0,
+            };
+            if verdict == 2 {
+                // AllPos: first y examined in this cell is its top block.
+                return cell_top_y + 1;
+            }
+            if verdict == 1 && cell_top_y < lava_line {
+                // AllNeg below the lava line: every block is LAVA.
+                if mode == 0 {
+                    return cell_top_y + 1;
+                }
+                continue;
+            }
+            if verdict == 1 && cell_base_y >= 64 && self.bh_air_zone_safe(cell_base_y, cell_top_y, x, z) {
+                // AllNeg in the uniform-air zone: every block is AIR.
+                continue;
+            }
+            for iy in (0..ch).rev() {
+                let y = cell_base_y + iy;
+                let dy = iy as f64 * dy_step;
+                let pt = Pt { x, y, z };
+                self.interp.cell_frac = (dx, dy, dz);
+                let substance = self.env.eval(
+                    &self.compiled,
+                    self.final_density,
+                    pt,
+                    Mode::CellFill,
+                    &self.interp,
+                    None,
+                );
+                let state = self.material_from_substance(x, y, z, substance);
+                let stop = match mode {
+                    0 => state != AIR,
+                    _ => state != AIR && state != WATER && state != LAVA,
+                };
+                if stop {
+                    return y + 1;
+                }
+            }
+        }
+        // vanilla: .orElse(level.getMinY()) — accessor min height
+        self.min_y
+    }
+
+    /// The fill's air-zone guard: every base aquifer cell covered by this
+    /// 4x8x4 block cell (gx/gz span at most 2, gy at most 2) must have a
+    /// cached all-same summary, in which case the aquifer outcome above the
+    /// uniformity line is provably AIR for the whole cell.
+    fn bh_air_zone_safe(&self, cell_base_y: i32, cell_top_y: i32, x: i32, z: i32) -> bool {
+        let gx0 = floor_div(x - 5, 16);
+        let gx1 = floor_div(x, 16);
+        let gy0 = floor_div(cell_base_y + 1, 12);
+        let gy1 = floor_div(cell_top_y + 1, 12);
+        let gz0 = floor_div(z - 5, 16);
+        let gz1 = floor_div(z, 16);
+        for gx in [gx0, gx1] {
+            for gy in [gy0, gy1] {
+                for gz in [gz0, gz1] {
+                    let base = self.aquifer.index(gx, gy, gz);
+                    let sv = self.aquifer.summary[base].0.load(Ordering::Relaxed);
+                    if sv == 0 {
+                        return false; // uncached
+                    }
+                    let (same, _s) = unpack_summary(sv);
+                    if !same {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     }
 
     fn fill_inner(&mut self, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
@@ -3208,13 +3447,21 @@ impl<'e> ChunkGen<'e> {
     /// Material rule per block (vanilla MaterialRuleList).
     #[inline]
     fn material_rule(&mut self, x: i32, y: i32, z: i32, ix: i32, iy: i32, iz: i32) -> u16 {
-        let pt = Pt { x, y, z };
         let mut substance = self.cell_cache_value(iy, ix, iz);
         if !self.beard.is_empty() {
             // vanilla: cacheAllInCell(add(finalDensity, beardifier)) — the
             // cached value already includes the beard contribution.
             substance += self.beard.contribution(x, y, z);
         }
+        self.material_from_substance(x, y, z, substance)
+    }
+
+    /// Post-substance material decision (aquifer -> ore veins -> stone),
+    /// shared by the chunk fill (material_rule) and the base-height walk
+    /// (vanilla iterateNoiseColumn runs the same material chain, always
+    /// beard-less — BeardifierMarker.INSTANCE in iterateNoiseColumn).
+    fn material_from_substance(&mut self, x: i32, y: i32, z: i32, substance: f64) -> u16 {
+        let pt = Pt { x, y, z };
         if self.prof.enabled {
             if substance > 0.0 {
                 self.prof.blocks_subst_pos += 1;
@@ -3228,7 +3475,7 @@ impl<'e> ChunkGen<'e> {
             if self.prof.enabled && matches!(r, Some(b) if b == AIR) {
                 self.prof.blocks_aquifer_air += 1;
             }
-            if r.is_some() && self.sched {
+            if r.is_some() && self.sched && !self.bh_mode {
                 let b = r.unwrap();
                 // vanilla doFill: mark when flag && written block has fluid state
                 if (b == WATER || b == LAVA) && self.marks.len() < MARK_CAP {

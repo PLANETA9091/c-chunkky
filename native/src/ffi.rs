@@ -264,6 +264,30 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
     surface_tail(ctx, cx, cz, out);
 }
 
+/// Native vanilla-parity getBaseHeight (iterateNoiseColumn, 1-cell walk).
+/// mode: 0 = WORLD_SURFACE_WG/WORLD_SURFACE (stop at first non-air),
+///       1 = OCEAN_FLOOR_WG/OCEAN_FLOOR (stop at first blocksMotion state).
+/// Returns i32::MIN when the ctx does not exist or the walk panicked —
+/// the caller falls back to the NMS delegate (vanilla) path.
+pub fn base_height(id: i64, x: i32, z: i32, mode: i32) -> i32 {
+    const FAIL: i32 = i32::MIN;
+    let mut map_guard = match SESSIONS.lock() {
+        Ok(g) => g,
+        Err(_) => return FAIL,
+    };
+    let Some(map) = map_guard.as_mut() else {
+        return FAIL;
+    };
+    let Some(ctx) = map.get_mut(&id) else {
+        return FAIL;
+    };
+    let gen = &mut ctx.gen;
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        gen.base_height(x, z, mode as u8)
+    }));
+    res.unwrap_or(FAIL)
+}
+
 // ---------------------------------------------------------------------------
 // C ABI
 // ---------------------------------------------------------------------------
@@ -482,6 +506,22 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fillBeard(
         }
     }
     fill_jni(env, ctx, cx, cz, out, marks)
+}
+
+/// baseHeight(long ctx, int x, int z, int mode) -> int
+/// Native replica of vanilla NoiseBasedChunkGenerator.getBaseHeight.
+/// mode 0 = WORLD_SURFACE_WG/WORLD_SURFACE, 1 = OCEAN_FLOOR_WG/OCEAN_FLOOR.
+/// Returns i32::MIN on any failure (caller falls back to the NMS delegate).
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_baseHeight(
+    _env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jni_sys::jlong,
+    x: jni_sys::jint,
+    z: jni_sys::jint,
+    mode: jni_sys::jint,
+) -> jni_sys::jint {
+    base_height(ctx as i64, x as i32, z as i32, mode as i32)
 }
 
 /// profStatsGlobal() -> String: the global per-fill phase snapshot.

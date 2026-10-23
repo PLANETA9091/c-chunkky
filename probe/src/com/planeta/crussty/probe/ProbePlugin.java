@@ -14,6 +14,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -56,6 +58,7 @@ public final class ProbePlugin extends JavaPlugin {
             case "crusfull": return fullCount(sender, args);
             case "crusstydump": return dumpOne(sender, args);
             case "crusstydumpregion": return dumpRegion(sender, args);
+            case "crusbase": return baseDump(sender, args);
             default: return false;
         }
     }
@@ -148,6 +151,108 @@ public final class ProbePlugin extends JavaPlugin {
                     + flags
                     + " srvpid=" + ProcessHandle.current().pid());
         }
+        return true;
+    }
+
+    /** crusbase <blockX1> <blockZ1> <blockX2> <blockZ2> <step> <outfile> [world]
+     *  Dumps the VANILLA delegate's getBaseHeight (pure density column walk,
+     *  beard-less) for a grid of points, both heightmap types, via full
+     *  reflection (this plugin compiles against paper-api only). One line per
+     *  point: "x z world ocean". Runs async — writes DONE as the last line. */
+    private boolean baseDump(CommandSender sender, String[] args) {
+        if (args.length < 6) {
+            sender.sendMessage("usage: crusbase <x1> <z1> <x2> <z2> <step> <outfile> [world]");
+            return true;
+        }
+        int x1, z1, x2, z2, step;
+        try {
+            x1 = Integer.parseInt(args[0]);
+            z1 = Integer.parseInt(args[1]);
+            x2 = Integer.parseInt(args[2]);
+            z2 = Integer.parseInt(args[3]);
+            step = Integer.parseInt(args[4]);
+        } catch (NumberFormatException e) {
+            sender.sendMessage("BAD_ARGS");
+            return true;
+        }
+        World w = resolveWorld(sender, args.length >= 7 ? args[6] : null);
+        if (w == null) return true;
+        File out = new File(args[5]).getAbsoluteFile();
+        sender.sendMessage("BASE_DUMP_STARTED " + out);
+        new Thread(() -> {
+            PrintWriter pw = null;
+            try {
+                pw = new PrintWriter(
+                        new BufferedOutputStream(new FileOutputStream(out), 1 << 16));
+                Object nmsWorld = w.getClass().getMethod("getHandle").invoke(w);
+                Object chunkSource = nmsWorld.getClass().getMethod("getChunkSource").invoke(nmsWorld);
+                Object gen = chunkSource.getClass().getMethod("getGenerator").invoke(chunkSource);
+                // CustomChunkGenerator.delegate -> vanilla NoiseBasedChunkGenerator
+                Object delegate = null;
+                for (Class<?> k = gen.getClass(); k != null && delegate == null; k = k.getSuperclass()) {
+                    try {
+                        java.lang.reflect.Field f = k.getDeclaredField("delegate");
+                        f.setAccessible(true);
+                        delegate = f.get(gen);
+                        break;
+                    } catch (NoSuchFieldException ignored) { }
+                }
+                if (delegate == null) {
+                    // not wrapped (vanilla world): use the generator itself
+                    delegate = gen;
+                }
+                pw.println("# delegate=" + delegate.getClass().getName());
+                Class<?> types = Class.forName("net.minecraft.world.level.levelgen.Heightmap$Types");
+                Object wswg = types.getField("WORLD_SURFACE_WG").get(null);
+                Object ofwg = types.getField("OCEAN_FLOOR_WG").get(null);
+                Class<?> rngState = Class.forName("net.minecraft.world.level.levelgen.RandomState");
+                java.lang.reflect.Field fSettings = null;                for (Class<?> k = delegate.getClass(); k != null; k = k.getSuperclass()) {
+                    try {
+                        fSettings = k.getDeclaredField("settings");
+                        fSettings.setAccessible(true);
+                        break;
+                    } catch (NoSuchFieldException ignored) { }
+                }
+                Object settings = fSettings.get(delegate);
+                Object regAccess = nmsWorld.getClass().getMethod("registryAccess").invoke(nmsWorld);
+                // 1.21.8: RandomState.create(NoiseGeneratorSettings,
+                //   HolderGetter<NoiseParameters>, long seed)
+                Object settingsVal = settings.getClass().getMethod("value").invoke(settings);
+                Object noiseKey = Class.forName("net.minecraft.core.registries.Registries")
+                        .getField("NOISE").get(null);
+                Object noiseGetter = regAccess.getClass()
+                        .getMethod("lookupOrThrow", noiseKey.getClass())
+                        .invoke(regAccess, noiseKey);
+                Method mCreate = null;
+                for (Method m : rngState.getMethods()) {
+                    if (m.getName().equals("create") && m.getParameterCount() == 3
+                            && m.getParameterTypes()[2] == long.class
+                            && m.getParameterTypes()[0].isInstance(settingsVal)) {
+                        mCreate = m;
+                        break;
+                    }
+                }
+                Object rs = mCreate.invoke(null, settingsVal, noiseGetter, w.getSeed());
+                Method mBase = delegate.getClass().getMethod("getBaseHeight",
+                        int.class, int.class, types,
+                        Class.forName("net.minecraft.world.level.LevelHeightAccessor"),
+                        rngState);
+                long t0 = System.nanoTime();
+                for (int x = x1; x <= x2; x += step) {
+                    for (int z = z1; z <= z2; z += step) {
+                        int world = (Integer) mBase.invoke(delegate, x, z, wswg, nmsWorld, rs);
+                        int ocean = (Integer) mBase.invoke(delegate, x, z, ofwg, nmsWorld, rs);
+                        pw.println(x + " " + z + " " + world + " " + ocean);
+                    }
+                }
+                pw.println("DONE ms=" + ((System.nanoTime() - t0) / 1_000_000L));
+                pw.close();
+            } catch (Throwable t) {
+                if (pw != null) pw.println("FAILED " + t);
+                t.printStackTrace();
+                if (pw != null) pw.close();
+            }
+        }, "crusbase-dump").start();
         return true;
     }
 

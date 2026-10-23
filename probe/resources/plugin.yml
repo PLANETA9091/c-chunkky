@@ -20,3 +20,6 @@ commands:
   crusfull:
     description: Count fully loaded chunks inside a block rect (pregen completion signal)
     usage: /<command> <x1> <z1> <x2> <z2> [world]
+  crusbase:
+    description: Dump vanilla delegate getBaseHeight for a grid of points
+    usage: /<command> <x1> <z1> <x2> <z2> <step> <outfile> [world]
