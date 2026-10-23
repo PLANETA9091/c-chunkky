@@ -1937,3 +1937,51 @@ Stage Summary:
 - Следующие фронты: (a) EnvScan колонка-фастпат / ov-колонка-индекс к run 2.0-2.16ms;
   (b) место placeInChunk 108ms/окно — vanilla structure placement, вне нашего контроля кроме
   как гейтить лучше; (c) margin-фейлы — отдельный паритет-трек (vanilla ли тоже фейлит их?).
+
+---
+Task ID: cont-43 (2026-10-23, ИНСТРУМЕНТ ВОССТАНОВЛЕН + NATIVE base_height + ПАРИТЕТ-ХАРНЕСС)
+Agent: Super Z (main)
+Task: «БОЛЬШЕ И ЛУЧШЕ» — продолжить на максимум с чекаут 848b2b6 (cont-41); профилирование, оптимизация.
+
+Work Log:
+- ТУЛЧЕЙН ВОССТАНОВЛЕН: rustup 1.99.1 (~/.cargo), Temurin JDK 21.0.13+9 (/home/z/tools/jdk-21.0.13+9,
+  jcmd/jfr), CFR 0.152 (decompile). cargo test на чекауте: 15/15; .so был актуален HEAD.
+- СВЕЖИЙ JFR-ПРОФИЛЬ dptt (sampler_session): выловил ТРИ бут-регрессии (surface boot-order ->
+  extendPalette null -> vanilla Java surface ~30% окна; CraftBlockData CNFE (правильный FQN —
+  block.data); mGetHandle clash CraftChunkData vs CraftWorld -> beardifier self-disable).
+  ВСЕ ТРИ УЖЕ ПОЧИНЕНЫ НА REMOTE (cont-5x) — дубль-фиксы отброшены в rebase.
+- ФРОНТ D (native getBaseHeight): семантика выцеплена из декомпила 1.21.8 (iterateNoiseColumn =
+  1-ячеечный NoiseChunk, BeardifierMarker, stop = type.isOpaque(), ответ y+1; NOT_AIR /
+  MATERIAL_MOTION_BLOCKING; MOTION_BLOCKING ≡ NOT_AIR на преп-сёрфейс наборе материалов).
+  Реализация в nochunk.rs: base_height() с локальным InterpState(cell_count_xz=1), slot-0 углы
+  через slice_slot0 eval8/eval4, слоты 1..7 мемоизированный скаляр, ПЕР-ЯЧЕЕЧНЫЙ verdict-гейт
+  (cell_interval): AllPos -> ответ на вершине ячейки, AllNeg ниже лавовой линии -> ответ/скип,
+  uniform-air zone -> скип. aquifer begin_chunk(query chunk), bh_mode гасит пуш марок.
+  Скорость: 31ms (наивный) -> 1.9ms/вызов изолированно (ванильный Java ~6ms).
+- ЛОВУШКА 1: baseref/bins не пересобирают cdylib (cargo build --bin X) — сервер гонял старый .so
+  (panic на дальних чанках; panic=abort не сработал как ожидалось — процесс выжил). Правило:
+  после правок nochunk/ffi — полный cargo build --release.
+- ЛОВУШКА 2: workdir/dpext/merged — ПРОТАХНАВШАЯ экстракция (122/218 density fns, неверный
+  overlay-политик) -> ложная дивергенция «пол на 47 vs 3». Правильная реплика пакета:
+  scripts/extract_biome_assets.py (PACK_FORMAT=81) -> 379 файлов. После фикс — паритет.
+- ЛОВУШКА 3: ny в slice_slot0 = cell_count_y+1 (не cell_count_y) — иначе углы верхней плоскости
+  коллизируют в flat-индексе (вернул 320 вместо 63).
+- ПАРИТЕТ: baseref + probe crusbase (vanilla delegate getBaseHeight через рефлексию,
+  RandomState.create(NoiseGeneratorSettings, HolderGetter<NoiseParameters>, seed)) +
+  vanilla_base_ref.sh (ванильный ground-truth мир): 1024/1024 точек бит-точных (Tectonic+Terralith,
+  WORLD_SURFACE_WG и OCEAN_FLOOR_WG, гриды 0..255 и 512..1023).
+- ДЖАДЖ на моём стеке (до обнаружения remote-прогресса): dptt 512/6.29M = 0.008% (только
+  vegetation-order шум: sand<->gravel, seagrass, kelp), HEIGHTMAP 0/16384.
+- РЕСИНК С REMOTE: remote ушёл на cont-58b (deco натив, heightsCtx Stage D, residual решён).
+  Rebase: их Stage D (fill-based heightsCtx + chunk-cache) ОСТАВЛЕН как прод-путь (выгоднее на
+  паттерне 25 запросов/чанк); мой single-column base_height оставлен как диагностический путь +
+  независимый верификатор их подхода (паритет 1024/1024 уже доказан на объединённом дереве).
+  cargo test на merged: 54/54. Дубли полей (mWorldHandle) вычищены, plugin/classes пересобраны.
+
+Stage Summary:
+- Коммит def43bd (push, CI запустится): diag(height) — base_height + baseref/crusbase/
+  vanilla_base_ref харнесс паритета высот.
+- Инструментальная база сессии: rustup+JDK21+CFR восстановлены; jfr_roots.py (root-атрибуция
+  JFR-стадий) в scripts/.
+- Следующие фронты: deco 2.0-2.16ms -> 1.5ms (EnvScan колонка-фастпат, ov-колонка-индекс),
+  height-сервис: их heightsCtx + мой walk — выбрать бенефициарный путь по профилю структур.
