@@ -1,0 +1,18 @@
+# prof session stageD 2026-10-23T12:06:56Z
+world=dptt datapacks_dir=server_datapacks fill_threads=2 parallel=1 heap=-Xms1G -Xmx2G
+18c29f1c871f71a96961af2664d7ae2e  01_tectonic.zip
+ee7f451a8d1a13b29090a08543bda46a  02_terralith.zip
+052b8c9b5415f660127ef31fa1382b8e  server/paper.jar
+37dab40796537efae9cc00f9a1a4b89e  server/plugins/CrusstyGen.jar
+876e5b49398baf82b492bd3e6af46bc7  native/target/release/libcrussty_chunkgen.so
+--- measured window: 12x12 cx 32..43 cz 32..43 ---
+batch cz 32..34: 36 chunks in 5532 ms -> 153.6 ms/chunk
+batch cz 35..37: 36 chunks in 3937 ms -> 109.3 ms/chunk
+batch cz 38..40: 36 chunks in 2779 ms -> 77.1 ms/chunk
+batch cz 41..43: 36 chunks in 2247 ms -> 62.4 ms/chunk
+window_ms=14505 chunks=144 ms_per_chunk=100.73
+--- crusgenstats (final) ---
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=396  mean=10149.7us  min=2658.9us  p50=7048.8us  p99=43405.3us  max=51451.3us  [native=9.43ms nat_p50=6.26ms layout=0.66ms beard=0.00ms marks=0.02ms]  [lay setup=0.08 sec=0.24 hmap=0.34 verify=0.00 | uni=0.00/0.2 lin=0.00/0.0 glob=0.00/8.0 pb=0.00/0.00]  [sections filled=0 mixed=3168 air=6336 v1fallback=0 bulk=ok]  swapfail=null  marks_seen=17153 marks_landed=17153 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=672 wall=10.57ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=4.55 par_strips=2.21]
+
+--- spark links in console ---
+https://spark.lucko.me/4xpU6ElfpA

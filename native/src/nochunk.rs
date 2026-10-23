@@ -3499,6 +3499,7 @@ impl<'e> ChunkGen<'e> {
         state.unwrap_or(STONE)
     }
 
+
     /// Global fluid picker (NoiseBasedChunkGenerator.createFluidPicker):
     /// y < min(-54, seaLevel) ? FluidStatus(-54, LAVA) : FluidStatus(seaLevel, WATER).
     #[inline]

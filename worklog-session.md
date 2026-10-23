@@ -1985,3 +1985,47 @@ Stage Summary:
   JFR-стадий) в scripts/.
 - Следующие фронты: deco 2.0-2.16ms -> 1.5ms (EnvScan колонка-фастпат, ov-колонка-индекс),
   height-сервис: их heightsCtx + мой walk — выбрать бенефициарный путь по профилю структур.
+
+---
+Task ID: cont-44 (2026-10-23, STAGE D: независимая сходимость + верификация scalar-пути в проде)
+Agent: Super Z (main)
+Task: «Продолжи на максимум, ультра скорость» — stage D (native height service) после ресета окружения.
+
+Work Log:
+- ОКРУЖЕНИЕ ВОССТАНОВЛЕНО: rustup 1.99.1, Temurin JDK 21.0.13+9 (/home/z/tools), filemode-шум git
+  выключен (core.fileMode false). cfr.jar найден в /home/z/my-project/scripts.
+- ДЕКОМПИЛ-ФАКТЫ (paper 1.21.8, CFR): Bukkit ChunkGenerator.getBaseHeight default КИДАЕТ
+  UnsupportedOperationException -> CustomChunkGenerator.implementBaseHeight=false НАВСЕГДА после
+  первого запроса -> все height-запросы шли в delegate = Java iterateNoiseColumn по ВСТРОЕННОЙ
+  ваниле (не датапак!) — ~12% старого окна + риск паритета размещения структур.
+  Call site: Structure.getCornerHeights -> 4x getFirstOccupiedHeight(WORLD_SURFACE_WG) на
+  структуру. iterateNoiseColumn = чистый density-walk (БЕЗ surface rules, БЕЗ beard —
+  BeardifierMarker), stop = type.isOpaque(), ответ y+1; OCEAN_FLOOR = blocksMotion =>
+  на преп-сёрфейс наборе (air/fluid/solid) предикаты схлопываются в AIR/fluid-членство.
+- СВОЯ РЕАЛИЗАЦИЯ (до обнаружения remote-прогресса): nochunk.rs base_height_column() — углы
+  xz-ячейки через Mode::Slice (паттерн serial fill_slice), substance через Mode::CellFill
+  final_density с cell_frac, блок через скалярный material_rule (aquifer+ore). JNI baseHeight +
+  dedicated height ctx в CtxPool + override getBaseHeight (Bukkit HeightMap -> htype 0..5).
+- ЛОВУШКА (поймана парити-тестом, пополнена в общую копилку): ДВА угла под ОДНИМ MemoCtx
+  next_serial() => CSE возвращает значение x-плоскости 0 для плоскости 1 (slice0==slice1,
+  плотность завышена у воды). next_serial per POINT — обязателен. Тесты: бит-паритет
+  base_height == heightmap fill-выхода, 3 чанка x 256 колонок x {WSWG, OFWG} + cold-ctx.
+- ВЕРИФИКАЦИЯ В ПРОДЕ (мой scalar как единственный height-путь): dptt judge (Terralith+Tectonic
+  нетронутые) = 279/6,291,456 = 0.004% (HEIGHTMAP 0/16384) — ЛУЧШЕ прежнего 0.005%; высоты
+  размещения структур теперь датапак-формы. prof_session dptt: окно 100.7 ms/chunk
+  (stage C2 99.4 — в шуме 2-core; тёплые батчи 62-77ms), натив p50 6.26ms без деградации.
+- РЕСИНК С REMOTE (как cont-42): origin/main уже содержит Stage D ДРУГОГО СЕАНСА (cont-58:
+  fill-based heightsCtx прод-путь + def43bd scalar base_height как диагностика с бит-паритетом
+  1024/1024 против ванильного delegate через crusbase) и уже Stage F1 (native deco engine).
+  Rebase: прод и диагностика — ИХ (бенефициар fill-based на паттерне ~25 запросов/чанк),
+  МОИ дубли (base_height_column, JNI/Java-обвязка) удалены; cargo test merged: 54/54.
+  plugin/classes пересобраны на merged-дереве.
+- ЦЕННОСТЬ СЕССИИ ДЛЯ ВЫБОРА ПУТИ: scalar-путь в изоляции (мой прогон) дал judge 0.004% и
+  нулевую деградацию натива — оба варианта зелёные; финальный выбор (fill-based heightsCtx)
+  подтверждён независимо. Мой prof_session_dptt_stageD.txt — артефакт сравнения.
+
+Stage Summary:
+- Merged: 54/54 tests, прод = их heightsCtx (fill-based) + их scalar diag; judge-свидетельство
+  0.004% на scalar-пути добавлено в evidence base. Коммит docs: cont-44.
+- Следующие фронты (из их worklog): deco 2.0-2.16 -> 1.5ms (EnvScan колонка-фастпат,
+  ov-колонка-индекс); height-профиль структур (25 запросов/чанк: fill-cache vs scalar).
