@@ -88,6 +88,7 @@ java $HEAP_ARGS $JAVA_LIB_PATH_ARGS $REGION_D_ARGS $AGENT_ARGS \
   $PGEN_FLAG \
   $GC_FLAGS \
   -XX:NonProfiledCodeHeapSize=64m \
+  -XX:FlightRecorderOptions=stackdepth=128 \
   -jar paper.jar nogui < run.in > run.out 2>&1 &
 echo $! > server.pid
 echo "paper started pid=$(cat server.pid) fifo_holder=$(cat fifo.pid)"

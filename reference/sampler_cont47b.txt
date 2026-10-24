@@ -1,0 +1,8 @@
+# sampler session cont47b 2026-10-24T10:17:56Z world=dptt gen=crussty
+01_tectonic.zip
+02_terralith.zip
+bukkit
+window_ms=3626
+--- crusgenstats (final) ---
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: no chunks generated yet | [CrusstyGen] native deco stage: deco: no chunks decorated yet | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00]
+

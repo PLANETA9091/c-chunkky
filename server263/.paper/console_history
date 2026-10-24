@@ -1,0 +1,6 @@
+1792838065981:__workspace_agent_exit_code=$?
+1792838065987:printf "\\n<<workspace_agent_exit_code:1792838053578:%s>>\\n" "$__workspace_agent_exit_code"
+1792838872192:__workspace_agent_exit_code=$?
+1792838872229:printf "\\n<<workspace_agent_exit_code:1792838859226:%s>>\\n" "$__workspace_agent_exit_code"
+1792839088466:__workspace_agent_exit_code=$?
+1792839088470:printf "\\n<<workspace_agent_exit_code:1792839075257:%s>>\\n" "$__workspace_agent_exit_code"

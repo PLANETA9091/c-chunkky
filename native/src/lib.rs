@@ -31,6 +31,7 @@ pub mod features_master;
 pub mod features_jni;
 pub mod features_snap;
 pub mod features_survive;
+pub mod n263;
 pub mod cplugin;
 pub mod ffi;
 

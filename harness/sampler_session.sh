@@ -86,6 +86,7 @@ rcon "crusgenstats reset" >/dev/null
 JC="$(ls -d /home/z/tools/jdk-21*/bin/jcmd 2>/dev/null | tail -1)"
 [ -z "$JC" ] && JC=jcmd
 JPID="$(cat "$SRV/server.pid")"
+$JC "$JPID" JFR.configure stackdepth=128 >/dev/null 2>&1 || echo "[sampler] JFR.configure (stackdepth) FAILED"
 WIN_T0=$(date +%s%3N)
 $JC "$JPID" JFR.start name=prof settings=profile filename="$ROOT/reference/jfr_${TAG}.jfr" >/dev/null 2>&1 || echo "[sampler] JFR.start FAILED"
 rcon "forceload add $(blockof $MEAS_CMIN) $(blockof $MEAS_CMIN) $(( $(blockof $MEAS_CMAX) + 15 )) $(( $(blockof $MEAS_CMAX) + 15 ))" >/dev/null

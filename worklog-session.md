@@ -2085,3 +2085,63 @@ Stage Summary:
 - Артефакты: features_deco.rs (CFast/compile/env_scan_column_fast/EnvColScan),
   features_snap.rs (ov_cols + EnvColScan impl), features_master.rs (chunk_ov_cols),
   features_jni.rs (wiring + drop-путь). Профили: prof_session_deco_fast1/slow1.txt.
+
+---
+## cont-47: МИГРАЦИЯ НА MINECRAFT 26.3 (директива пользователя: модуль только под 26.3)
+
+Task: «модуль под версию майнкрафта 26.3 только, а не 1.21.8» + «1мс на чанк e2e на 26.3».
+Work Log:
+- ЗАКРЫТ ВОПРОС ПРОФИЛЯ 1.21.8 (перед разворотом): свежий JFR dptt (jfr_cont47c, stackdepth
+  исправлен через -XX:FlightRecorderOptions=stackdepth=128; ЛОВУШКА: `jfr print` по умолчанию
+  режет стеки до 5 кадров — нужен --stack-depth 128!). Root-атрибуция воркера: generateFeatures
+  38.4% (убит нативным deco в проде), generateCarvers 30.9% — ГЛАВНЫЙ ОСТАВШИЙСЯ Java-рычаг:
+  applyCarvers создаёт на каждый чанк Java NoiseChunk (NoiseChunk.forChunk -> mapAll по всему
+  DF-дереву + CubicSpline rebuild + HashMap.wrap churn ~19% воркера) + сам carve 3.6%. Нативные
+  carvers = следующий фронт уже НА 26.3.
+- СКАЧАН PAPER 26.3 (Fill API v3; старый v2 sunset): build 218 STABLE 2026-10-23,
+  sha256 cdd56d33...cc11, server263/paper-26.3-218.jar. MC 26.3 требует JAVA 25 — установлен
+  Temurin 25.0.5+8 (/home/z/tools/jdk-25.0.5+8). Первичный бут: Done (18.8s), cache/mojang_26.3.jar
+  — снова бандлер, настоящий mojmap jar = server263/versions/26.3/paper-26.3.jar.
+- ДЕКОМПИЛ 26.3: vineflower (кэш /tmp/my-project/decomp/vineflower.jar), пакеты levelgen/biome/
+  chunk -> 536 классов, СОХРАНЕНЫ в reference/dec263/. Ванильные датапак-JSONs 26.3 (8370 шт) ->
+  reference/vanilla263/data/. pack_format 26.3: data_major=121 (1.21.8 был 81), world_version 5023,
+  protocol 777.
+- ФОРМАТ-ДЕЛЬТА 26.3 (worldgen данные): configured_feature->feature, configured_carver->carver
+  (реестры ПЕРЕИМЕНОВАНЫ); surface rules вынесены из noise_settings в отдельные реестры
+  material_condition(8)/material_rule(42) — в noise_settings только ссылка "minecraft:overworld";
+  noise_router — ВСЕ строковые ссылки на density_function (переезжают в подпапки overworld/,
+  nether/, end/); density_function 35->55 файлов; НОВЫЙ КЛЮЧ router: chunk_surface_level; aquifers
+  стала секцией noise_settings {barrier, exclusi...} (из router УШЛИ barrier/fluid_level_*/lava/
+  vein_* — аквифер-рework, vein-функции удалены); NoiseSettings сжат до {height, min_y};
+  блокState_provider тоже отдельный реестр; noise-формат: base_octave/octave_count/base_amplitude
+  вместо firstOctave+amplitudes[]; биом: новый ключ attributes; carver-конфиг: новые поля
+  weird_thickness_bias + room_vertical_radius_multiplier (семантика carver изменена!).
+- КОД-ДЕЛЬТА 26.3 (worldgen): synth ПЕРЕПИСАН — ImprovedNoise удалён -> GradientNoise (byte[256]
+  perms, GRADIENT-таблица 16 шт, FLOAT-оценка, offsetX/Y/Z scale 256, wrap ROUND_OFF), новый
+  SmearedPerlinNoise, NoiseStack, LegacyFbmInitializer; NormalNoise: Parameters{baseAmplitude,
+  baseOctave, octaveCount, Normalization(LEGACY parity path), amplitudeModifiers};
+  densityfunction ПАКЕТ НОВЫЙ (levelgen.densityfunction): DensitySampler/DensityVolume/
+  DensityBuffer/Arena/Pool (объёмная float-оценка вместо per-point compute!), op/{Interpolated,
+  Lerp, Pow, Round, Slice, FindTopSurface, IntervalSelect, ...}, generator/{Noise, ShiftNoise,
+  Gradient, EndIsland, ...}; NoiseChunk теперь тонкая обёртка (73 строки) над RandomState.
+  samplersWithContext(SamplerContext) + Aquifer из settings.aquifers(); MaterialSystem (levelgen.
+  material) = новый surface-движок; RandomState: сидирование БЕЗ ИЗМЕНЕНИЙ (xoroshiro
+  forkPositional + fromHashOf(name) на шум + getOrCreateRandomFactory(Identifier)); paper-патчи:
+  chunk_gen/{buffer_alloc, climate_rtree, noise(ChunkGenPerlinNoise/NoiseGradients pAdj char[])}.
+- RNG-ЯДРО НЕ ИЗМЕНЕНО (диффы — только переименования): Xoroshiro128PlusPlus, mixStafford13,
+  upgradeSeedTo128bit, seedFromHashOf (raw MD5) — rng.rs/md5.rs портируются 1:1.
+- ПЛАГИН НА 26.3: CrusstyGen.jar (собран под 1.21 API) ЗАГРУЖАЕТСЯ на Paper 26.3: генератор
+  регистрируется (bukkit.yml), JNI ctx pool создаётся, sea level читается из NMS (63), beardifier
+  bridge init OK, spawn-чанки генерятся через наш fill (12.9s). Поломки: (1) NoSuchMethod
+  ProtoChunk.markPosForPostprocessing(BlockPos) — переименован; (2) NoSuchField "registry" в
+  bulk section layout — переименован; (3) native biome source swap не применился; (4) поверхность
+  всё ещё vanilla (MaterialSystem). JNI-контракт жив.
+- СЛЕДУЮЩИЕ ШАГИ (порядок): 1) Rust: noise-ядро 26.3 (GradientNoise/PerlinNoise float-путь +
+  NormalNoise + Smeared + NoiseStack + BlendedNoise) с golden-тестами против 26.3-оракула;
+  2) densityfunction-дерево (новый op-набор + InterpolatedFunction); 3) worldgen.rs loader под
+  форматы 26.3; 4) MaterialSystem (surface); 5) Climate/biomes; 6) height-сервис (iterateNoiseColumn
+  26.3); 7) fill+layout (новые имена полей); 8) carvers 26.3 (натив, новые поля!); 9) features/deco.
+  Артефакты: reference/dec263/, reference/vanilla263/, server263/, harness правки (stackdepth).
+Stage Summary:
+- Миграционная база собрана: jar 26.3, mojmap-декомпил, ванильные JSONs, карта дельт, JNI жив на 26.3.
+- Движок = новый порт (float-сэмплеры), паритет-цель = ваниль 26.3.
