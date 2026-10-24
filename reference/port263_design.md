@@ -70,7 +70,7 @@ Bit-parity rules (cont-47b lesson):
 
 ## Reading queue (exact files, reference/dec263/)
 
-1. op/InterpolatedFunction.java (236) — cell cache semantics
+1. op/InterpolatedFunction.java (236) — **READ, semantics frozen (see below)**
 2. op/SliceFunction.java + TilingMode.java — volume tiling
 3. DensityFunctions.java (408) — DIRECT_CODEC op list + HolderHolder semantics
 4. DensityFunctionCompiler.java (87) — JSON ref resolution + caching
@@ -79,6 +79,26 @@ Bit-parity rules (cont-47b lesson):
 7. NoiseRouter.java + NoiseGeneratorSettings.java — settings shape for worldgen.rs loader
 8. material/MaterialSystem.java — surface rule host (port of surface.rs target)
 9. moonrise chunk_gen patch: ChunkGenPerlinNoise/CoordCache usage in fill pipeline
+
+## InterpolatedFunction 26.3 — FROZEN semantics (read 2026-10-24)
+
+Two DIFFERENT numeric paths (both vanilla; do NOT unify):
+
+* **Volume fill** (chunk gen): input sampled at cell CORNERS (cellVolume step=cellSize);
+  per cell: alphaZ = z*cellSizeXzInv -> Z-lerp first (v00_/v01_/v10_/v11_),
+  then alphaX -> X-lerp (v_0_/v_1_), then Y via ADDITIVE walk:
+  `valueStep = (v_1_ - v_0_) * cellSizeYInv; value = v_0_ + valueStep*y0; value += valueStep`
+  per y — f32 accumulation drift is REQUIRED for bit parity.
+  Order: Z -> X -> Y-additive. (1.21.8 was Y->X->Z per-point lerp3 — CHANGED.)
+* **Point query** (height service): 2x2x2 corner buffer at
+  (blockX - xInCell, ..., step=cellSize), then Mth.lerp3(xInCell/cellXz, yInCell/cellY,
+  zInCell/cellXz, corners...) — X,Y,Z lerp2/lerp3 path. If point sits ON a cell corner
+  (xInCell==yInCell==zInCell==0): direct input sample.
+* Cell coverage: cellVolume spans cells [floorDiv(min)..floorDiv(max)] with +1 cell when
+  maxBlockX % cellSize != 0; Y same with cellSizeY.
+* Implication for the Rust fill: precompute corner grid (like 1.21.8 slice slots) then
+  reproduce fillCell EXACTLY (incl. additive Y) for chunk volumes; height queries use the
+  point path.
 
 ## Harness deltas queued
 

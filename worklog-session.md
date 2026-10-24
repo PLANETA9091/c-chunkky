@@ -2179,3 +2179,23 @@ Stage Summary:
   новый op-набор + InterpolatedFunction + DensityVolume-семантика), далее loader форматов
   26.3 (material_rule/material_condition реестры, aquifers-секция, router-ссылки).
 - Оракул-пайплайн воспроизводим: oracle263/*.java + classpath-конвенции — в артефактах.
+
+---
+## cont-47c: InterpolatedFunction 26.3 семантика заморожена
+
+Work Log:
+- op/InterpolatedFunction.java прочитан полностью (236 строк). ДВА разных числовых пути
+  (оба ванильные, НЕ унифицировать): volume-fill (чанк) = ячейковые углы -> lerp Z -> lerp X
+  -> Y АДДИТИВНЫМ шагом (valueStep=(v_1_-v_0_)*cellSizeYInv; value+=valueStep) — f32-дрейф
+  обязателен для бит-паритета; point-запрос (height-сервис) = 2x2x2 угловый буфер +
+  Mth.lerp3(X,Y,Z альфы), угловой сэмплирование при inCell==0. Порядок лерпов ИЗМЕНИЛСЯ
+  против 1.21.8 (был Y->X->Z). Покрытие ячеек: floorDiv(min)..floorDiv(max) +1 ячейка при
+  некратном max.
+- Обновлён reference/port263_design.md (InterpolatedFunction — FROZEN). Очередь чтения:
+  SliceFunction/TilingMode -> DensityFunctions (op-лист) -> Compiler -> NoiseRouterData ->
+  FindTopSurface -> MaterialSystem.
+- Пуш: f06f9b0 (noise core) + 9a6207a (design) на origin/main.
+Stage Summary:
+- Самый рискованный кусок порта (интерполяция ячеек) зафиксирован в дизайн-доке; следующий
+  сеанс = DensityFunctions op-лист + компилятор + первый Df263-скелет с золотыми сетками
+  sampleValue из расширенного оракула.
