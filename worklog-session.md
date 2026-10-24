@@ -2266,3 +2266,50 @@ Stage Summary:
 - Следующие шаги: (1) fill+layout под 26.3 (новые имена полей, moonrise chunk_gen),
   (2) height-сервис на DfSam263 point-пути, (3) MaterialSystem port, (4) carvers 26.3
   натив, (5) e2e-харнесс 26.3 (server263 уже стоит, JDK25) и замер к 1мс.
+
+---
+## cont-49: FILL263 БИТ-ТОЧЕН + NATIVE CARVERS 26.3 ЖИВЫ В ПРОДЕ
+
+Task: «продолжи, надо максимальное ускорение сейчас!» — 26.3-only, цель 1мс/чанк e2e.
+Work Log:
+- ПЛАГИН 26.3 (коммит 5b08c84): markPosForPostProcessing (cap P), PalettedContainer(T,
+  Strategy, T[] presetValues) + top-level Strategy.createForBlockStates + Configuration
+  top-level + Palette$Factory.create(bits,List) (26.3 снял registry/resize), PACK_FORMAT
+  121 (81 фильтровал серверные датапаки -> packs=none), ResourceLocation->Identifier,
+  blocksMotion()->BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP, sec.getStates(),
+  startsForStructure(cx,cz), PlacedFeature.place, getAllReferences; NativeBiomeSource —
+  createResolver(BiomeResolver-лямбда); build против server263 (classpath: jspecify +
+  jetbrains-annotations + guava — иначе CompletionFailure).
+- FILL263 (7b0609f): beard263.rs (f32 Beardifier 26.3: affected box inflate24, f32
+  getBuryContribution с веткой 36.0, fastInvSqrt f64->f32 cast, kernel layout совпадает),
+  aquifer263.rs (полный NoiseBasedAquifer: exclusion+surface_level из секции aquifers,
+  strided (4,1,4) maxSurfaceLevel prefill через ОБЩИЙ SamplerCtx (порядок = Java:
+  конструктор аквифера ДО volume-fill final_density!), skipSamplingAboveY, 4-closest,
+  calculatePressure f64, computeFluidType, BlockPos.asLong pack), fill263.rs (doFill:
+  final_density volume -> computeSubstance -> stone/water/lava + marks; baseHeight),
+  df263: DfSam263::Beard (ContextBoundSampler) вместо constant(0.0); Rc->Arc (Send).
+- ОРАКУЛ (29b05f0 пойдёт следом): FillOracle263.java (vanilla doFill c
+  Beardifier.CONTEXT_KEY=EMPTY через ContextMap user fields, aquifers JSON реальными
+  кодеками) -> 4 чанка / 129273 ячеек / 165 marks — БИТ-ТОЧНО vs Rust fill263golden.
+  ЛОВУШКА: cargo не пересобрал golden-бинарник после правки (byte count совпал) —
+  форсить touch+rebuild при сравнениях!
+- CARVERS 26.3 (29b05f0): carver263.rs — Cave/CanyonWorldCarver точно (Trapezoid
+  min+nf*plateauEnd+nf*plateauStart, VeryBiasedToBottom 26.3 ТРОЙНОЙ nextInt!,
+  Mth.sin/cos таблица 65536, f32-порядок mul'ов в tunnel/room radius),
+  setLargeFeatureSeed 26.3 = setSeed(s); xScale=nextLong; zScale=nextLong;
+  setSeed(sx*xScale ^ sz*zScale ^ s); маска (y-minY)+(z+(x<<4))*height; apply через
+  aquifer.computeSubstance(0.0), UNCARVABLE=bedrock (весь тег!), changed-cells ops.
+  JNI carve/carveOps/carveMarks; CarverDriver populator (пак секций bits/raw/pal,
+  ops через getAndSetUnchecked + recalcBlockCounts, postproc marks).
+- ПРОД-СМОУК ЗЕЛЁНЫЙ: server263_up/down.sh (JDK25, gen-parallelism=false,
+  CRUS_NATIVE_CARVERS=1); boot 15-16с; bulk layout жив; forceload 20+ чанков чисто,
+  океанская вода проверена rcon-пробами (WATER_OK).
+Stage Summary:
+- Нативный 26.3-движок = fill (бит-точен) + carvers (в проде) + height-сервис.
+- ИЗВЕСТНЫЕ ГЭПЫ (порядок): (1) topMaterial под вырезанной травой — отложен до
+  MaterialSystem порта (ванилла оставляет dirt в пустом case — редкая ветка);
+  (2) MaterialSystem (surface) — сейчас ванильная Java-стадия; (3) biomes263
+  (NativeBiomeSource createResolver жив, но ctxBiomeNames для 26.3 не строится —
+  vanilla биомы); (4) deco 26.3 (features JSON дельты); (5) e2e-замер на 26.3
+  (харнесс готов, замер следующей сессией); (6) перф-проход fill263 (goldens
+  ~14.6мс/чанк вкл. формат-вывод; оптимизировать после полного нативного пайпа).
