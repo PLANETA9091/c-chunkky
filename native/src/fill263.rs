@@ -185,3 +185,134 @@ impl Gen263 {
 fn out_index(min_y: i32, block_y: i32, x: i32, z: i32) -> usize {
     ((block_y - min_y) as usize) * 256 + (z as usize) * 16 + (x as usize)
 }
+
+impl Gen263 {
+    /// NoiseBasedChunkGenerator.applyCarvingMask 26.3 over the carver mask:
+    /// per masked cell (top-down): UNCARVABLE (bedrock) guard, grass flag,
+    /// aquifer.computeSubstance(x, y, z, 0.0) -> null keeps the block,
+    /// AIR carves, fluids write + marks. The vanilla grass→dirt
+    /// topMaterial replacement is deferred to the MaterialSystem port
+    /// (vanilla keeps the dirt when the optional is empty).
+    /// `io` is the post-surface center chunk buffer (JNI layout).
+    pub fn apply_carvers(
+        &self,
+        cx: i32,
+        cz: i32,
+        seed: i64,
+        io: &mut [u16],
+        changed: &mut Vec<i64>,
+    ) -> Vec<i64> {
+        let mut marks = Vec::new();
+        let mask = crate::carver263::generate_carver_mask(seed, cx, cz, self.min_y, self.height);
+        if mask.is_empty() {
+            return marks;
+        }
+        let volume = DensityVolume::block_step((16, self.height, 16), (cx * 16, self.min_y, cz * 16));
+        let mut ctx = SamplerCtx263::cached();
+        let mut aquifer = self.aquifer_for(&mut ctx, &volume);
+        let min_x = cx * 16;
+        let min_z = cz * 16;
+        mask.visit(|x, z, bottom_y, top_y| {
+            let mut has_grass = false;
+            let world_x = min_x + x;
+            let world_z = min_z + z;
+            for world_y in (bottom_y..=top_y).rev() {
+                let idx = ((world_y - self.min_y) * 256 + z * 16 + x) as usize;
+                let block = io[idx];
+                if block == 2 {
+                    continue; // bedrock — the whole UNCARVABLE tag in 26.3
+                }
+                if block == 4 {
+                    has_grass = true; // grass_block (mycelium not in the id table)
+                }
+                let Some(ty) = aquifer.compute_substance(&mut ctx, world_x, world_y, world_z, 0.0)
+                else {
+                    continue; // vanilla: null -> keep the block
+                };
+                let pre = io[idx];
+                let write = match ty {
+                    crate::aquifer263::FluidTy::Air => Some(0u16),
+                    crate::aquifer263::FluidTy::Water => {
+                        if aquifer.should_schedule_fluid_update() {
+                            marks.push(crate::aquifer263::pos_as_long(world_x, world_y, world_z));
+                        }
+                        Some(WATER_ID)
+                    }
+                    crate::aquifer263::FluidTy::Lava => {
+                        if aquifer.should_schedule_fluid_update() {
+                            marks.push(crate::aquifer263::pos_as_long(world_x, world_y, world_z));
+                        }
+                        Some(LAVA_ID)
+                    }
+                };
+                if let Some(w) = write {
+                    if pre != w {
+                        changed.push(((idx as i64) << 16) | w as i64);
+                        io[idx] = w;
+                    }
+                }
+                let _ = has_grass;
+            }
+            true
+        });
+        marks
+    }
+}
+
+
+/// One section's decoded payload for the carve JNI.
+pub struct SectionPack<'a> {
+    /// 24 entries: bits (0 = single-value palette, -1 = absent section).
+    pub bits: &'a [i32],
+    /// Concatenated BitStorage raw longs (offsets via raw_off).
+    pub raw: &'a [i64],
+    pub raw_off: &'a [i32],
+    /// Concatenated palette id tables (our u16 ids; unknown states -> 1).
+    pub pal: &'a [i16],
+    pub pal_off: &'a [i32],
+}
+
+impl Gen263 {
+    /// JNI carve pipeline: decode sections -> carver mask + apply -> changed
+    /// cells + fluid marks. `ops` receives (idx << 16 | newId) for every
+    /// mask cell whose block changed; Java applies them via the NMS states.
+    pub fn carve_chunk(
+        &self,
+        cx: i32,
+        cz: i32,
+        seed: i64,
+        pack: &SectionPack,
+        io: &mut [u16; OUT_LEN],
+        marks: &mut Vec<i64>,
+        ops: &mut Vec<i64>,
+    ) {
+        io.fill(0);
+        for s in 0..24usize {
+            let bits = pack.bits[s];
+            if bits < 0 {
+                continue; // absent section — stays air
+            }
+            let base = s * 4096;
+            if bits == 0 {
+                let id = pack.pal[pack.pal_off[s] as usize] as u16;
+                io[base..base + 4096].fill(id);
+            } else {
+                let ro = pack.raw_off[s] as usize;
+                let po = pack.pal_off[s] as usize;
+                for i in 0..4096usize {
+                    let bit_idx = i * bits as usize;
+                    let word = bit_idx / 64;
+                    let shift = bit_idx % 64;
+                    let mut v = (pack.raw[ro + word] >> shift) as i64;
+                    if shift + bits as usize > 64 {
+                        v |= pack.raw[ro + word + 1] << (64 - shift);
+                    }
+                    let v = (v & ((1i64 << bits) - 1)) as usize;
+                    io[base + i] = pack.pal[po + v] as u16;
+                }
+            }
+        }
+        let changed_marks = self.apply_carvers(cx, cz, seed, io, ops);
+        marks.extend(changed_marks);
+    }
+}

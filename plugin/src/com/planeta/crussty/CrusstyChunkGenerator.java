@@ -207,10 +207,28 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         return true;
     }
 
-    /** Vanilla carvers (caves/ravines) cut into our blocks. */
+    /** Vanilla carvers (caves/ravines): skipped when the native 26.3 carver
+     *  driver is active (CRUS_NATIVE_CARVERS=1). */
+    private static final boolean NATIVE_CARVERS;
+    static {
+        boolean f = false;
+        try {
+            f = "1".equals(System.getenv("CRUS_NATIVE_CARVERS"));
+        } catch (Throwable ignored) {
+        }
+        NATIVE_CARVERS = f;
+    }
+
     @Override
     public boolean shouldGenerateCaves() {
-        return true;
+        return !NATIVE_CARVERS;
+    }
+
+    /** The bulk layout's NMS state table (material id -> NMS BlockState) for
+     *  the CarverDriver reverse mapping; forces the (idempotent) bulk init. */
+    static Object[] bulkStatesById() {
+        initBulk();
+        return sectionStatesById;
     }
 
     @Override
@@ -693,6 +711,16 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             CtxPool pool = poolForNamed(w.getName(), seed, minY, height);
             setupSurface(pool, w);
             setupDeco(pool, w);
+            if (NATIVE_CARVERS && "world_the_end".equals(w.getName()) == false) {
+                try {
+                    Class<?> cd = Class.forName("com.planeta.crussty.CarverDriver");
+                    cd.getMethod("setup", org.bukkit.World.class, long.class)
+                            .invoke(null, w, seed);
+                } catch (Throwable t) {
+                    Logger.getLogger("CrusstyGen").warning(
+                            "native carvers setup failed (vanilla carvers stay): " + t);
+                }
+            }
             String[] names = ChunkGenNative.ctxBiomeNames(pool.firstCtx());
             if (names == null) {
                 Logger.getLogger("CrusstyGen").info(
@@ -1108,12 +1136,20 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 Method mBitsCfg = cfgSingleton.getClass().getMethod("bits");
                 mBitsCfg.setAccessible(true);
                 singletonBits = (Integer) mBitsCfg.invoke(cfgSingleton);
-                mPalCreate = Class.forName(
-                        "net.minecraft.world.level.chunk.Palette$Factory").getMethod("create",
-                        int.class,
-                        Class.forName("net.minecraft.core.IdMap"),
-                        Class.forName("net.minecraft.world.level.chunk.PaletteResize"),
-                        java.util.List.class);
+                try {
+                    mPalCreate = Class.forName(
+                            "net.minecraft.world.level.chunk.Palette$Factory").getMethod("create",
+                            int.class, java.util.List.class); // 26.3: no registry/resize
+                    mPalCreate263 = true;
+                } catch (NoSuchMethodException nsme2) {
+                    mPalCreate = Class.forName(
+                            "net.minecraft.world.level.chunk.Palette$Factory").getMethod("create",
+                            int.class,
+                            Class.forName("net.minecraft.core.IdMap"),
+                            Class.forName("net.minecraft.world.level.chunk.PaletteResize"),
+                            java.util.List.class);
+                    mPalCreate263 = false;
+                }
                 factorySingleton = mCfgFactory.invoke(cfgSingleton);
                 // force the template to the linear configuration (2 distinct values)
                 Object otherSt = states[1] != null ? states[1] : states[2];
@@ -1244,7 +1280,8 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static int airGlobalId;     // registry id of the air state
     private static int[] globalIdById;  // material id -> global state id
     private static Object airState;     // NMS air block state (palette slot 0)
-    private static Method mPalCreate;   // Palette$Factory.create(bits, registry, resize, List)
+    private static Method mPalCreate;   // Palette$Factory.create
+    private static boolean mPalCreate263; // 26.3: create(bits, List)
     private static Object factorySingleton; // Palette$Factory from cfgSingleton
     private static Object factoryLinear;    // Palette$Factory from cfgLinear
     private static Integer singletonBits, linearBits; // Palette$Factory.create bits arg
@@ -1402,8 +1439,11 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                     swapped = false;
                                 } else {
                                     cfg = cfgSingleton;
-                                    palette = mPalCreate.invoke(factorySingleton, singletonBits,
-                                            reg, pal, java.util.List.of(st0));
+                                    palette = mPalCreate263
+                                            ? mPalCreate.invoke(factorySingleton, singletonBits,
+                                                    java.util.List.of(st0))
+                                            : mPalCreate.invoke(factorySingleton, singletonBits,
+                                                    reg, pal, java.util.List.of(st0));
                                     storage = ctorZeroBit.newInstance(4096);
                                     swapped = true;
                                     path = 1;
@@ -1428,8 +1468,10 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                 for (int v = 1; v < vn; v++) {
                                     vals.add(valuesScratch[v]);
                                 }
-                                palette = mPalCreate.invoke(factoryLinear, linearBits,
-                                        reg, pal, vals);
+                                palette = mPalCreate263
+                                        ? mPalCreate.invoke(factoryLinear, linearBits, vals)
+                                        : mPalCreate.invoke(factoryLinear, linearBits,
+                                                reg, pal, vals);
                                 long[] raw = new long[256]; // 4096 * 4 bits
                                 for (int k = 0; k < 4096; k++) {
                                     short id = out[base + k];

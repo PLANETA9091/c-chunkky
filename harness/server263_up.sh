@@ -31,7 +31,10 @@ echo $! > fifo.pid
 HEAP_ARGS="-Xms2G -Xmx3G"
 PGEN_FLAG="-Dpaper.chunk-system.gen-parallelism=false"
 
+# opt-in native carvers pass-through
+CRUS_NATIVE_CARVERS="${CRUS_NATIVE_CARVERS:-0}" CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" \
 echo "booting Paper 26.3 (JDK 25)..."
+CRUS_NATIVE_CARVERS="${CRUS_NATIVE_CARVERS:-0}" CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" \
 $JAVA $HEAP_ARGS $PGEN_FLAG \
   -XX:FlightRecorderOptions=stackdepth=128 \
   -Djava.library.path="$ROOT/native/target/release" \

@@ -31,7 +31,7 @@ echo "using javac: ${JAVAC_CMD[*]}"
 rm -rf classes
 mkdir -p classes
 # Main sources (paper-api only)
-SRCS_MAIN=$(find src -name '*.java' ! -name 'NativeBiomeSource.java' ! -name 'BiomeSwap.java' ! -name 'SurfaceSetup.java' ! -name 'DecoDriver.java')
+SRCS_MAIN=$(find src -name '*.java' ! -name 'NativeBiomeSource.java' ! -name 'BiomeSwap.java' ! -name 'SurfaceSetup.java' ! -name 'DecoDriver.java' ! -name 'CarverDriver.java')
 "${JAVAC_CMD[@]}" -encoding UTF-8 -cp "$API_JAR:$LIBS" -d classes $SRCS_MAIN
 
 # NMS companions (NativeBiomeSource/BiomeSwap) need the mojmap paper jar —
@@ -46,7 +46,7 @@ if [ -f "$SERVER_JAR" ]; then
   ANNOT_LIBS="$(find ../server263/libraries -name 'jspecify*.jar' -o -name 'annotations-*.jar' 2>/dev/null | tr '\n' ':')"
   MOJANG_LIBS="${MOJANG_LIBS}${ANNOT_LIBS}"
   "${JAVAC_CMD[@]}" -encoding UTF-8 -cp "classes:$SERVER_JAR:$API_JAR:$LIBS:$MOJANG_LIBS" -d classes \
-    src/com/planeta/crussty/NativeBiomeSource.java src/com/planeta/crussty/BiomeSwap.java src/com/planeta/crussty/SurfaceSetup.java src/com/planeta/crussty/DecoDriver.java
+    src/com/planeta/crussty/NativeBiomeSource.java src/com/planeta/crussty/BiomeSwap.java src/com/planeta/crussty/SurfaceSetup.java src/com/planeta/crussty/DecoDriver.java src/com/planeta/crussty/CarverDriver.java
 else
   echo "no server jar — NMS biome companions skipped (vanilla Java biomes)"
 fi

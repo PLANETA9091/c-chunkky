@@ -202,6 +202,24 @@ public final class ChunkGenNative {
     /** Global per-fill phase snapshot from the native (JNI diagnostics). */
     public static native String profStatsGlobal();
 
+    // ------------------------------------------------------------------
+    // Native carvers 26.3 (CRUS_NATIVE_CARVERS=1). Protocol: Java packs the
+    // 24 sections (bits[24] + rawOff[24] + palOff[24], concatenated BitStorage
+    // raw longs + palette id tables with unknown states collapsed to stone),
+    // native runs the carver mask + aquifer apply and stashes the changed
+    // cells (idx<<16|newId: 0 air, 3 water, 17 lava) + fluid-update marks.
+    // ------------------------------------------------------------------
+
+    /** carve(ctx, cx, cz, seed, meta72, raw, pal) -> int opCount (MIN_VALUE on failure). */
+    public static native int carve(long ctx, int cx, int cz, long seed,
+                                   int[] meta, long[] raw, short[] pal);
+
+    /** carveOps(ctx, ops) -> int — the changed-cell ops of the last carve. */
+    public static native int carveOps(long ctx, long[] ops);
+
+    /** carveMarks(ctx, marks) -> int — the fluid-update marks of the last carve. */
+    public static native int carveMarks(long ctx, long[] marks);
+
     private ChunkGenNative() {
     }
 }

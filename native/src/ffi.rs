@@ -32,11 +32,12 @@ pub struct Ctx {
     pub deco: Option<crate::features_master::DecoCtx>,
 }
 
-/// 26.3 per-ctx mutable state (marks buffer + last beard list).
+/// 26.3 per-ctx mutable state (marks buffer + last beard list + carve ops).
 pub struct Gen263State {
     pub g: crate::fill263::Gen263,
     pub marks: Vec<i64>,
     pub beard: Vec<i32>,
+    pub ops: Vec<i64>,
 }
 
 /// Native surface engine state (config parsed from the pack noise_settings;
@@ -215,7 +216,7 @@ pub fn ctx_new(seed: i64, min_y: i32, height: i32, sea_level: i32) -> i64 {
     // their 26.3 routers are ported.
     let v263 = if min_y == -64 && height == 384 && std::env::var("CRUS_LEGACY").as_deref() != Ok("1") {
         match std::panic::catch_unwind(|| crate::fill263::Gen263::new(seed, min_y, height, sea_level)) {
-            Ok(g) => Some(Gen263State { g, marks: Vec::new(), beard: Vec::new() }),
+            Ok(g) => Some(Gen263State { g, marks: Vec::new(), beard: Vec::new(), ops: Vec::new() }),
             Err(_) => None,
         }
     } else {
@@ -328,6 +329,47 @@ pub fn base_height(id: i64, x: i32, z: i32, mode: i32) -> i32 {
         gen.base_height(x, z, mode as u8)
     }));
     res.unwrap_or(FAIL)
+}
+
+/// Native carve entry: decodes the section pack, runs the carver mask+apply,
+/// stashes ops (idx<<16|newId) and fluid marks on the ctx state. Returns the
+/// op count (or i32::MIN on failure — the caller falls back to vanilla).
+pub fn carve(
+    id: i64,
+    cx: i32,
+    cz: i32,
+    seed: i64,
+    bits: &[i32],
+    raw: &[i64],
+    raw_off: &[i32],
+    pal: &[i16],
+    pal_off: &[i32],
+    io: &mut [u16; OUT_LEN],
+) -> i32 {
+    const FAIL: i32 = i32::MIN;
+    let mut map_guard = match SESSIONS.lock() {
+        Ok(g) => g,
+        Err(_) => return FAIL,
+    };
+    let Some(map) = map_guard.as_mut() else {
+        return FAIL;
+    };
+    let Some(ctx) = map.get_mut(&id) else {
+        return FAIL;
+    };
+    let Some(st) = ctx.v263.as_mut() else {
+        return FAIL;
+    };
+    let pack = crate::fill263::SectionPack { bits, raw, raw_off, pal, pal_off };
+    let g = &st.g;
+    let (marks_buf, ops_buf) = (&mut st.marks, &mut st.ops);
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        g.carve_chunk(cx, cz, seed, &pack, io, marks_buf, ops_buf);
+    }));
+    match res {
+        Ok(()) => st.ops.len() as i32,
+        Err(_) => FAIL,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -976,4 +1018,95 @@ pub fn surface_states_of(id: i64) -> Option<Vec<String>> {
 
 pub(crate) fn log_warn(msg: &str) {
     eprintln!("[crussty] {msg}");
+}
+
+/// carve(long ctx, int cx, int cz, long seed, int[] meta(72), long[] raw,
+/// int[] offs(48), short[] pal, long[] marks) -> int opCount.
+/// meta layout: bits[24] then rawOff[24] then palOff[24]; offs unused
+/// (compat pad). io is rebuilt internally; ops (idx<<16|newId) are stashed
+/// on the ctx and read back via carveOps JNI.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_carve(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jni_sys::jlong,
+    cx: jni_sys::jint,
+    cz: jni_sys::jint,
+    seed: jni_sys::jlong,
+    meta: jni_sys::jintArray,
+    raw: jni_sys::jlongArray,
+    pal: jni_sys::jshortArray,
+) -> jni_sys::jint {
+    let tbl = *env;
+    let mlen = ((*tbl).v1_1.GetArrayLength)(env, meta as jni_sys::jarray) as usize;
+    let rlen = ((*tbl).v1_1.GetArrayLength)(env, raw as jni_sys::jarray) as usize;
+    let plen = ((*tbl).v1_1.GetArrayLength)(env, pal as jni_sys::jarray) as usize;
+    if mlen < 72 {
+        return i32::MIN;
+    }
+    let mp = ((*tbl).v1_1.GetIntArrayElements)(env, meta, std::ptr::null_mut());
+    let rp = ((*tbl).v1_1.GetLongArrayElements)(env, raw, std::ptr::null_mut());
+    let pp = ((*tbl).v1_1.GetShortArrayElements)(env, pal, std::ptr::null_mut());
+    if mp.is_null() || rp.is_null() || pp.is_null() {
+        return i32::MIN;
+    }
+    let bits = std::slice::from_raw_parts(mp, 24);
+    let raw_off = std::slice::from_raw_parts(mp.add(24), 24);
+    let pal_off = std::slice::from_raw_parts(mp.add(48), 24);
+    let raw_slice = std::slice::from_raw_parts(rp, rlen);
+    let pal_slice = std::slice::from_raw_parts(pp as *const i16, plen);
+    let mut io = [0u16; OUT_LEN];
+    let n = carve(ctx as i64, cx as i32, cz as i32, seed as i64, bits, raw_slice, raw_off, pal_slice, pal_off, &mut io);
+    ((*tbl).v1_1.ReleaseIntArrayElements)(env, meta, mp, 0);
+    ((*tbl).v1_1.ReleaseLongArrayElements)(env, raw, rp, 0);
+    ((*tbl).v1_1.ReleaseShortArrayElements)(env, pal, pp, 0);
+    n
+}
+
+/// carveOps(long ctx, long[] ops) -> int — copies the stashed carve ops.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_carveOps(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jni_sys::jlong,
+    ops: jni_sys::jlongArray,
+) -> jni_sys::jint {
+    let tbl = *env;
+    let len = ((*tbl).v1_1.GetArrayLength)(env, ops as jni_sys::jarray) as usize;
+    let map = SESSIONS.lock().unwrap();
+    let Some(n) = map.as_ref().and_then(|m| m.get(&(ctx as i64))).and_then(|c| c.v263.as_ref()) else {
+        return 0;
+    };
+    let count = n.ops.len().min(len);
+    let ptr = ((*tbl).v1_1.GetLongArrayElements)(env, ops, std::ptr::null_mut());
+    if ptr.is_null() {
+        return 0;
+    }
+    std::ptr::copy_nonoverlapping(n.ops.as_ptr() as *const u64, ptr as *mut u64, count);
+    ((*tbl).v1_1.ReleaseLongArrayElements)(env, ops, ptr, 0);
+    count as i32
+}
+
+/// carveMarks(long ctx, long[] marks) -> int — copies the stashed carve marks.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_carveMarks(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jni_sys::jlong,
+    marks: jni_sys::jlongArray,
+) -> jni_sys::jint {
+    let tbl = *env;
+    let len = ((*tbl).v1_1.GetArrayLength)(env, marks as jni_sys::jarray) as usize;
+    let map = SESSIONS.lock().unwrap();
+    let Some(n) = map.as_ref().and_then(|m| m.get(&(ctx as i64))).and_then(|c| c.v263.as_ref()) else {
+        return 0;
+    };
+    let count = n.marks.len().min(len);
+    let ptr = ((*tbl).v1_1.GetLongArrayElements)(env, marks, std::ptr::null_mut());
+    if ptr.is_null() {
+        return 0;
+    }
+    std::ptr::copy_nonoverlapping(n.marks.as_ptr() as *const u64, ptr as *mut u64, count);
+    ((*tbl).v1_1.ReleaseLongArrayElements)(env, marks, ptr, 0);
+    count as i32
 }
