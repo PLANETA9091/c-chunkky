@@ -23,6 +23,15 @@ fn children_of(n: &WKind) -> Vec<u32> {
         WKind::Spline { coordinate, .. } => vec![*coordinate],
         WKind::Ap2 { a, b, .. } => vec![*a, *b],
         WKind::RangeChoice { input, .. } => vec![*input],
+        WKind::Gradient { .. } => vec![],
+        WKind::Lerp { alpha, first, second } => vec![*alpha, *first, *second],
+        WKind::IntervalSelect { input, functions, .. } => {
+            let mut v = vec![*input];
+            v.extend_from_slice(functions);
+            v
+        }
+        WKind::FindTopSurface { density, upper_bound, .. } => vec![*density, *upper_bound],
+        WKind::Pow { base, exponent } => vec![*base, *exponent],
     }
 }
 

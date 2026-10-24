@@ -155,6 +155,16 @@ pub enum MapKind {
     HalfNegative,
     QuarterNegative,
     Squeeze,
+    /// 26.3: minecraft:negate.
+    Negate,
+    /// 26.3: minecraft:reciprocal (1/x).
+    Reciprocal,
+    /// 26.3: minecraft:log (ln(x); matches UnaryFunction LOG).
+    Log,
+    /// 26.3: minecraft:sign (Math.signum).
+    Sign,
+    /// 26.3: minecraft:round (Math.round on float).
+    Round,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -163,6 +173,10 @@ pub enum Ap2Kind {
     Mul,
     Min,
     Max,
+    /// 26.3: minecraft:div (left / right).
+    Div,
+    /// 26.3: minecraft:sub (left - right).
+    Sub,
 }
 
 pub enum SplineValueW {
@@ -260,6 +274,39 @@ pub enum WKind {
     },
     /// Argument-less end-island density (vanilla DensityFunctions::EndIslands).
     EndIslands,
+    // --- 26.3 new nodes (densityfunction/op + generator) ---
+    /// axis: 0=x, 1=y, 2=z; tiling: 0=clamp_to_edge, 1=repeat, 2=mirrored_repeat.
+    Gradient {
+        axis: u8,
+        tiling: u8,
+        from_coord: i32,
+        to_coord: i32,
+        from_value: f64,
+        to_value: f64,
+    },
+    Lerp {
+        alpha: u32,
+        first: u32,
+        second: u32,
+    },
+    IntervalSelect {
+        input: u32,
+        thresholds: Vec<f32>,
+        functions: Vec<u32>,
+    },
+    /// Column-constant top-surface finder: upper_bound AND the cell-broadcast
+    /// both evaluate at y=0 (26.3 wraps the sampler in SliceFunction.YSampler(0));
+    /// probes descend from floor(ub/cellH)*cellH by cellH until density > 0.
+    FindTopSurface {
+        density: u32,
+        upper_bound: u32,
+        lower_bound: i32,
+        cell_height: i32,
+    },
+    Pow {
+        base: u32,
+        exponent: u32,
+    },
 }
 
 impl WKind {
@@ -272,6 +319,7 @@ impl WKind {
             | WKind::OldBlendedNoise { .. }
             | WKind::YClampedGradient { .. }
             | WKind::EndIslands
+            | WKind::Gradient { .. }
             | WKind::Noise { .. }
             | WKind::Interpolated { .. }
             | WKind::WeirdScaledSampler { .. }
@@ -291,6 +339,14 @@ impl WKind {
                 ..
             } => vec![*input, *when_in_range, *when_out_of_range],
             WKind::ShiftedNoise { sx, sy, sz, .. } => vec![*sx, *sy, *sz],
+            WKind::Lerp { alpha, first, second } => vec![*alpha, *first, *second],
+            WKind::IntervalSelect { input, functions, .. } => {
+                let mut v = vec![*input];
+                v.extend_from_slice(functions);
+                v
+            }
+            WKind::FindTopSurface { density, upper_bound, .. } => vec![*density, *upper_bound],
+            WKind::Pow { base, exponent } => vec![*base, *exponent],
         }
     }
 }
@@ -451,6 +507,44 @@ fn hash_wkind(k: &WKind) -> u64 {
             fnv64_u64(h, argument.to_bits())
         }
         W::EndIslands => fnv64_u64(base, 19),
+        W::Gradient { axis, tiling, from_coord, to_coord, from_value, to_value } => {
+            let h = fnv64_u64(base, 30);
+            let h = fnv64_u64(h, *axis as u64 | ((*tiling as u64) << 8));
+            let h = fnv64_u64(h, (*from_coord as i64) as u64);
+            let h = fnv64_u64(h, (*to_coord as i64) as u64);
+            let h = fnv64_u64(h, from_value.to_bits());
+            fnv64_u64(h, to_value.to_bits())
+        }
+        W::Lerp { alpha, first, second } => {
+            let h = fnv64_u64(base, 31);
+            let h = fnv64_u64(h, *alpha as u64);
+            let h = fnv64_u64(h, *first as u64);
+            fnv64_u64(h, *second as u64)
+        }
+        W::IntervalSelect { input, thresholds, functions } => {
+            let h = fnv64_u64(base, 32);
+            let h = fnv64_u64(h, *input as u64);
+            let mut h = h;
+            for t in thresholds {
+                h = fnv64_u64(h, t.to_bits() as u64);
+            }
+            for f in functions {
+                h = fnv64_u64(h, *f as u64);
+            }
+            h
+        }
+        W::FindTopSurface { density, upper_bound, lower_bound, cell_height } => {
+            let h = fnv64_u64(base, 33);
+            let h = fnv64_u64(h, *density as u64);
+            let h = fnv64_u64(h, *upper_bound as u64);
+            let h = fnv64_u64(h, (*lower_bound as i64) as u64);
+            fnv64_u64(h, (*cell_height as i64) as u64)
+        }
+        W::Pow { base: pb, exponent: pe } => {
+            let h = fnv64_u64(base, 34);
+            let h = fnv64_u64(h, *pb as u64);
+            fnv64_u64(h, *pe as u64)
+        }
     }
 }
 
@@ -607,6 +701,65 @@ impl<'a> Compiler<'a> {
             // empty beardifier (no structure density in the noise takeover)
             DfNode::Beardifier => self.push(WKind::Const(0.0)),
             DfNode::EndIslands => self.push(WKind::EndIslands),
+            DfNode::Gradient { axis, tiling, from_coord, to_coord, from_value, to_value } => self.push(WKind::Gradient {
+                axis: *axis,
+                tiling: *tiling,
+                from_coord: *from_coord,
+                to_coord: *to_coord,
+                from_value: *from_value,
+                to_value: *to_value,
+            }),
+            DfNode::Lerp { alpha, first, second } => {
+                let a = self.compile(*alpha);
+                let f = self.compile(*first);
+                let s = self.compile(*second);
+                self.push(WKind::Lerp { alpha: a, first: f, second: s })
+            }
+            DfNode::IntervalSelect { input, thresholds, functions } => {
+                let i = self.compile(*input);
+                let fns: Vec<u32> = functions.iter().map(|f| self.compile(*f)).collect();
+                self.push(WKind::IntervalSelect { input: i, thresholds: thresholds.clone(), functions: fns })
+            }
+            DfNode::FindTopSurface { density, upper_bound, lower_bound, cell_height } => {
+                let d = self.compile(*density);
+                let u = self.compile(*upper_bound);
+                self.push(WKind::FindTopSurface { density: d, upper_bound: u, lower_bound: *lower_bound, cell_height: *cell_height })
+            }
+            DfNode::Pow { base, exponent } => {
+                let b = self.compile(*base);
+                let e = self.compile(*exponent);
+                self.push(WKind::Pow { base: b, exponent: e })
+            }
+            DfNode::Div { left, right } => {
+                let a = self.compile(*left);
+                let b = self.compile(*right);
+                self.push(WKind::Ap2 { kind: Ap2Kind::Div, a, b })
+            }
+            DfNode::Sub { left, right } => {
+                let a = self.compile(*left);
+                let b = self.compile(*right);
+                self.push(WKind::Ap2 { kind: Ap2Kind::Sub, a, b })
+            }
+            DfNode::Negate { argument } => {
+                let a = self.compile(*argument);
+                self.push(WKind::Mapped { kind: MapKind::Negate, input: a })
+            }
+            DfNode::Reciprocal { argument } => {
+                let a = self.compile(*argument);
+                self.push(WKind::Mapped { kind: MapKind::Reciprocal, input: a })
+            }
+            DfNode::Log { argument } => {
+                let a = self.compile(*argument);
+                self.push(WKind::Mapped { kind: MapKind::Log, input: a })
+            }
+            DfNode::Sign { argument } => {
+                let a = self.compile(*argument);
+                self.push(WKind::Mapped { kind: MapKind::Sign, input: a })
+            }
+            DfNode::Round { argument } => {
+                let a = self.compile(*argument);
+                self.push(WKind::Mapped { kind: MapKind::Round, input: a })
+            }
             DfNode::Clamp { input, min, max } => {
                 let c = self.compile(*input);
                 self.push(WKind::Clamp { input: c, min: *min, max: *max })
@@ -923,6 +1076,23 @@ impl Env {
                         && visit(arena, state, *when_in_range as usize)
                         && visit(arena, state, *when_out_of_range as usize)
                 }
+                // 26.3 nodes
+                WKind::Gradient { axis, .. } => *axis != 1,
+                // column-constant by construction (upper bound AND probes both
+                // forced to y=0 by the YSampler(0) wrap)
+                WKind::FindTopSurface { .. } => true,
+                WKind::Lerp { alpha, first, second } => {
+                    visit(arena, state, *alpha as usize)
+                        && visit(arena, state, *first as usize)
+                        && visit(arena, state, *second as usize)
+                }
+                WKind::IntervalSelect { input, functions, .. } => {
+                    visit(arena, state, *input as usize)
+                        && functions.iter().all(|f| visit(arena, state, *f as usize))
+                }
+                WKind::Pow { base, exponent } => {
+                    visit(arena, state, *base as usize) && visit(arena, state, *exponent as usize)
+                }
             };
             state[i] = if yinv { 2 } else { 3 };
             yinv
@@ -1208,6 +1378,15 @@ fn compute_col_caches(arena: &[WKind]) -> (Vec<u32>, u32) {
                 ..
             } => vec![*input, *when_in_range, *when_out_of_range],
             WKind::ShiftedNoise { sx, sy, sz, .. } => vec![*sx, *sy, *sz],
+            WKind::Gradient { .. } => Vec::new(),
+            WKind::Lerp { alpha, first, second } => vec![*alpha, *first, *second],
+            WKind::IntervalSelect { input, functions, .. } => {
+                let mut v = vec![*input];
+                v.extend_from_slice(functions);
+                v
+            }
+            WKind::FindTopSurface { density, upper_bound, .. } => vec![*density, *upper_bound],
+            WKind::Pow { base, exponent } => vec![*base, *exponent],
         }
     };
 
@@ -1962,6 +2141,21 @@ impl Env {
                             out[l] = d / 2.0 - d * d * d / 24.0;
                         }
                     }
+                    MapKind::Negate => {
+                        for l in 0..N { out[l] = -v[l]; }
+                    }
+                    MapKind::Reciprocal => {
+                        for l in 0..N { out[l] = 1.0 / v[l]; }
+                    }
+                    MapKind::Log => {
+                        for l in 0..N { out[l] = v[l].ln(); }
+                    }
+                    MapKind::Sign => {
+                        for l in 0..N { out[l] = if v[l] > 0.0 { 1.0 } else if v[l] < 0.0 { -1.0 } else { 0.0 }; }
+                    }
+                    MapKind::Round => {
+                        for l in 0..N { out[l] = (v[l] as f32).round() as f64; }
+                    }
                 }
                 out
             }
@@ -2007,6 +2201,18 @@ impl Env {
                         for l in 0..N { out[l] = if va[l] > vb[l] { va[l] } else { vb[l] }; }
                         out
                     }
+                    Ap2Kind::Div => {
+                        let vb = self.eval_batch_uncached(c, *b, pts, mode, interp, memo);
+                        let mut out = [0f64; N];
+                        for l in 0..N { out[l] = va[l] / vb[l]; }
+                        out
+                    }
+                    Ap2Kind::Sub => {
+                        let vb = self.eval_batch_uncached(c, *b, pts, mode, interp, memo);
+                        let mut out = [0f64; N];
+                        for l in 0..N { out[l] = va[l] - vb[l]; }
+                        out
+                    }
                 }
             }
             WKind::RangeChoice { input, min_inclusive, max_exclusive, when_in_range, when_out_of_range } => {
@@ -2038,6 +2244,106 @@ impl Env {
                     } else {
                         lerp(t, *from_value, *to_value)
                     };
+                }
+                out
+            }
+            WKind::Gradient { axis, tiling, from_coord, to_coord, from_value, to_value } => {
+                let mut out = [0f64; N];
+                for l in 0..N {
+                    out[l] = gradient_eval(*axis, *tiling, *from_coord, *to_coord, *from_value, *to_value, pts[l]);
+                }
+                out
+            }
+            WKind::Lerp { alpha, first, second } => {
+                let va = self.eval_batch_uncached(c, *alpha, pts, mode, interp, memo);
+                let mut need_f = [false; N];
+                let mut need_s = [false; N];
+                for l in 0..N {
+                    if va[l] == 0.0 {
+                        need_f[l] = true;
+                    } else if va[l] == 1.0 {
+                        need_s[l] = true;
+                    } else {
+                        need_f[l] = true;
+                        need_s[l] = true;
+                    }
+                }
+                let vf = if need_f.iter().any(|x| *x) {
+                    self.eval_batch_uncached(c, *first, pts, mode, interp, memo)
+                } else {
+                    [0.0; N]
+                };
+                let vs = if need_s.iter().any(|x| *x) {
+                    self.eval_batch_uncached(c, *second, pts, mode, interp, memo)
+                } else {
+                    [0.0; N]
+                };
+                let mut out = [0f64; N];
+                for l in 0..N {
+                    out[l] = if va[l] == 0.0 {
+                        vf[l]
+                    } else if va[l] == 1.0 {
+                        vs[l]
+                    } else {
+                        lerp(va[l], vf[l], vs[l])
+                    };
+                }
+                out
+            }
+            WKind::IntervalSelect { input, thresholds, functions } => {
+                // per-lane branch selection; lanes hitting the same branch are
+                // evaluated together in M-wide mini-batches
+                let vin = self.eval_batch_uncached(c, *input, pts, mode, interp, memo);
+                let mut sel = [0usize; N];
+                for l in 0..N {
+                    let v = vin[l] as f32;
+                    sel[l] = functions.len() - 1;
+                    for (i, t) in thresholds.iter().enumerate() {
+                        if v < *t {
+                            sel[l] = i;
+                            break;
+                        }
+                    }
+                }
+                let mut out = [0f64; N];
+                for (b, fnode) in functions.iter().enumerate() {
+                    let mut lane_pts: Vec<Pt> = Vec::new();
+                    let mut lanes: Vec<usize> = Vec::new();
+                    for l in 0..N {
+                        if sel[l] == b {
+                            lane_pts.push(pts[l]);
+                            lanes.push(l);
+                        }
+                    }
+                    if lane_pts.is_empty() {
+                        continue;
+                    }
+                    const M: usize = 4;
+                    let mut rem: &[Pt] = &lane_pts;
+                    let mut lrem: &[usize] = &lanes;
+                    while !rem.is_empty() {
+                        let take = rem.len().min(M);
+                        // pad to a full N-lane batch (eval_batch_uncached is
+                        // monomorphic over N); padding lanes are discarded
+                        let mut arr = [rem[0]; N];
+                        for (i, p) in rem[..take].iter().enumerate() {
+                            arr[i] = *p;
+                        }
+                        let vals = self.eval_batch_uncached(c, *fnode, &arr, mode, interp, memo);
+                        for (i, l) in lrem[..take].iter().enumerate() {
+                            out[*l] = vals[i];
+                        }
+                        rem = &rem[take..];
+                        lrem = &lrem[take..];
+                    }
+                }
+                out
+            }
+            WKind::FindTopSurface { .. } | WKind::Pow { .. } => {
+                // probes/branching: scalar lanes
+                let mut out = [0f64; N];
+                for l in 0..N {
+                    out[l] = self.eval_uncached(c, idx, pts[l], mode, interp, None);
                 }
                 out
             }
@@ -2161,6 +2467,52 @@ fn mth_clamp(v: f64, min: f64, max: f64) -> f64 {
     }
 }
 
+/// Java Math.floorMod (sign follows divisor — differs from rem_euclid when
+/// the range is negative; ranges are positive in practice).
+fn java_floor_mod(a: i64, b: i64) -> i64 {
+    let r = a % b;
+    if r != 0 && ((r < 0) != (b < 0)) {
+        r + b
+    } else {
+        r
+    }
+}
+
+/// 26.3 GradientFunction: axis 0=x/1=y/2=z; tiling 0=clamp_to_edge (default),
+/// 1=repeat, 2=mirrored_repeat. Clamped variant clamps the INTEGER coordinate.
+fn gradient_eval(axis: u8, tiling: u8, from_coord: i32, to_coord: i32, from_value: f64, to_value: f64, pt: Pt) -> f64 {
+    let coord_i = match axis {
+        0 => pt.x,
+        1 => pt.y,
+        _ => pt.z,
+    };
+    let factor = (to_value - from_value) / (to_coord - from_coord) as f64;
+    match tiling {
+        1 => {
+            let range = (to_coord - from_coord) as i64;
+            let rel = coord_i as i64 - from_coord as i64;
+            from_value + java_floor_mod(rel, range) as f64 * factor
+        }
+        2 => {
+            let range = (to_coord - from_coord) as i64;
+            let rel = coord_i as i64 - from_coord as i64;
+            let tile = rel.div_euclid(range);
+            let local = rel - tile * range;
+            if tile & 1 == 0 {
+                from_value + local as f64 * factor
+            } else {
+                from_value + (range - local) as f64 * factor
+            }
+        }
+        _ => {
+            let min = from_coord.min(to_coord);
+            let max = from_coord.max(to_coord);
+            let rel = (coord_i.clamp(min, max) - from_coord) as f64;
+            from_value + rel * factor
+        }
+    }
+}
+
 impl Env {
     pub fn eval(
         &self,
@@ -2243,6 +2595,19 @@ impl Env {
                         let d = mth_clamp(v, -1.0, 1.0);
                         d / 2.0 - d * d * d / 24.0
                     }
+                    MapKind::Negate => -v,
+                    MapKind::Reciprocal => 1.0 / v,
+                    MapKind::Log => v.ln(),
+                    MapKind::Sign => {
+                        if v > 0.0 {
+                            1.0
+                        } else if v < 0.0 {
+                            -1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    MapKind::Round => (v as f32).round() as f64,
                 }
             }
             WKind::Ap2 { kind, a, b } => {
@@ -2272,6 +2637,14 @@ impl Env {
                             vb
                         }
                     }
+                    Ap2Kind::Div => {
+                        let vb = self.eval(c, *b, pt, mode, interp, mem);
+                        va / vb
+                    }
+                    Ap2Kind::Sub => {
+                        let vb = self.eval(c, *b, pt, mode, interp, mem);
+                        va - vb
+                    }
                 }
             }
             WKind::RangeChoice { input, min_inclusive, max_exclusive, when_in_range, when_out_of_range } => {
@@ -2292,6 +2665,62 @@ impl Env {
                 } else {
                     lerp(t, *from_value, *to_value)
                 }
+            }
+            WKind::Gradient { axis, tiling, from_coord, to_coord, from_value, to_value } => {
+                gradient_eval(*axis, *tiling, *from_coord, *to_coord, *from_value, *to_value, pt)
+            }
+            WKind::Lerp { alpha, first, second } => {
+                // vanilla LerpFunction.Sampler: alpha==0 -> first, alpha==1 -> second,
+                // else Mth.lerp(alpha, first, second)
+                let a = self.eval(c, *alpha, pt, mode, interp, mem);
+                if a == 0.0 {
+                    self.eval(c, *first, pt, mode, interp, mem)
+                } else if a == 1.0 {
+                    self.eval(c, *second, pt, mode, interp, mem)
+                } else {
+                    let f = self.eval(c, *first, pt, mode, interp, mem);
+                    let s = self.eval(c, *second, pt, mode, interp, mem);
+                    lerp(a, f, s)
+                }
+            }
+            WKind::IntervalSelect { input, thresholds, functions } => {
+                let v = self.eval(c, *input, pt, mode, interp, mem);
+                // vanilla selectSamplerIndex: first threshold where input < t, else last
+                let vin = v as f32;
+                let mut sel = functions.len() - 1;
+                for (i, t) in thresholds.iter().enumerate() {
+                    if vin < *t {
+                        sel = i;
+                        break;
+                    }
+                }
+                self.eval(c, functions[sel], pt, mode, interp, mem)
+            }
+            WKind::FindTopSurface { density, upper_bound, lower_bound, cell_height } => {
+                // 26.3 wraps the sampler in SliceFunction.YSampler(0): BOTH the
+                // upper bound and the broadcast volume evaluate at y=0. The
+                // result is column-constant; probes descend by cell_height.
+                let p0 = Pt { y: 0, ..pt };
+                let ub = self.eval(c, *upper_bound, p0, Mode::Direct, interp, mem);
+                let ch = *cell_height;
+                let top = ((ub as f32 / ch as f32).floor() as i32) * ch;
+                if top <= *lower_bound {
+                    return *lower_bound as f64;
+                }
+                let mut probe = top;
+                while probe >= *lower_bound {
+                    let v = self.eval(c, *density, Pt { y: probe, ..pt }, Mode::Direct, interp, mem);
+                    if v > 0.0 {
+                        return probe as f64;
+                    }
+                    probe -= ch;
+                }
+                *lower_bound as f64
+            }
+            WKind::Pow { base, exponent } => {
+                let b = self.eval(c, *base, pt, mode, interp, mem);
+                let e = self.eval(c, *exponent, pt, mode, interp, mem);
+                (b as f32).powf(e as f32) as f64
             }
             WKind::Spline { coordinate, points } => {
                 let f = self.eval(c, *coordinate, pt, mode, interp, mem) as f32;
@@ -2470,6 +2899,11 @@ impl WKind {
                 MapKind::HalfNegative => "Mapped",
                 MapKind::QuarterNegative => "Mapped",
                 MapKind::Squeeze => "Mapped",
+                MapKind::Negate => "Mapped",
+                MapKind::Reciprocal => "Mapped",
+                MapKind::Log => "Mapped",
+                MapKind::Sign => "Mapped",
+                MapKind::Round => "Mapped",
             },
             WKind::Ap2 { .. } => "Ap2",
             WKind::MulOrAdd { .. } => "MulOrAdd",
@@ -2483,6 +2917,11 @@ impl WKind {
             WKind::FlatCache { .. } => "FlatCache",
             WKind::CacheAllInCell { .. } => "CacheAllInCell",
             WKind::EndIslands => "EndIslandDensityFunction",
+            WKind::Gradient { .. } => "GradientFunction",
+            WKind::Lerp { .. } => "LerpFunction",
+            WKind::IntervalSelect { .. } => "IntervalSelectFunction",
+            WKind::FindTopSurface { .. } => "FindTopSurfaceFunction",
+            WKind::Pow { .. } => "PowFunction",
         }
     }
 
@@ -2788,12 +3227,16 @@ pub fn compile_cellfill(arena: &[WKind], root: u32) -> Option<Vec<CellOp>> {
                     MapKind::HalfNegative => CellOp::HalfNeg,
                     MapKind::QuarterNegative => CellOp::QuarterNeg,
                     MapKind::Squeeze => CellOp::Squeeze,
+                    // 26.3 unary ops not wired into the cellfill VM — abort to scalar
+                    MapKind::Negate | MapKind::Reciprocal | MapKind::Log | MapKind::Sign | MapKind::Round => return None,
                 }),
                 WKind::Ap2 { kind, .. } => prog.push(match kind {
                     Ap2Kind::Add => CellOp::Add,
                     Ap2Kind::Mul => CellOp::Mul,
                     Ap2Kind::Min => CellOp::Min,
                     Ap2Kind::Max => CellOp::Max,
+                    // 26.3 ops not wired into the cellfill VM — abort to scalar
+                    Ap2Kind::Div | Ap2Kind::Sub => return None,
                 }),
                 WKind::RangeChoice { min_inclusive, max_exclusive, .. } => prog.push(CellOp::RangeChoice {
                     min_inclusive: *min_inclusive,

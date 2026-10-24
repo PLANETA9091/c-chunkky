@@ -327,6 +327,10 @@ pub struct ChunkGen<'e> {
     // router roots
     final_density: u32,
     initial_density: u32,
+    /// 26.3: dedicated aquifer/surface "surface_level" DF (None = 1.21.8 scan).
+    surface_level: Option<u32>,
+    /// 26.3: aquifer exclusion DF (None = 1.21.8 erosion/depth inline check).
+    exclusion: Option<u32>,
     barrier: u32,
     floodedness: u32,
     spread: u32,
@@ -863,6 +867,8 @@ impl<'e> ChunkGen<'e> {
             prelim_batch_ns: 0,
             prelim_scalar_ns: 0,
             initial_density: router("initial_density_without_jaggedness"),
+            surface_level: compiled.router.get("surface_level").copied(),
+            exclusion: compiled.router.get("exclusion").copied(),
             barrier: router("barrier"),
             floodedness: router("fluid_level_floodedness"),
             spread: router("fluid_level_spread"),
@@ -1079,6 +1085,30 @@ impl<'e> ChunkGen<'e> {
                     stack.push(*when_in_range);
                     stack.push(*when_out_of_range);
                 }
+                WKind::Gradient { .. } => *hist.entry("gradient").or_default() += 1,
+                WKind::Lerp { alpha, first, second } => {
+                    *hist.entry("lerp").or_default() += 1;
+                    stack.push(*alpha);
+                    stack.push(*first);
+                    stack.push(*second);
+                }
+                WKind::IntervalSelect { input, functions, .. } => {
+                    *hist.entry("interval_select").or_default() += 1;
+                    stack.push(*input);
+                    for f in functions {
+                        stack.push(*f);
+                    }
+                }
+                WKind::FindTopSurface { density, upper_bound, .. } => {
+                    *hist.entry("find_top_surface").or_default() += 1;
+                    stack.push(*density);
+                    stack.push(*upper_bound);
+                }
+                WKind::Pow { base, exponent } => {
+                    *hist.entry("pow").or_default() += 1;
+                    stack.push(*base);
+                    stack.push(*exponent);
+                }
                 WKind::YClampedGradient { .. } => *hist.entry("ygrad").or_default() += 1,
                 WKind::Spline { coordinate, .. } => {
                     *hist.entry("spline").or_default() += 1;
@@ -1117,6 +1147,15 @@ impl<'e> ChunkGen<'e> {
         if let Some(v) = self.prelim.get(key) {
             return v;
         }
+        // MC 26.3: the preliminary surface is a dedicated DF tree (aquifers.
+        // surface_level, find_top_surface-based) sampled at the quart-snapped
+        // column, y=0; result = Mth.floor((float)value).
+        if let Some(sl) = self.surface_level {
+            let v = self.eval_fresh(sl, Pt { x: bx, y: 0, z: bz }, Mode::Direct);
+            let result = (v as f32).floor() as i32;
+            self.prelim.put(key, result);
+            return result;
+}
         let mut result = i32::MAX;
         let mut y = self.min_y + self.env.wg.height;
         let diag = crate::density::PROF_ON.load(std::sync::atomic::Ordering::Relaxed);
@@ -1590,6 +1629,8 @@ impl<'e> ChunkGen<'e> {
             ore_veins_enabled: self.ore_veins_enabled,
             final_density: self.final_density,
             initial_density: self.initial_density,
+            surface_level: self.surface_level,
+            exclusion: self.exclusion,
             barrier: self.barrier,
             floodedness: self.floodedness,
             spread: self.spread,
@@ -3513,7 +3554,12 @@ impl<'e> ChunkGen<'e> {
 
     /// Vanilla NoiseBasedAquifer.computeSubstance.
     /// Also sets self.sched = vanilla shouldScheduleFluidUpdate (per block).
-    fn aquifer_compute_substance(&mut self, pt: Pt, substance: f64) -> Option<u16> {
+    /// Native carve (26.3): aquifer.computeSubstance(x, y, z, 0.0).
+    pub fn aquifer_substance_at(&mut self, pt: Pt) -> Option<u16> {
+        self.aquifer_compute_substance(pt, 0.0)
+    }
+
+    pub fn aquifer_compute_substance(&mut self, pt: Pt, substance: f64) -> Option<u16> {
         let _aq_guard = if crate::density::PROF_ON.load(std::sync::atomic::Ordering::Relaxed) {
             AQ_SUBSTANCE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some(AqTimer { t0: std::time::Instant::now() })
@@ -3968,10 +4014,19 @@ impl<'e> ChunkGen<'e> {
         let d: f64;
         let d1: f64;
         self.memo.next_serial(); // fresh pt context (aquifer cell coords)
-        let erosion = self.eval(self.erosion, pt, Mode::Direct);
-        let depth = self.eval(self.depth, pt, Mode::Direct);
-        // isDeepDarkRegion: erosion < (double)(float)-0.225 && depth > (double)(float)0.9
-        if erosion < (-0.225f32 as f64) && depth > (0.9f32 as f64) {
+        // MC 26.3: the deep-dark exclusion became a real DF (aquifers.
+        // exclusion); the 1.21.8 inline erosion/depth check below is its
+        // exact algebraic equivalent for vanilla, but a pack may override
+        // the DF — prefer it when present.
+        let excluded = match self.exclusion {
+            Some(ex) => self.eval(ex, pt, Mode::Direct) > 0.0,
+            None => {
+                let erosion = self.eval(self.erosion, pt, Mode::Direct);
+                let depth = self.eval(self.depth, pt, Mode::Direct);
+                erosion < (-0.225f32 as f64) && depth > (0.9f32 as f64)
+            }
+        };
+        if excluded {
             d = -1.0;
             d1 = -1.0;
         } else {

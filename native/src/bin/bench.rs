@@ -509,6 +509,32 @@ fn walk_node(
             walk_node(env, c, *when_in_range, pt, &format!("{path}.in"), out, interp);
             walk_node(env, c, *when_out_of_range, pt, &format!("{path}.out"), out, interp);
         }
+        WKind::Gradient { .. } => {
+            writeln!(out, "{path} Gradient {bits:016x}").unwrap();
+        }
+        WKind::Lerp { alpha, first, second } => {
+            writeln!(out, "{path} Lerp {bits:016x}").unwrap();
+            walk_node(env, c, *alpha, pt, &format!("{path}.alpha"), out, interp);
+            walk_node(env, c, *first, pt, &format!("{path}.first"), out, interp);
+            walk_node(env, c, *second, pt, &format!("{path}.second"), out, interp);
+        }
+        WKind::IntervalSelect { input, functions, .. } => {
+            writeln!(out, "{path} IntervalSelect {bits:016x}").unwrap();
+            walk_node(env, c, *input, pt, &format!("{path}.i"), out, interp);
+            for (i, f) in functions.iter().enumerate() {
+                walk_node(env, c, *f, pt, &format!("{path}.f{i}"), out, interp);
+            }
+        }
+        WKind::FindTopSurface { density, upper_bound, .. } => {
+            writeln!(out, "{path} FindTopSurface {bits:016x}").unwrap();
+            walk_node(env, c, *density, pt, &format!("{path}.d"), out, interp);
+            walk_node(env, c, *upper_bound, pt, &format!("{path}.ub"), out, interp);
+        }
+        WKind::Pow { base, exponent } => {
+            writeln!(out, "{path} Pow {bits:016x}").unwrap();
+            walk_node(env, c, *base, pt, &format!("{path}.b"), out, interp);
+            walk_node(env, c, *exponent, pt, &format!("{path}.e"), out, interp);
+        }
         WKind::Spline { .. } => {
             writeln!(out, "{path} Spline {bits:016x}").unwrap();
         }

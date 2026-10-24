@@ -108,11 +108,16 @@ pub struct ColWalk<'a> {
     // per-site lazy caches
     pub xz_cache: Vec<(u64, bool)>,
     pub y_cache: Vec<(u64, bool)>,
+<<<<<<< HEAD
     /// Biome cond results keyed by (xz_counter, quartY) — biome conds depend
     /// only on (column, quart-Y), but the y_cache resets per block (3D-biome
     /// semantics), so Terralith's ~hundreds-of-branches biome dispatch
     /// re-resolved quart + set scan per band block. One u64 compare now.
     biome_cache: Vec<(u64, bool)>,
+=======
+    /// 26.3 ore-vein positional random factory ("minecraft:ore" from world seed)
+    pub ore_factory: XoroshiroPositionalRandomFactory,
+>>>>>>> 5a96306 (feat(26.3): MC 26.3 retarget — native carve/material-rules/DF-26.3 + plugin NMS fix)
 }
 
 impl<'a> ColWalk<'a> {
@@ -131,6 +136,7 @@ impl<'a> ColWalk<'a> {
         cond_count: usize,
         heightmap: &'a [i32; 256],
         noise_handles_ref: &[u32; 3],
+        ore_factory: XoroshiroPositionalRandomFactory,
     ) -> Self {
         let nh = *noise_handles_ref;
         ColWalk {
@@ -147,6 +153,7 @@ impl<'a> ColWalk<'a> {
             frozen,
             names,
             heightmap,
+            ore_factory,
             prelim: std::collections::HashMap::new(),
             block_x: 0,
             block_z: 0,
@@ -541,6 +548,42 @@ impl<'a> ColWalk<'a> {
                 let st = self.cfg.bandlands.get(idx).copied().unwrap_or(self.cfg.terracotta[0]);
                 Some(self.cfg.ids[st as usize])
             }
+            SrRule::OreVein { ore, raw, filler, raw_chance, density_df, richness_df, gap_df } => {
+                // 26.3 OreVeinRule.apply: density<=0 -> null; rng.at(x,y,z);
+                // nextFloat>density -> null; richness/gap decide ore vs filler
+                let pt = crate::density::Pt { x: self.block_x, y: self.block_y, z: self.block_z };
+                self.memo.next_serial();
+                let density = self
+                    .env
+                    .eval(self.compiled, *density_df, pt, Mode::Direct, self.interp, Some(self.memo))
+                    as f32;
+                if density <= 0.0 {
+                    return None;
+                }
+                let mut rnd = self.ore_factory.at(self.block_x, self.block_y, self.block_z);
+                if rnd.next_f32() > density {
+                    return None;
+                }
+                self.memo.next_serial();
+                let richness = self
+                    .env
+                    .eval(self.compiled, *richness_df, pt, Mode::Direct, self.interp, Some(self.memo))
+                    as f32;
+                self.memo.next_serial();
+                let gap = self
+                    .env
+                    .eval(self.compiled, *gap_df, pt, Mode::Direct, self.interp, Some(self.memo))
+                    as f32;
+                if (rnd.next_f32() as f64) < richness as f64 && gap < 0.0 {
+                    if rnd.next_f32() < *raw_chance {
+                        Some(self.cfg.ids[*raw as usize])
+                    } else {
+                        Some(self.cfg.ids[*ore as usize])
+                    }
+                } else {
+                    Some(self.cfg.ids[*filler as usize])
+                }
+            }
         }
     }
 }
@@ -711,9 +754,12 @@ pub fn apply_surface(
     let mut interp = InterpState::new(compiled.interp_slots, 4, height / 8);
     let mut memo = MemoCtx::new(compiled.arena.len()).with_cols(compiled.col_count as usize);
     let root_factory = super::surface::root_factory(env.seed);
+    // vanilla RandomState.getOrCreateRandomFactory("minecraft:ore") — the ore
+    // vein material rule draws its per-block randomness from this factory
+    let ore_factory = super::surface::root_factory(env.seed);
     let mut walk = ColWalk::new(
         cfg, env, &root_factory, temps_noises, compiled, &mut interp, &mut memo, grid,
-        temps, frozen, names, cond_count, &hm, &noise_handles,
+        temps, frozen, names, cond_count, &hm, &noise_handles, ore_factory,
     );
     let default_id = cfg.default_id;
     // (CRUS_SF_NOWALK / CRUS_SF_NOSCAN: diagnostic skips — timing only)

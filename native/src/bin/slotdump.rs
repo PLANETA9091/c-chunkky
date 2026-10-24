@@ -75,6 +75,11 @@ fn dump(c: &crussty_chunkgen::density::Compiled, idx: u32, d: usize, shown: &mut
                 crussty_chunkgen::density::MapKind::HalfNegative => "HalfNeg",
                 crussty_chunkgen::density::MapKind::QuarterNegative => "QuarterNeg",
                 crussty_chunkgen::density::MapKind::Squeeze => "Squeeze",
+                crussty_chunkgen::density::MapKind::Negate => "Negate",
+                crussty_chunkgen::density::MapKind::Reciprocal => "Reciprocal",
+                crussty_chunkgen::density::MapKind::Log => "Log",
+                crussty_chunkgen::density::MapKind::Sign => "Sign",
+                crussty_chunkgen::density::MapKind::Round => "Round",
             };
             println!("{}{idx} Mapped {kn}{coltag}", indent(d));
             dump(c, *input, d + 1, shown);
@@ -85,6 +90,8 @@ fn dump(c: &crussty_chunkgen::density::Compiled, idx: u32, d: usize, shown: &mut
                 crussty_chunkgen::density::Ap2Kind::Mul => "Mul",
                 crussty_chunkgen::density::Ap2Kind::Min => "Min",
                 crussty_chunkgen::density::Ap2Kind::Max => "Max",
+                crussty_chunkgen::density::Ap2Kind::Div => "Div",
+                crussty_chunkgen::density::Ap2Kind::Sub => "Sub",
             };
             println!("{}{idx} Ap2 {kn}{coltag}", indent(d));
             dump(c, *a, d + 1, shown);

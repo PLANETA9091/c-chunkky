@@ -207,6 +207,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         return true;
     }
 
+<<<<<<< HEAD
     /** Vanilla carvers (caves/ravines): skipped when the native 26.3 carver
      *  driver is active (CRUS_NATIVE_CARVERS=1). */
     private static final boolean NATIVE_CARVERS;
@@ -229,6 +230,14 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     static Object[] bulkStatesById() {
         initBulk();
         return sectionStatesById;
+=======
+    /** MC 26.3: carvers run NATIVELY inside the Rust fill (buildTerrain's
+     *  carve stage — mask walk + aquifer substance fill). Paper's Java
+     *  generateCarvers must stay off or caves would be carved twice. */
+    @Override
+    public boolean shouldGenerateCaves() {
+        return false;
+>>>>>>> 5a96306 (feat(26.3): MC 26.3 retarget — native carve/material-rules/DF-26.3 + plugin NMS fix)
     }
 
     @Override

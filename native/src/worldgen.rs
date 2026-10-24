@@ -282,6 +282,59 @@ pub enum DfNode {
         rarity_value_mapper: String,
         input: usize,
     },
+    // --- 26.3 new nodes ---
+    /// axis 0=x/1=y/2=z; tiling 0=clamp_to_edge (default)/1=repeat/2=mirrored.
+    Gradient {
+        axis: u8,
+        tiling: u8,
+        from_coord: i32,
+        to_coord: i32,
+        from_value: f64,
+        to_value: f64,
+    },
+    Lerp {
+        alpha: usize,
+        first: usize,
+        second: usize,
+    },
+    IntervalSelect {
+        input: usize,
+        thresholds: Vec<f32>,
+        functions: Vec<usize>,
+    },
+    FindTopSurface {
+        density: usize,
+        upper_bound: usize,
+        lower_bound: i32,
+        cell_height: i32,
+    },
+    Pow {
+        base: usize,
+        exponent: usize,
+    },
+    Div {
+        left: usize,
+        right: usize,
+    },
+    Sub {
+        left: usize,
+        right: usize,
+    },
+    Negate {
+        argument: usize,
+    },
+    Reciprocal {
+        argument: usize,
+    },
+    Log {
+        argument: usize,
+    },
+    Sign {
+        argument: usize,
+    },
+    Round {
+        argument: usize,
+    },
 }
 
 impl DfNode {
@@ -321,6 +374,18 @@ impl DfNode {
             DfNode::Bandlands => "bandlands",
             DfNode::WeightedList { .. } => "weighted_list",
             DfNode::WeirdScaledSampler { .. } => "weird_scaled_sampler",
+            DfNode::Gradient { .. } => "gradient",
+            DfNode::Lerp { .. } => "lerp",
+            DfNode::IntervalSelect { .. } => "interval_select",
+            DfNode::FindTopSurface { .. } => "find_top_surface",
+            DfNode::Pow { .. } => "pow",
+            DfNode::Div { .. } => "div",
+            DfNode::Sub { .. } => "sub",
+            DfNode::Negate { .. } => "negate",
+            DfNode::Reciprocal { .. } => "reciprocal",
+            DfNode::Log { .. } => "log",
+            DfNode::Sign { .. } => "sign",
+            DfNode::Round { .. } => "round",
         }
     }
 
@@ -481,14 +546,17 @@ impl WorldGen {
         let legacy_random_source =
             matches!(ns.get("legacy_random_source"), Some(Json::Bool(true)));
         let ore_veins_enabled = matches!(ns.get("ore_veins_enabled"), Some(Json::Bool(true)));
+        // 26.3: noise settings dropped size_horizontal/size_vertical — cell
+        // dims come from the Interpolated nodes' cell_size_xz/cell_size_y
+        // (overworld 4x8). Default to the overworld shape when absent.
         let size_horizontal = noise_obj
             .get("size_horizontal")
             .and_then(Json::as_i32)
-            .unwrap_or_else(|| panic!("{noise_settings_asset}: missing noise.size_horizontal"));
+            .unwrap_or(1);
         let size_vertical = noise_obj
             .get("size_vertical")
             .and_then(Json::as_i32)
-            .unwrap_or_else(|| panic!("{noise_settings_asset}: missing noise.size_vertical"));
+            .unwrap_or(2);
         if !(1..=4).contains(&size_horizontal) || !(1..=4).contains(&size_vertical) {
             panic!(
                 "{noise_settings_asset}: size_horizontal/vertical out of range 1..=4: {size_horizontal}/{size_vertical}"
@@ -507,6 +575,52 @@ impl WorldGen {
         let mut router_indices = HashMap::new();
         for (k, v) in entries {
             router_indices.insert(k.clone(), loader.build_value(v));
+        }
+
+        // 4b) MC 26.3: aquifer DFs moved out of noise_router into a dedicated
+        // "aquifers" object {barrier, exclusion, fluid_level_floodedness,
+        // fluid_level_spread, lava, surface_level}. Merge them into the same
+        // lookup so the fill/aquifer wiring resolves keys uniformly.
+        if let Some(Json::Obj(aq)) = ns.get("aquifers") {
+            for (k, v) in aq {
+                router_indices.insert(k.clone(), loader.build_value(v));
+            }
+        }
+        // 1.21.8-only router fields absent in 26.3 — neutral stubs keep the
+        // nochunk wiring compiling; the consumers gate on their presence.
+        for stub in [
+            "initial_density_without_jaggedness",
+            "vein_toggle",
+            "vein_ridged",
+            "vein_gap",
+        ] {
+            if !router_indices.contains_key(stub) {
+                let idx = loader.build_value(&Json::Obj(vec![
+                    ("type".to_string(), Json::Str("minecraft:constant".to_string())),
+                    ("argument".to_string(), Json::Num(0.0)),
+                ]));
+                router_indices.insert(stub.to_string(), idx);
+            }
+        }
+
+        // 4c) MC 26.3 material rules: the material_rule tree may carry
+        // ore_vein rules whose density/richness/filler_gap fields reference
+        // density functions by string id. Pre-resolve every such DF into the
+        // arena and register it under "material:<id>" so the surface parser
+        // can reach it through Compiled.router.
+        if let Some(Json::Str(mr)) = ns.get("material_rule") {
+            let mut queue = vec![mr.clone()];
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            while let Some(id) = queue.pop() {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                let path = format!("minecraft/worldgen/material_rule/{}.json", id.strip_prefix("minecraft:").unwrap_or(&id));
+                let Some(bytes) = assets.get(&path) else { continue };
+                let Ok(text) = std::str::from_utf8(bytes) else { continue };
+                let Ok(j) = parse(text) else { continue };
+                collect_material_dfs(&j, &id, &mut loader, &mut router_indices, &mut queue);
+            }
         }
 
         // destructure the loader: ends its borrow of `noise_params` so the
@@ -631,19 +745,39 @@ fn noise_label(n: &NoiseSource) -> String {
 // ---------------------------------------------------------------------------
 
 fn parse_noise_params(v: &Json, ctx: &str) -> NoiseParams {
-    let first_octave = v
-        .get("firstOctave")
+    // 1.21.8 shape: {"firstOctave": n, "amplitudes": [...]}
+    if let Some(fo) = v.get("firstOctave").and_then(Json::as_i32) {
+        let amps = v
+            .get("amplitudes")
+            .and_then(Json::as_arr)
+            .unwrap_or_else(|| panic!("{ctx}: missing amplitudes"));
+        let amplitudes = amps
+            .iter()
+            .map(|a| a.as_f64().unwrap_or_else(|| panic!("{ctx}: non-numeric amplitude {a:?}")))
+            .collect();
+        return NoiseParams { first_octave: fo, amplitudes };
+    }
+    // MC 26.3 shape: {"base_amplitude": b, "base_octave": n,
+    //                  "octave_count": k?, "amplitude_modifiers": [...]?}
+    // (NormalNoise$Parameters codec). Approximate the legacy amplitudes list
+    // as base_amplitude * modifier_i (default modifier 1.0). NOTE: 26.3
+    // switched the noise synthesis to NoiseStack with its own normalization —
+    // a full bit-exact re-port of the synth stack is tracked separately.
+    let base_octave = v
+        .get("base_octave")
         .and_then(Json::as_i32)
-        .unwrap_or_else(|| panic!("{ctx}: missing/invalid firstOctave"));
-    let amps = v
-        .get("amplitudes")
+        .unwrap_or_else(|| panic!("{ctx}: missing firstOctave/base_octave"));
+    let base_amplitude = v.get("base_amplitude").and_then(Json::as_f64).unwrap_or(1.0);
+    let octave_count = v.get("octave_count").and_then(Json::as_i32).unwrap_or(1).max(1) as usize;
+    let modifiers: Vec<f64> = v
+        .get("amplitude_modifiers")
         .and_then(Json::as_arr)
-        .unwrap_or_else(|| panic!("{ctx}: missing amplitudes"));
-    let amplitudes = amps
-        .iter()
-        .map(|a| a.as_f64().unwrap_or_else(|| panic!("{ctx}: non-numeric amplitude {a:?}")))
+        .map(|arr| arr.iter().map(|a| a.as_f64().unwrap_or(1.0)).collect())
+        .unwrap_or_default();
+    let amplitudes: Vec<f64> = (0..octave_count)
+        .map(|i| base_amplitude * modifiers.get(i).copied().unwrap_or(1.0))
         .collect();
-    NoiseParams { first_octave, amplitudes }
+    NoiseParams { first_octave: base_octave, amplitudes }
 }
 
 fn req_field<'j>(v: &'j Json, key: &str, ty: &str) -> &'j Json {
@@ -773,7 +907,12 @@ impl Loader<'_> {
                 }
             }
             "minecraft:blend_density" => {
-                let argument = self.build_value(req_field(v, "argument", ty));
+                // 1.21.8 "argument"; 26.3 "input"
+                let argument = self.build_value(
+                    v.get("argument")
+                        .or_else(|| v.get("input"))
+                        .unwrap_or_else(|| panic!("{ty}: missing argument/input")),
+                );
                 self.push(DfNode::BlendDensity { argument })
             }
             "minecraft:blend_offset" => self.push(DfNode::BlendOffset),
@@ -803,7 +942,14 @@ impl Loader<'_> {
             | "minecraft:cache_2d"
             | "minecraft:cache_once"
             | "minecraft:cache_all_in_cell" => {
-                let argument = self.build_value(req_field(v, "argument", ty));
+                // 1.21.8 uses "argument"; 26.3 uses "input" (interpolated also
+                // carries cell_size_xz/cell_size_y which we take from the
+                // noise settings defaults)
+                let argument = self.build_value(
+                    v.get("argument")
+                        .or_else(|| v.get("input"))
+                        .unwrap_or_else(|| panic!("{ty}: missing field 'argument'/'input'")),
+                );
                 let node = match ty {
                     "minecraft:abs" => DfNode::Abs { argument },
                     "minecraft:square" => DfNode::Square { argument },
@@ -818,6 +964,13 @@ impl Loader<'_> {
                     _ => DfNode::CacheAllInCell { argument },
                 };
                 self.push(node)
+            }
+            "minecraft:sub" => {
+                let children = self.build_children(v, ty);
+                if children.len() != 2 {
+                    panic!("{ty}: expected exactly 2 children");
+                }
+                self.push(DfNode::Sub { left: children[0], right: children[1] })
             }
             "minecraft:add" | "minecraft:mul" | "minecraft:min" | "minecraft:max" => {
                 let children = self.build_children(v, ty);
@@ -896,6 +1049,91 @@ impl Loader<'_> {
                 }
                 self.push(DfNode::WeightedList { distribution })
             }
+            // --- 26.3 new nodes ---
+            "minecraft:cache" => {
+                // 26.3 renamed cache_once -> cache (CacheFunction)
+                let input = self.build_value(req_field(v, "input", ty));
+                self.push(DfNode::CacheOnce { argument: input })
+            }
+            "minecraft:gradient" => {
+                let axis = match req_field(v, "axis", ty).as_str() {
+                    Some("x") | Some("minecraft:x") => 0u8,
+                    Some("y") | Some("minecraft:y") => 1u8,
+                    Some("z") | Some("minecraft:z") => 2u8,
+                    other => panic!("{ty}: unknown axis {other:?}"),
+                };
+                let tiling = match v.get("tiling").and_then(|t| t.as_str()) {
+                    None => 0u8,
+                    Some("minecraft:clamp_to_edge") | Some("clamp_to_edge") => 0u8,
+                    Some("minecraft:repeat") | Some("repeat") => 1u8,
+                    Some("minecraft:mirrored_repeat") | Some("mirrored_repeat") => 2u8,
+                    other => panic!("{ty}: unknown tiling {other:?}"),
+                };
+                let from_coord = req_field(v, "from_coordinate", ty).as_i64().unwrap_or_else(|| panic!("{ty}: from_coordinate")) as i32;
+                let to_coord = req_field(v, "to_coordinate", ty).as_i64().unwrap_or_else(|| panic!("{ty}: to_coordinate")) as i32;
+                let from_value = req_num(v, "from_value", ty);
+                let to_value = req_num(v, "to_value", ty);
+                self.push(DfNode::Gradient { axis, tiling, from_coord, to_coord, from_value, to_value })
+            }
+            "minecraft:lerp" => {
+                let alpha = self.build_value(req_field(v, "alpha", ty));
+                let first = self.build_value(req_field(v, "first", ty));
+                let second = self.build_value(req_field(v, "second", ty));
+                self.push(DfNode::Lerp { alpha, first, second })
+            }
+            "minecraft:interval_select" => {
+                let input = self.build_value(req_field(v, "input", ty));
+                let thresholds = req_field(v, "thresholds", ty)
+                    .as_arr()
+                    .unwrap_or_else(|| panic!("{ty}: thresholds"))
+                    .iter()
+                    .map(|t| t.as_f64().unwrap_or_else(|| panic!("{ty}: threshold value")) as f32)
+                    .collect();
+                let functions = req_field(v, "functions", ty)
+                    .as_arr()
+                    .unwrap_or_else(|| panic!("{ty}: functions"))
+                    .iter()
+                    .map(|f| self.build_value(f))
+                    .collect();
+                self.push(DfNode::IntervalSelect { input, thresholds, functions })
+            }
+            "minecraft:find_top_surface" => {
+                let density = self.build_value(req_field(v, "density", ty));
+                let upper_bound = self.build_value(req_field(v, "upper_bound", ty));
+                let lower_bound = req_field(v, "lower_bound", ty).as_i64().unwrap_or_else(|| panic!("{ty}: lower_bound")) as i32;
+                let cell_height = req_field(v, "cell_height", ty).as_i64().unwrap_or_else(|| panic!("{ty}: cell_height")) as i32;
+                self.push(DfNode::FindTopSurface { density, upper_bound, lower_bound, cell_height })
+            }
+            "minecraft:pow" => {
+                let base = self.build_value(req_field(v, "base", ty));
+                let exponent = self.build_value(req_field(v, "exponent", ty));
+                self.push(DfNode::Pow { base, exponent })
+            }
+            "minecraft:div" => {
+                let left = self.build_value(req_field(v, "left", ty));
+                let right = self.build_value(req_field(v, "right", ty));
+                self.push(DfNode::Div { left, right })
+            }
+            "minecraft:negate" => {
+                let argument = self.build_value(req_field(v, "input", ty));
+                self.push(DfNode::Negate { argument })
+            }
+            "minecraft:reciprocal" => {
+                let argument = self.build_value(req_field(v, "input", ty));
+                self.push(DfNode::Reciprocal { argument })
+            }
+            "minecraft:log" => {
+                let argument = self.build_value(req_field(v, "input", ty));
+                self.push(DfNode::Log { argument })
+            }
+            "minecraft:sign" => {
+                let argument = self.build_value(req_field(v, "input", ty));
+                self.push(DfNode::Sign { argument })
+            }
+            "minecraft:round" => {
+                let argument = self.build_value(req_field(v, "input", ty));
+                self.push(DfNode::Round { argument })
+            }
             other => panic!("unknown density type: {other}"),
         }
     }
@@ -943,9 +1181,17 @@ impl Loader<'_> {
         if let Some(arr) = v.get("arguments").and_then(Json::as_arr) {
             return arr.iter().map(|a| self.build_value(a)).collect();
         }
-        let a = self.build_value(req_field(v, "argument1", ty));
-        let b = self.build_value(req_field(v, "argument2", ty));
-        vec![a, b]
+        // 1.21.8: "argument1"/"argument2"; 26.3: "left"/"right"
+        let f1 = v.get("argument1").or_else(|| v.get("left"));
+        let f2 = v.get("argument2").or_else(|| v.get("right"));
+        match (f1, f2) {
+            (Some(a), Some(b)) => {
+                let ia = self.build_value(a);
+                let ib = self.build_value(b);
+                vec![ia, ib]
+            }
+            _ => panic!("{ty}: missing argument1/argument2 (left/right)"),
+        }
     }
 
     /// Noise id string (verified against the noise param set) or inline
@@ -973,6 +1219,57 @@ impl Loader<'_> {
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
+
+/// Walk a material_rule JSON collecting ore_vein DF references (26.3).
+/// Registers each referenced DF in the arena under "material:<id>" and queues
+/// rule/condition string refs for transitive traversal.
+fn collect_material_dfs(
+    j: &Json,
+    cur_id: &str,
+    loader: &mut Loader<'_>,
+    router_indices: &mut HashMap<String, usize>,
+    queue: &mut Vec<String>,
+) {
+    match j {
+        Json::Obj(entries) => {
+            let ty = entries.iter().find(|(k, _)| k == "type").map(|(_, v)| v.clone());
+            if let Some(Json::Str(t)) = &ty {
+                if t == "minecraft:ore_vein" {
+                    for field in ["density", "richness", "filler_gap"] {
+                        if let Some(v) = entries.iter().find(|(k, _)| k == field).map(|(_, v)| v) {
+                            if let Json::Str(dfid) = v {
+                                let key = format!("material:{dfid}");
+                                if !router_indices.contains_key(&key) {
+                                    let idx = loader.build_value(v);
+                                    router_indices.insert(key, idx);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for (k, v) in entries {
+                match v {
+                    Json::Str(s) if k == "then_run" || k == "if_true" || k == "invert" => {
+                        queue.push(s.clone());
+                    }
+                    Json::Arr(_) | Json::Obj(_) => collect_material_dfs(v, cur_id, loader, router_indices, queue),
+                    _ => {}
+                }
+            }
+        }
+        Json::Arr(items) => {
+            for v in items {
+                match v {
+                    Json::Str(s) => queue.push(s.clone()),
+                    Json::Obj(_) | Json::Arr(_) => collect_material_dfs(v, cur_id, loader, router_indices, queue),
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -58,7 +58,7 @@
 use crate::json::{self, Json};
 use crate::noise::NormalNoise;
 use crate::rng::{LegacyRandom, XoroshiroPositionalRandomFactory, XoroshiroRandomSource};
-use crate::worldgen::WorldGen;
+use crate::worldgen::{Assets, WorldGen};
 
 /// Parsed surface rule tree (rules reference conditions by arena index).
 pub enum SrRule {
@@ -66,6 +66,17 @@ pub enum SrRule {
     IfTrue { cond: usize, then: usize },
     Block { state: u32 },
     Bandlands,
+    /// MC 26.3: ore veins became a material rule (OreVeinRule). DF indices
+    /// point into the density Compiled arena via Compiled.router lookups.
+    OreVein {
+        ore: u32,
+        raw: u32,
+        filler: u32,
+        raw_chance: f32,
+        density_df: u32,
+        richness_df: u32,
+        gap_df: u32,
+    },
 }
 
 pub enum SrCond {
@@ -159,6 +170,13 @@ struct Parser<'a> {
     noise_idx: &'a dyn Fn(&str) -> Option<u32>,
     biome_idx: &'a dyn Fn(&str) -> Option<u32>,
     wg: &'a WorldGen,
+    /// embedded asset store — resolves 26.3 material_rule / material_condition
+    /// string refs
+    assets: Option<&'a Assets>,
+    /// resolves a DF string ref ("minecraft:overworld/ore_vein/iron_density")
+    /// to a density Compiled arena index (26.3 ore_vein rules)
+    dfc: Option<&'a dyn Fn(&str) -> Option<u32>>,
+    depth: u32,
 }
 
 struct Partial {
@@ -190,6 +208,18 @@ fn canon(name: &str) -> String {
     }
 }
 
+/// required-field helper (surface JSON)
+fn req<'a>(j: &'a Json, key: &str) -> &'a Json {
+    static NULL: Json = Json::Null;
+    j.get(key).unwrap_or(&NULL)
+}
+
+/// {"Name": "minecraft:x", "Properties": {...}} -> "minecraft:x[k=v,...]"
+fn state_key(j: &Json) -> String {
+    let name = j.get("Name").and_then(Json::as_str).unwrap_or("");
+    st_str(name, j.get("Properties"))
+}
+
 fn cdesc(j: &Json) -> String {
     j.get("type").and_then(|v| v.as_str()).unwrap_or("?").to_string()
 }
@@ -218,6 +248,10 @@ fn parse_anchor(j: &Json, wg: &WorldGen) -> Option<i32> {
 
 impl<'a> Parser<'a> {
     fn rule(&mut self, j: &Json) -> Option<usize> {
+        // 26.3: a bare string is a material_rule ref ("minecraft:overworld/biome_surface/frozen_peaks")
+        if let Json::Str(s) = j {
+            return self.rule_ref(s);
+        }
         let t = match j.get("type").and_then(|v| v.as_str()) {
             Some(t) => t,
             None => { eprintln!("surface parse: rule without type: {j:?}"); return None; }
@@ -275,6 +309,35 @@ impl<'a> Parser<'a> {
                 self.cfg.rules.push(SrRule::Bandlands);
                 self.cfg.rules.len() - 1
             }
+            "minecraft:ore_vein" => {
+                // 26.3 OreVeinRule: ore/raw/filler are block states;
+                // density/richness/filler_gap are DF refs pre-registered in
+                // Compiled.router under "material:<id>".
+                let block_at = |v: &Json| -> String {
+                    match v {
+                        Json::Str(s) => canon(s),
+                        Json::Obj(_) => state_key(v),
+                        _ => String::new(),
+                    }
+                };
+                let ore = self.cfg.state(block_at(req(j, "ore_block")));
+                let raw = self.cfg.state(block_at(req(j, "raw_ore_block")));
+                let filler = self.cfg.state(block_at(req(j, "filler_block")));
+                let df_at = |p: &Parser<'a>, v: &Json| -> Option<u32> {
+                    let id = match v {
+                        Json::Str(s) => s.clone(),
+                        _ => { eprintln!("surface parse: ore_vein DF not a string ref"); return None; }
+                    };
+                    let key = format!("material:{id}");
+                    p.dfc.and_then(|f| f(&key))
+                };
+                let density_df = match df_at(self, req(j, "density")) { Some(v) => v, None => { eprintln!("surface parse: ore_vein density ref failed"); return None; } };
+                let richness_df = match df_at(self, req(j, "richness")) { Some(v) => v, None => { eprintln!("surface parse: ore_vein richness ref failed"); return None; } };
+                let gap_df = match df_at(self, req(j, "filler_gap")) { Some(v) => v, None => { eprintln!("surface parse: ore_vein filler_gap ref failed"); return None; } };
+                let raw_chance = req(j, "raw_ore_chance").as_f64().unwrap_or(0.02) as f32;
+                self.cfg.rules.push(SrRule::OreVein { ore, raw, filler, raw_chance, density_df, richness_df, gap_df });
+                self.cfg.rules.len() - 1
+            }
             _ => {
                 eprintln!("surface parse: unknown rule type {t}");
                 return None;
@@ -283,7 +346,65 @@ impl<'a> Parser<'a> {
         Some(idx)
     }
 
+    /// 26.3: resolve "minecraft:overworld/biome_surface/frozen_peaks" ->
+    /// minecraft/worldgen/material_rule/overworld/biome_surface/frozen_peaks.json
+    fn rule_ref(&mut self, s: &str) -> Option<usize> {
+        let assets = match self.assets {
+            Some(a) => a,
+            None => { eprintln!("surface parse: rule ref {s} but no assets"); return None; }
+        };
+        self.depth += 1;
+        if self.depth > 64 {
+            eprintln!("surface parse: ref depth cap at {s}");
+            return None;
+        }
+        let path = format!("minecraft/worldgen/material_rule/{}.json", s.strip_prefix("minecraft:").unwrap_or(s));
+        let bytes = match assets.get(&path) {
+            Some(b) => b,
+            None => { eprintln!("surface parse: rule ref not found: {path}"); return None; }
+        };
+        let text = match std::str::from_utf8(bytes) { Ok(t) => t, Err(_) => { eprintln!("surface parse: {path} not utf-8"); return None; } };
+        let j = match json::parse(text) {
+            Ok(v) => v,
+            Err(e) => { eprintln!("surface parse: {path}: {e}"); return None; }
+        };
+        let r = self.rule(&j);
+        self.depth -= 1;
+        r
+    }
+
+    /// 26.3: resolve "minecraft:on_floor" ->
+    /// minecraft/worldgen/material_condition/on_floor.json
+    fn cond_ref(&mut self, s: &str) -> Option<usize> {
+        let assets = match self.assets {
+            Some(a) => a,
+            None => { eprintln!("surface parse: cond ref {s} but no assets"); return None; }
+        };
+        self.depth += 1;
+        if self.depth > 64 {
+            eprintln!("surface parse: cond ref depth cap at {s}");
+            return None;
+        }
+        let path = format!("minecraft/worldgen/material_condition/{}.json", s.strip_prefix("minecraft:").unwrap_or(s));
+        let bytes = match assets.get(&path) {
+            Some(b) => b,
+            None => { eprintln!("surface parse: cond ref not found: {path}"); return None; }
+        };
+        let text = match std::str::from_utf8(bytes) { Ok(t) => t, Err(_) => { eprintln!("surface parse: {path} not utf-8"); return None; } };
+        let j = match json::parse(text) {
+            Ok(v) => v,
+            Err(e) => { eprintln!("surface parse: {path}: {e}"); return None; }
+        };
+        let r = self.cond(&j);
+        self.depth -= 1;
+        r
+    }
+
     fn cond(&mut self, j: &Json) -> Option<usize> {
+        // 26.3: a bare string is a material_condition ref ("minecraft:on_floor")
+        if let Json::Str(s) = j {
+            return self.cond_ref(s);
+        }
         let t = match j.get("type").and_then(|v| v.as_str()) {
             Some(t) => t,
             None => { eprintln!("surface parse: cond without type: {j:?}"); return None; }
@@ -388,6 +509,7 @@ impl<'a> Parser<'a> {
                 self.cfg.conds.push(SrCond::YAbove { anchor, add_stone_depth: asd, surface_depth_multiplier: sdm });
                 self.cfg.conds.len() - 1
             }
+<<<<<<< HEAD
             // Paper patch of the vanilla bedrock rule: same shape as
             // vertical_gradient + is_roof (ignored — flat bedrock off in
             // bench worlds; generate-flat-bedrock=false default).
@@ -395,6 +517,15 @@ impl<'a> Parser<'a> {
                 let name = match j.get("random_name").and_then(|v| v.as_str()) {
                     Some(n) => canon(n),
                     None => { eprintln!("surface parse: paper bedrock without random_name"); return None; }
+=======
+            // Paper 26.3: same shape as vertical_gradient; with
+            // generate-flat-bedrock=false (our server.properties default) the
+            // anchors pass through unchanged — exact VerticalGradient semantics.
+            "paper:optionally_flat_bedrock_material_condition" => {
+                let name = match j.get("random_name").and_then(|v| v.as_str()) {
+                    Some(n) => canon(n),
+                    None => { eprintln!("surface parse: paper bedrock cond without random_name"); return None; }
+>>>>>>> 5a96306 (feat(26.3): MC 26.3 retarget — native carve/material-rules/DF-26.3 + plugin NMS fix)
                 };
                 let ty = match j.get("true_at_and_below").and_then(|v| parse_anchor(v, self.wg)) {
                     Some(a) => a,
@@ -666,14 +797,36 @@ pub fn build(
     ns_json: &str,
     noise_idx: &dyn Fn(&str) -> Option<u32>,
     biome_idx: &dyn Fn(&str) -> Option<u32>,
+    assets: Option<&Assets>,
+    dfc: Option<&dyn Fn(&str) -> Option<u32>>,
 ) -> Option<SurfaceBuild> {
     let j = match json::parse(ns_json) {
         Ok(v) => v,
         Err(e) => { eprintln!("surface build: ns json parse failed: {e}"); return None; }
     };
-    let rule = match j.get("surface_rule") {
-        Some(r) => r,
-        None => { eprintln!("surface build: no surface_rule in ns"); return None; }
+    // 1.21.8: inline "surface_rule"; 26.3: "material_rule" is a string ref
+    // into material_rule/<path>.json (resolved via the embedded assets)
+    let rule_json = match j.get("surface_rule") {
+        Some(r) => r.clone(),
+        None => match j.get("material_rule") {
+            Some(Json::Str(id)) => {
+                let a = match assets {
+                    Some(a) => a,
+                    None => { eprintln!("surface build: material_rule ref {id} but no assets"); return None; }
+                };
+                let path = format!("minecraft/worldgen/material_rule/{}.json", id.strip_prefix("minecraft:").unwrap_or(id));
+                let bytes = match a.get(&path) {
+                    Some(b) => b,
+                    None => { eprintln!("surface build: material_rule not found: {path}"); return None; }
+                };
+                let text = match std::str::from_utf8(bytes) { Ok(t) => t, Err(_) => { eprintln!("surface build: {path} not utf-8"); return None; } };
+                match json::parse(text) {
+                    Ok(v) => v,
+                    Err(e) => { eprintln!("surface build: {path}: {e}"); return None; }
+                }
+            }
+            _ => { eprintln!("surface build: no surface_rule/material_rule in ns"); return None; }
+        },
     };
     let default_id: u16 = 1; // stone (native STONE const)
     let mut p = Parser {
@@ -686,8 +839,11 @@ pub fn build(
         noise_idx,
         biome_idx,
         wg,
+        assets,
+        dfc,
+        depth: 0,
     };
-    let root = p.rule(rule)?;
+    let root = p.rule(&rule_json)?;
     // bandlands terracottas are referenced only via the Bandlands rule —
     // append their states explicitly (stable order).
     let mut terracotta = [0u32; 7];

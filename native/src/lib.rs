@@ -17,6 +17,7 @@ pub mod biomes;
 pub mod surface;
 pub mod surface_fill;
 pub mod beard;
+pub mod carver;
 pub mod nochunk;
 pub mod features_rng;
 pub mod features_math;

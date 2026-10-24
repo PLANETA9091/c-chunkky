@@ -9,8 +9,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRV="$ROOT/server"
-BUILD="${1:-60}"
-VERSION="1.21.8"
+BUILD="${1:-222}"
+VERSION="26.3"
 SEED=3257840388504953787
 
 mkdir -p "$SRV/plugins"
