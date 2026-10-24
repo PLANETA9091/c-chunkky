@@ -2145,3 +2145,37 @@ Work Log:
 Stage Summary:
 - Миграционная база собрана: jar 26.3, mojmap-декомпил, ванильные JSONs, карта дельт, JNI жив на 26.3.
 - Движок = новый порт (float-сэмплеры), паритет-цель = ваниль 26.3.
+
+---
+## cont-47b: NOISE-ЯДРО 26.3 — БИТ-ПАРИТЕТ ДОСТИГНУТ (первый камень порта)
+
+Work Log:
+- ОРАКУЛ 26.3: oracle263/NoiseOracle263.java против server263/versions/26.3/paper-26.3.jar
+  (javac/java Temurin 25, classpath = versions-jar ПЕРВЫМ + все libraries; ЛОВУШКИ: (1) Paper
+  шадовит com/mojang/logging/LogUtils (добавляет getClassLogger) — без versions-jar первым
+  NoSuchMethodError; (2) нужен SharedConstants.tryDetectVersion() + Bootstrap.bootStrap();
+  (3) --enable-native-access=ALL-UNNAMED). Голдены: reference/oracle263_noise.txt (17 строк).
+- РЕАЛИЗАЦИЯ native/src/n263.rs: GradientNoise263 (byte[256] perms + shuffle nextInt(256-i),
+  offsets *256.0, wrap far-lands), PerlinNoise263 (pAdj u16-пак p[n]|p[n+1]<<8, FLOAT-оценка,
+  smoothstep/lerp3 f32, sampleWithDerivative через permute), SmearedPerlinNoise263 (fudgeY
+  снап), NoiseStack263 (слои noise/frequency/amplitude, f32-аккумуляция), NormalNoise263
+  (Parameters + buildOctaves + estimateDeviation-нормировка + create: два forkPositional,
+  per-octave fromHashOf("octave_N"), second chain ×1.0181268882175227), BlendedNoise263
+  (FBM -15/-15/-7 через SmearedPerlin, lerp(clamp(main+0.5,0,1),min,max)), паритет-конструктор
+  createParity. RNG/md5 из rng.rs переиспользованы 1:1 (диффы 26.3 — только переименования).
+- БАГ БИСЕКТОМ (процедура в копилку): NormalNoise расходился ×1.84. Проверки: perlin-голден OK,
+  fork-цепочка OK, per-octave перлины через OracleLayers OK (все P-значения бит-точны) ->
+  деливер Only normalization. Reflection полей (ЛОВУШКА: Paper кладёт Layer[] в родителя
+  NoiseStack; NoiseStack$Perlin.fields=[] -> getDeclaredField("layers") падает; брать
+  getSuperclass()) дал РЕАЛЬНЫЕ октавы: амплитуды УПОЛОВИНИВАЮТСЯ каждый шаг
+  (0.9067/0.4533/0.2267/0.1133, Σ|amp| = base_amplitude) — vineflower-вывод buildOctaves был
+  обрезан до frequency*=2.0 и амплитудный halving потерялся; javap-байткод подтвердил
+  безусловный amplitude*=0.5 (даже для скипнутых модифайером октав). Фикс -> 23/23 золотых
+  проверки БИТ-ТОЧНЫ (perlin 5, normal 3, normalparity 2, smeared 3, blended 6×3 стека,
+  forkA/B 2).
+- cargo test: 61/61 (вкл. golden_parity_vs_paper263). Коммит f06f9b0.
+Stage Summary:
+- Ядро шума 26.3 готово и бит-точно: фундамент для densityfunction-дерева (следующий шаг —
+  новый op-набор + InterpolatedFunction + DensityVolume-семантика), далее loader форматов
+  26.3 (material_rule/material_condition реестры, aquifers-секция, router-ссылки).
+- Оракул-пайплайн воспроизводим: oracle263/*.java + classpath-конвенции — в артефактах.
