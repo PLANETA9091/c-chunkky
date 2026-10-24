@@ -2029,3 +2029,31 @@ Stage Summary:
   0.004% на scalar-пути добавлено в evidence base. Коммит docs: cont-44.
 - Следующие фронты (из их worklog): deco 2.0-2.16 -> 1.5ms (EnvScan колонка-фастпат,
   ov-колонка-индекс); height-профиль структур (25 запросов/чанк: fill-cache vs scalar).
+
+---
+## cont-45 (local resync): independent stage-D convergence #3 — production line adopted
+
+Work Log:
+- Локальная сессия независимо довела scalar height-путь до бит-точности (HeightCheck 9216
+  колонок/4 региона mismatches=0; heightdiag fill-vs-height 0/256) и поймала ТЕ ЖЕ два класса
+  багов, что и cont-43/44: cell_frac не выставлялся per-block в height-walk + memo next_serial
+  per-point (их формулировка: CSE вернул x-плоскость 0 для плоскости 1 под одним MemoCtx).
+  Плюс независимо воспроизведены оба silent-boot фикса (block.data.CraftBlockData + initBulk
+  в surface handshake) — на моём дереве они были ДО обнаружения remote.
+- Rebase на origin/main: конфликт с cont-43/44; их версия — та же семантика (heightsCtx prod
+  fill-based + scalar base_height диагностика). МОЙ дубль отклонён, коммит сохранён в ветке
+  backup/stageD-cont42 (d05b4fe) для архива.
+- Резинк локального рантайма на прод-дереве: cargo test 54/54 (после распаковки пакетов в
+  /tmp/dptt_packs/{tectonic,terralith} — конвенция теста real_pack_coverage), native+plugin
+  пересобраны, бут чистый: bulkReady=true, surface engine active (51 states), biomes 149,
+  deco stage on; forceload 576 чанков: fills ok, marks 28918/28918, bridge_err=0.
+- Локальные A/B (2-core песочница, окно ±20%): native height 92.6/93.5/84.5 ms/chunk vs
+  vanilla-delegate 88.6 — вклад height-запросов в e2e мал (~0.4 вызова/чанк); натив 2.2-2.4x
+  быстрее на колонку (5.5-6.4ms vs 14.4-15.5ms холодные замеры HeightCheck A/B). Честный
+  вердикт — CI judge (4-core).
+
+Stage Summary:
+- Локальное дерево = origin/main (cont-44), прод-путь heightsCtx без изменений.
+- Ценность сессии: третье независимое подтверждение семантики height-пути + диагностический
+  приём (твин-дампы субстанции fill vs height) пополнил копилку; A/B артефакты в
+  backup/stageD-cont42 (prof_session_stageD*.txt).
