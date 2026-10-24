@@ -108,7 +108,7 @@ pub struct Aquifer263 {
     grid_size_y: i32,
     grid_size_z: i32,
     sea_level: i32,
-    skip_sampling_above_y: i32,
+    pub skip_sampling_above_y: i32,
     surface_level_cache: HashMap<i64, i32>,
     should_schedule: bool,
 }
