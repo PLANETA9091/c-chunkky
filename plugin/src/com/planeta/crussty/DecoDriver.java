@@ -5,7 +5,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.core.Holder;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
-import net.minecraft.resources.ResourceLocation;
+import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.WorldGenRegion;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.util.RandomSource;
@@ -21,7 +21,7 @@ import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.RandomSupport;
 import net.minecraft.world.level.levelgen.XoroshiroRandomSource;
 import net.minecraft.world.level.levelgen.WorldgenRandom;
-import net.minecraft.world.level.levelgen.feature.ConfiguredFeature;
+import net.minecraft.world.level.levelgen.feature.Feature;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructureStart;
@@ -218,7 +218,8 @@ public final class DecoDriver extends BlockPopulator {
             for (int i = 0; i < STATES.length; i++) {
                 BlockState st = state(STATES[i]);
                 if (st != null) {
-                    flags[i] = (byte) ((st.isAir() ? 1 : 0) | (st.blocksMotion() ? 2 : 0));
+                    flags[i] = (byte) ((st.isAir() ? 1 : 0)
+                            | (st.is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP) ? 2 : 0)); // 26.3: tag replaces blocksMotion()
                 }
             }
             ChunkGenNative.decoSetFlags(ctx, flags);
@@ -370,7 +371,7 @@ public final class DecoDriver extends BlockPopulator {
                     return;
                 }
                 var holders = reg.registryAccess().lookupOrThrow(Registries.PLACED_FEATURE)
-                        .get(ResourceLocation.parse(placedName));
+                        .get(Identifier.parse(placedName));
                 if (holders.isEmpty()) {
                     LOG.warning("deco delegate: placed feature missing in registry: " + placedName);
                     DELEGATE_MISSING.add(placedName);
@@ -387,7 +388,7 @@ public final class DecoDriver extends BlockPopulator {
             WorldgenRandom rng = new WorldgenRandom(
                     new XoroshiroRandomSource(RandomSupport.generateUniqueSeed()));
             rng.setFeatureSeed(decoSeed, gid, step);
-            holder.value().placeWithBiomeCheck(reg, NMS_GEN, rng, new BlockPos(ox, oy, oz));
+            holder.value().place(reg, NMS_GEN, rng, new BlockPos(ox, oy, oz)); // 26.3: biome filter lives in placement modifiers
         } catch (Throwable t) {
             LOG.warning("deco delegate failed for " + placedName + ": " + t);
         }
@@ -414,7 +415,7 @@ public final class DecoDriver extends BlockPopulator {
         long tg0 = System.nanoTime();
         for (int dz = -1; dz <= 1 && !anyRefs; dz++) {
             for (int dx = -1; dx <= 1; dx++) {
-                if (reg.getChunk(cx + dx, cz + dz).hasAnyStructureReferences()) {
+                if (reg.getChunk(cx + dx, cz + dz).getAllReferences().size() > 0) { // 26.3: was hasAnyStructureReferences()
                     anyRefs = true;
                     break;
                 }
@@ -466,7 +467,7 @@ public final class DecoDriver extends BlockPopulator {
                         // diagnostics only
                     }
                     long ts0 = System.nanoTime();
-                    java.util.List<StructureStart> starts = sm.startsForStructure(sp, structure);
+                    java.util.List<StructureStart> starts = sm.startsForStructure(cx, cz, structure); // 26.3: (chunkX, chunkZ, Structure)
                     DecoStats.STRUCT_STARTS_NS.addAndGet(System.nanoTime() - ts0);
                     DecoStats.STRUCT_START_CALLS.incrementAndGet();
                     for (StructureStart ss : starts) {
@@ -530,7 +531,7 @@ public final class DecoDriver extends BlockPopulator {
             // FLAG_POSTPROC: vanilla markAboveForPostProcessing (DiskFeature)
             // — chunk-level postprocessing mark, no block write.
             ChunkAccess ch = reg.getChunk((ox + rx) >> 4, (oz + rz) >> 4);
-            ch.markPosForPostprocessing(new BlockPos(ox + rx, y, oz + rz));
+            ch.markPosForPostProcessing(new BlockPos(ox + rx, y, oz + rz)); // 26.3 name
             return false;
         }
         if (stateIdx < 0 || stateIdx >= states.length) {
@@ -602,7 +603,7 @@ public final class DecoDriver extends BlockPopulator {
                 props = s.substring(b + 1, s.length() - 1);
             }
             final String fname = name;
-            ResourceLocation rl = ResourceLocation.parse(fname);
+            Identifier rl = Identifier.parse(fname);
             BlockState st = BuiltInRegistries.BLOCK.get(rl)
                     .orElseThrow(() -> new IllegalStateException("unknown block " + fname))
                     .value()
@@ -759,9 +760,9 @@ public final class DecoDriver extends BlockPopulator {
             BlockState st = reg.getBlockState(new BlockPos(x, y, z));
             boolean hit = switch (t) {
                 case WORLD_SURFACE, WORLD_SURFACE_WG -> !st.isAir();
-                case OCEAN_FLOOR, MOTION_BLOCKING -> st.blocksMotion() || !st.getFluidState().isEmpty();
-                case OCEAN_FLOOR_WG -> st.blocksMotion();
-                case MOTION_BLOCKING_NO_LEAVES -> st.blocksMotion() && !st.is(BlockTags.LEAVES)
+                case OCEAN_FLOOR, MOTION_BLOCKING -> st.is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP) || !st.getFluidState().isEmpty();
+                case OCEAN_FLOOR_WG -> st.is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP);
+                case MOTION_BLOCKING_NO_LEAVES -> st.is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP) && !st.is(BlockTags.LEAVES)
                         || !st.getFluidState().isEmpty();
             };
             if (hit) {
@@ -812,7 +813,7 @@ public final class DecoDriver extends BlockPopulator {
     public boolean tagIs(int x, int y, int z, String tag) {
         BlockState st = reg.getBlockState(new BlockPos(x, y, z));
         return st.is(net.minecraft.tags.TagKey.create(net.minecraft.core.registries.Registries.BLOCK,
-                ResourceLocation.parse(tag)));
+                Identifier.parse(tag)));
     }
 
     /** Debug upcall: block registry key at pos (draw-trace diagnostics). */
@@ -955,7 +956,7 @@ public final class DecoDriver extends BlockPopulator {
         if (st.isAir()) {
             f |= 1;
         }
-        if (st.blocksMotion()) {
+        if (st.is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP)) { // 26.3: tag replaces blocksMotion()
             f |= 2;
         }
         if (!st.getFluidState().isEmpty()) {
@@ -1151,7 +1152,7 @@ public final class DecoDriver extends BlockPopulator {
         // ---- blocks (empty-section fast path: getNonEmptyBlockCount==0 ->
         // single-air palette with NO storage reflect / registry lookups;
         // biomes are still needed — 3D quart palette feeds the zoom) ----
-        PalettedContainer<?> pc = sec.states;
+        PalettedContainer<?> pc = sec.getStates(); // 26.3: states is private, getter added
         try {
             Data<?> d = (Data<?>) pc.data;
             BitStorage storage = (BitStorage) F_STORAGE.get(d);

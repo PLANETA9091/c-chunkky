@@ -4,6 +4,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 API_JAR="../probe/paper-api.jar"
 LIBS="$(ls ../probe/libs/*.jar 2>/dev/null | tr '\n' ':')"
+# paper-api 26.3 signatures reference guava (Multimap) — pulled from the
+# server runtime libraries when present.
+GUAVA_JAR="$(find ../server263/libraries -name 'guava-*.jar' 2>/dev/null | head -1)"
+[ -n "$GUAVA_JAR" ] && LIBS="${LIBS}${GUAVA_JAR}:"
 [ -f "$API_JAR" ] || { echo "missing $API_JAR"; exit 1; }
 JAVAC="${JAVAC:-$(command -v javac || true)}"
 if [ -z "$JAVAC" ]; then
@@ -33,10 +37,14 @@ SRCS_MAIN=$(find src -name '*.java' ! -name 'NativeBiomeSource.java' ! -name 'Bi
 # NMS companions (NativeBiomeSource/BiomeSwap) need the mojmap paper jar —
 # present only after harness/bootstrap_server.sh (CI integration job). When
 # absent the plugin still builds and runs with vanilla Java biomes.
-SERVER_JAR="../server/versions/1.21.8/paper-1.21.8.jar"
+SERVER_JAR="../server263/versions/26.3/paper-26.3.jar"
 if [ -f "$SERVER_JAR" ]; then
   echo "compiling NMS biome companions against $SERVER_JAR"
-  MOJANG_LIBS="$(find ../server/libraries/com/mojang ../server/libraries/it -name '*.jar' 2>/dev/null | tr '\n' ':')"
+  MOJANG_LIBS="$(find ../server263/libraries/com/mojang ../server263/libraries/it -name '*.jar' 2>/dev/null | tr '\n' ':')"
+  # 26.3 NMS classes carry jspecify/jetbrains annotations — javac needs them
+  # on the classpath or it dies with CompletionFailure.
+  ANNOT_LIBS="$(find ../server263/libraries -name 'jspecify*.jar' -o -name 'annotations-*.jar' 2>/dev/null | tr '\n' ':')"
+  MOJANG_LIBS="${MOJANG_LIBS}${ANNOT_LIBS}"
   "${JAVAC_CMD[@]}" -encoding UTF-8 -cp "classes:$SERVER_JAR:$API_JAR:$LIBS:$MOJANG_LIBS" -d classes \
     src/com/planeta/crussty/NativeBiomeSource.java src/com/planeta/crussty/BiomeSwap.java src/com/planeta/crussty/SurfaceSetup.java src/com/planeta/crussty/DecoDriver.java
 else

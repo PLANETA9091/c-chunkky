@@ -524,11 +524,11 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         return keep ? rel : null;
     }
 
-    /** Resource-pack format of this server (Paper 1.21.8 = 81). Overridable
+    /** Resource-pack format of this server (Paper 26.3 = 121). Overridable
      *  via CRUS_PACK_FORMAT for other server versions. */
     private static final int PACK_FORMAT;
     static {
-        int f = 81;
+        int f = 121; // 26.3 data pack format (1.21.8 was 81)
         try {
             String env = System.getenv("CRUS_PACK_FORMAT");
             if (env != null) {
@@ -932,8 +932,11 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static java.lang.reflect.Field fNonEmpty, fTickingBlock, fTickingFluid, fSpecial;
     private static java.lang.reflect.Field fTickingList, fIsOpaque, fChunkHeightmaps;
     private static Constructor<?> ctorPal;
+    /** true = 26.3 ctor (T, Strategy, T[] presetValues); false = legacy (IdMap, T, Strategy). */
+    private static boolean ctorPalPreset;
     private static Object sectionStrategyField;
-    private static java.lang.reflect.Field bulkRegistryField;
+    /** Block.BLOCK_STATE_REGISTRY — 26.3 PalettedContainer has no per-container registry field. */
+    private static Object bulkRegistryObj;
     private static Object[] sectionStatesById; // NMS BlockState per material id (null = n/a)
     private static org.bukkit.block.data.BlockData[] bdataById; // Bukkit BlockData per id >= base (surface states)
     // per-material invariant flags (computed once from the NMS states)
@@ -967,14 +970,35 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 Class<?> cPaletted = fStates.getType();
                 mFillState = cPaletted.getMethod("getAndSetUnchecked",
                         int.class, int.class, int.class, Object.class);
-                java.lang.reflect.Field fRegistry = cPaletted.getField("registry");
-                Class<?> cStrategy = Class.forName(
-                        "net.minecraft.world.level.chunk.PalettedContainer$Strategy");
-                Object sectionStrategy = cStrategy.getField("SECTION_STATES").get(null);
-                ctorPal = cPaletted.getConstructor(
-                        fRegistry.getType(), Object.class, cStrategy);
+                Object regBlock = Class.forName("net.minecraft.world.level.block.Block")
+                        .getField("BLOCK_STATE_REGISTRY").get(null);
+                bulkRegistryObj = regBlock;
+                Class<?> cStrategy;
+                try {
+                    cStrategy = Class.forName(
+                            "net.minecraft.world.level.chunk.Strategy"); // 26.3 top-level
+                } catch (ClassNotFoundException cnf) {
+                    cStrategy = Class.forName(
+                            "net.minecraft.world.level.chunk.PalettedContainer$Strategy");
+                }
+                Object sectionStrategy;
+                try {
+                    // 26.3: no SECTION_STATES constant — build via the factory
+                    sectionStrategy = cStrategy.getMethod("createForBlockStates",
+                            Class.forName("net.minecraft.core.IdMap")).invoke(null, regBlock);
+                } catch (Throwable t2) {
+                    sectionStrategy = cStrategy.getField("SECTION_STATES").get(null);
+                }
+                try {
+                    // 26.3: PalettedContainer(T initialValue, Strategy, T[] presetValues)
+                    ctorPal = cPaletted.getConstructor(Object.class, cStrategy, Object[].class);
+                    ctorPalPreset = true;
+                } catch (NoSuchMethodException nsme) {
+                    ctorPal = cPaletted.getConstructor(
+                            regBlock.getClass(), Object.class, cStrategy);
+                    ctorPalPreset = false;
+                }
                 sectionStrategyField = sectionStrategy;
-                bulkRegistryField = fRegistry;
                 mGetAndSetUnch = cPaletted.getMethod("getAndSetUnchecked",
                         int.class, int.class, int.class, Object.class);
                 fNonEmpty = cSection.getDeclaredField("nonEmptyBlockCount");
@@ -1060,7 +1084,9 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 Object reg0 = Class.forName(
                         "net.minecraft.world.level.block.Block")
                         .getField("BLOCK_STATE_REGISTRY").get(null);
-                Object tpl = ctorPal.newInstance(reg0, airSt, sectionStrategyField);
+                Object tpl = ctorPalPreset
+                        ? ctorPal.newInstance(airSt, sectionStrategyField, null)
+                        : ctorPal.newInstance(reg0, airSt, sectionStrategyField);
                 airState = airSt;
                 Object d0 = fPalData.get(tpl);
                 Method mCfg = d0.getClass().getMethod("configuration");
@@ -1233,15 +1259,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 layoutV1(chunkData, minY, height, out, mats); // v1 fallback
                 return;
             }
-            Object registry = null;
-            try {
-                Object pal0 = bulkFieldStates.get(sections[0]);
-                if (pal0 != null) {
-                    registry = bulkRegistryField.get(pal0);
-                }
-            } catch (Throwable t) {
-                registry = null;
-            }
+            Object registry = bulkRegistryObj;
             if (registry == null) {
                 GenStats.BULK_BROKEN_COUNT.incrementAndGet();
                 layoutV1(chunkData, minY, height, out, mats);
@@ -1289,7 +1307,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                         if (swapFail == null && !swapProbed) {
                             swapProbed = true;
                         }
-                        Object reg = bulkRegistryField.get(pal);
+                        Object reg = bulkRegistryObj;
                         // 1) distinct non-air states (palette slots 1..15)
                         int vn = 1;
                         int[] usedIds = new int[16];
@@ -2063,7 +2081,11 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 weakChunkField.setAccessible(true);
                 Class<?> blockPos = Class.forName("net.minecraft.core.BlockPos");
                 Class<?> protoChunk = Class.forName("net.minecraft.world.level.chunk.ProtoChunk");
-                markMethod = protoChunk.getMethod("markPosForPostprocessing", blockPos);
+                try {
+                    markMethod = protoChunk.getMethod("markPosForPostProcessing", blockPos); // 26.3
+                } catch (NoSuchMethodException nsme) {
+                    markMethod = protoChunk.getMethod("markPosForPostprocessing", blockPos); // <=1.21.8
+                }
                 markMethod.setAccessible(true);
                 blockPosCtor = blockPos.getConstructor(int.class, int.class, int.class);
                 bridgeReady = true;

@@ -4,7 +4,7 @@ import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceKey;
-import net.minecraft.resources.ResourceLocation;
+import net.minecraft.resources.Identifier;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
@@ -45,7 +45,7 @@ public final class SurfaceSetup {
         int misses = 0;
         for (int i = 0; i < names.length; i++) {
             java.util.Optional<Holder.Reference<Biome>> hOpt =
-                    biomeReg.get(ResourceLocation.parse(names[i]));
+                    biomeReg.get(Identifier.parse(names[i]));
             if (hOpt.isEmpty()) {
                 misses++;
                 continue;
@@ -90,7 +90,7 @@ public final class SurfaceSetup {
         }
         Registry<Block> reg = net.minecraft.core.registries.BuiltInRegistries.BLOCK;
         final String fname = name;
-        Block blk = reg.getOptional(ResourceLocation.parse(name))
+        Block blk = reg.getOptional(Identifier.parse(name))
                 .orElseThrow(() -> new IllegalStateException("block not found: " + fname));
         BlockState st = blk.defaultBlockState();
         if (props != null && !props.isEmpty()) {

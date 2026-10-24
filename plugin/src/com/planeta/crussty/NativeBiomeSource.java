@@ -3,9 +3,10 @@ package com.planeta.crussty;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
-import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.biome.BiomeResolver;
 import net.minecraft.world.level.biome.BiomeSource;
 import net.minecraft.world.level.biome.Climate;
 
@@ -56,8 +57,8 @@ public final class NativeBiomeSource extends BiomeSource {
         // (Holder.is(ResourceKey) needs the wrapped key; a Holder.direct
         // wrapper would break every biome-condition check).
         for (int i = 0; i < names.length; i++) {
-            ResourceLocation rl = ResourceLocation.parse(names[i]);
-            java.util.Optional<Holder.Reference<Biome>> h = biomeRegistry.get(rl);
+            Identifier id = Identifier.parse(names[i]);
+            java.util.Optional<Holder.Reference<Biome>> h = biomeRegistry.get(id);
             if (h.isEmpty()) {
                 throw new IllegalStateException("biome not registered: " + names[i]);
             }
@@ -89,8 +90,14 @@ public final class NativeBiomeSource extends BiomeSource {
         throw new UnsupportedOperationException("native biome source is not serializable");
     }
 
+    /** 26.3: BiomeSource hands out BiomeResolver views of itself; the native
+     *  path ignores the climate sampler (the climate DFs run in Rust). */
     @Override
-    public Holder<Biome> getNoiseBiome(int qx, int qy, int qz, Climate.Sampler sampler) {
+    public BiomeResolver createResolver(Climate.Sampler sampler) {
+        return (qx, qy, qz) -> this.biomeAt(qx, qy, qz);
+    }
+
+    private Holder<Biome> biomeAt(int qx, int qy, int qz) {
         long chunkKey = (long) (qx >> 2) & 0x3FFFFFFL | (((long) (qz >> 2) & 0x3FFFFFFL) << 26);
         int[] ids = chunkCache.get(chunkKey);
         if (ids == null) {
