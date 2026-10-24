@@ -3,7 +3,7 @@
 //! Semantics frozen from reference/dec263 (see reference/port263_design.md).
 
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::n263::{self, BlendedNoise263, Noise263, NormalNoise263, NormalNoiseParameters};
 use crate::rng::XoroshiroPositionalRandomFactory;
@@ -150,9 +150,12 @@ impl CacheCell263 {
 
 /// SamplerContext 26.3: scratch arena + optional cache cells (caches disabled in
 /// EMPTY_UNCACHED -> pass-through, mirroring Java null cacheCells).
+/// `beard` carries the per-chunk Beardifier (Beardifier.CONTEXT_KEY user field;
+/// EMPTY == the oracle's constant(0.0) fallback — identical values).
 pub struct SamplerCtx263 {
     pub scratch: Scratch263,
     caches: Option<Vec<CacheCell263>>,
+    pub beard: crate::beard263::Beardifier263,
 }
 
 impl SamplerCtx263 {
@@ -160,6 +163,7 @@ impl SamplerCtx263 {
         SamplerCtx263 {
             scratch: Scratch263::default(),
             caches: None,
+            beard: crate::beard263::Beardifier263::empty(),
         }
     }
 
@@ -167,6 +171,7 @@ impl SamplerCtx263 {
         SamplerCtx263 {
             scratch: Scratch263::default(),
             caches: Some(Vec::new()),
+            beard: crate::beard263::Beardifier263::empty(),
         }
     }
 
@@ -278,7 +283,7 @@ fn floor_mod(a: i32, b: i32) -> i32 {
 
 // ---------------------------------------------------------------- compiled samplers
 
-pub type SamRef = Rc<DfSam263>;
+pub type SamRef = Arc<DfSam263>;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum BinOp {
@@ -332,7 +337,7 @@ pub enum DfSam263 {
     Constant(f32),
     /// NoiseFunction.Sampler (no shifts).
     Noise {
-        noise: Rc<N263>,
+        noise: Arc<N263>,
         xz_scale: f64,
         y_scale: f64,
     },
@@ -340,7 +345,7 @@ pub enum DfSam263 {
     ShiftedXz {
         shift_x: SamRef,
         shift_z: SamRef,
-        noise: Rc<N263>,
+        noise: Arc<N263>,
         xz_scale: f64,
         y_scale: f64,
     },
@@ -491,19 +496,22 @@ pub enum DfSam263 {
     /// ShiftNoiseFunction.ShiftB compiled: noise.get(z*0.25, x*0.25, 0)*4
     /// (transposed volume path).
     ShiftB {
-        noise: Rc<N263>,
+        noise: Arc<N263>,
     },
     /// BlendedNoise 26.3 compiled tree: Lerp(clamp(main+0.5,0,1), min, max)
     /// over three FBM stacks, all f32 lerp short-circuits.
     Blended {
-        min_stack: Rc<Noise263>,
-        max_stack: Rc<Noise263>,
-        main_stack: Rc<Noise263>,
+        min_stack: Arc<Noise263>,
+        max_stack: Arc<Noise263>,
+        main_stack: Arc<Noise263>,
         xz_multiplier: f64,
         y_multiplier: f64,
         main_xz_div: f64,
         main_y_div: f64,
     },
+    /// ContextBoundSampler(Beardifier.CONTEXT_KEY, fallback 0.0) — the beard
+    /// contribution from the ctx (EMPTY beardifier == 0.0 everywhere).
+    Beard,
     Spline {
         coord: SamRef,
         locations: Vec<f32>,
@@ -606,7 +614,7 @@ impl N263 {
 /// (Noises.instantiate = params.create(root.fromHashOf("minecraft:<name>"))).
 pub struct NoiseFactory263 {
     root: XoroshiroPositionalRandomFactory,
-    cache: HashMap<String, Rc<N263>>,
+    cache: HashMap<String, Arc<N263>>,
 }
 
 impl NoiseFactory263 {
@@ -619,16 +627,22 @@ impl NoiseFactory263 {
         }
     }
 
-    pub fn normal(&mut self, name: &str, params: NormalNoiseParameters) -> Rc<N263> {
+    pub fn normal(&mut self, name: &str, params: NormalNoiseParameters) -> Arc<N263> {
         let key = format!("minecraft:{name}");
         if let Some(n) = self.cache.get(&key) {
             return n.clone();
         }
         let mut random = self.root.from_hash_of(&key);
         let noise = NormalNoise263::new(params, &mut random);
-        let rc = Rc::new(N263::Normal(noise));
+        let rc = Arc::new(N263::Normal(noise));
         self.cache.insert(key, rc.clone());
         rc
+    }
+
+    /// RandomState.getOrCreateRandomFactory(name) step 1:
+    /// random.fromHashOf(name) — the caller forkPositional()s the result.
+    pub fn root_from_hash_of(&self, name: &str) -> crate::rng::XoroshiroRandomSource {
+        self.root.from_hash_of(name)
     }
 
     /// BlendedNoise 26.3: createFbmSet(context.createRandom("minecraft:terrain")).
@@ -639,7 +653,7 @@ impl NoiseFactory263 {
         xz_factor: f64,
         y_factor: f64,
         smear_scale_multiplier: f64,
-    ) -> (Rc<Noise263>, Rc<Noise263>, Rc<Noise263>, f64, f64, f64, f64) {
+    ) -> (Arc<Noise263>, Arc<Noise263>, Arc<Noise263>, f64, f64, f64, f64) {
         let mut random = self.root.from_hash_of("minecraft:terrain");
         let blended = BlendedNoise263::new(
             xz_scale,
@@ -649,9 +663,9 @@ impl NoiseFactory263 {
             smear_scale_multiplier,
             &mut random,
         );
-        let min_stack = Rc::new(Noise263::Stack(Box::new(blended.min_limit)));
-        let max_stack = Rc::new(Noise263::Stack(Box::new(blended.max_limit)));
-        let main = Rc::new(Noise263::Stack(Box::new(blended.main)));
+        let min_stack = Arc::new(Noise263::Stack(Box::new(blended.min_limit)));
+        let max_stack = Arc::new(Noise263::Stack(Box::new(blended.max_limit)));
+        let main = Arc::new(Noise263::Stack(Box::new(blended.main)));
         let xz_multiplier = 684.412 * xz_scale;
         let y_multiplier = 684.412 * y_scale;
         (
@@ -672,6 +686,7 @@ impl DfSam263 {
     pub fn sample_volume(&self, ctx: &mut SamplerCtx263, out: &mut Vec<f32>, vol: &DensityVolume) {
         match self {
             DfSam263::Constant(c) => out.fill(*c),
+            DfSam263::Beard => ctx.beard.fill_volume(vol, out),
             DfSam263::Noise {
                 noise,
                 xz_scale,
@@ -1226,6 +1241,7 @@ impl DfSam263 {
     pub fn sample_value(&self, ctx: &mut SamplerCtx263, x: i32, y: i32, z: i32) -> f32 {
         match self {
             DfSam263::Constant(c) => *c,
+            DfSam263::Beard => ctx.beard.sample_value(x, y, z),
             DfSam263::Noise {
                 noise,
                 xz_scale,

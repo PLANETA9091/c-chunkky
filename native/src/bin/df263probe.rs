@@ -1,9 +1,10 @@
 //! Probe spaghetti_2d internals vs Java oracle probes.
 use std::rc::Rc;
+use std::sync::Arc;
 use crussty_chunkgen::df263::{BinOp, DfSam263, SamRef, SamplerCtx263};
 use crussty_chunkgen::df263_router::RouterBuilder263;
 
-fn sam(v: DfSam263) -> SamRef { Rc::new(v) }
+fn sam(v: DfSam263) -> SamRef { Arc::new(v) }
 fn constant(v: f32) -> SamRef { sam(DfSam263::Constant(v)) }
 
 fn main() {
@@ -29,7 +30,7 @@ fn main() {
     // factory+cache -> the cached Rc instances are reused (same forked noise).
     let _ = &router;
 
-    let noise = |n: Rc<crussty_chunkgen::df263::N263>, xz: f64, ys: f64| sam(DfSam263::Noise { noise: n, xz_scale: xz, y_scale: ys });
+    let noise = |n: Arc<crussty_chunkgen::df263::N263>, xz: f64, ys: f64| sam(DfSam263::Noise { noise: n, xz_scale: xz, y_scale: ys });
     let add = |l: SamRef, r: SamRef| sam(DfSam263::Binary { op: BinOp::Add, l, r, r_bound: 0.0 });
     // elevation = remap(noise(elev,1,0), -1,1,-8,8): factor 8, offset 0 -> mul(8)
     let elev = sam(DfSam263::ConstMul { a: noise(spa2d_elev, 1.0, 0.0), c: 8.0 });

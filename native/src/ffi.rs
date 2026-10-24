@@ -16,6 +16,10 @@ use std::sync::Mutex;
 // ctx in the plugin (ReentrantLock), the global lock is uncontended.
 pub struct Ctx {
     gen: ChunkGen<'static>,
+    /// 26.3 engine (df263 router + aquifer 26.3 + beardifier 26.3). Some =
+    /// the ctx runs the 26.3 fill path (overworld-signature ctxs); None =
+    /// legacy 1.21.8 engine (nether/end, probe harnesses).
+    pub v263: Option<Gen263State>,
     /// Native multi_noise biome source (pack dimension override). None =
     /// keep the vanilla Java biome path (embedded-vanilla ctx has no
     /// data-driven dimension json).
@@ -26,6 +30,13 @@ pub struct Ctx {
     /// Native features engine (stage F). None until the pack assets carry a
     /// data-driven dimension (embedded-vanilla ctx keeps vanilla decorations).
     pub deco: Option<crate::features_master::DecoCtx>,
+}
+
+/// 26.3 per-ctx mutable state (marks buffer + last beard list).
+pub struct Gen263State {
+    pub g: crate::fill263::Gen263,
+    pub marks: Vec<i64>,
+    pub beard: Vec<i32>,
 }
 
 /// Native surface engine state (config parsed from the pack noise_settings;
@@ -196,8 +207,20 @@ static NEXT_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new
 
 /// Create a generator context for (seed, minY, height, seaLevel). Returns the
 /// ctx id (non-zero) or 0 on failure.
-pub fn ctx_new(seed: i64, _min_y: i32, _height: i32, sea_level: i32) -> i64 {
+pub fn ctx_new(seed: i64, min_y: i32, height: i32, sea_level: i32) -> i64 {
     let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // 26.3-only directive: the overworld signature (minY -64 / height 384)
+    // builds the bit-exact 26.3 engine (df263 + aquifer 26.3). Other
+    // dimensions (nether/end signatures) stay on the legacy engine until
+    // their 26.3 routers are ported.
+    let v263 = if min_y == -64 && height == 384 && std::env::var("CRUS_LEGACY").as_deref() != Ok("1") {
+        match std::panic::catch_unwind(|| crate::fill263::Gen263::new(seed, min_y, height, sea_level)) {
+            Ok(g) => Some(Gen263State { g, marks: Vec::new(), beard: Vec::new() }),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
     let mut env: Box<DEnv> = Box::new(DEnv::new(seed));
     // The plugin resolves the datapack-aware sea level (NoiseGeneratorSettings
     // from the server registry); override the bundled-vanilla default.
@@ -205,7 +228,10 @@ pub fn ctx_new(seed: i64, _min_y: i32, _height: i32, sea_level: i32) -> i64 {
     let env: &'static DEnv = Box::leak(env);
     let gen = ChunkGen::new(env);
     let mut map = SESSIONS.lock().unwrap();
-    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes: None, surface: None, deco: None });
+    map.get_or_insert_with(HashMap::new).insert(
+        id,
+        Ctx { gen, v263, biomes: None, surface: None, deco: None },
+    );
     id
 }
 
@@ -246,7 +272,10 @@ pub fn ctx_new_assets(
         }
     };
     let mut map = SESSIONS.lock().unwrap();
-    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes, surface, deco });
+    map.get_or_insert_with(HashMap::new).insert(
+        id,
+        Ctx { gen, v263: None, biomes, surface, deco },
+    );
     Ok(id)
 }
 
@@ -260,6 +289,12 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
     let mut map_guard = SESSIONS.lock().unwrap();
     let map = map_guard.as_mut().expect("sessions map");
     let ctx = map.get_mut(&id).expect("ctx id");
+    if let Some(st) = ctx.v263.as_mut() {
+        let beard = std::mem::take(&mut st.beard);
+        st.g.fill_chunk(cx, cz, &beard, out, &mut st.marks);
+        st.beard = beard;
+        return;
+    }
     ctx.gen.fill(cx, cz, out);
     surface_tail(ctx, cx, cz, out);
 }
@@ -281,6 +316,13 @@ pub fn base_height(id: i64, x: i32, z: i32, mode: i32) -> i32 {
     let Some(ctx) = map.get_mut(&id) else {
         return FAIL;
     };
+    if let Some(st) = ctx.v263.as_ref() {
+        let g = &st.g;
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            g.base_height(x, z, mode as u8)
+        }));
+        return res.unwrap_or(FAIL);
+    }
     let gen = &mut ctx.gen;
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         gen.base_height(x, z, mode as u8)
@@ -499,7 +541,11 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fillBeard(
                     let mut map = SESSIONS.lock().unwrap();
                     let map = map.as_mut().expect("sessions map");
                     if let Some(c) = map.get_mut(&ctx as &i64) {
-                        c.gen.set_beard(&data);
+                        if let Some(st) = c.v263.as_mut() {
+                            st.beard = data;
+                        } else {
+                            c.gen.set_beard(&data);
+                        }
                     }
                 }
             }
@@ -587,7 +633,11 @@ unsafe fn fill_jni(
         let map = SESSIONS.lock().unwrap();
         let map = map.as_ref().expect("sessions map");
         let c = map.get(&ctx as &i64).expect("ctx id");
-        let m = c.gen.marks();
+        let m: &[i64] = if let Some(st) = c.v263.as_ref() {
+            &st.marks
+        } else {
+            c.gen.marks()
+        };
         let n = m.len().min(mlen);
         let mptr = ((*tbl).v1_1.GetLongArrayElements)(
             env,

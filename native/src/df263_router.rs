@@ -1,7 +1,7 @@
 //! df263_router.rs — vanilla 26.3 overworld router build (NoiseRouterData +
 //! TerrainProvider mirrored in f32) and oracle goldens (cont-48).
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::df263::{
     Axis, BinOp, DfSam263, N263, NoiseFactory263, SamRef, SplineRef, Tiling, UnOp,
@@ -46,7 +46,7 @@ impl NoiseParams263 {
 // ---------------------------------------------------------------- build helpers
 
 fn sam(v: DfSam263) -> SamRef {
-    Rc::new(v)
+    Arc::new(v)
 }
 
 fn constant(v: f32) -> SamRef {
@@ -208,7 +208,7 @@ fn gradient(
     })
 }
 
-fn noise_fn(noise: Rc<N263>, xz_scale: f64, y_scale: f64) -> SamRef {
+fn noise_fn(noise: Arc<N263>, xz_scale: f64, y_scale: f64) -> SamRef {
     sam(DfSam263::Noise {
         noise,
         xz_scale,
@@ -242,12 +242,12 @@ fn remap(input: SamRef, from_min: f32, from_max: f32, to_min: f32, to_max: f32) 
 }
 
 /// mappedNoise 3-arg: (noise, minTarget, maxTarget) = xz 1.0, y 1.0.
-fn mapped_noise(noise: Rc<N263>, min_target: f32, max_target: f32) -> SamRef {
+fn mapped_noise(noise: Arc<N263>, min_target: f32, max_target: f32) -> SamRef {
     remap(noise_fn(noise, 1.0, 1.0), -1.0, 1.0, min_target, max_target)
 }
 
 /// mappedNoise 5-arg: (noise, xzScale, yScale, minTarget, maxTarget).
-fn mapped_noise_scaled(noise: Rc<N263>, xz_scale: f64, y_scale: f64, min_target: f32, max_target: f32) -> SamRef {
+fn mapped_noise_scaled(noise: Arc<N263>, xz_scale: f64, y_scale: f64, min_target: f32, max_target: f32) -> SamRef {
     remap(noise_fn(noise, xz_scale, y_scale), -1.0, 1.0, min_target, max_target)
 }
 
@@ -603,6 +603,9 @@ pub struct OverworldRouter263 {
     pub ridges: SamRef,
     pub chunk_surface_level: SamRef,
     pub final_density: SamRef,
+    /// "minecraft:overworld/preliminary_surface_level" — the aquifer surface
+    /// DF reference binds to this exact compiled node.
+    pub prelim: SamRef,
     pub offset: SamRef,
     pub factor: SamRef,
     pub sloped_cheese: SamRef,
@@ -616,6 +619,11 @@ pub struct OverworldRouter263 {
 pub struct RouterBuilder263 {
     pub factory: NoiseFactory263,
     next_cache: u32,
+    /// Compiled router nodes reused by the aquifer config (same node identity
+    /// as the DF-registry references).
+    erosion_node: Option<SamRef>,
+    depth_node: Option<SamRef>,
+    prelim_node: Option<SamRef>,
 }
 
 fn noise_gradient_density(factor: &SamRef, depth_jagged: SamRef) -> SamRef {
@@ -646,6 +654,9 @@ impl RouterBuilder263 {
         RouterBuilder263 {
             factory: NoiseFactory263::new(seed),
             next_cache: 0,
+            erosion_node: None,
+            depth_node: None,
+            prelim_node: None,
         }
     }
 
@@ -655,7 +666,7 @@ impl RouterBuilder263 {
         sam(DfSam263::Cache { id, a })
     }
 
-    fn normal_noise(&mut self, name: &str, p: NP) -> Rc<N263> {
+    fn normal_noise(&mut self, name: &str, p: NP) -> Arc<N263> {
         self.factory.normal(name, params(p.0, p.1, p.2, p.3))
     }
 
@@ -679,7 +690,7 @@ impl RouterBuilder263 {
         let ridge_noise = self.normal_noise("ridge", NoiseParams263::RIDGE);
         let jagged_noise = self.normal_noise("jagged", NoiseParams263::JAGGED);
 
-        let shifted_2d = |noise: Rc<N263>, shift_x: &SamRef, shift_z: &SamRef| {
+        let shifted_2d = |noise: Arc<N263>, shift_x: &SamRef, shift_z: &SamRef| {
             sam(DfSam263::ShiftedXz {
                 shift_x: shift_x.clone(),
                 shift_z: shift_z.clone(),
@@ -692,6 +703,7 @@ impl RouterBuilder263 {
         let vegetation = shifted_2d(vegetation_noise, &shift_x, &shift_z);
         let continents = self.cache(shifted_2d(continentalness_noise, &shift_x, &shift_z));
         let erosion = self.cache(shifted_2d(erosion_noise, &shift_x, &shift_z));
+        self.erosion_node = Some(erosion.clone());
         let ridges = self.cache(shifted_2d(ridge_noise, &shift_x, &shift_z));
 
         // ridges_folded = peaksAndValleys(ridges)
@@ -731,8 +743,8 @@ impl RouterBuilder263 {
         let spa_3d_2 = self.normal_noise("spaghetti_3d_2", NoiseParams263::SPAGHETTI);
         let cave_entrance_noise = self.normal_noise("cave_entrance", NoiseParams263::CAVE_ENTRANCE);
         let rarity_modulator = self.cache(noise_fn(spa_3d_rarity, 2.0, 1.0));
-        let wrap_3d = |noise: Rc<N263>, rarity_modulator: &SamRef| -> SamRef {
-            let branch = |noise: &Rc<N263>, rarity: f32| -> SamRef {
+        let wrap_3d = |noise: Arc<N263>, rarity_modulator: &SamRef| -> SamRef {
+            let branch = |noise: &Arc<N263>, rarity: f32| -> SamRef {
                 binary(
                     BinOp::Mul,
                     noise_fn(noise.clone(), 1.0 / (rarity as f64), 1.0 / (rarity as f64)),
@@ -940,6 +952,7 @@ impl RouterBuilder263 {
         ));
 
         let depth = binary(BinOp::Add, y_clamped_gradient(-64, 320, 1.5, -1.5), offset.clone());
+        self.depth_node = Some(depth.clone());
 
         let jaggedness = self.cache(binary(
             BinOp::Mul,
@@ -1056,7 +1069,9 @@ impl RouterBuilder263 {
         let final_density = binary(
             BinOp::Add,
             binary(BinOp::Min, post_processed, noodle.clone()),
-            constant(0.0), // beardifier default (context-bound, no structures)
+            // ContextBoundSampler(Beardifier.CONTEXT_KEY, fallback 0.0): EMPTY
+            // beardifier contributes exactly 0.0 (oracle parity holds).
+            sam(DfSam263::Beard),
         );
 
         // preliminary_surface_level
@@ -1090,7 +1105,8 @@ impl RouterBuilder263 {
             lower_bound: -64,
             cell_height: 8,
         });
-        let chunk_surface_level = interpolated(preliminary, 16, 1);
+        self.prelim_node = Some(preliminary.clone());
+        let chunk_surface_level = interpolated(preliminary.clone(), 16, 1);
 
         OverworldRouter263 {
             temperature,
@@ -1108,9 +1124,72 @@ impl RouterBuilder263 {
             ridges,
             chunk_surface_level,
             final_density,
+            prelim: preliminary.clone(),
             offset,
             factor,
             sloped_cheese,
+        }
+    }
+
+    /// The noise_settings "aquifers" section DFs (26.3 moved them out of the
+    /// router): barrier/floodedness/spread/lava are noise nodes, exclusion
+    /// references the SAME compiled erosion/depth nodes as the router.
+    pub fn build_aquifer_config(&mut self) -> crate::aquifer263::AquiferConfig263 {
+        let barrier = noise_fn(
+            self.normal_noise("aquifer_barrier", (0.955388882960065, -3, 1, &[])),
+            1.0,
+            0.5,
+        );
+        let floodedness = noise_fn(
+            self.normal_noise(
+                "aquifer_fluid_level_floodedness",
+                (0.955388882960065, -7, 1, &[]),
+            ),
+            1.0,
+            0.67,
+        );
+        let spread = noise_fn(
+            self.normal_noise(
+                "aquifer_fluid_level_spread",
+                (0.955388882960065, -5, 1, &[]),
+            ),
+            1.0,
+            0.7142857142857143,
+        );
+        let lava = noise_fn(
+            self.normal_noise("aquifer_lava", (0.955388882960065, -1, 1, &[])),
+            1.0,
+            1.0,
+        );
+        let erosion = self
+            .erosion_node
+            .clone()
+            .expect("build_overworld before build_aquifer_config");
+        let depth = self
+            .depth_node
+            .clone()
+            .expect("build_overworld before build_aquifer_config");
+        // exclusion = min(sub(-0.225, erosion), max(sub(depth, 0.9), 0.0))
+        let exclusion = binary(
+            BinOp::Min,
+            binary(BinOp::Sub, constant(-0.225), erosion),
+            binary(
+                BinOp::Max,
+                binary(BinOp::Sub, depth, constant(0.9)),
+                constant(0.0),
+            ),
+        );
+        let surface_level = self
+            .prelim_node
+            .clone()
+            .expect("build_overworld before build_aquifer_config");
+        crate::aquifer263::AquiferConfig263 {
+            barrier,
+            floodedness: floodedness,
+            spread,
+            lava,
+            exclusion,
+            surface_level,
         }
     }
 }
