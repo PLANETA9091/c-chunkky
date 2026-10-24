@@ -1066,8 +1066,14 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 fPalData = cPaletted.getField("data"); // public volatile
                 Class<?> cData = Class.forName(
                         "net.minecraft.world.level.chunk.PalettedContainer$Data");
-                Class<?> cCfg = Class.forName(
-                        "net.minecraft.world.level.chunk.PalettedContainer$Configuration");
+                Class<?> cCfg;
+                try {
+                    cCfg = Class.forName(
+                            "net.minecraft.world.level.chunk.Configuration"); // 26.3 top-level
+                } catch (ClassNotFoundException cnf) {
+                    cCfg = Class.forName(
+                            "net.minecraft.world.level.chunk.PalettedContainer$Configuration");
+                }
                 ctorData = cData.getConstructor(
                         cCfg,
                         Class.forName("net.minecraft.util.BitStorage"),
