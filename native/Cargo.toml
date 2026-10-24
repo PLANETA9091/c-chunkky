@@ -29,3 +29,11 @@ path = "src/bin/baseref.rs"
 [[bin]]
 name = "bhdebug"
 path = "src/bin/bhdebug.rs"
+
+[[bin]]
+name = "df263golden"
+path = "src/bin/df263golden.rs"
+
+[[bin]]
+name = "df263probe"
+path = "src/bin/df263probe.rs"

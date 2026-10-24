@@ -2199,3 +2199,70 @@ Stage Summary:
 - Самый рискованный кусок порта (интерполяция ячеек) зафиксирован в дизайн-доке; следующий
   сеанс = DensityFunctions op-лист + компилятор + первый Df263-скелет с золотыми сетками
   sampleValue из расширенного оракула.
+
+---
+## cont-48: DF-СЛОЙ 26.3 — ПОЛНЫЙ ДВИЖОК БИТ-ТОЧЕН (432 точки + 3.54M volume-семплов)
+
+Task: продолжение порта на 26.3 (только 26.3, не 1.21.8); цель 1мс/чанк e2e на 26.3.
+Work Log:
+- GIT: remote переключён на PLANETA9091/c-chunkky.git (пользователь подтвердил имя; старый
+  c-faster работал по redirect). Push проверен.
+- ПРОЧИТАН И ЗАМОРОЖЕН ВЕСЬ densityfunction-пакет 26.3 (reference/dec263): DensityVolume
+  (index=y+(x+z*sx)*sy, Y-fastest), DensityBuffer/ScopedBuffer/arena, SamplerContext
+  (cacheCells: volume-memo + last-blockpos memo; EMPTY_UNCACHED = pass-through),
+  DensityFunctionCompiler (INLINE_REFERENCE -> cache-dedup (PreparedCache/общий id) ->
+  SLICE_UNIFORM_AXES(7) — оборачивает ось-независимые поддеревья в Slice(axis,0),
+  VALUE-NOOP), все ops (binary const-folding, MIN/MAX collapse по range — для overworld
+  НЕ срабатывает; point-shortcuts mul/div left==0, min/max по r-range), Interpolated
+  (fastpath при step==cell; corner-volume +1 cell при max%cell!=0; fillCell: Z->X->Y
+  ADDITIVE walk — точный код перечитан), FindTopSurface (compile wrap YSampler(0)!),
+  IntervalSelect/RangeChoice/Lerp/Pow/Round/Gradient/TilingMode, Spline (26.3 = f32
+  ВЕЗДЕ: locations/derivatives/lerp-формула; 1.21.8 был f64), Mth (lerp/clamp/sqrt/
+  floor/roundToward) — utils декомпилированы отдельно в reference/dec263_util
+  (vineflower: Mth, Interval, CubicSpline, BoundedFloatFunction, TerrainProvider).
+- NoiseRouter 26.3 = 8 полей (temperature/vegetation/continents/erosion/depth/ridges/
+  chunk_surface_level/final_density); NoiseRouterData/overworld-дерево полностью
+  перенесено (registerTerrainNoises, underground, noodle, pillars, entrances,
+  spaghetti_2d, preliminary_surface_level=findTopSurface, chunk_surface_level=
+  interpolated(prelim,16,1), postProcess=squeeze(interpolated(mul(blend,0.64),4,8)),
+  slide 240/256/-0.078125/0.1171875); TerrainProvider-сплайны (overworldOffset/Factor/
+  Jaggedness + mountain/ridge/erosion sub-splines) — механический перенос f32.
+- ОРАКУЛ RouterOracle263.java: 26.3 DF-реестр = ДАТАПАК-JSONы (55 файлов в jar,
+  data/minecraft/worldgen/density_function — извлечены в reference/vanilla263/...);
+  парсинг РЕАЛЬНЫМИ кодеками (DensityFunction.CODEC через самодельный
+  HolderLookup.Provider на standalone References с late-bind через reflection
+  bindValue; NormalNoise.CODEC для 64 шумов) -> RandomState.create(seed 3257840388504953787)
+  -> point-сетки (EMPTY_UNCACHED) + полные чанк-volume (16x384x16, cached ctx, f32-bits)
+  для 18 функций x 2 чанка. ЛОВУШКИ: versions-jar ПЕРВЫМ в cp (Paper-шадовит LogUtils);
+  JsonOps в DFU10 лежит в com.mojang.serialization (без .json); Class<>::staticMethod
+  нелегален; Class.getStatic-вызовы через переменную типа Class — ошибка компиляции.
+- РЕАЛИЗАЦИЯ native/src/df263.rs (~1950 строк): DensityVolume (с step), Scratch263
+  (pool), SamplerCtx263 (cache-клетки 1:1 с Java), DfSam263 (compiled-enum: Const/
+  Noise/ShiftedXz/ShiftB/бинарные+Const-варианты/Unary/Clamp/Lerp×3/Pow×3/Round×2/
+  RangeChoice×2/IntervalSelect/Cache/Slice×4/Gradient/Interpolated/FindTopSurface/
+  BlendDensity/ShiftB-транспонированный/Blended(дерево Lerp(clamp(main+.5))/Spline);
+  SplineRef с coord_slot (DFS pre-order) + volume (buffer per slot) + point (memo) пути.
+  df263_router.rs: параметры 27 ванильных шумов 26.3 (base_amplitude/base_octave/
+  octave_count/amplitude_modifiers из JSON), NoiseFactory263 (fork по "minecraft:<name>"),
+  build_overworld — зеркало NoiseRouterData.
+- БИСЕКТ-ЛОГИКА (5 багов, все через probe-бинарники + hash-конвенции LCG >>> vs >>):
+  (1) BlendedNoise 26.3: compiled = NoiseFunction.Samplers => Z УМНОЖАЕТСЯ на
+  xzMultiplier (n263::get и старый оракул оба реплицировали 1.21.8 — z без skaly);
+  (2) FindTopSurface volume-путь: emulate YSampler(0) (y=0 slice + broadcast);
+  (3) SPA_2D_ELEVATION: mappedNoise 4-arg => yScale=0.0 (я перепутал с target -8);
+  (4) cave_layer/cave_cheese: 2-arg noise(Holder, yScale) => JSON xz=1.0, y=8.0|0.667;
+  (5) rarity-ветки intervalSelect: 1.0/(double)rarity (f64!), не f32-деление.
+- РЕЗУЛЬТАТ: 432/432 point + 3,538,944/3,538,944 volume БИТ-ТОЧНЫ (22 полных чанк-
+  заливки, 18 функций, seed 3257840388504953787; 3.2s release). Остаток: 149,376
+  signed-zero-only (-0.0/+0.0 в jaggedness при y*0.0-underflow; -0.0>0 == 0.0>0 —
+  для генерации инертно; задокументировано в port263_design.md).
+- cargo test 61/61 (золотые n263 не тронуты); бинарники df263golden/df263probe;
+  артефакты: reference/oracle263_df.txt (119MB, gitignored), oracle263_df_strided.txt
+  (committed), dec263_util/, vanilla263 density_function JSONs.
+Stage Summary:
+- СЛОЙ densityfunction 26.3 ЗАМРОЖЕН И БИТ-ТОЧЕН: фундамент для fill-интеграции
+  (NoChunk 26.3 = тонкая обёртка над RandomState), height-сервиса (point-путь готов),
+  MaterialSystem (surface) и нативных carvers 26.3 (главный рычаг ~31% воркера).
+- Следующие шаги: (1) fill+layout под 26.3 (новые имена полей, moonrise chunk_gen),
+  (2) height-сервис на DfSam263 point-пути, (3) MaterialSystem port, (4) carvers 26.3
+  натив, (5) e2e-харнесс 26.3 (server263 уже стоит, JDK25) и замер к 1мс.

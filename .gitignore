@@ -20,3 +20,4 @@ workdir/
 fifo.pid\nserver.pid
 /dist/
 !native/cplug-sdk/asm-lib/**
+reference/oracle263_df.txt

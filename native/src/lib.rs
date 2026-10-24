@@ -32,6 +32,8 @@ pub mod features_jni;
 pub mod features_snap;
 pub mod features_survive;
 pub mod n263;
+pub mod df263;
+pub mod df263_router;
 pub mod cplugin;
 pub mod ffi;
 
