@@ -2057,3 +2057,31 @@ Stage Summary:
 - Ценность сессии: третье независимое подтверждение семантики height-пути + диагностический
   приём (твин-дампы субстанции fill vs height) пополнил копилку; A/B артефакты в
   backup/stageD-cont42 (prof_session_stageD*.txt).
+
+---
+## cont-46: EnvScan column fastpath — deco mean -18.6%, bit-identical ops
+
+Work Log:
+- Реализован заявленный в cont-58 рычаг "EnvScan колонка-фастпат + ov-колонка-индекс":
+  CFast-компилятор предикатов (flag/name/AllOf/AnyOf/Not/MatchingBlocks/MatchingFluids/
+  Replaceable/Solid/HasSturdyFace при offset==(0,0,0); WouldSurvive/offset!=0 -> фолбэк),
+  EnvColScan-трейт (ChunkLevel: один palette-decode на шаг обслуживает ВСЕ предикаты шага),
+  ov-колонка-индекс ((x,z) -> ys в DecoCtx.chunk_ov_cols, ведётся write_overlay/drop-путь,
+  чистится с оверлеем). Фастпат активен только при пустом оверлей-окне колонки -> бит-точен
+  by construction; любой precondition-miss -> generic-цикл ДО первого leaf (скан без эффектов).
+- A/B (dptt, 324 чанка, CRUS_NATIVE_DECO=1): deco mean 4097.2 -> 3336.5us (-18.6%),
+  p50 1801 -> 1723us, run-фаза 2.02 -> 1.90ms, snap-sec 26.91 -> 21.97ms; e2e окно
+  80.0 -> 77.75 ms/chunk. Бит-точность: ops=11026 features=23620 delegate=2588 и полное
+  deleg-names распределение ИДЕНТИЧНЫ (fast1 / slow1 / база prod_deco1).
+- cargo test 54/54; бисект-флаг CRUS_DECO_NOENVFAST=1 (как no_snap/no_hm).
+- Остаток: p50 двигался слабо (-4%) — тяжёлая часть run-фазы не EnvScan (struct 1.06ms,
+  delegate 0.20ms, p99-хвосты). Следующие под-рычаги: hoist секции на весь y-диапазон
+  колонки (одна смена секции на 16 шагов вместо per-step with_snap), EnvScan по x/z
+  (не реализованы ванилью в dptt — проверить census), deleg 0.20ms (2588 гибридных
+  вызовов PlacedFeature.placeWithBiomeCheck).
+
+Stage Summary:
+- deco p50 1.72ms (цель cont-58 была 1.5 — почти достигнута), mean -18.6%.
+- Артефакты: features_deco.rs (CFast/compile/env_scan_column_fast/EnvColScan),
+  features_snap.rs (ov_cols + EnvColScan impl), features_master.rs (chunk_ov_cols),
+  features_jni.rs (wiring + drop-путь). Профили: prof_session_deco_fast1/slow1.txt.

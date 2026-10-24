@@ -943,6 +943,8 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
     // setBlock is live) AND the point queries must not upcall per query —
     // the snapshot serves them natively (flags computed in Java).
     let ov: &std::cell::RefCell<crate::features_snap::OvMap> = &d.chunk_ov;
+    let ov_cols: &std::cell::RefCell<std::collections::HashMap<(i32, i32), Vec<i32>>> =
+        &d.chunk_ov_cols;
     let snap: &std::cell::RefCell<crate::features_snap::SnapRegion> = &d.chunk_snap;
     let hms: &std::cell::RefCell<
         std::collections::HashMap<
@@ -1037,6 +1039,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
     let chunk_level = crate::features_snap::ChunkLevel::new(
         level_ref,
         ov,
+        ov_cols,
         snap,
         &loader,
         &hm_loader,
@@ -1120,6 +1123,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoChunkB
         .and_then(|c| c.deco.as_ref())
     {
         d.chunk_ov.borrow_mut().clear();
+        d.chunk_ov_cols.borrow_mut().clear();
         d.chunk_snap.borrow_mut().reset(cx, cz, min_sec_y);
         d.chunk_hms.borrow_mut().clear();
         d.chunk_zoom_seed.set(zoom_seed);
@@ -1161,8 +1165,16 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoOpsDro
         {
             {
                 let mut ov = d.chunk_ov.borrow_mut();
+                let mut cols = d.chunk_ov_cols.borrow_mut();
                 for k in 0..count as usize {
-                    ov.remove(&(slice[k * 3], slice[k * 3 + 1], slice[k * 3 + 2]));
+                    let (x, y, z) = (slice[k * 3], slice[k * 3 + 1], slice[k * 3 + 2]);
+                    ov.remove(&(x, y, z));
+                    if let Some(v) = cols.get_mut(&(x, z)) {
+                        v.retain(|&yy| yy != y);
+                        if v.is_empty() {
+                            cols.remove(&(x, z));
+                        }
+                    }
                 }
             }
             // revert the WG heightmap raise the dropped write may have caused
@@ -1242,6 +1254,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoDelega
         .and_then(|c| c.deco.as_ref())
     {
         d.chunk_ov.borrow_mut().clear();
+        d.chunk_ov_cols.borrow_mut().clear();
         d.chunk_snap.borrow().bump_epoch();
         d.chunk_hms.borrow_mut().clear();
     }

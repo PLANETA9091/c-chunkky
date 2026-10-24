@@ -346,6 +346,10 @@ pub type OvMap = std::collections::HashMap<(i32, i32, i32), String>;
 pub struct ChunkLevel<'a> {
     inner: &'a dyn DecoLevelExt,
     ov: &'a std::cell::RefCell<OvMap>,
+    /// (x, z) -> ys of the chunk overlay entries in that column (the
+    /// EnvScan column fastpath's window probe — maintained by write_overlay,
+    /// pruned by the ops-dropped removal, cleared with the overlay)
+    ov_cols: &'a std::cell::RefCell<std::collections::HashMap<(i32, i32), Vec<i32>>>,
     snap: &'a std::cell::RefCell<SnapRegion>,
     /// bridge fallback loader for missing sections
     loader: &'a dyn Fn(i32, i32, i32) -> Option<SnapSection>,
@@ -376,6 +380,7 @@ impl<'a> ChunkLevel<'a> {
     pub fn new(
         inner: &'a dyn DecoLevelExt,
         ov: &'a std::cell::RefCell<OvMap>,
+        ov_cols: &'a std::cell::RefCell<std::collections::HashMap<(i32, i32), Vec<i32>>>,
         snap: &'a std::cell::RefCell<SnapRegion>,
         loader: &'a dyn Fn(i32, i32, i32) -> Option<SnapSection>,
         hm_loader: &'a dyn Fn(i32, i32) -> Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>>,
@@ -385,7 +390,21 @@ impl<'a> ChunkLevel<'a> {
     ) -> Self {
         let no_snap = std::env::var("CRUS_DECO_NOSNAP").ok().as_deref() == Some("1");
         let no_hm = std::env::var("CRUS_DECO_NOHANDSHAKE").ok().as_deref() == Some("1");
-        ChunkLevel { inner, ov, snap, loader, hm_loader, uid_names, zoom_seed, no_snap, no_hm, st_flags }
+        ChunkLevel { inner, ov, ov_cols, snap, loader, hm_loader, uid_names, zoom_seed, no_snap, no_hm, st_flags }
+    }
+
+    /// prune one overlay entry (the ops-dropped path) — the column index
+    /// keeps a conservative vec: a stale y only makes the fastpath bail
+    /// (safe direction), but keep it exact anyway — one linear retain.
+    pub fn drop_overlay(&self, x: i32, y: i32, z: i32) {
+        self.ov.borrow_mut().remove(&(x, y, z));
+        let mut cols = self.ov_cols.borrow_mut();
+        if let Some(v) = cols.get_mut(&(x, z)) {
+            v.retain(|&yy| yy != y);
+            if v.is_empty() {
+                cols.remove(&(x, z));
+            }
+        }
     }
 
     /// WG heightmap snapshot for a region chunk (cached by the hm_loader's
@@ -858,6 +877,26 @@ impl DecoLevel for ChunkLevel<'_> {
     }
 }
 
+impl crate::features_deco::EnvColScan for ChunkLevel<'_> {
+    fn ov_window_has(&self, x: i32, z: i32, y0: i32, y1: i32) -> bool {
+        let cols = self.ov_cols.borrow();
+        match cols.get(&(x, z)) {
+            Some(ys) => ys.iter().any(|&y| y >= y0 && y <= y1),
+            None => false,
+        }
+    }
+    fn step_eval(&self, x: i32, y: i32, z: i32, fast: &crate::features_deco::CFast) -> Option<bool> {
+        self.with_snap(x, y, z, |sec, v| {
+            let (ni, f) = *sec.pal.get(v)?;
+            let name = sec.names.get(ni as usize).map(|s| s.as_ref());
+            Some(fast.eval(f, name))
+        })
+    }
+    fn outside(&self, y: i32) -> bool {
+        self.inner.is_outside_build_height(y)
+    }
+}
+
 impl DecoLevelExt for ChunkLevel<'_> {
     fn state_is(&self, pos: BlockPos, ids: &[String]) -> bool {
         {
@@ -933,6 +972,8 @@ impl DecoLevelExt for ChunkLevel<'_> {
     }
     fn write_overlay(&self, pos: BlockPos, state: &str) {
         self.ov.borrow_mut().insert((pos.x, pos.y, pos.z), state.to_string());
+        let mut cols = self.ov_cols.borrow_mut();
+        cols.entry((pos.x, pos.z)).or_default().push(pos.y);
         if let Some(st) = (self.st_flags)(state) {
             self.hm_update(pos.x, pos.y, pos.z, st);
         }
@@ -945,6 +986,9 @@ impl DecoLevelExt for ChunkLevel<'_> {
             return st.clone();
         }
         self.inner.state_name(pos)
+    }
+    fn env_col_scan(&self) -> Option<&dyn crate::features_deco::EnvColScan> {
+        Some(self)
     }
 }
 

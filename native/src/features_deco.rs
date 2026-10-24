@@ -51,6 +51,198 @@ pub trait DecoLevel {
 }
 
 // ---------------------------------------------------------------------------
+// EnvScan column fastpath (cont-60): vertical EnvironmentScanPlacement on a
+// snapshot-backed level. Vanilla steps one y at a time testing the target
+// (and the allowed gate after each step); on the snapshot level each step
+// was 1-3 full point queries (overlay probe + palette decode per predicate).
+// The fastpath compiles the predicates to a flag/name tree and answers EVERY
+// predicate of a step from ONE snapshot palette decode. Bit-exact by
+// construction: the fastpath only engages when the chunk overlay has NO
+// entries in the scan window (then the generic loop's per-predicate overlay
+// checks all fall through to the same snapshot decode), falls back to the
+// generic walk on ANY precondition miss (non-vertical, non-expressible
+// predicate, overlay in the window, missing snapshot) BEFORE the first leaf
+// fires (the scan is side-effect-free until the hit).
+// ---------------------------------------------------------------------------
+
+/// Compiled predicate over one snapshot palette entry (flag word + name).
+#[derive(Clone, Debug)]
+pub enum CFast {
+    Const(bool),
+    Flag { mask: u16, want: bool },
+    /// state_is: any-of exact block names (the snapshot palette name)
+    Name(Box<[Box<str>]>),
+    /// fluid_is semantics: water/lava flag membership in the id list
+    Fluid(Box<[Box<str>]>),
+    All(Box<[CFast]>),
+    Any(Box<[CFast]>),
+    Not(Box<CFast>),
+}
+
+impl CFast {
+    #[inline]
+    pub fn eval(&self, flags: u16, name: Option<&str>) -> bool {
+        match self {
+            CFast::Const(b) => *b,
+            CFast::Flag { mask, want } => (flags & mask != 0) == *want,
+            CFast::Name(ids) => match name {
+                Some(n) => ids.iter().any(|i| i.as_ref() == n),
+                None => false,
+            },
+            CFast::Fluid(ids) => {
+                if flags & crate::features_snap::flags::FLUID_WATER != 0 {
+                    ids.iter().any(|i| i.as_ref() == "minecraft:water")
+                } else if flags & crate::features_snap::flags::FLUID_LAVA != 0 {
+                    ids.iter().any(|i| i.as_ref() == "minecraft:lava")
+                } else {
+                    false
+                }
+            }
+            CFast::All(v) => v.iter().all(|p| p.eval(flags, name)),
+            CFast::Any(v) => v.iter().any(|p| p.eval(flags, name)),
+            CFast::Not(p) => !p.eval(flags, name),
+        }
+    }
+}
+
+/// Compile a vanilla predicate to the snapshot-expressible tree. None =
+/// predicate touches another position (offset != 0) or needs the bridge
+/// (WouldSurvive, Unsupported) — the generic step loop handles it.
+pub fn compile_cfast(p: &BlockPredicate) -> Option<CFast> {
+    match p {
+        BlockPredicate::True => Some(CFast::Const(true)),
+        BlockPredicate::AllOf(v) => {
+            let mut out = Vec::with_capacity(v.len());
+            for q in v {
+                out.push(compile_cfast(q)?);
+            }
+            Some(CFast::All(out.into_boxed_slice()))
+        }
+        BlockPredicate::AnyOf(v) => {
+            let mut out = Vec::with_capacity(v.len());
+            for q in v {
+                out.push(compile_cfast(q)?);
+            }
+            Some(CFast::Any(out.into_boxed_slice()))
+        }
+        BlockPredicate::Not(q) => Some(CFast::Not(Box::new(compile_cfast(q)?))),
+        BlockPredicate::MatchingBlocks { ids, off } if *off == (0, 0, 0) => {
+            let mut v: Vec<Box<str>> = ids.iter().map(|s| s.as_str().into()).collect();
+            v.sort_unstable();
+            v.dedup();
+            Some(CFast::Name(v.into_boxed_slice()))
+        }
+        BlockPredicate::MatchingFluids { ids, off } if *off == (0, 0, 0) => {
+            let mut v: Vec<Box<str>> = ids.iter().map(|s| s.as_str().into()).collect();
+            v.sort_unstable();
+            v.dedup();
+            Some(CFast::Fluid(v.into_boxed_slice()))
+        }
+        BlockPredicate::Replaceable => Some(CFast::Flag {
+            mask: crate::features_snap::flags::REPLACEABLE,
+            want: true,
+        }),
+        BlockPredicate::Solid => Some(CFast::Flag {
+            mask: crate::features_snap::flags::SOLID,
+            want: true,
+        }),
+        BlockPredicate::HasSturdyFace { offset, dir } if *offset == (0, 0, 0) => {
+            // ChunkLevel::has_sturdy_face dir mapping (DecoLevel order)
+            let bit = match dir {
+                0 => crate::features_snap::flags::STURDY_DOWN,
+                1 => crate::features_snap::flags::STURDY_UP,
+                2 => crate::features_snap::flags::STURDY_N,
+                3 => crate::features_snap::flags::STURDY_S,
+                4 => crate::features_snap::flags::STURDY_W,
+                _ => crate::features_snap::flags::STURDY_E,
+            };
+            Some(CFast::Flag { mask: bit, want: true })
+        }
+        _ => None,
+    }
+}
+
+/// The snapshot-side half of the fastpath (implemented by ChunkLevel —
+/// the only level with a palette snapshot + the overlay column index).
+pub trait EnvColScan {
+    /// true when the chunk overlay has at least one entry in the (x, z)
+    /// column within [y0, y1] — the fastpath must bail (overlay writes
+    /// change predicate verdicts vs the snapshot).
+    fn ov_window_has(&self, x: i32, z: i32, y0: i32, y1: i32) -> bool;
+    /// All-compiled-predicate verdict at pos from ONE palette decode.
+    /// None = the position is not snapshotted (bail to the generic walk).
+    fn step_eval(&self, x: i32, y: i32, z: i32, fast: &CFast) -> Option<bool>;
+    fn outside(&self, y: i32) -> bool;
+}
+
+/// Run the vertical EnvScan through the snapshot; returns:
+/// None            — preconditions failed, run the generic loop instead
+/// Some(None)      — scan exhausted without a hit (no leaf)
+/// Some(Some(pos)) — hit (the CALLER runs leaf + the modifier chain)
+pub fn env_scan_column_fast(
+    level: &dyn DecoLevelExt,
+    pos: BlockPos,
+    dir: u8,
+    max_steps: i32,
+    target: &BlockPredicate,
+    allowed: &Option<BlockPredicate>,
+) -> Option<Option<BlockPos>> {
+    use std::sync::OnceLock;
+    static OFF: OnceLock<bool> = OnceLock::new();
+    if *OFF.get_or_init(|| std::env::var("CRUS_DECO_NOENVFAST").ok().as_deref() == Some("1")) {
+        return None;
+    }
+    let cols = level.env_col_scan()?;
+    let step = match dir {
+        1 => 1,
+        _ => -1,
+    };
+    let ft = compile_cfast(target)?;
+    let fa = match allowed {
+        Some(a) => compile_cfast(a)?,
+        None => CFast::Const(true),
+    };
+    // overlay window: origin + every stepped position (max_steps steps past
+    // the origin; the final check position is origin + step*max_steps)
+    let y_end = pos.y + step * max_steps;
+    let (y0, y1) = if step > 0 {
+        (pos.y, y_end)
+    } else {
+        (y_end, pos.y)
+    };
+    if cols.ov_window_has(pos.x, pos.z, y0, y1) {
+        return None;
+    }
+    // origin allowed gate
+    if !cols.step_eval(pos.x, pos.y, pos.z, &fa)? {
+        return Some(None);
+    }
+    let mut cur = pos;
+    let mut blocked = false;
+    for _ in 0..max_steps.max(0) {
+        if cols.step_eval(cur.x, cur.y, cur.z, &ft)? {
+            return Some(Some(cur));
+        }
+        cur = BlockPos::new(cur.x, cur.y + step, cur.z);
+        if cols.outside(cur.y) {
+            return Some(None);
+        }
+        if !cols.step_eval(cur.x, cur.y, cur.z, &fa)? {
+            // vanilla breaks to the FINAL check at cur
+            blocked = true;
+            break;
+        }
+    }
+    let _ = blocked;
+    // loop exhausted OR allowed-break: the final check at cur
+    if cols.step_eval(cur.x, cur.y, cur.z, &ft)? {
+        Some(Some(cur))
+    } else {
+        Some(None)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Block predicates (blockpredicates package, subset by dptt census)
 // ---------------------------------------------------------------------------
 
@@ -162,6 +354,11 @@ pub trait DecoLevelExt: DecoLevel {
     fn is_solid_render(&self, pos: BlockPos) -> bool {
         let _ = pos;
         false
+    }
+    /// The EnvScan column fastpath backend (ChunkLevel only — the snapshot
+    /// palette + the overlay column index). Default None = generic loop.
+    fn env_col_scan(&self) -> Option<&dyn EnvColScan> {
+        None
     }
 }
 
@@ -571,6 +768,19 @@ pub fn expand_deco(
             }
         }
         Mod::EnvScan { dir, max_steps, target, allowed } => {
+            // Column fastpath: vertical scans on the snapshot level with
+            // flag/name-expressible predicates and no overlay entries in the
+            // scan window. Bit-exact fallback to the generic loop on any
+            // precondition miss (before the first leaf fires).
+            if let Some(hit) =
+                env_scan_column_fast(level, pos, *dir, *max_steps, target, allowed)
+            {
+                if let Some(hp) = hit {
+                    leaf(hp, rng);
+                    expand_deco(mods, idx + 1, level, rng, hp, leaf, top_uid);
+                }
+                return;
+            }
             // vanilla EnvironmentScanPlacement: allowed(origin) gate, then step loop
             let allowed_ok = |level: &dyn DecoLevelExt, p: BlockPos| -> bool {
                 match allowed {

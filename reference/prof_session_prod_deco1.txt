@@ -1,0 +1,18 @@
+# prof session prod_deco1 2026-10-24T09:14:54Z
+world=dptt datapacks_dir=server_datapacks fill_threads=2 parallel=1 heap=-Xms1G -Xmx2G
+18c29f1c871f71a96961af2664d7ae2e  01_tectonic.zip
+ee7f451a8d1a13b29090a08543bda46a  02_terralith.zip
+052b8c9b5415f660127ef31fa1382b8e  server/paper.jar
+ae602da61baff9e1ba43a906bf3e8c09  server/plugins/CrusstyGen.jar
+a86a34e79413556527b5978c41924225  native/target/release/libcrussty_chunkgen.so
+--- measured window: 12x12 cx 32..43 cz 32..43 ---
+batch cz 32..34: 36 chunks in 4746 ms -> 131.8 ms/chunk
+batch cz 35..37: 36 chunks in 2538 ms -> 70.5 ms/chunk
+batch cz 38..40: 36 chunks in 2808 ms -> 78.0 ms/chunk
+batch cz 41..43: 36 chunks in 1120 ms -> 31.1 ms/chunk
+window_ms=11231 chunks=144 ms_per_chunk=77.99
+--- crusgenstats (final) ---
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=396  mean=12843.1us  min=4695.9us  p50=9473.2us  p99=46175.0us  max=49714.0us  [native=12.30ms nat_p50=9.10ms layout=0.35ms beard=0.16ms marks=0.02ms]  [lay setup=0.02 sec=0.24 hmap=0.08 verify=0.00 | uni=0.00/0.2 lin=0.00/0.0 glob=0.00/8.0 pb=0.00/0.00]  [sections filled=0 mixed=3168 air=6336 v1fallback=0 bulk=ok]  swapfail=null  marks_seen=17153 marks_landed=17153 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] native deco stage: native deco stage: chunks=324  mean=3222.0us  min=1367.4us  p50=1781.1us  p99=23856.3us  max=51394.3us  [plan=0.09ms struct=0.82ms run=2.02ms apply=0.01ms deleg=0.23ms]  ops=11026 features=23620 delegate=2588  upcalls=34267 (h=0 stateis=0 fluidis=11 isair=0 survive=2 other=34254) snap-sec=20455/26.91ms blocks=0 snap-hm=1766 planbio=15.15ms | [struct-split] starts=1.22ms place=67.38ms [gate=1.30ms setup=1.22ms loop=70.08ms func=265.12ms iters=7575 startCalls=7586] | [deleg-names] minecraft:monster_room=324 minecraft:lake_lava_surface=324 terralith:cave/stone/andesite_boulders=324 minecraft:freeze_top_layer=324 minecraft:monster_room_deep=324 minecraft:lake_lava_underground=324 minecraft:amethyst_geode=324 minecraft:trees_plains=320 | [CrusstyGen] jni_prof[fills=751 wall=10.74ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=4.83 par_strips=2.80]
+
+--- spark links in console ---
+https://spark.lucko.me/qBvmZ5J0jE

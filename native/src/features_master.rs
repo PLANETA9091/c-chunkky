@@ -42,6 +42,11 @@ pub struct DecoCtx {
     /// writes; the ops flush to the region after each feature, but the
     /// snapshot + later features must see them live)
     pub chunk_ov: std::cell::RefCell<crate::features_snap::OvMap>,
+    /// (x, z) -> ys of the chunk overlay entries in that column — the EnvScan
+    /// column fastpath's window probe (maintained by write_overlay / the
+    /// ops-dropped removal; cleared with chunk_ov)
+    pub chunk_ov_cols:
+        std::cell::RefCell<HashMap<(i32, i32), Vec<i32>>>,
     /// lazy 3x3 region section snapshot (perf pass — no per-query JNI)
     pub chunk_snap: std::cell::RefCell<crate::features_snap::SnapRegion>,
     /// WG heightmap snapshots per region chunk: (cx, cz) -> 512 i32 (WS_WG+OF_WG,
@@ -176,6 +181,7 @@ pub fn build_deco_ctx(
         biome_features,
         uid_names,
         chunk_ov: std::cell::RefCell::new(crate::features_snap::OvMap::new()),
+        chunk_ov_cols: std::cell::RefCell::new(HashMap::new()),
         chunk_snap: std::cell::RefCell::new(crate::features_snap::SnapRegion::new(0, 0, -1024, 26)),
         chunk_hms: std::cell::RefCell::new(HashMap::new()),
         chunk_zoom_seed: std::cell::Cell::new(0),
