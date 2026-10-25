@@ -5,10 +5,6 @@ import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
-<<<<<<< HEAD
-=======
-import net.minecraft.resources.Identifier;
->>>>>>> 5a96306 (feat(26.3): MC 26.3 retarget — native carve/material-rules/DF-26.3 + plugin NMS fix)
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.BiomeResolver;
 import net.minecraft.world.level.biome.BiomeSource;
@@ -61,13 +57,8 @@ public final class NativeBiomeSource extends BiomeSource {
         // (Holder.is(ResourceKey) needs the wrapped key; a Holder.direct
         // wrapper would break every biome-condition check).
         for (int i = 0; i < names.length; i++) {
-<<<<<<< HEAD
             Identifier id = Identifier.parse(names[i]);
             java.util.Optional<Holder.Reference<Biome>> h = biomeRegistry.get(id);
-=======
-            Identifier rl = Identifier.parse(names[i]);
-            java.util.Optional<Holder.Reference<Biome>> h = biomeRegistry.get(rl);
->>>>>>> 5a96306 (feat(26.3): MC 26.3 retarget — native carve/material-rules/DF-26.3 + plugin NMS fix)
             if (h.isEmpty()) {
                 throw new IllegalStateException("biome not registered: " + names[i]);
             }
@@ -94,7 +85,6 @@ public final class NativeBiomeSource extends BiomeSource {
         throw new UnsupportedOperationException("native biome source is not serializable");
     }
 
-<<<<<<< HEAD
     /** 26.3: BiomeSource hands out BiomeResolver views of itself; the native
      *  path ignores the climate sampler (the climate DFs run in Rust). */
     @Override
@@ -103,19 +93,6 @@ public final class NativeBiomeSource extends BiomeSource {
     }
 
     private Holder<Biome> biomeAt(int qx, int qy, int qz) {
-=======
-    /** 26.3 BiomeSource: the engine resolves biomes through a BiomeResolver
-     *  created per sampler; ours ignores the sampler entirely (native climate
-     *  resolution lives in Rust). */
-    @Override
-    public net.minecraft.world.level.biome.BiomeResolver createResolver(Climate.Sampler sampler) {
-        return (qx, qy, qz) -> getNoiseBiome(qx, qy, qz);
-    }
-
-    /** Not a BiomeSource override in 26.3 — exposed through the
-     *  BiomeResolver returned by {@link #createResolver}. */
-    public Holder<Biome> getNoiseBiome(int qx, int qy, int qz) {
->>>>>>> 5a96306 (feat(26.3): MC 26.3 retarget — native carve/material-rules/DF-26.3 + plugin NMS fix)
         long chunkKey = (long) (qx >> 2) & 0x3FFFFFFL | (((long) (qz >> 2) & 0x3FFFFFFL) << 26);
         int[] ids = chunkCache.get(chunkKey);
         if (ids == null) {

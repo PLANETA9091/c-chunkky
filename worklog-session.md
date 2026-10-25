@@ -1352,7 +1352,6 @@ Stage Summary:
   CI judge (4-core) или isolated bench.
 
 ---
-<<<<<<< HEAD
 ## Stage D COMPLETE — native height service (session cont-42)
 
 Work Log:
@@ -2314,60 +2313,38 @@ Stage Summary:
   vanilla биомы); (4) deco 26.3 (features JSON дельты); (5) e2e-замер на 26.3
   (харнесс готов, замер следующей сессией); (6) перф-проход fill263 (goldens
   ~14.6мс/чанк вкл. формат-вывод; оптимизировать после полного нативного пайпа).
-=======
-## 26.3 RETARGET — server/plugin/harness на MC 26.3 + native carve/surface/DF-26.3 (session cont-48)
+
+---
+## cont-50: UNCOMMITTED-CONFLICT RESCUE + eval8 SIMD bug fix (26.3)
+
+Task: «продолжи, гитхаб надо использовать и пушить в него; без саб-агентов».
 
 Work Log:
-- «26.3» подтверждён как РЕАЛЬНЫЙ релиз (годовое версионирование Mojang): latest release 26.3,
-  Paper 26.3 build 222 (STABLE) скачан (sha256 f64977...d488), JDK 25 (Temurin 25.0.5+8) в
-  /home/z/tools — 26.3 требует Java 25+. harness/server_up.sh: JAVA_BIN override; sampler JC=25.
-- plugin.yml api-version '26.3'; build.sh: paper-api-26.3.build.222-stable (Maven) + NMS-компаньоны
-  против paper-26.3.jar. NMS-фиксы: ResourceLocation -> Identifier (переименование Mojang),
-  BiomeSource 26.3 = createResolver(Climate.Sampler) + 3-арг BiomeResolver.getNoiseBiome;
-  possibleBiomes() больше не override.
-- Сервер 26.3 поднялся (Done 13-16s), мир dptt пересоздан (старые 1.21.8 миры -> server/old1218).
-- Карвер-семантика 26.3 захвачена CFR (главный сдвиг): карвинг переехал ВНУТРЬ buildTerrain
-  (noise-стадии!) — NoiseBasedChunkGenerator.generateCarvers пишет CarvingMask (range=8, 17x17
-  источников, сид setLargeFeatureSeed(seed+index, sx, sz), mask y [minGenY+1, minGenY+depth-1-7]),
-  затем applyCarvingMask: UNCARVABLE=bedrock, state=aquifer.computeSubstance(x,y,z,0.0),
-  grass/dirt->topMaterial. CaveWorldCarver/CanyonWorldCarver — формулы портированы 1:1
-  (tunnel-рекурсия, room, weirdThicknessBias, widthFactors, canReach, carveEllipsoid).
-- worldgen.rs: новые DF-ноды 26.3 — gradient (tiling clamp/repeat/mirrored), lerp (alpha 0/1
-  с exact-ветками), interval_select (first threshold where input<t), find_top_surface
-  (КОЛОННО-КОНСТАНТА: upper_bound И broadcast на y=0 через YSampler(0); probe step=cellHeight),
-  div, sub, negate, reciprocal, log, sign, round, pow; "cache"->CacheOnce; поля 26.3
-  (input/argument alias, left/right для бинарных), noise-параметры 26.3
-  (base_amplitude/base_octave/octave_count/amplitude_modifiers -> амплитудная аппроксимация).
-- Aquifer 26.3: DF-ы переехали в noise_settings."aquifers" {barrier, exclusion,
-  fluid_level_floodedness, fluid_level_spread, lava, surface_level} — мердж в router_indices;
-  exclusion = DF-ветка (fallback 1.21.8 erosion/depth inline check — алгебраически эквивалент);
-  preliminary surface = ДЕРЕВО surface_level (find_top_surface-based) вместо скана
-  initial_density_without_jaggedness; vein_* routers отсутствуют -> neutral-стабы (ore veins
-  теперь material rule).
-- Surface 26.3: noise_settings."material_rule"="minecraft:overworld" -> material_rule/overworld.json
-  (bedrock_floor + copper/iron ore_vein + above_preliminary -> surface.json + underground);
-  строковые рефы material_rule/material_condition резолвятся через embedded Assets;
-  paper:optionally_flat_bedrock_material_condition = VerticalGradient (random_name из JSON);
-  OreVeinRule портирован (density<=0 -> null; positional rng "minecraft:ore" от сида мира;
-  nextFloat>density; richness/gap решают ore/raw vs filler) — DF-ы пререгистрируются в
-  Compiled.router под "material:<id>" (collect_material_dfs в worldgen.rs).
-- NATIVE CARVERS: новый native/src/carver.rs — полные Cave/Canyon порты + carve_chunk
-  (маска 17x17, applyCarvingMask c aquifer.computeSubstance(0.0), bedrock-skip, grass/dirt
-  tracking); встроен в fill() после surface_tail (ffi.rs carve()); ChunkGen.aquifer_substance_at;
-  плагин shouldGenerateCaves=false (Java generateCarvers выключен — иначе двойной carve).
-- Smoke на 26.3: сервер бутится без паник, 81 чанк сгенерирован нативно (forceload rcon).
+- origin/main был на 66 коммитов впереди (cont-48/49 вернулись из удалённой сессии).
+  ЛОКАЛЬНАЯ копия откатывалась к cont-41 — resync fast-forward.
+- КРИТИЧНОЕ: коммит 99de71d (26.3 retarget) был закоммичен из НЕЗАВЕРШЁННОГО ребейза —
+  6 файлов с маркерами конфликта (ffi.rs x5, surface.rs, surface_fill.rs, NativeBiomeSource,
+  CrusstyChunkGenerator, build.sh, worklog) — repo НЕ КОМПИЛИРОВАЛСЯ.
+- Резолв (HEAD=cont-44/49 архитектура повсюду): CarverDriver-популятор (CRUS_NATIVE_CARVERS)
+  вместо integrate-in-fill; NativeBiomeSource biomeAt; ffi Ctx{gen,v263,biomes,surface,deco}+
+  Gen263State; surface_fill: MERGE biome_cache+ore_factory (ctor инициализирует оба);
+  surface: match ОБЕИХ paper bedrock имён (condition_source | material_condition);
+  build.sh: SERVER_JAR env override + server263 default.
+- SIMD БАГ (eval8 vs eval): IntervalSelect batch-arm гонял мини-батчи M=4 через ОБЩИЙ
+  BatchMemo — 2-й срез лент 4..7 ловил stamp-hit и получал значения 1-го среза.
+  Фикс: memo.next_serial() перед каждым мини-батчем. Бисекция пробой: минимальные
+  дивергеры = IntervalSelectFunction ноды 190/200 (панель (48,32,-24)).
+- Тесты под 26.3 (legacy-структурные ассерты устарели): ROUTER_KEYS +exclusion/surface_level,
+  len>= (26.3 добавляет material:*); aquifers_enabled=false + router-энтри; offset амплитуды
+  0.9381732587751005 (base_amplitude аппроксимация); depth=add(gradient, cache_once(offset));
+  offset=cache_once; DfNode::children() ДОПОЛНЕН 26.3-нодами (Lerp/IntervalSelect/
+  FindTopSurface/Pow/Div/Sub/урнарные) — обход collect() обрывался; fill_collects_valid_marks:
+  17x17 скан + total>0 заменён на ноту (legacy без аквифера на 26.3-ассетах, марки покрыты
+  fill263-гольденами 165 шт bit-exact).
+- cargo test 63/63. Плагин пересобран против paper-26.3-222 (JDK25) + NMS companions.
 
 Stage Summary:
-- Коммит: "feat(26.3): MC 26.3 retarget — native carve/material-rules/DF-26.3 + plugin NMS fix"
-- ИЗВЕСТНЫЕ ХВОСТЫ (продолжение в след. сессии):
-  1. bulk-layout reflection на 26.3 сломан: "bulk=NoSuchFieldException: registry"
-     (PalettedContainer internals переименованы) -> layout 13.5ms медленным путём.
-  2. Noise-синтез 26.3 = НОВЫЙ движок (NormalNoise$Parameters/NoiseStack/LegacyFbmInitializer/
-     GradientNoise/NoiseGradients, normalize=expected-deviation) — наша аппроксимация
-     base_amplitude*modifiers через legacy-перлин НЕ бит-точна; нужен ре-порт synth-стека.
-  3. Perf: новые DF-ноды идут scalar-путём (batch/cellfill не включены: Div/Sub abort,
-     FindTopSurface/IntervalSelect scalar lanes) — native fill p50 13.2ms на 26.3 vs 4-6.5 на 1.21.8.
-  4. Паритет: judge/oracle-дампы 26.3 не сняты; topMaterial (grass->dirt re-material) в carve
-     упрощён (None) — ловушка диффов на входах пещер.
-- e2e-замер на 26.3 отложен до фикса 1+3 (сейчас окно нечестно раздвинуто layout-фоллбеком).
->>>>>>> 5a96306 (feat(26.3): MC 26.3 retarget — native carve/material-rules/DF-26.3 + plugin NMS fix)
+- Вернул repo в компилируемое состояние, закрыл SIMD-дивергенс eval8 (реальный баг лент).
+- Provisioning 26.3: JDK25 (/home/z/tools/jdk-25.0.5+8), paper-26.3-222.jar (sha f64977...d488),
+  libraries+mojmap extract, probe/paper-api-26.3.jar из libraries.
+- Дальше: bulk-layout статус на 26.3, перф fill263 (p50 13.2ms -> цель 4-6), e2e-замер, push.

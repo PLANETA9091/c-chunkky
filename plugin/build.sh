@@ -37,11 +37,7 @@ SRCS_MAIN=$(find src -name '*.java' ! -name 'NativeBiomeSource.java' ! -name 'Bi
 # NMS companions (NativeBiomeSource/BiomeSwap) need the mojmap paper jar —
 # present only after harness/bootstrap_server.sh (CI integration job). When
 # absent the plugin still builds and runs with vanilla Java biomes.
-<<<<<<< HEAD
-SERVER_JAR="../server263/versions/26.3/paper-26.3.jar"
-=======
-SERVER_JAR="${SERVER_JAR:-../server/versions/26.3/paper-26.3.jar}"
->>>>>>> 5a96306 (feat(26.3): MC 26.3 retarget — native carve/material-rules/DF-26.3 + plugin NMS fix)
+SERVER_JAR="${SERVER_JAR:-../server263/versions/26.3/paper-26.3.jar}"
 if [ -f "$SERVER_JAR" ]; then
   echo "compiling NMS biome companions against $SERVER_JAR"
   MOJANG_LIBS="$(find ../server263/libraries/com/mojang ../server263/libraries/it -name '*.jar' 2>/dev/null | tr '\n' ':')"

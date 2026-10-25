@@ -2329,6 +2329,13 @@ impl Env {
                         for (i, p) in rem[..take].iter().enumerate() {
                             arr[i] = *p;
                         }
+                        // The mini-batch has DIFFERENT lane geometry than the
+                        // outer call — shared-subtree stamps from the outer
+                        // serial (or from a previous mini-batch slice) would
+                        // return foreign lane values (lanes 4+ got slice-0
+                        // results). Bump the serial so every slice recomputes
+                        // its own subtree values.
+                        memo.next_serial();
                         let vals = self.eval_batch_uncached(c, *fnode, &arr, mode, interp, memo);
                         for (i, l) in lrem[..take].iter().enumerate() {
                             out[*l] = vals[i];

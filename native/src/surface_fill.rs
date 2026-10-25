@@ -108,16 +108,13 @@ pub struct ColWalk<'a> {
     // per-site lazy caches
     pub xz_cache: Vec<(u64, bool)>,
     pub y_cache: Vec<(u64, bool)>,
-<<<<<<< HEAD
     /// Biome cond results keyed by (xz_counter, quartY) — biome conds depend
     /// only on (column, quart-Y), but the y_cache resets per block (3D-biome
     /// semantics), so Terralith's ~hundreds-of-branches biome dispatch
     /// re-resolved quart + set scan per band block. One u64 compare now.
     biome_cache: Vec<(u64, bool)>,
-=======
     /// 26.3 ore-vein positional random factory ("minecraft:ore" from world seed)
     pub ore_factory: XoroshiroPositionalRandomFactory,
->>>>>>> 5a96306 (feat(26.3): MC 26.3 retarget — native carve/material-rules/DF-26.3 + plugin NMS fix)
 }
 
 impl<'a> ColWalk<'a> {

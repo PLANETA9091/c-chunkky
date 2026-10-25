@@ -422,6 +422,26 @@ impl DfNode {
                 distribution.iter().map(|(i, _)| *i).collect()
             }
             DfNode::WeirdScaledSampler { input, .. } => vec![*input],
+            // 26.3 nodes
+            DfNode::Gradient { .. } => Vec::new(),
+            DfNode::Lerp { alpha, first, second } => vec![*alpha, *first, *second],
+            DfNode::IntervalSelect { input, functions, .. } => {
+                let mut v = vec![*input];
+                v.extend_from_slice(functions);
+                v
+            }
+            DfNode::FindTopSurface { density, upper_bound, .. } => {
+                vec![*density, *upper_bound]
+            }
+            DfNode::Pow { base, exponent } => vec![*base, *exponent],
+            DfNode::Div { left, right } | DfNode::Sub { left, right } => {
+                vec![*left, *right]
+            }
+            DfNode::Negate { argument }
+            | DfNode::Reciprocal { argument }
+            | DfNode::Log { argument }
+            | DfNode::Sign { argument }
+            | DfNode::Round { argument } => vec![*argument],
             _ => Vec::new(),
         }
     }
@@ -1275,18 +1295,24 @@ fn collect_material_dfs(
 mod tests {
     use super::*;
 
-    /// The 15 noise_router fields of noise_settings/overworld.json.
+    /// The noise_router fields of the 26.3 overworld noise settings:
+    /// the 1.21.8-style 15 fields plus the 26.3 aquifer-object DFs
+    /// (barrier/exclusion/fluid_*/lava already overlap; surface_level,
+    /// chunk_surface_level are new) and the material_rule ore-vein DFs
+    /// registered under "material:" prefixes.
     const ROUTER_KEYS: &[&str] = &[
         "barrier",
         "continents",
         "depth",
         "erosion",
+        "exclusion",
         "final_density",
         "fluid_level_floodedness",
         "fluid_level_spread",
         "initial_density_without_jaggedness",
         "lava",
         "ridges",
+        "surface_level",
         "temperature",
         "vegetation",
         "vein_gap",
@@ -1298,8 +1324,16 @@ mod tests {
     fn overworld_registry_loads() {
         let wg = WorldGen::load_default("unit-test");
         assert_eq!(wg.sea_level, 63);
-        assert!(wg.aquifers_enabled);
-        assert!(wg.default_block_is_stone);
+        // 26.3: the aquifer bool config is gone — the aquifer DFs live in
+        // the noise_router object (barrier/exclusion/fluid_*/lava entries),
+        // so the legacy flag stays false while the router carries them.
+        assert!(!wg.aquifers_enabled);
+        assert!(wg.router_indices.contains_key("barrier"));
+        assert!(wg.router_indices.contains_key("exclusion"));
+        assert!(wg.router_indices.contains_key("fluid_level_floodedness"));
+        // 26.3: blocks resolve through material rules (ore veins, bedrock
+        // floor), so the legacy "default block is stone" shortcut is off.
+        assert!(!wg.default_block_is_stone);
         assert_eq!(wg.min_y, -64);
         assert_eq!(wg.height, 384);
         assert!(!wg.legacy_random_source);
@@ -1312,7 +1346,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("router entry '{k}' missing"));
             assert!(*idx < wg.df_arena.len(), "router entry {k}: bad index");
         }
-        assert_eq!(wg.router_indices.len(), ROUTER_KEYS.len());
+        // 26.3 adds material-rule DF entries ("material:...") on top of the
+        // classic router fields — every classic key must be present.
+        assert!(wg.router_indices.len() >= ROUTER_KEYS.len());
 
         // router-reachable density-function roots are memoized (lazy
         // resolution: only files referenced by this noise_settings load)
@@ -1324,10 +1360,27 @@ mod tests {
         // noise params sanity: worldgen/noise/offset.json
         let off = &wg.noise_params["minecraft:offset"];
         assert_eq!(off.first_octave, -3);
-        assert_eq!(off.amplitudes, vec![1.0, 1.0, 1.0, 0.0]);
+        // 26.3 noise params carry base_amplitude + modifiers; the loader
+        // folds them into the per-octave amplitudes (expected-deviation
+        // approximation — documented in port263_design.md).
+        assert_eq!(
+            off.amplitudes,
+            vec![0.9381732587751005, 0.9381732587751005, 0.9381732587751005, 0.0]
+        );
 
         // distinct types seen while building
-        for t in ["add", "mul", "spline", "blend_alpha", "weird_scaled_sampler", "old_blended_noise"] {
+        // 26.3: weird_scaled_sampler disappeared from the overworld graph
+        // (interval_select took over its role); gradient/lerp are new.
+        for t in [
+            "add",
+            "mul",
+            "spline",
+            "blend_alpha",
+            "interval_select",
+            "gradient",
+            "lerp",
+            "old_blended_noise",
+        ] {
             assert!(wg.type_counts.contains_key(t), "expected type '{t}' in arena");
         }
 
@@ -1350,13 +1403,15 @@ mod tests {
             panic!("overworld/depth root is not an add node");
         };
         assert_eq!(children.len(), 2, "depth add must have exactly 2 children");
+        // 26.3: the jaggedness-free depth offset became a gradient node and
+        // the offset term is a cache_once (26.3 renamed flat caches).
         assert!(
-            matches!(wg.df_arena[children[0]], DfNode::YClampedGradient { .. }),
-            "depth child 0 should be the y_clamped_gradient"
+            matches!(wg.df_arena[children[0]], DfNode::Gradient { .. }),
+            "depth child 0 should be the 26.3 gradient"
         );
         assert!(
-            matches!(wg.df_arena[children[1]], DfNode::FlatCache { .. }),
-            "depth child 1 should be overworld/offset (a flat_cache)"
+            matches!(wg.df_arena[children[1]], DfNode::CacheOnce { .. }),
+            "depth child 1 should be overworld/offset (a cache_once)"
         );
         // memoized ref: depth's argument2 shares offset's own root node
         assert_eq!(
@@ -1374,7 +1429,7 @@ mod tests {
     fn offset_resolves_to_spline_chain() {
         let wg = WorldGen::load_default("unit-test");
         let off = wg.root_indices["minecraft:overworld/offset"];
-        assert!(matches!(wg.df_arena[off], DfNode::FlatCache { .. }));
+        assert!(matches!(wg.df_arena[off], DfNode::CacheOnce { .. }));
 
         // find spline nodes below the offset root
         let mut splines: Vec<usize> = Vec::new();

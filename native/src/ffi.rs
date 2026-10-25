@@ -27,7 +27,6 @@ pub struct Ctx {
     /// Native SurfaceRules engine (pack surface_rule). None = vanilla Java
     /// surface stage stays active.
     surface: Option<SurfaceState>,
-<<<<<<< HEAD
     /// Native features engine (stage F). None until the pack assets carry a
     /// data-driven dimension (embedded-vanilla ctx keeps vanilla decorations).
     pub deco: Option<crate::features_master::DecoCtx>,
@@ -39,10 +38,6 @@ pub struct Gen263State {
     pub marks: Vec<i64>,
     pub beard: Vec<i32>,
     pub ops: Vec<i64>,
-=======
-    /// Native 26.3 carvers (mask + aquifer fill). None = Java carvers stay.
-    carvers: Option<CarverState>,
->>>>>>> 5a96306 (feat(26.3): MC 26.3 retarget — native carve/material-rules/DF-26.3 + plugin NMS fix)
 }
 
 pub type CarverState = crate::carver::CarverState;
@@ -242,14 +237,10 @@ pub fn ctx_new(seed: i64, min_y: i32, height: i32, sea_level: i32) -> i64 {
     let gen = ChunkGen::new(env);
     let carvers = crate::carver::CarverState::from_assets(&crate::worldgen::Assets::new(), env.wg.min_y as i32, env.wg.height as i32);
     let mut map = SESSIONS.lock().unwrap();
-<<<<<<< HEAD
     map.get_or_insert_with(HashMap::new).insert(
         id,
         Ctx { gen, v263, biomes: None, surface: None, deco: None },
     );
-=======
-    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes: None, surface: None, carvers });
->>>>>>> 5a96306 (feat(26.3): MC 26.3 retarget — native carve/material-rules/DF-26.3 + plugin NMS fix)
     id
 }
 
@@ -274,16 +265,9 @@ pub fn ctx_new_assets(
         let surface = biomes
             .as_ref()
             .and_then(|b| build_surface_state(&assets, b.env, Some(b)));
-<<<<<<< HEAD
         (ChunkGen::new(env), biomes, surface, crate::features_master::build_deco_ctx(&assets))
     });
     let (gen, biomes, surface, deco) = match result {
-=======
-        let carvers = crate::carver::CarverState::from_assets(&assets, env.wg.min_y as i32, env.wg.height as i32);
-        (ChunkGen::new(env), biomes, surface, carvers)
-    });
-    let (gen, biomes, surface, carvers) = match result {
->>>>>>> 5a96306 (feat(26.3): MC 26.3 retarget — native carve/material-rules/DF-26.3 + plugin NMS fix)
         Ok(v) => v,
         Err(p) => {
             let msg = if let Some(s) = p.downcast_ref::<String>() {
@@ -297,14 +281,10 @@ pub fn ctx_new_assets(
         }
     };
     let mut map = SESSIONS.lock().unwrap();
-<<<<<<< HEAD
     map.get_or_insert_with(HashMap::new).insert(
         id,
         Ctx { gen, v263: None, biomes, surface, deco },
     );
-=======
-    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes, surface, carvers });
->>>>>>> 5a96306 (feat(26.3): MC 26.3 retarget — native carve/material-rules/DF-26.3 + plugin NMS fix)
     Ok(id)
 }
 
@@ -328,7 +308,6 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
     surface_tail(ctx, cx, cz, out);
 }
 
-<<<<<<< HEAD
 /// Native vanilla-parity getBaseHeight (iterateNoiseColumn, 1-cell walk).
 /// mode: 0 = WORLD_SURFACE_WG/WORLD_SURFACE (stop at first non-air),
 ///       1 = OCEAN_FLOOR_WG/OCEAN_FLOOR (stop at first blocksMotion state).
@@ -399,65 +378,6 @@ pub fn carve(
         Ok(()) => st.ops.len() as i32,
         Err(_) => FAIL,
     }
-=======
-/// Native 26.3 carve pass (runs after surface, before the block layout
-/// leaves the JNI): mirrors vanilla buildTerrain fill -> surface -> carve.
-pub fn carve(ctx: &mut Ctx, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
-    let Some(carvers) = ctx.carvers.as_ref() else { return };
-    // material ids for the carve fill: resolve through the surface engine's
-    // state table (plugin-assigned ids), with fill-const fallbacks.
-    let (bedrock, grass, mycelium, dirt) = match ctx.surface.as_ref() {
-        Some(s) => {
-            let find = |name: &str| -> Option<u16> {
-                s.cfg.states.iter().position(|st| st == name).map(|i| s.cfg.ids[i])
-            };
-            (
-                find("minecraft:bedrock"),
-                find("minecraft:grass_block[snowy=false]"),
-                find("minecraft:mycelium"),
-                find("minecraft:dirt"),
-            )
-        }
-        None => (None, None, None, Some(crate::nochunk::STONE + 4)),
-    };
-    let seed = ctx.gen.env.seed;
-    let biomes = ctx.biomes.as_ref();
-    let state = carvers;
-    let min_y = state.min_y;
-    let biome_at_source = |sx: i32, sz: i32| -> Option<String> {
-        let b = biomes?;
-        // 26.3 getBiomeGenerationSettingsForCarver: biome at (quart(x), 0, quart(z))
-        let qx = sx * 4;
-        let qz = sz * 4;
-        let pt = crate::density::Pt { x: qx * 4, y: 0, z: qz * 4 };
-        let mut memo = crate::density::MemoCtx::new(b.compiled.arena.len())
-            .with_cols(b.compiled.col_count as usize);
-        let mut vals = [0i64; crate::biomes::N_PARAMS];
-        for (i, df) in b.climate.idx.iter().enumerate() {
-            if i >= crate::biomes::N_PARAMS { break; }
-            memo.next_serial();
-            let v = b.env.eval(&b.compiled, *df, pt, crate::density::Mode::Direct, &crate::density::InterpState::new(b.compiled.interp_slots, 4, 1), Some(&memo));
-            vals[i] = crate::biomes::quantize_pub(v);
-        }
-        let bi = b.src.find_value(&vals);
-        b.src.biome_names.get(bi).cloned()
-    };
-    let gen = &mut ctx.gen;
-    let mut aquifer_substance = |x: i32, y: i32, z: i32| -> Option<u16> {
-        gen.aquifer_substance_at(crate::density::Pt { x, y, z })
-    };
-    let mut cctx = crate::carver::CarveCtx {
-        state,
-        seed,
-        bedrock,
-        grass,
-        mycelium,
-        dirt: dirt.unwrap_or(0),
-        top_material: None,
-    };
-    crate::carver::carve_chunk(&mut cctx, cx, cz, out, biome_at_source, &mut aquifer_substance);
-    let _ = min_y;
->>>>>>> 5a96306 (feat(26.3): MC 26.3 retarget — native carve/material-rules/DF-26.3 + plugin NMS fix)
 }
 
 // ---------------------------------------------------------------------------

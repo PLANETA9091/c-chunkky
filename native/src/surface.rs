@@ -509,23 +509,14 @@ impl<'a> Parser<'a> {
                 self.cfg.conds.push(SrCond::YAbove { anchor, add_stone_depth: asd, surface_depth_multiplier: sdm });
                 self.cfg.conds.len() - 1
             }
-<<<<<<< HEAD
-            // Paper patch of the vanilla bedrock rule: same shape as
-            // vertical_gradient + is_roof (ignored — flat bedrock off in
-            // bench worlds; generate-flat-bedrock=false default).
-            "paper:optionally_flat_bedrock_condition_source" => {
+            // Paper bedrock rule patch — 1.21.8 name (condition_source) and
+            // 26.3 name (material_condition): same vertical_gradient shape;
+            // flat bedrock off in bench worlds (generate-flat-bedrock=false).
+            "paper:optionally_flat_bedrock_condition_source"
+            | "paper:optionally_flat_bedrock_material_condition" => {
                 let name = match j.get("random_name").and_then(|v| v.as_str()) {
                     Some(n) => canon(n),
                     None => { eprintln!("surface parse: paper bedrock without random_name"); return None; }
-=======
-            // Paper 26.3: same shape as vertical_gradient; with
-            // generate-flat-bedrock=false (our server.properties default) the
-            // anchors pass through unchanged — exact VerticalGradient semantics.
-            "paper:optionally_flat_bedrock_material_condition" => {
-                let name = match j.get("random_name").and_then(|v| v.as_str()) {
-                    Some(n) => canon(n),
-                    None => { eprintln!("surface parse: paper bedrock cond without random_name"); return None; }
->>>>>>> 5a96306 (feat(26.3): MC 26.3 retarget — native carve/material-rules/DF-26.3 + plugin NMS fix)
                 };
                 let ty = match j.get("true_at_and_below").and_then(|v| parse_anchor(v, self.wg)) {
                     Some(a) => a,
