@@ -32,6 +32,10 @@ pub struct Gen263 {
     pub aquifer_cfg: crate::aquifer263::AquiferConfig263,
     /// RandomState.getOrCreateRandomFactory("minecraft:aquifer").
     pub aquifer_factory: crate::rng::XoroshiroPositionalRandomFactory,
+    /// The six climate router nodes (temperature, vegetation, continents,
+    /// erosion, depth, ridges) — the createClimateSampler fields; used by
+    /// the native biome stage (biome263).
+    pub climate: [crate::df263::SamRef; 6],
 }
 
 impl Gen263 {
@@ -50,9 +54,17 @@ impl Gen263 {
             sea_level,
             min_y,
             height,
-            final_density: router.final_density,
+            final_density: router.final_density.clone(),
             aquifer_cfg,
             aquifer_factory,
+            climate: [
+                router.temperature.clone(),
+                router.vegetation.clone(),
+                router.continents.clone(),
+                router.erosion.clone(),
+                router.depth.clone(),
+                router.ridges.clone(),
+            ],
         }
     }
 

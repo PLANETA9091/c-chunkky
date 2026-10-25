@@ -49,6 +49,22 @@ public final class GenStats {
     static final AtomicLong LAYOUT_TOTAL = new AtomicLong();
     static final AtomicLong BEARD_TOTAL = new AtomicLong();
     static final AtomicLong MARKS_TOTAL = new AtomicLong();
+    // native biome bulk fill (stage B-263): JNI fillBiomes wall time + count
+    static final java.util.concurrent.atomic.AtomicLong BIOME_TOTAL = new java.util.concurrent.atomic.AtomicLong();
+    static final java.util.concurrent.atomic.AtomicLong BIOME_N = new java.util.concurrent.atomic.AtomicLong();
+    // thread CPU time (ThreadMXBean) — contention-immune; the honest metric
+    // on a throttled sandbox where wall time stretches 6x under load.
+    static final java.util.concurrent.atomic.AtomicLong BIOME_CPU = new java.util.concurrent.atomic.AtomicLong();
+    private static volatile java.lang.management.ThreadMXBean THREAD_MX;
+
+    static long threadCpuNano() {
+        java.lang.management.ThreadMXBean mx = THREAD_MX;
+        if (mx == null) {
+            mx = java.lang.management.ManagementFactory.getThreadMXBean();
+            THREAD_MX = mx;
+        }
+        return mx.isCurrentThreadCpuTimeSupported() ? mx.getCurrentThreadCpuTime() : 0L;
+    }
     // bulk section layout diagnostics
     static final AtomicLong BULK_FILLED = new AtomicLong();
     static final AtomicLong BULK_MIXED = new AtomicLong();
@@ -142,7 +158,7 @@ public final class GenStats {
         long natP50 = ncopy[(int) n / 2];
         double meanUs = (TOTAL.get() / Math.max(1, COUNT.get())) / 1000.0;
         long cnt = Math.max(1, COUNT.get());
-        return String.format(
+        String s = String.format(
                 "chunks=%d  mean=%.1fus  min=%.1fus  p50=%.1fus  p99=%.1fus  max=%.1fus  [native=%.2fms nat_p50=%.2fms layout=%.2fms beard=%.2fms marks=%.2fms]  [lay setup=%.2f sec=%.2f hmap=%.2f verify=%.2f | uni=%.2f/%.1f lin=%.2f/%.1f glob=%.2f/%.1f pb=%.2f/%.2f]  [sections filled=%d mixed=%d air=%d v1fallback=%d bulk=%s]  swapfail=%s  marks_seen=%d marks_landed=%d bridge_no_chunk=%d bridge_err=%d beard_chunks=%d beard_pieces=%d",
                 COUNT.get(), meanUs,
                 pmin / 1000.0, p50 / 1000.0, p99 / 1000.0, copy[(int) (n - 1)] / 1000.0,
@@ -168,6 +184,11 @@ public final class GenStats {
                 com.planeta.crussty.CrusstyChunkGenerator.swapFail,
                 MARKS_SEEN.get(), MARKS_LANDED.get(), BRIDGE_NO_CHUNK.get(), BRIDGE_ERROR.get(),
                 BEARD_CHUNKS.get(), BEARD_PIECES.get());
+        s += String.format(" [biome_fill=%.2fms n=%d cpu=%.2fms]",
+                BIOME_TOTAL.get() / (double) Math.max(1, BIOME_N.get()) / 1e6,
+                BIOME_N.get(),
+                BIOME_CPU.get() / (double) Math.max(1, BIOME_N.get()) / 1e6);
+        return s;
     }
 
     static long count() {

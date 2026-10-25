@@ -2390,3 +2390,61 @@ Stage Summary:
   хоистить x/z решётку per колонку как в legacy noise_col4), (2) сплавить
   shell-операции final_density в один проход (-1.5ms), (3) deco/features
   (Java-стадия, главный остаток e2e), (4) параллелизм на gen-parallelism=true.
+
+---
+## cont-52: STAGE B-263 — НАТИВНЫЕ БИОМЫ 26.3 БИТ-ТОЧНЫ + ВОССТАНОВЛЕНИЕ ОКРУЖЕНИЯ
+
+Task: «продолжи» (саб-агентов нет — всё лично; гитхаб = обязательный канал).
+
+Work Log:
+- ОКРУЖЕНИЕ СНЕСЕНО sandbox-резетом: rust/jdk/paper-jar отсутствовали. Восстановлено:
+  rustup 1.99.1, JDK25 (Temurin 25.0.5+8) -> /home/z/tools/jdk-25.0.5+8 (жёсткий путь
+  server263_up.sh), paper-26.3-222.jar (fill v3), 65/65 native тестов зелёные.
+- ROOT CAUSE мёртвых NMS-мостов (marking/bulk/beard): СТАРЫЙ CrusstyGen.jar — байткод
+  содержал "registry" литерал (в исходниках его нет) и НЕ содержал 26.3-camelCase мост.
+  Джарник когда-то собрали из конфликт-маркерного состояния и закоммитили классы.
+  Фикс: пересборка plugin/build.sh из текущих исходников + build.sh научен colon-спискам
+  SERVER_JAR (слоёный layout 26.3: versions-патч-jar + mojang jar). Все мосты живы.
+- ПРОФИЛЬ 26.3 (JFR, gen-worker): biomes 22.6% (Java multi_noise RTree+сэмплер),
+  features 16.4%, surface-rules 13.6%, JNI_fill 12.8%. Главный Java-остаток = биомы.
+- STAGE B-263 (нативные биомы embedded-vanilla overworld):
+  * Пресет 26.3 живёт В КОДЕ (multi_noise_biome_source_parameter_list = индирекция;
+    список строит OverworldBiomeBuilder) — 7594 записи / 56 биомов. Извлечение РАНТАЙМОМ
+    scripts/ExtractParams263.java (knownPresets(), точные i64 квантованные диапазоны,
+    offset=0 у всех) -> native/src/params263_overworld.json (1.7MB, include_str!).
+  * Climate.RTree 26.3: CHILDREN_PER_NODE 6 -> 19 (декомпил paper-26.3-222), полная
+    thenComparing-цепочка в сортировке minBuckets (было только первичное |mid|) —
+    biomes.rs::build_cpn; легаси-путь (6) не изменил голдены (65/65).
+  * from_params263: парсер целых (уже квантованных) диапазонов, без float-путешествия.
+  * biome263.rs: fill_biomes263 — 6 клим.DF через df263 sample_value (путь точек,
+    бит-точный с cont-48), quantize_f32, RTree warm-start (общий с легаси).
+    Column-cache: 5 из 6 полей y-инвариантны (ShiftedXz y_scale=0.0 в 26.3!) — pass1
+    80 эвалов на чанк, pass2 depth per quart + поиск в ванильном порядке секций.
+    Изолированно: 5.7 -> 2.5 -> 1.52 ms/chunk.
+  * LOCK-FREE: fillBiomes клонирует Arc<BiomeState263> под SESSIONS.lock и филлит
+    БЕЗ мьютекса; fill() (noise) больше не держит SESSIONS весь филл (raw-borrow
+    с инвариантом: pool-лок Java сериализует per-ctx, мапа заморожена в генерации);
+    biome-filler не берёт pool ctx вовсе (read-only). Мотивация: noise-филлы держали
+    глобальный мьютекс ~13ms, biome-филлы ждали.
+  * Gen263 хранит climate[6] (temperature,vegetation,continents,erosion,depth,ridges).
+  * KILL-SWITCH: CRUS_NO_NATIVE_BIOMES_263=1 (ванильные Java биомы) для A/B.
+- ПАРИТЕТ: probe263/ (Bukkit-only biomedump, ChunkSnapshot.getBiome FNV-хэш чанка).
+  A/B на 12x12 регионах: 0 расхождений / 159 чанков (первый билд), 0/167 (column-cache),
+  0/165 (lock-free) — биомы каждого блока идентичны ванили.
+- ПРОИЗВОДИТЕЛЬНОСТЬ (честно): песочница 2-core троттлится — окна шумят ±30%.
+  Стационар A/B: native 78-100ms vs vanilla 61-89ms — на этом боксе окно НЕЙТРАЛЬНО
+  или чуть хуже; wall biome_fill 10.1ms при CPU 6.9ms (частота под нагрузкой).
+  Снята Java-CPU стадия (19.8-22.6% gen-worker exec). Честный вердикт e2e — за
+  CI-judge (4-core). Изолированная нативная цена: 1.5ms/chunk.
+- Инструменты: scripts/ExtractParams263.java, probe263/ (build+dump), native/bin/
+  biome263bench, GenStats biome_fill wall/cpu счётчики.
+
+Stage Summary:
+- Коммит: "feat(263): native biomes bit-exact — runtime-extracted preset (7594),
+  RTree cpn=19, lock-free fillBiomes, column-cache y-invariant fields; env restore
+  + stale-jar bridge fix". Push в GitHub.
+- Натив 26.3 теперь: noise fill + carvers + BIOMES. Остаток e2e (Java): surface
+  rules ~14-20%, features ~16-23%, serialization/light/nbt ~15%, structures ~3%.
+- СЛЕДУЮЩИЕ: (1) натив surface-rules 26.3 (движок surface.rs готов, нужен парс
+  ванильных material_rule JSON 26.3 + хвост в fill263) — закроет 14-20%;
+  (2) features/deco 26.3 (мега-проект, движок легаси готов); (3) gen-parallelism.

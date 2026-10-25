@@ -38,7 +38,14 @@ SRCS_MAIN=$(find src -name '*.java' ! -name 'NativeBiomeSource.java' ! -name 'Bi
 # present only after harness/bootstrap_server.sh (CI integration job). When
 # absent the plugin still builds and runs with vanilla Java biomes.
 SERVER_JAR="${SERVER_JAR:-../server263/versions/26.3/paper-26.3.jar}"
-if [ -f "$SERVER_JAR" ]; then
+# SERVER_JAR may be a colon-joined multi-entry classpath (layered 26.3 layout:
+# versions patch jar + vanilla mojang jar); -f cannot test a joined string.
+SERVER_JAR_EXISTS=1
+IFS=: read -ra SERVER_JAR_PARTS <<< "$SERVER_JAR"
+for p in "${SERVER_JAR_PARTS[@]}"; do
+  [ -f "$p" ] || { SERVER_JAR_EXISTS=0; break; }
+done
+if [ "$SERVER_JAR_EXISTS" = "1" ]; then
   echo "compiling NMS biome companions against $SERVER_JAR"
   MOJANG_LIBS="$(find ../server263/libraries/com/mojang ../server263/libraries/it -name '*.jar' 2>/dev/null | tr '\n' ':')"
   # 26.3 NMS classes carry jspecify/jetbrains annotations — javac needs them

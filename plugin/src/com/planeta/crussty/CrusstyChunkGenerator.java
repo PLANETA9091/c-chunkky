@@ -730,13 +730,18 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             int sections = height / 16;
             int minQuartY = minY / 4;
             CrusstyFiller filler = (ctx, cx, cz, out) -> {
-                ReentrantLock[] lockBox = new ReentrantLock[1];
-                long ctx2 = pool.acquire(lockBox);
-                try {
-                    return ChunkGenNative.fillBiomes(ctx2, cx, cz, out);
-                } finally {
-                    lockBox[0].unlock();
-                }
+                // Read-only JNI path (stage B-263): fillBiomes clones the
+                // immutable biome Arc under the sessions lock and fills
+                // lock-free — it does NOT mutate the ctx, so no pool ctx is
+                // acquired here (acquiring would serialize every biome fill
+                // behind the 13ms noise fills on a 2-ctx pool).
+                long tb0 = System.nanoTime();
+                long tc0 = GenStats.threadCpuNano();
+                int r = ChunkGenNative.fillBiomes(pool.firstCtx(), cx, cz, out);
+                GenStats.BIOME_TOTAL.addAndGet(System.nanoTime() - tb0);
+                GenStats.BIOME_CPU.addAndGet(GenStats.threadCpuNano() - tc0);
+                GenStats.BIOME_N.incrementAndGet();
+                return r;
             };
             Class<?> swap = Class.forName("com.planeta.crussty.BiomeSwap");
             swap.getMethod("apply", org.bukkit.World.class, CrusstyFiller.class,

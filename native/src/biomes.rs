@@ -134,12 +134,18 @@ fn sort_nodes(children: &mut [Node], entries: &[BiomeEntry], dim0: usize, absolu
 }
 
 fn bucketize(nodes: &[Node]) -> Vec<Vec<Node>> {
-    // int i = (int)Math.pow(6.0, Math.floor(Math.log(size - 0.01) / Math.log(6.0)));
+    bucketize_cpn(nodes, CHILDREN_PER_NODE)
+}
+
+/// Java bucketize with the variable children-per-node base:
+/// expectedChildrenCount = (int)Math.pow(cpn, floor(log(n - 0.01) / log(cpn))).
+fn bucketize_cpn(nodes: &[Node], cpn: usize) -> Vec<Vec<Node>> {
     let n = nodes.len();
+    let base = cpn as f64;
     let bucket = if n == 0 {
         1
     } else {
-        let b = 6.0f64.powf(((n as f64 - 0.01).ln() / 6.0f64.ln()).floor());
+        let b = base.powf(((n as f64 - 0.01).ln() / base.ln()).floor());
         let b = b as usize;
         if b == 0 {
             1
@@ -173,13 +179,20 @@ fn subtree_space(children: &[Node], entries: &[BiomeEntry]) -> Box<[Param; N_PAR
 }
 
 fn build(mut children: Vec<Node>, entries: &[BiomeEntry]) -> Node {
+    build_cpn(children, entries, CHILDREN_PER_NODE)
+}
+
+/// Vanilla RTree.build with a variable children-per-node: 1.21.8 (moonrise
+/// ChunkGenRTree era) used 6; 26.3 moved the tree back into Climate.RTree
+/// with CHILDREN_PER_NODE = 19 (decompiled from paper-26.3-222).
+fn build_cpn(mut children: Vec<Node>, entries: &[BiomeEntry], cpn: usize) -> Node {
     if children.is_empty() {
         panic!("biome RTree: no children");
     }
     if children.len() == 1 {
         return children.pop().unwrap();
     }
-    if children.len() <= CHILDREN_PER_NODE {
+    if children.len() <= cpn {
         // Java: sort by sum over dims of Math.abs(mid) (wrapping)
         children.sort_by_key(|node| {
             let s = node_space(node, entries);
@@ -201,7 +214,7 @@ fn build(mut children: Vec<Node>, entries: &[BiomeEntry]) -> Node {
     for dim in 0..N_PARAMS {
         let mut ch = children.clone();
         sort_nodes(&mut ch, entries, dim, false);
-        let buckets = bucketize(&ch);
+        let buckets = bucketize_cpn(&ch, cpn);
         let mut cost: i64 = 0;
         for b in &buckets {
             let space = subtree_space(b, entries);
@@ -215,7 +228,10 @@ fn build(mut children: Vec<Node>, entries: &[BiomeEntry]) -> Node {
             best_buckets = buckets;
         }
     }
-    // Java: sort(list, paramSpaceSize, i, true) — the SubTree list by |mid|.
+    // Java: sort(minBuckets, paramSpaceSize, minDimension, true) — the full
+    // thenComparing chain over (minDimension + d) % dims of |mid| (decompile
+    // 26.3: sort() builds comparator(dim) thenComparing for d in 1..dims;
+    // the same comparator applies to SubTrees via their spanned space).
     let mut subs: Vec<(Box<[Param; N_PARAMS]>, Vec<Node>)> = best_buckets
         .into_iter()
         .map(|b| {
@@ -223,8 +239,21 @@ fn build(mut children: Vec<Node>, entries: &[BiomeEntry]) -> Node {
             (space, b)
         })
         .collect();
-    subs.sort_by_key(|(space, _)| mid_of(&space[best_dim], true));
-    let children: Vec<Node> = subs.into_iter().map(|(_, b)| build(b, entries)).collect();
+    subs.sort_by(|(sa, _), (sb, _)| {
+        for i in 0..N_PARAMS {
+            let d = (best_dim + i) % N_PARAMS;
+            let ka = mid_of(&sa[d], true);
+            let kb = mid_of(&sb[d], true);
+            if ka != kb {
+                return ka.cmp(&kb);
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    let children: Vec<Node> = subs
+        .into_iter()
+        .map(|(_, b)| build_cpn(b, entries, cpn))
+        .collect();
     let space = subtree_space(&children, entries);
     Node::SubTree {
         space,
@@ -323,6 +352,72 @@ impl BiomeSourceData {
         }
         let leaves: Vec<Node> = (0..entries.len()).map(Node::Leaf).collect();
         let root = build(leaves, &entries);
+        Some(BiomeSourceData {
+            biome_names: names,
+            entries,
+            root,
+        })
+    }
+
+    /// Parse the 26.3 vanilla multi_noise preset (runtime-extracted by
+    /// scripts/ExtractParams263.java from knownPresets() — the 26.3 list
+    /// lives in CODE, not data/). Entries carry PRE-QUANTIZED integer
+    /// min/max: used as-is, no float round-trip. Tree built with
+    /// CHILDREN_PER_NODE = 19 (26.3 Climate.RTree constant).
+    pub fn from_params263(text: &str) -> Option<BiomeSourceData> {
+        let json = crate::json::parse(text).ok()?;
+        let list = json.get("biomes")?.as_arr()?;
+        let mut names: Vec<String> = Vec::new();
+        let mut entries: Vec<BiomeEntry> = Vec::new();
+        for el in list {
+            let name = el.get("biome")?.as_str()?;
+            let biome_idx = match names.iter().position(|n| n == name) {
+                Some(i) => i as u32,
+                None => {
+                    names.push(name.to_string());
+                    (names.len() - 1) as u32
+                }
+            };
+            let p = el.get("parameters")?;
+            let get = |key: &str| -> Option<(i64, i64)> {
+                let v = p.get(key)?;
+                if let Some(arr) = v.as_arr() {
+                    if arr.len() != 2 {
+                        return None;
+                    }
+                    Some((arr[0].as_i64()?, arr[1].as_i64()?))
+                } else {
+                    let a = v.as_i64()?;
+                    Some((a, a))
+                }
+            };
+            let (t, h, c, e, d, w, o) = (
+                get("temperature")?,
+                get("humidity")?,
+                get("continentalness")?,
+                get("erosion")?,
+                get("depth")?,
+                get("weirdness")?,
+                get("offset")?,
+            );
+            entries.push(BiomeEntry {
+                biome_idx,
+                params: [
+                    Param { min: t.0, max: t.1 },
+                    Param { min: h.0, max: h.1 },
+                    Param { min: c.0, max: c.1 },
+                    Param { min: e.0, max: e.1 },
+                    Param { min: d.0, max: d.1 },
+                    Param { min: w.0, max: w.1 },
+                    Param { min: o.0, max: o.1 },
+                ],
+            });
+        }
+        if entries.is_empty() {
+            return None;
+        }
+        let leaves: Vec<Node> = (0..entries.len()).map(Node::Leaf).collect();
+        let root = build_cpn(leaves, &entries, 19);
         Some(BiomeSourceData {
             biome_names: names,
             entries,

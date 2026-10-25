@@ -1,0 +1,8 @@
+name: CrusstyProbe263
+version: 0.1.0
+main: com.planeta.crussty.probe.ProbePlugin
+api-version: '26.3'
+commands:
+  biomedump:
+    description: dump per-chunk biome fingerprints for loaded chunks
+    usage: /biomedump <outfile>

@@ -38,6 +38,11 @@ pub struct Gen263State {
     pub marks: Vec<i64>,
     pub beard: Vec<i32>,
     pub ops: Vec<i64>,
+    /// Native 26.3 multi_noise biome source (embedded-vanilla overworld
+    /// preset, runtime-extracted). Arc: the JNI biome fill clones the Arc
+    /// under the sessions lock and fills WITHOUT holding it (the fill must
+    /// not serialize against the noise fills on the global mutex).
+    pub biomes: Option<std::sync::Arc<crate::biome263::BiomeState263>>,
 }
 
 pub type CarverState = crate::carver::CarverState;
@@ -222,8 +227,33 @@ pub fn ctx_new(seed: i64, min_y: i32, height: i32, sea_level: i32) -> i64 {
     // dimensions (nether/end signatures) stay on the legacy engine until
     // their 26.3 routers are ported.
     let v263 = if min_y == -64 && height == 384 && std::env::var("CRUS_LEGACY").as_deref() != Ok("1") {
-        match std::panic::catch_unwind(|| crate::fill263::Gen263::new(seed, min_y, height, sea_level)) {
-            Ok(g) => Some(Gen263State { g, marks: Vec::new(), beard: Vec::new(), ops: Vec::new() }),
+        match std::panic::catch_unwind(|| {
+            let g = crate::fill263::Gen263::new(seed, min_y, height, sea_level);
+            // Native biome stage (stage B-263): the runtime-extracted 26.3
+            // overworld preset + the six climate router nodes. A/B kill-switch
+            // restores the vanilla Java BIOMES status for parity testing.
+            let biomes = if std::env::var("CRUS_NO_NATIVE_BIOMES_263").as_deref() == Ok("1") {
+                None
+            } else {
+                std::panic::catch_unwind(|| {
+                    crate::biomes::BiomeSourceData::from_params263(include_str!(
+                        "params263_overworld.json"
+                    ))
+                    .map(|src| std::sync::Arc::new(crate::biome263::BiomeState263 {
+                        src,
+                        climate: g.climate.clone(),
+                        // 26.3 overworld router shape: the five noise fields
+                        // are ShiftedXz(y_scale=0); depth is y-dependent.
+                        y_invariant: [true, true, true, true, false, true],
+                    }))
+                })
+                .unwrap_or(None)
+            };
+            (g, biomes)
+        }) {
+            Ok((g, biomes263)) => {
+                Some(Gen263State { g, marks: Vec::new(), beard: Vec::new(), ops: Vec::new(), biomes: biomes263 })
+            }
             Err(_) => None,
         }
     } else {
@@ -295,9 +325,23 @@ pub fn ctx_free(id: i64) {
 }
 
 pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
-    let mut map_guard = SESSIONS.lock().unwrap();
-    let map = map_guard.as_mut().expect("sessions map");
-    let ctx = map.get_mut(&id).expect("ctx id");
+    // RAW-BORROW INVARIANT (stage B-263 perf fix): the pointer is taken under
+    // the sessions lock and the fill runs WITHOUT it. Safety:
+    // (a) the Java CtxPool lock serializes JNI calls per ctx (fills, carves,
+    //     base_height on their own ctxs) — a ctx is never touched by two
+    //     threads at once;
+    // (b) the map itself is mutation-frozen during generation: ctxs are
+    //     created at world load and freed at world unload, both outside the
+    //     chunk pipeline, so no rehash can move the value under the pointer.
+    // Holding the lock across the whole fill serialized ALL noise fills AND
+    // the biome fills against each other (~13ms exclusive each).
+    let ctx_ptr: *mut Ctx = {
+        let mut map_guard = SESSIONS.lock().unwrap();
+        let map = map_guard.as_mut().expect("sessions map");
+        map.get_mut(&id).expect("ctx id") as *mut Ctx
+    };
+    // SAFETY: see the invariant above — exclusive per-ctx access, stable map.
+    let ctx: &mut Ctx = unsafe { &mut *ctx_ptr };
     if let Some(st) = ctx.v263.as_mut() {
         let beard = std::mem::take(&mut st.beard);
         st.g.fill_chunk(cx, cz, &beard, out, &mut st.marks);
@@ -725,15 +769,30 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_ctxBiomeNa
 ) -> jni_sys::jobjectArray {
     let tbl = *env;
     let bs_guard = SESSIONS.lock().unwrap();
-    let Some(bs) = bs_guard.as_ref().and_then(|m| m.get(&(ctx as i64)))
-        .and_then(|c| c.biomes.as_ref()) else {
+    // v263 ctxs carry the 26.3 preset biome source inside the Gen263 slot;
+    // legacy ctxs use the pack-assets slot.
+    let bs = bs_guard
+        .as_ref()
+        .and_then(|m| m.get(&(ctx as i64)))
+        .and_then(|c| {
+            c.biomes
+                .as_ref()
+                .map(|b| &b.src)
+                .or_else(|| {
+                    c.v263
+                        .as_ref()
+                        .and_then(|v| v.biomes.as_ref())
+                        .map(|b| &b.src)
+                })
+        });
+    let Some(bs) = bs else {
         return std::ptr::null_mut();
     };
     let str_class = ((*tbl).v1_1.FindClass)(env, c"java/lang/String".as_ptr());
     if str_class.is_null() {
         return std::ptr::null_mut();
     }
-    let names = &bs.src.biome_names;
+    let names = &bs.biome_names;
     let arr = ((*tbl).v1_1.NewObjectArray)(
         env,
         names.len() as jni_sys::jsize,
@@ -777,9 +836,6 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fillBiomes
     let Some(c) = state_guard.as_ref().and_then(|m| m.get(&(ctx as i64))) else {
         return -1;
     };
-    let Some(state) = c.biomes.as_ref() else {
-        return -1;
-    };
     let len = ((*tbl).v1_1.GetArrayLength)(env, out as jni_sys::jarray) as usize;
     if len < 64 {
         return -1;
@@ -789,6 +845,28 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fillBiomes
         return -1;
     }
     let slice = std::slice::from_raw_parts_mut(ptr as *mut i32, len);
+    // v263 path: clone the Arc + copy (min_y, height) under the sessions
+    // lock, then fill WITHOUT the lock (no serialization vs noise fills;
+    // the warm-start cell is a thread_local, the climate nodes immutable).
+    let b263 = c
+        .v263
+        .as_ref()
+        .and_then(|v| v.biomes.clone().map(|b| (b, v.g.min_y, v.g.height)));
+    if let Some((b, min_y, height)) = b263 {
+        let n = (height as usize) / 16 * 64;
+        if len < n {
+            ((*tbl).v1_1.ReleaseIntArrayElements)(env, out, ptr, 0);
+            return -1;
+        }
+        drop(state_guard);
+        crate::biome263::fill_biomes263(&b, min_y, height, cx as i32, cz as i32, &mut slice[..n]);
+        ((*tbl).v1_1.ReleaseIntArrayElements)(env, out, ptr, 0);
+        return n as jni_sys::jint;
+    }
+    let Some(state) = c.biomes.as_ref() else {
+        ((*tbl).v1_1.ReleaseIntArrayElements)(env, out, ptr, 0);
+        return -1;
+    };
     let height = state.env.wg.height as usize;
     let sections = height / 16;
     let n = sections * 64;
