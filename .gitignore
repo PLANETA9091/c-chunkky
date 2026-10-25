@@ -21,3 +21,4 @@ fifo.pid\nserver.pid
 /dist/
 !native/cplug-sdk/asm-lib/**
 reference/oracle263_df.txt
+server263/boot_extract.out
