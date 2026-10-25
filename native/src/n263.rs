@@ -168,6 +168,200 @@ pub struct PerlinNoise263 {
     pub p_adj: [u16; 256],
 }
 
+
+// ---------------------------------------------------------------------------
+// 8-wide AVX2 batch kernels (bit-exact vs the scalar paths: identical f32 op
+// order per lane, no FMA contraction).
+// ---------------------------------------------------------------------------
+
+/// GRADIENT as flat f32 arrays for vector gather-free lane prep.
+#[inline]
+fn grad3(hash: usize) -> (f32, f32, f32) {
+    let g = GRADIENT[hash & 15];
+    (g.0 as f32, g.1 as f32, g.2 as f32)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub struct LanePrep8 {
+    /// per-corner gradient hash per lane: [corner][lane]
+    pub gh: [[usize; 8]; 8],
+    pub rel_x: [f32; 8],
+    pub rel_y: [f32; 8],
+    pub rel_z: [f32; 8],
+}
+
+impl PerlinNoise263 {
+    /// Scalar lane prep shared by the batch kernel: wrap/floor/relative +
+    /// permutation walk producing the 8 corner hashes per lane.
+    #[inline]
+    pub fn prep_lanes(&self, x: &[f64; 8], y: &[f64; 8], z: &[f64; 8], out: &mut LanePrep8) {
+        let p = &self.p_adj;
+        for l in 0..8 {
+            let wx = wrap(x[l]) + self.base.offset_x;
+            let wy = wrap(y[l]) + self.base.offset_y;
+            let wz = wrap(z[l]) + self.base.offset_z;
+            let fx = mth_floor(wx);
+            let fy = mth_floor(wy);
+            let fz = mth_floor(wz);
+            out.rel_x[l] = (wx - fx as f64) as f32;
+            out.rel_y[l] = (wy - fy as f64) as f32;
+            out.rel_z[l] = (wz - fz as f64) as f32;
+            let x0 = p[(fx & 0xFF) as usize] as usize;
+            let x1 = x0 >> 8;
+            let xy00 = p[(x0.wrapping_add(fy as usize)) & 0xFF] as usize;
+            let xy01 = xy00 >> 8;
+            let z000 = p[(xy00.wrapping_add(fz as usize)) & 0xFF] as usize;
+            let z001 = p[(xy01.wrapping_add(fz as usize)) & 0xFF] as usize;
+            let xy10 = p[(x1.wrapping_add(fy as usize)) & 0xFF] as usize;
+            let xy11 = xy10 >> 8;
+            let z100 = p[(xy10.wrapping_add(fz as usize)) & 0xFF] as usize;
+            let z101 = p[(xy11.wrapping_add(fz as usize)) & 0xFF] as usize;
+            // corner order matches sample_and_lerp:
+            // 0:d000 1:d001 2:d010 3:d011 4:d100 5:d101 6:d110 7:d111
+            out.gh[0][l] = z000 & 15;
+            out.gh[1][l] = (z000 >> 8) & 15;
+            out.gh[2][l] = z001 & 15;
+            out.gh[3][l] = (z001 >> 8) & 15;
+            out.gh[4][l] = z100 & 15;
+            out.gh[5][l] = (z100 >> 8) & 15;
+            out.gh[6][l] = z101 & 15;
+            out.gh[7][l] = (z101 >> 8) & 15;
+        }
+    }
+
+    /// 8-wide batch get(). Lanes are independent; each lane reproduces
+    /// sample_and_lerp's f32 op order exactly (separate mul/add, no FMA).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn get_batch8_avx2(&self, x: &[f64; 8], y: &[f64; 8], z: &[f64; 8]) -> [f32; 8] {
+        let mut prep = LanePrep8 { gh: [[0; 8]; 8], rel_x: [0.0; 8], rel_y: [0.0; 8], rel_z: [0.0; 8] };
+        self.prep_lanes(x, y, z, &mut prep);
+        get_batch8_from_prep(&prep)
+    }
+
+    /// Portable reference batch (scalar per lane) — used off-x86 and by tests.
+    pub fn get_batch8(&self, x: &[f64; 8], y: &[f64; 8], z: &[f64; 8]) -> [f32; 8] {
+        let mut out = [0f32; 8];
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::arch::is_x86_feature_detected!("avx2") {
+                unsafe {
+                    return self.get_batch8_avx2(x, y, z);
+                }
+            }
+        }
+        for l in 0..8 {
+            out[l] = self.get(x[l], y[l], z[l]);
+        }
+        out
+    }
+}
+
+/// Corner dots + trilerp from a prepared LanePrep8 (8 lanes).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub unsafe fn get_batch8_from_prep(prep: &LanePrep8) -> [f32; 8] {
+    use std::arch::x86_64::*;
+
+    let mut gxs = [0f32; 8];
+    let mut gys = [0f32; 8];
+    let mut gzs = [0f32; 8];
+    let mut dots = [[0f32; 8]; 8];
+    for c in 0..8usize {
+        for l in 0..8usize {
+            let (gx, gy, gz) = grad3(prep.gh[c][l]);
+            gxs[l] = gx;
+            gys[l] = gy;
+            gzs[l] = gz;
+        }
+        let rx = match c {
+            4..=7 => sub_ps_1(_mm256_loadu_ps(prep.rel_x.as_ptr())),
+            _ => _mm256_loadu_ps(prep.rel_x.as_ptr()),
+        };
+        let ry = match c {
+            2 | 3 | 6 | 7 => sub_ps_1(_mm256_loadu_ps(prep.rel_y.as_ptr())),
+            _ => _mm256_loadu_ps(prep.rel_y.as_ptr()),
+        };
+        let rz = match c {
+            1 | 3 | 5 | 7 => sub_ps_1(_mm256_loadu_ps(prep.rel_z.as_ptr())),
+            _ => _mm256_loadu_ps(prep.rel_z.as_ptr()),
+        };
+        let gxv = _mm256_loadu_ps(gxs.as_ptr());
+        let gyv = _mm256_loadu_ps(gys.as_ptr());
+        let gzv = _mm256_loadu_ps(gzs.as_ptr());
+        // gradient_dot_f32: gx*x + gy*y + gz*z  (left-to-right)
+        let xy = _mm256_add_ps(_mm256_mul_ps(gxv, rx), _mm256_mul_ps(gyv, ry));
+        dots[c] = [
+            0.0; 8
+        ];
+        _mm256_storeu_ps(dots[c].as_mut_ptr(), _mm256_add_ps(xy, _mm256_mul_ps(gzv, rz)));
+    }
+
+    // smoothstep per axis (lane-identical to scalar)
+    let sx = smoothstep_v_ps(_mm256_loadu_ps(prep.rel_x.as_ptr()));
+    let sy = smoothstep_v_ps(_mm256_loadu_ps(prep.rel_y.as_ptr()));
+    let sz = smoothstep_v_ps(_mm256_loadu_ps(prep.rel_z.as_ptr()));
+
+    // lerp2(a1, a2, x00, x10, x01, x11): lo = x00 + a1*(x10-x00); hi = x01 + a1*(x11-x01); lo + a2*(hi-lo)
+    #[inline]
+    fn lerp2v(
+        a1: __m256,
+        a2: __m256,
+        x00: [f32; 8],
+        x10: [f32; 8],
+        x01: [f32; 8],
+        x11: [f32; 8],
+    ) -> [f32; 8] {
+        unsafe {
+            let v00 = _mm256_loadu_ps(x00.as_ptr());
+            let v10 = _mm256_loadu_ps(x10.as_ptr());
+            let v01 = _mm256_loadu_ps(x01.as_ptr());
+            let v11 = _mm256_loadu_ps(x11.as_ptr());
+            let lo = _mm256_add_ps(v00, _mm256_mul_ps(a1, _mm256_sub_ps(v10, v00)));
+            let hi = _mm256_add_ps(v01, _mm256_mul_ps(a1, _mm256_sub_ps(v11, v01)));
+            let mut o = [0f32; 8];
+            _mm256_storeu_ps(
+                o.as_mut_ptr(),
+                _mm256_add_ps(lo, _mm256_mul_ps(a2, _mm256_sub_ps(hi, lo))),
+            );
+            o
+        }
+    }
+
+    // lerp3(a1=sx, a2=sy, a3=sz; lo-corners 0,4,2,6 / hi-corners 1,5,3,7)
+    let lo = lerp2v(sx, sy, dots[0], dots[4], dots[2], dots[6]);
+    let hi = lerp2v(sx, sy, dots[1], dots[5], dots[3], dots[7]);
+    let mut out = [0f32; 8];
+    let lov = _mm256_loadu_ps(lo.as_ptr());
+    let hiv = _mm256_loadu_ps(hi.as_ptr());
+    _mm256_storeu_ps(
+        out.as_mut_ptr(),
+        _mm256_add_ps(lov, _mm256_mul_ps(sz, _mm256_sub_ps(hiv, lov))),
+    );
+    out
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn sub_ps_1(v: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+    use std::arch::x86_64::*;
+    _mm256_sub_ps(v, _mm256_set1_ps(1.0))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn smoothstep_v_ps(v: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+    use std::arch::x86_64::*;
+    // x*x*x*(x*(x*6-15)+10)
+    let x = v;
+    let x2 = _mm256_mul_ps(x, x);
+    let inner = _mm256_add_ps(
+        _mm256_mul_ps(x, _mm256_sub_ps(_mm256_mul_ps(x, _mm256_set1_ps(6.0)), _mm256_set1_ps(15.0))),
+        _mm256_set1_ps(10.0),
+    );
+    _mm256_mul_ps(_mm256_mul_ps(x2, x), inner)
+}
+
 impl PerlinNoise263 {
     pub fn new(random: &mut XoroshiroRandomSource) -> Self {
         let base = GradientNoise263::new(random);
@@ -413,6 +607,22 @@ impl Noise263 {
             Noise263::Stack(s) => s.get(x, y, z),
         }
     }
+
+    /// 8-wide batch; Smeared falls back to scalar lanes (fudge-y is per
+    /// point), Perlin/Stack are lane-batched.
+    pub fn get_batch8(&self, x: &[f64; 8], y: &[f64; 8], z: &[f64; 8]) -> [f32; 8] {
+        match self {
+            Noise263::Perlin(p) => p.get_batch8(x, y, z),
+            Noise263::Stack(s) => s.get_batch8(x, y, z),
+            Noise263::Smeared(sm) => {
+                let mut out = [0f32; 8];
+                for l in 0..8 {
+                    out[l] = sm.get(x[l], y[l], z[l]);
+                }
+                out
+            }
+        }
+    }
 }
 
 pub struct NoiseStack263 {
@@ -426,6 +636,26 @@ impl NoiseStack263 {
             value += amplitude * noise.get(x * frequency, y * frequency, z * frequency);
         }
         value
+    }
+
+    /// 8-wide batch: per-layer batch eval, lane-identical sum order.
+    pub fn get_batch8(&self, x: &[f64; 8], y: &[f64; 8], z: &[f64; 8]) -> [f32; 8] {
+        let mut acc = [0f32; 8];
+        for (noise, frequency, amplitude) in &self.layers {
+            let mut lx = [0f64; 8];
+            let mut ly = [0f64; 8];
+            let mut lz = [0f64; 8];
+            for l in 0..8 {
+                lx[l] = x[l] * frequency;
+                ly[l] = y[l] * frequency;
+                lz[l] = z[l] * frequency;
+            }
+            let v = noise.get_batch8(&lx, &ly, &lz);
+            for l in 0..8 {
+                acc[l] += amplitude * v[l];
+            }
+        }
+        acc
     }
 }
 
@@ -522,6 +752,10 @@ impl NormalNoise263 {
 
     pub fn get(&self, x: f64, y: f64, z: f64) -> f32 {
         self.stack.get(x, y, z)
+    }
+
+    pub fn get_batch8(&self, x: &[f64; 8], y: &[f64; 8], z: &[f64; 8]) -> [f32; 8] {
+        self.stack.get_batch8(x, y, z)
     }
 }
 
@@ -905,5 +1139,79 @@ pub fn parity_base_amplitude_params(first_octave: i32, amplitudes: Vec<f64>) -> 
         octave_count,
         normalize: Normalization::Enabled,
         amplitude_modifiers: modifiers,
+    }
+}
+
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+
+    #[test]
+    fn perlin263_batch8_bit_exact_vs_scalar() {
+        let mut rng = crate::rng::XoroshiroRandomSource::new(12345);
+        for case in 0..64 {
+            let pn = PerlinNoise263::new(&mut rng);
+            let mut x = [0f64; 8];
+            let mut y = [0f64; 8];
+            let mut z = [0f64; 8];
+            let mut s = case as f64 * 0.618033988749895;
+            for l in 0..8 {
+                s += 0.3183098861837907;
+                x[l] = (s * 7919.0).sin() * 4096.0 + s * 517.0;
+                y[l] = (s * 104729.0).cos() * 384.0 - 64.0 + s;
+                z[l] = (s * 15485863.0).sin() * 4096.0 + s * 211.0;
+            }
+            let b = pn.get_batch8(&x, &y, &z);
+            for l in 0..8 {
+                let sc = pn.get(x[l], y[l], z[l]);
+                assert_eq!(
+                    sc.to_bits(),
+                    b[l].to_bits(),
+                    "case {case} lane {l}: scalar={sc:e} batch={:e}",
+                    b[l]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn normal_noise263_batch8_bit_exact_vs_scalar() {
+        let mut rng = crate::rng::XoroshiroRandomSource::new(777);
+        for case in 0..16 {
+            let params = NormalNoiseParameters {
+                base_amplitude: 1.0,
+                base_octave: -3 + (case % 5) as i32,
+                octave_count: 1 + (case % 6) as i32,
+                normalize: [Normalization::Disabled, Normalization::Enabled, Normalization::Legacy]
+                    [case % 3],
+                amplitude_modifiers: if case % 2 == 0 {
+                    vec![]
+                } else {
+                    vec![1.0, 0.75, 0.5, 0.25, 0.125, 0.0625]
+                },
+            };
+            let n = NormalNoise263::new(params, &mut rng);
+            let mut x = [0f64; 8];
+            let mut y = [0f64; 8];
+            let mut z = [0f64; 8];
+            let mut s = case as f64 * 1.6180339887;
+            for l in 0..8 {
+                s += 0.2718281828;
+                x[l] = (s * 7919.0).sin() * 2048.0 + s * 101.0;
+                y[l] = (s * 104729.0).cos() * 384.0 - 64.0;
+                z[l] = (s * 15485863.0).sin() * 2048.0 + s * 37.0;
+            }
+            let b = n.get_batch8(&x, &y, &z);
+            for l in 0..8 {
+                let sc = n.get(x[l], y[l], z[l]);
+                assert_eq!(
+                    sc.to_bits(),
+                    b[l].to_bits(),
+                    "case {case} lane {l}: scalar={sc:e} batch={:e}",
+                    b[l]
+                );
+            }
+        }
     }
 }

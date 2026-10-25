@@ -285,6 +285,89 @@ fn floor_mod(a: i32, b: i32) -> i32 {
 
 pub type SamRef = Arc<DfSam263>;
 
+// ---- volume-sample profiling (fill263bench: prof report) ----------------
+pub static PROF_ON_263: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Exclusive per-kind nanos: 0 shell, 1 noise-family, 2 blended, 3 spline,
+/// 4 gradient, 5 beard, 6 slice, 7 cache, 8 interpolated-shell.
+pub static PROF_KINDS: [std::sync::atomic::AtomicU64; 9] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+/// Exact internal timers of the Interpolated volume path.
+pub static PROF_INTERP_CELL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_INTERP_FILL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+thread_local! { static PROF_CHILD_T: std::cell::Cell<u64> = std::cell::Cell::new(0); }
+
+#[inline]
+fn prof_now() -> u64 {
+    use std::sync::atomic::AtomicU64;
+    static EPOCH: AtomicU64 = AtomicU64::new(0);
+    static TICK: AtomicU64 = AtomicU64::new(0);
+    // monotonic micro-timer: nanos since first use via Instant elapsed
+    let t = std::time::Instant::now();
+    let base = EPOCH.compare_exchange(0, 1, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok();
+    if base {
+        // store nothing; we only need deltas — use a monotonic counter seeded once
+    }
+    let _ = &EPOCH;
+    let _ = &TICK;
+    // Use a cheap monotonic source: Instant elapsed since thread start is not
+    // available; fall back to Instant::now() minus a lazy global epoch.
+    static mut EPOCH_INST: Option<std::time::Instant> = None;
+    unsafe {
+        if let Some(e) = &*(&raw const EPOCH_INST) {
+            t.duration_since(*e).as_nanos() as u64
+        } else {
+            EPOCH_INST = Some(t);
+            0
+        }
+    }
+}
+
+impl DfSam263 {
+    /// Profiling class id (see PROF_KINDS).
+    pub fn prof_kind(&self) -> usize {
+        match self {
+            DfSam263::Noise { .. }
+            | DfSam263::ShiftedXz { .. }
+            | DfSam263::ShiftB { .. }
+            | DfSam263::Blended { .. } => 1,
+            DfSam263::Spline { .. } => 3,
+            DfSam263::Gradient { .. } => 4,
+            DfSam263::Beard => 5,
+            DfSam263::SliceX { .. }
+            | DfSam263::SliceY { .. }
+            | DfSam263::SliceZ { .. }
+            | DfSam263::SliceXz { .. } => 6,
+            DfSam263::Cache { .. } => 7,
+            DfSam263::Interpolated { .. } => 8,
+            _ => 0,
+        }
+    }
+}
+
+pub const PROF_KIND_NAMES: [&str; 9] = [
+    "shell(plain ops)",
+    "noise-family",
+    "blended",
+    "spline",
+    "gradient",
+    "beard",
+    "slice",
+    "cache",
+    "interpolated-shell",
+];
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum BinOp {
     Add,
@@ -606,6 +689,14 @@ impl N263 {
             N263::Plain(n) => n.get(x, y, z),
         }
     }
+
+    #[inline]
+    pub fn get_batch8(&self, x: &[f64; 8], y: &[f64; 8], z: &[f64; 8]) -> [f32; 8] {
+        match self {
+            N263::Normal(n) => n.get_batch8(x, y, z),
+            N263::Plain(n) => n.get_batch8(x, y, z),
+        }
+    }
 }
 
 // ---------------------------------------------------------------- noise factory
@@ -683,7 +774,23 @@ impl NoiseFactory263 {
 // ---------------------------------------------------------------- sampler impls
 
 impl DfSam263 {
+    #[inline]
     pub fn sample_volume(&self, ctx: &mut SamplerCtx263, out: &mut Vec<f32>, vol: &DensityVolume) {
+        if !PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed) {
+            // hot path: single dispatch, no wrapper overhead
+            return self.sample_volume_inner(ctx, out, vol);
+        }
+        let t0 = prof_now();
+        let child_before = PROF_CHILD_T.with(|c| c.get());
+        PROF_CHILD_T.with(|c| c.set(0));
+        self.sample_volume_inner(ctx, out, vol);
+        let total = prof_now() - t0;
+        let child = PROF_CHILD_T.with(|c| c.get());
+        PROF_KINDS[self.prof_kind()].fetch_add(total - child, std::sync::atomic::Ordering::Relaxed);
+        PROF_CHILD_T.with(|c| c.set(child_before + total));
+    }
+
+    fn sample_volume_inner(&self, ctx: &mut SamplerCtx263, out: &mut Vec<f32>, vol: &DensityVolume) {
         match self {
             DfSam263::Constant(c) => out.fill(*c),
             DfSam263::Beard => ctx.beard.fill_volume(vol, out),
@@ -694,6 +801,13 @@ impl DfSam263 {
             } => {
                 // NoiseFunction.Sampler volume: fill(0) then addToVolume(amplitude*get).
                 // addToVolume fills index-order per point; emulate directly.
+                // NOTE: the 8-wide AVX2 kernel (get_batch8) measured 2x SLOWER
+                // than this scalar loop — perlin is lookup-bound (9 dependent
+                // p_adj table reads per point), the SIMD arithmetic does not
+                // pay for the per-lane prep. A column-state kernel (hoist the
+                // x/z lattice + hashes per column, like the legacy
+                // noise_col4 kernels) is the future direction; the batch
+                // kernel + bit-exact tests stay in n263.rs for that work.
                 let mut index = 0usize;
                 for z in 0..vol.size_z {
                     let bz = vol.block_z(z);
@@ -1180,22 +1294,27 @@ impl DfSam263 {
                 main_xz_div,
                 main_y_div,
             } => {
+                // 26.3 compiled BlendedNoise = NoiseFunction.Samplers: the z
+                // coordinate is scaled by xzMultiplier (NOT bare z). Scalar
+                // loop: the batch kernel measured slower (lookup-bound).
                 let mut index = 0usize;
+                let bxz = xz_multiplier;
+                let bym = y_multiplier;
+                let mdiv = main_xz_div;
+                let mydiv = main_y_div;
                 for z in 0..vol.size_z {
-                    let bz = vol.block_z(z);
+                    let bz = vol.block_z(z) as f64 * bxz;
                     for x in 0..vol.size_x {
-                        let bx = vol.block_x(x);
+                        let bx = vol.block_x(x) as f64 * bxz;
+                        let bxm = bx / mdiv;
+                        let bzm = bz / mdiv;
                         for y in 0..vol.size_y {
                             let by = vol.block_y(y);
-                            // 26.3 compiled BlendedNoise = NoiseFunction.Samplers:
-                            // z coordinate is scaled by xzMultiplier (NOT bare z!).
-                            let min = min_stack.get(bx as f64 * xz_multiplier, by as f64 * y_multiplier, bz as f64 * xz_multiplier);
-                            let max = max_stack.get(bx as f64 * xz_multiplier, by as f64 * y_multiplier, bz as f64 * xz_multiplier);
-                            let main = main_stack.get(
-                                bx as f64 * xz_multiplier / main_xz_div,
-                                by as f64 * y_multiplier / main_y_div,
-                                bz as f64 * xz_multiplier / main_xz_div,
-                            );
+                            let yv = by as f64 * bym;
+                            let ymv = yv / mydiv;
+                            let min = min_stack.get(bx, yv, bz);
+                            let max = max_stack.get(bx, yv, bz);
+                            let main = main_stack.get(bxm, ymv, bzm);
                             let choice = mth_clamp(main + 0.5, 0.0, 1.0);
                             out[index] = if choice == 0.0 {
                                 min
@@ -1226,6 +1345,35 @@ impl DfSam263 {
                     let mut b = ctx.scratch.acquire(vol.size());
                     c.sample_volume(ctx, &mut b, vol);
                     coord_bufs.push(b);
+                }
+                if std::env::var("CRUS_SPLINE_DEBUG").is_ok() {
+                    let mut maxslot = 0usize;
+                    fn maxs(v: &SplineRef, m: &mut usize) {
+                        if let SplineRef::Multi { coord_slot, values: nested, .. } = v {
+                            *m = (*m).max(*coord_slot);
+                            for n in nested { maxs(n, m); }
+                        }
+                    }
+                    for v in values { maxs(v, &mut maxslot); }
+                    eprintln!(
+                        "[spline-debug] node={:p} coords={} maxslot={} vol=({},{},{})",
+                        locations.as_ptr(), coords.len(), maxslot, vol.size_x, vol.size_y, vol.size_z
+                    );
+                    if coords.len() <= maxslot {
+                        eprintln!("[spline-debug] *** BROKEN NODE TREE ***");
+                        fn dumpv(v: &SplineRef, d: usize, out: &mut Vec<String>) {
+                            match v {
+                                SplineRef::Constant(_) => out.push(format!("{}const", "  ".repeat(d))),
+                                SplineRef::Multi { coord_slot, values: nested, .. } => {
+                                    out.push(format!("{}multi slot={coord_slot}", "  ".repeat(d)));
+                                    for n in nested { dumpv(n, d + 1, out); }
+                                }
+                            }
+                        }
+                        let mut lines = Vec::new();
+                        for v in values { dumpv(v, 1, &mut lines); }
+                        for l in lines.iter().take(70) { eprintln!("[spline-debug] {}", l); }
+                    }
                 }
                 for i in 0..out.len() {
                     let input = coord_bufs[0][i];
@@ -1735,8 +1883,22 @@ fn interpolated_volume(
     };
 
     let mut cell_buf = ctx.scratch.acquire(cell_volume.size());
+    let prof_t = if PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed) {
+        prof_now()
+    } else {
+        0
+    };
     a.sample_volume(ctx, &mut cell_buf, &cell_volume);
+    if prof_t != 0 {
+        PROF_INTERP_CELL.fetch_add(prof_now() - prof_t, std::sync::atomic::Ordering::Relaxed);
+    }
+    let prof_t2 = if PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed) {
+        prof_now()
+    } else {
+        0
+    };
 
+    let fill_done = std::cell::Cell::new(false);
     for cell_z in 0..cell_count_z {
         let next_cell_z = (cell_z + 1).min(cell_volume.size_z - 1);
         for cell_x in 0..cell_count_x {
@@ -1761,6 +1923,9 @@ fn interpolated_volume(
                 v101 = v111;
             }
         }
+    }
+    if prof_t2 != 0 {
+        PROF_INTERP_FILL.fetch_add(prof_now() - prof_t2, std::sync::atomic::Ordering::Relaxed);
     }
     ctx.scratch.release(cell_buf);
 }

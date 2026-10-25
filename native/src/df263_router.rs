@@ -295,7 +295,7 @@ impl SplineBuilder {
 
 fn spline_df(spline: SplineRef) -> SamRef {
     let mut s = spline;
-    s.assign_slots(1); // slot 0 = root coordinate
+    s.assign_slots(0); // root Multi slot 0 aligns with coord_bufs[0] = root coord
     let (coord, locations, derivatives, values) = match &s {
         SplineRef::Multi {
             coord,

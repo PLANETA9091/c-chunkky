@@ -56,7 +56,7 @@ impl Gen263 {
         }
     }
 
-    fn aquifer_for<'a>(
+    pub fn aquifer_for<'a>(
         &'a self,
         ctx: &mut SamplerCtx263,
         volume: &DensityVolume,
@@ -92,6 +92,58 @@ impl Gen263 {
         // are NOT written, so the destination must start zeroed.
         out.fill(0);
         let volume = DensityVolume::block_step((16, self.height, 16), (cx * 16, self.min_y, cz * 16));
+
+        // ---- strip-parallel fill -----------------------------------------
+        // The volume sample + substance walk are per-z-strip pure functions
+        // (deterministic per point; per-strip caches converge to identical
+        // values). Strips write disjoint out[] rows; marks concatenate in
+        // strip (z) order — the same order the sequential walk produces.
+        // The aquifer prefill runs per thread over the FULL volume so every
+        // strip's 4-closest grid lookups see the whole chunk's surface grid.
+        let threads = fill_threads();
+        if threads > 1 && volume.size_z >= threads as i32 {
+            let strips: Vec<(i32, i32)> = split_strips(volume.size_z, threads);
+            if strips.len() > 1 {
+                // per-strip private out buffer (disjoint z rows) merged
+                // sequentially afterwards; marks concatenate in strip order —
+                // identical to the sequential walk's z-major order.
+                let volume_ref = &volume;
+                let beard_ref = &beard_list;
+                let strip_results: Result<Vec<(Vec<i64>, Box<[u16; OUT_LEN]>)>, ()> = std::thread::scope(|scope| {
+                    let mut handles = Vec::with_capacity(strips.len() - 1);
+                    for &(z0, z1) in &strips[1..] {
+                        handles.push(scope.spawn(move || {
+                            self.fill_strip(cx, cz, beard_ref, volume_ref, z0, z1)
+                        }));
+                    }
+                    let mut results = Vec::with_capacity(strips.len());
+                    let (z0, z1) = strips[0];
+                    results.push(self.fill_strip(cx, cz, beard_list, &volume, z0, z1));
+                    for h in handles {
+                        if let Ok(r) = h.join() {
+                            results.push(r);
+                        } else {
+                            // worker panicked — fall back to sequential fill
+                            // to preserve correctness (marks stay empty here;
+                            // the sequential path below repopulates out).
+                            return Err(());
+                        }
+                    }
+                    Ok(results)
+                });
+                if let Ok(results) = strip_results {
+                    out.fill(0);
+                    for ((local_marks, buf), &(z0, z1)) in results.iter().zip(strips.iter()) {
+                        merge_strip_rows(buf, out, z0, z1);
+                        marks.extend_from_slice(local_marks);
+                    }
+                    return;
+                }
+                // panic fallback: repair out and fall through to sequential
+                out.fill(0);
+            }
+        }
+
         let mut ctx = SamplerCtx263::cached();
         ctx.beard = crate::beard263::Beardifier263::decode(beard_list);
 
@@ -148,6 +200,83 @@ impl Gen263 {
             }
         }
         ctx.scratch.release(buf);
+    }
+
+    /// One z-strip of the fill: own ctx/aquifer/buffer; writes its rows of
+    /// out[] and appends fluid marks (z-order preserved). Bit-exact vs the
+    /// sequential walk: every value is a pure function of (x, y, z).
+    fn fill_strip(
+        &self,
+        cx: i32,
+        cz: i32,
+        beard_list: &[i32],
+        volume: &DensityVolume,
+        z0: i32,
+        z1: i32,
+    ) -> (Vec<i64>, Box<[u16; OUT_LEN]>) {
+        let strip_vol = DensityVolume {
+            size_x: volume.size_x,
+            size_y: volume.size_y,
+            size_z: z1 - z0,
+            min_x: volume.min_x,
+            min_y: volume.min_y,
+            min_z: volume.min_z + z0 * volume.step_z,
+            step_x: volume.step_x,
+            step_y: volume.step_y,
+            step_z: volume.step_z,
+        };
+        let mut ctx = SamplerCtx263::cached();
+        ctx.beard = crate::beard263::Beardifier263::decode(beard_list);
+        // full-volume prefill so the aquifer grid is complete per thread
+        let mut aquifer = self.aquifer_for(&mut ctx, volume);
+        let mut buf = ctx.scratch.acquire(strip_vol.size());
+        let mut strip_out: Box<[u16; OUT_LEN]> = vec![0u16; OUT_LEN].into_boxed_slice().try_into().unwrap();
+        let mut marks: Vec<i64> = Vec::new();
+        self.final_density.sample_volume(&mut ctx, &mut buf, &strip_vol);
+        for z in 0..strip_vol.size_z {
+            let z_global = z0 + z;
+            for x in 0..strip_vol.size_x {
+                for y in (0..strip_vol.size_y).rev() {
+                    let density = buf[strip_vol.index_unchecked(x, y, z)];
+                    let ty = aquifer.compute_substance(
+                        &mut ctx,
+                        strip_vol.block_x(x),
+                        strip_vol.block_y(y),
+                        strip_vol.block_z(z),
+                        density as f64,
+                    );
+                    let Some(ty) = ty else {
+                        strip_out[out_index(self.min_y, strip_vol.block_y(y), x, z_global)] = STONE_ID;
+                        continue;
+                    };
+                    match ty {
+                        FluidTy::Air => {}
+                        FluidTy::Water => {
+                            strip_out[out_index(self.min_y, strip_vol.block_y(y), x, z_global)] = WATER_ID;
+                            if aquifer.should_schedule_fluid_update() {
+                                marks.push(crate::aquifer263::pos_as_long(
+                                    strip_vol.block_x(x),
+                                    strip_vol.block_y(y),
+                                    strip_vol.block_z(z),
+                                ));
+                            }
+                        }
+                        FluidTy::Lava => {
+                            strip_out[out_index(self.min_y, strip_vol.block_y(y), x, z_global)] = LAVA_ID;
+                            if aquifer.should_schedule_fluid_update() {
+                                marks.push(crate::aquifer263::pos_as_long(
+                                    strip_vol.block_x(x),
+                                    strip_vol.block_y(y),
+                                    strip_vol.block_z(z),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ctx.scratch.release(buf);
+        (marks, strip_out)
     }
 
     /// Native iterateNoiseColumn 26.3 (getBaseHeight): 1-cell volume walk,
@@ -314,5 +443,48 @@ impl Gen263 {
         }
         let changed_marks = self.apply_carvers(cx, cz, seed, io, ops);
         marks.extend(changed_marks);
+    }
+}
+
+
+/// Strip-parallel worker count: CRUS_FILL_THREADS_263 overrides, else
+/// available_parallelism (min 1). 1 disables the strip path entirely.
+fn fill_threads() -> usize {
+    if let Ok(v) = std::env::var("CRUS_FILL_THREADS_263") {
+        if let Ok(n) = v.parse::<usize>() {
+            return n.max(1);
+        }
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(4)
+}
+
+/// Split `total` rows into at most `parts` contiguous strips (balanced).
+fn split_strips(total: i32, parts: usize) -> Vec<(i32, i32)> {
+    let parts = parts.min(total.max(1) as usize);
+    let base = total / parts as i32;
+    let rem = total % parts as i32;
+    let mut out = Vec::with_capacity(parts);
+    let mut z = 0i32;
+    for i in 0..parts as i32 {
+        let len = base + if i < rem { 1 } else { 0 };
+        out.push((z, z + len));
+        z += len;
+    }
+    out
+}
+
+
+/// Copy a strip buffer's z-rows into the full out buffer (JNI layout:
+/// index = (y-minY)*256 + z*16 + x — a z row is 16 contiguous u16s).
+fn merge_strip_rows(src: &[u16; OUT_LEN], dst: &mut [u16; OUT_LEN], z0: i32, z1: i32) {
+    // copy only the strip's own global z rows (y relative: idx = y*256 + z*16 + x)
+    for y in 0..384i32 {
+        for z in z0..z1 {
+            let start = (y * 256 + z * 16) as usize;
+            dst[start..start + 16].copy_from_slice(&src[start..start + 16]);
+        }
     }
 }

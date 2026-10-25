@@ -2348,3 +2348,45 @@ Stage Summary:
 - Provisioning 26.3: JDK25 (/home/z/tools/jdk-25.0.5+8), paper-26.3-222.jar (sha f64977...d488),
   libraries+mojmap extract, probe/paper-api-26.3.jar из libraries.
 - Дальше: bulk-layout статус на 26.3, перф fill263 (p50 13.2ms -> цель 4-6), e2e-замер, push.
+
+---
+## cont-51: FILL263 STRIP-PARALLEL (-37%) + SPLINE SLOT CORRUPTION FIX
+
+Task: «мега ускорение, ванила совместимо, пушить в гитхаб» (без саб-агентов).
+
+Work Log:
+- ПРОФИЛЬ fill263 (новый native/src/bin/fill263bench, exclusive per-kind):
+  volume sample 8.98ms (87%): noise-family 6.56 (весь noise на клеточном уровне,
+  1225 pts на interpolated), shell 2.0, trilinear 0.67, aquifer ctor 0.30,
+  substance 0.86. fill_chunk median 10.35ms isolated.
+- AVX2 8-wide кернел PerlinNoise263/NoiseStack/NormalNoise get_batch8
+  (n263.rs, бит-точные тесты 2/2): объёмные arms переписаны — РЕГРЕССИЯ 10.4->13.5:
+  perlin LOOKUP-BOUND (9 зависимых p_adj чтений/точку), SIMD-арифметика не окупает
+  per-lane prep (микробенч: 0.48x). ОТКАТ объёмных arms; кернел+тесты оставлены для
+  будущей column-state работы. Урок: wrapper профилирования ломал инлайнинг
+  рекурсии (двойной dispatch, +30%) — hot path обходит wrapper при PROF=off.
+- STRIP-PARALLEL fill_chunk (fill263.rs): z-полосы по потокам, у каждого СВОЙ
+  SamplerCtx263 + полный aquifer-prefill (4-closest grid видит весь чанк), свой
+  out-буфер + merge z-строк, marks конкатенируются в z-порядке (=sequential).
+  CRUS_FILL_THREADS_263 (default available_parallelism, cap 4), panic-fallback на
+  sequential. fill_chunk 10.35 -> 6.5ms (-37%) на 2 ядрах, БИТ-ТОЧНО (golden 4 чанка
+  / 129273 ячеек vs FillOracle263).
+- КОРРУПЦИЯ-БАГ СПЛАЙНОВ (из Panic в проде): assign_slots(1) давал первому
+  вложенному Multi slot=2, а volume/point пути ждут 1 (coord_bufs[0]=root coord).
+  Терраин-сплайны маскировали (единый координатный DF — любой индекс одно значение),
+  multi-coord сплайны (chunk_surface_level и др.) читали ЧУЖИЕ буферы + OOB.
+  ФИКС: assign_slots(0). Golden остался бит-точным, 65/65 тестов.
+- Инструменты: splineaudit (полный обход графа: 193 узла, все LerpConst*/Pow*/
+  Round ветки — исходный kids() терял 136 узлов!), e2e263.sh (forceload-окна),
+  профилировочная обвязка PROF_KINDS в df263.rs (env-gated, вне hot path).
+- Сервер: setsid в server263_up.sh (переживает таймауты), forceload-лимит учтён
+  (<=256 чанков/запрос), e2e окна ~73-85ms/чанк (2-core, gen-parallelism=false;
+  native p50 под нагрузкой 13.9ms, layout 0.3, bulk=ok, marks bridge ok).
+
+Stage Summary:
+- Коммит: "perf(263): strip-parallel fill (-37%), spline slot corruption fix,
+  AVX2 noise kernels + audit tooling".
+- СЛЕДУЮЩИЕ РЫЧАГИ: (1) column-state noise kernel (шум lookup-bound —
+  хоистить x/z решётку per колонку как в legacy noise_col4), (2) сплавить
+  shell-операции final_density в один проход (-1.5ms), (3) deco/features
+  (Java-стадия, главный остаток e2e), (4) параллелизм на gen-parallelism=true.

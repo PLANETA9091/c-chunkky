@@ -35,9 +35,9 @@ PGEN_FLAG="-Dpaper.chunk-system.gen-parallelism=false"
 CRUS_NATIVE_CARVERS="${CRUS_NATIVE_CARVERS:-0}" CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" \
 echo "booting Paper 26.3 (JDK 25)..."
 CRUS_NATIVE_CARVERS="${CRUS_NATIVE_CARVERS:-0}" CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" \
-$JAVA $HEAP_ARGS $PGEN_FLAG \
+setsid $JAVA $HEAP_ARGS $PGEN_FLAG \
   -XX:FlightRecorderOptions=stackdepth=128 \
   -Djava.library.path="$ROOT/native/target/release" \
-  -jar paper-26.3-218.jar nogui < run.in > run.out 2>&1 &
+  -jar paper-26.3-222.jar nogui < run.in > run.out 2>&1 &
 echo $! > server.pid
 echo "server263 pid: $(cat server.pid)"
