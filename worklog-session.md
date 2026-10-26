@@ -2606,3 +2606,31 @@ Work Log:
 Stage Summary:
 - Регион 400 чанков теперь: sulfur/cinnabar/granite = 0 дельта, stone-family
   аномалий нет; остаток = только deco nondeterminism vanilla-vs-vanilla.
+
+---
+## cont-54c: E2E-ЗАМЕР (2-core sandbox) + ТОПМАТЕРИАЛ-ПЛАН (декомпил заморожен)
+
+Work Log:
+- E2E (12x12 регион, e2e263.sh): 221.5 ms/chunk wall — 2-core sandbox
+  троттлит (native fill p50 29-52ms vs 6.5 изолированно на 4-core cont-51);
+  честный перф — только CI-judge. Native stats живы: layout 0.64ms,
+  marks bridge ok.
+- ТОПМАТЕРИАЛ (carver-mask topMaterial, задокументированный гэп cont-49) —
+  семантика MaterialSystem.topMaterial заморожена по декомпилу 26.3:
+  * FRESH MaterialRuleContext c 1x1x1 DensityVolume at (x, y, z);
+  * biomeGetter = correctBiomeManager::getBiome = FIDDLE + POINT-путь
+    клим.ресемплера (createUncachedResolver, НЕ контейнер);
+  * updateXZ(x, z, gradientX, gradientZ) — градиенты от WORLD_SURFACE_WG
+    heightmap чанка; updateY(1, 1, underFluid ? y+1 : MIN, y);
+  * csl для min_surface: preliminarySurfaceVolume 1x1x1 при y=pos.y —
+    indexOfBlock(x, 0, z) = -1 -> POINT-путь fallback (не плита!);
+  * rule.tryApply(x, y, z) -> Optional; empty -> оставить dirt.
+  План: point_biome263 (6 клим.DF sample_value at y -> quantize -> RTree
+  find_value) + одноколоночный вход в walk (синтет. контекст 1/1/water).
+- STATE: sulfur-семейство 0 дельта на 400 чанках; raw-fill аномалия
+  закрыта (compute-on-missing); остаток региона = deco nondeterminism.
+
+Stage Summary:
+- Push: 5939fde (parity-фиксы), f988399 (grid fallback). cargo test 70/70.
+- Следующая сессия: (1) topMaterial по плану выше; (2) deco/features 26.3
+  (главный остаток ~16-23%); (3) e2e на CI 4-core.
