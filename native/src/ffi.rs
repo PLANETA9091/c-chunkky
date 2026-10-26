@@ -43,6 +43,9 @@ pub struct Gen263State {
     /// under the sessions lock and fills WITHOUT holding it (the fill must
     /// not serialize against the noise fills on the global mutex).
     pub biomes: Option<std::sync::Arc<crate::biome263::BiomeState263>>,
+    /// Native 26.3 MaterialSystem (surface rules). None = the vanilla Java
+    /// surface stage stays active (kill-switch / parse failure / no biomes).
+    pub surface: Option<crate::surface263::SurfaceState263>,
 }
 
 pub type CarverState = crate::carver::CarverState;
@@ -249,10 +252,32 @@ pub fn ctx_new(seed: i64, min_y: i32, height: i32, sea_level: i32) -> i64 {
                 })
                 .unwrap_or(None)
             };
-            (g, biomes)
+            // Native surface stage (26.3 MaterialSystem): parse the embedded
+            // 26.3 material_rule tree + resolve 26.3 noises/DFs. Needs the
+            // native biome name table (cond indexes); kill-switch restores
+            // the vanilla Java SURFACE status for A/B parity testing.
+            let surface = if std::env::var("CRUS_NO_NATIVE_SURFACE_263").as_deref() == Ok("1") {
+                None
+            } else {
+                std::panic::catch_unwind(|| {
+                    crate::surface263::build_surface263(
+                        seed,
+                        min_y,
+                        height,
+                        8,
+                        sea_level,
+                        biomes.as_deref(),
+                    )
+                })
+                .unwrap_or(None)
+            };
+            (g, biomes, surface)
         }) {
-            Ok((g, biomes263)) => {
-                Some(Gen263State { g, marks: Vec::new(), beard: Vec::new(), ops: Vec::new(), biomes: biomes263 })
+            Ok((g, biomes263, surface263)) => {
+                if surface263.is_some() {
+                    crate::ffi::log_warn("surface263: native MaterialSystem built");
+                }
+                Some(Gen263State { g, marks: Vec::new(), beard: Vec::new(), ops: Vec::new(), biomes: biomes263, surface: surface263 })
             }
             Err(_) => None,
         }
@@ -343,9 +368,37 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
     // SAFETY: see the invariant above — exclusive per-ctx access, stable map.
     let ctx: &mut Ctx = unsafe { &mut *ctx_ptr };
     if let Some(st) = ctx.v263.as_mut() {
-        let beard = std::mem::take(&mut st.beard);
-        st.g.fill_chunk(cx, cz, &beard, out, &mut st.marks);
-        st.beard = beard;
+        let Gen263State {
+            g,
+            marks,
+            beard,
+            surface,
+            ..
+        } = st;
+        let beard_list = std::mem::take(beard);
+        g.fill_chunk(cx, cz, &beard_list, out, marks);
+        *beard = beard_list;
+        // Native surface tail 26.3 — vanilla order: surface at the SURFACE
+        // status, right after NOISE, before carvers. The biome grid comes
+        // from fillBiomes (BIOMES status runs first); without a grid the
+        // tail is skipped (the vanilla surface stage then re-runs on top —
+        // same contract as the legacy surface_tail guard).
+        if let Some(sf) = surface.as_ref() {
+            let grid = take_biome_grid263(cx, cz);
+            if let Some(gd) = grid {
+                crate::surface263::apply_surface263(
+                    sf,
+                    g.min_y,
+                    g.height,
+                    g.sea_level,
+                    cx,
+                    cz,
+                    out,
+                    marks,
+                    &gd,
+                );
+            }
+        }
         return;
     }
     ctx.gen.fill(cx, cz, out);
@@ -861,6 +914,9 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fillBiomes
         drop(state_guard);
         crate::biome263::fill_biomes263(&b, min_y, height, cx as i32, cz as i32, &mut slice[..n]);
         ((*tbl).v1_1.ReleaseIntArrayElements)(env, out, ptr, 0);
+        // the grid handoff is global (see V263_GRIDS) — the consuming fill
+        // may run on ANY pool ctx.
+        store_biome_grid263(cx as i32, cz as i32, &slice[..n]);
         return n as jni_sys::jint;
     }
     let Some(state) = c.biomes.as_ref() else {
@@ -899,6 +955,55 @@ pub fn store_biome_grid(c: &Ctx, cx: i32, cz: i32, grid: &[i32]) {
         }
         g.insert((cx, cz), Box::from(grid));
     }
+}
+
+/// 26.3 biome-grid handoff (BIOMES status -> NOISE fill tail). GLOBAL by
+/// (cx, cz): fillBiomes runs on pool.firstCtx() while fills acquire ANY pool
+/// ctx — a per-ctx cache would skip the surface tail on every other ctx
+/// (raw-stone chunks). The grid is per-chunk data, not per-ctx state.
+static V263_GRIDS: std::sync::Mutex<Option<std::collections::HashMap<(i32, i32), Box<[i32]>>>> =
+    std::sync::Mutex::new(None);
+
+pub fn store_biome_grid263(cx: i32, cz: i32, grid: &[i32]) {
+    let mut guard = V263_GRIDS.lock().unwrap();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    // generous cap: the chunk system may run many BIOMES steps before the
+    // matching NOISE fills (per-chunk status ordering, gen single-threaded);
+    // a tight cap + clear() would drop pending grids -> raw-stone chunks.
+    // 6 KiB per grid, consumed (removed) by the fill tail immediately after.
+    if map.len() > 8192 {
+        map.clear();
+    }
+    map.insert((cx, cz), Box::from(grid));
+}
+
+/// Take the cached grid for (cx, cz) (the fill tail consumes it once).
+fn take_biome_grid263(cx: i32, cz: i32) -> Option<Box<[i32]>> {
+    let mut guard = V263_GRIDS.lock().unwrap();
+    guard.as_mut().and_then(|m| m.remove(&(cx, cz)))
+}
+
+/// Bench helper: the v263 biome grid + global store (no JNI).
+pub fn bench_fill_biomes263(id: i64, cx: i32, cz: i32, out: &mut [i32]) -> i32 {
+    let (b, min_y, height) = {
+        let guard = SESSIONS.lock().unwrap();
+        let Some((b, mn, h)) = guard
+            .as_ref()
+            .and_then(|m| m.get(&id))
+            .and_then(|c| c.v263.as_ref())
+            .and_then(|v| v.biomes.clone().map(|b| (b, v.g.min_y, v.g.height)))
+        else {
+            return -1;
+        };
+        (b, mn, h)
+    };
+    let n = (height as usize) / 16 * 64;
+    if out.len() < n {
+        return -1;
+    }
+    crate::biome263::fill_biomes263(&b, min_y, height, cx, cz, &mut out[..n]);
+    store_biome_grid263(cx, cz, &out[..n]);
+    n as i32
 }
 
 /// Bench/plugin-test helper: compute + store the biome grid for one chunk
@@ -941,15 +1046,22 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_surfaceSta
 ) -> jni_sys::jobjectArray {
     let tbl = *env;
     let guard = SESSIONS.lock().unwrap();
-    let Some(s) = guard.as_ref().and_then(|m| m.get(&(ctx as i64)))
-        .and_then(|c| c.surface.as_ref()) else {
-        return std::ptr::null_mut();
+    let states: &[String] = match guard
+        .as_ref()
+        .and_then(|m| m.get(&(ctx as i64)))
+        .and_then(|c| {
+            c.surface
+                .as_ref()
+                .map(|s| &s.cfg.states)
+                .or_else(|| c.v263.as_ref().and_then(|v| v.surface.as_ref()).map(|s| &s.cfg.states))
+        }) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
     };
     let str_class = ((*tbl).v1_1.FindClass)(env, c"java/lang/String".as_ptr());
     if str_class.is_null() {
         return std::ptr::null_mut();
     }
-    let states = &s.cfg.states;
     let arr = ((*tbl).v1_1.NewObjectArray)(
         env,
         states.len() as jni_sys::jsize,
@@ -1002,17 +1114,28 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_surfaceSet
 /// Rust-side helper shared by JNI + bins: assign material ids + bands.
 pub fn surface_assign_ids(id: i64, ids: &[u16]) -> Result<(), String> {
     let mut guard = SESSIONS.lock().unwrap();
-    let Some(c) = guard.as_mut().and_then(|m| m.get_mut(&id)) else {
-        return Err("no ctx".into());
-    };
-    let Some(s) = c.surface.as_mut() else {
+    let c = guard
+        .as_mut()
+        .and_then(|m| m.get_mut(&id))
+        .ok_or_else(|| "no ctx".to_string())?;
+    if let Some(s) = c.surface.as_mut() {
+        if ids.len() != s.cfg.states.len() {
+            return Err(format!("ids {} != states {}", ids.len(), s.cfg.states.len()));
+        }
+        s.cfg.ids = ids.to_vec();
+        let factory = crate::surface::root_factory(s.env.seed);
+        s.cfg.bandlands = crate::surface::generate_bands(&s.cfg, &factory);
+        return Ok(());
+    }
+    let st = c.v263.as_mut().ok_or_else(|| "no surface".to_string())?;
+    let Some(s) = st.surface.as_mut() else {
         return Err("no surface".into());
     };
     if ids.len() != s.cfg.states.len() {
         return Err(format!("ids {} != states {}", ids.len(), s.cfg.states.len()));
     }
     s.cfg.ids = ids.to_vec();
-    let factory = crate::surface::root_factory(s.env.seed);
+    let factory = crate::surface::root_factory(st.g.seed);
     s.cfg.bandlands = crate::surface::generate_bands(&s.cfg, &factory);
     Ok(())
 }
@@ -1071,10 +1194,17 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_surfaceSet
 /// Rust-side helper shared by JNI + bins.
 pub fn surface_assign_temps(id: i64, temps: &[f32], frozen: &[bool]) -> Result<(), String> {
     let mut guard = SESSIONS.lock().unwrap();
-    let Some(c) = guard.as_mut().and_then(|m| m.get_mut(&id)) else {
-        return Err("no ctx".into());
-    };
-    let Some(s) = c.surface.as_mut() else {
+    let c = guard
+        .as_mut()
+        .and_then(|m| m.get_mut(&id))
+        .ok_or_else(|| "no ctx".to_string())?;
+    if let Some(s) = c.surface.as_mut() {
+        s.temps = temps.to_vec();
+        s.frozen = frozen.to_vec();
+        return Ok(());
+    }
+    let st = c.v263.as_mut().ok_or_else(|| "no surface".to_string())?;
+    let Some(s) = st.surface.as_mut() else {
         return Err("no surface".into());
     };
     s.temps = temps.to_vec();
@@ -1098,8 +1228,17 @@ pub fn surface_states_of(id: i64) -> Option<Vec<String>> {
     guard
         .as_ref()
         .and_then(|m| m.get(&id))
-        .and_then(|c| c.surface.as_ref())
-        .map(|s| s.cfg.states.clone())
+        .and_then(|c| {
+            c.surface
+                .as_ref()
+                .map(|s| s.cfg.states.clone())
+                .or_else(|| {
+                    c.v263
+                        .as_ref()
+                        .and_then(|v| v.surface.as_ref())
+                        .map(|s| s.cfg.states.clone())
+                })
+        })
 }
 
 pub(crate) fn log_warn(msg: &str) {

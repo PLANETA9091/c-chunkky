@@ -168,7 +168,10 @@ pub fn upgrade_seed_to_128bit(seed: i64) -> (i64, i64) {
 /// Mth.getSeed(x, y, z)
 #[inline]
 pub fn mth_get_seed(x: i32, y: i32, z: i32) -> i64 {
-    let mut l = ((x as i64).wrapping_mul(3129871))
+    // javap Mth.getSeed: `iload_0; ldc 3129871; imul; i2l` — the X term is an
+    // INT (32-bit wrapping) multiply widened AFTER; z/y widen first (long
+    // multiplies). The int-overflow at |x| >= ~2155 is part of the contract.
+    let mut l = ((x.wrapping_mul(3129871)) as i64)
         ^ ((z as i64).wrapping_mul(116129781))
         ^ (y as i64);
     l = l
@@ -258,6 +261,11 @@ pub struct XoroshiroPositionalRandomFactory {
 }
 
 impl XoroshiroPositionalRandomFactory {
+    /// Debug access to the raw factory seeds.
+    pub fn seeds(&self) -> (i64, i64) {
+        (self.seed_lo, self.seed_hi)
+    }
+
     pub fn at(&self, x: i32, y: i32, z: i32) -> XoroshiroRandomSource {
         let seed = mth_get_seed(x, y, z);
         XoroshiroRandomSource::from_128(seed ^ self.seed_lo, self.seed_hi)

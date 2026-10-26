@@ -2445,7 +2445,14 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 cCraftBlockData = Class.forName(
                         "org.bukkit.craftbukkit.block.CraftBlockData");
             }
-            Method mFromData = cCraftBlockData.getMethod("fromData", cBlockState);
+            // 1.21.8: CraftBlockData.fromData(BlockState); 26.3 renamed it
+            // to createData(BlockState) — resolve whichever exists.
+            Method mFromData;
+            try {
+                mFromData = cCraftBlockData.getMethod("fromData", cBlockState);
+            } catch (NoSuchMethodException e) {
+                mFromData = cCraftBlockData.getMethod("createData", cBlockState);
+            }
             Class<?> cFluidState = Class.forName("net.minecraft.world.level.material.FluidState");
             Method mFluidRand = cFluidState.getMethod("isRandomlyTicking");
             Method mFluidEmpty = cFluidState.getMethod("isEmpty");

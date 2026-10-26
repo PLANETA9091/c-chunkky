@@ -398,7 +398,7 @@ impl<'a> ColWalk<'a> {
                             SrCond::StoneDepth { offset, add_surface_depth, secondary_range, ceiling } => format!("stone_depth(off={offset} asd={add_surface_depth} sdr={secondary_range} ceil={ceiling} sda={} sdb={})", self.stone_depth_above, self.stone_depth_below),
                             SrCond::Water { offset, surface_depth_multiplier, add_stone_depth } => format!("water(off={offset} sdm={surface_depth_multiplier} asd={add_stone_depth} wh={})", self.water_height),
                             SrCond::YAbove { anchor, add_stone_depth, surface_depth_multiplier } => format!("y_above(anchor={anchor} asd={add_stone_depth} sdm={surface_depth_multiplier})"),
-                            SrCond::NoiseThreshold { noise, min, max } => format!("noise_threshold(n={noise} [{min},{max}])"),
+                            SrCond::NoiseThreshold { noise, min, max, .. } => format!("noise_threshold(n={noise} [{min},{max}])"),
                             SrCond::Temperature => "temperature".into(),
                             SrCond::Hole => format!("hole(sd={})", self.surface_depth),
                             SrCond::Steep => "steep".into(),
@@ -453,9 +453,13 @@ impl<'a> ColWalk<'a> {
                 let h4 = self.hm(x2, z15);
                 h3 >= h4 + 4
             }
-            SrCond::NoiseThreshold { noise, min, max } => {
+            SrCond::NoiseThreshold { noise, min, max, is_3d } => {
                 let n = noise_at(self.env, *noise);
-                let v = n.get_value(self.block_x as f64, 0.0, self.block_z as f64);
+                let v = if *is_3d {
+                    n.get_value(self.block_x as f64, self.block_y as f64, self.block_z as f64)
+                } else {
+                    n.get_value(self.block_x as f64, 0.0, self.block_z as f64)
+                };
                 v >= *min && v <= *max
             }
             SrCond::StoneDepth { offset, add_surface_depth, secondary_range, ceiling } => {

@@ -1192,4 +1192,174 @@ impl RouterBuilder263 {
             surface_level,
         }
     }
+
+    /// 26.3 material-rule ore-vein DF trees
+    /// (worldgen/density_function/overworld/ore_vein/*.json transcribed).
+    /// Cache ids live in THIS builder's namespace (a fresh RouterBuilder263
+    /// per surface state) — never mix with the fill router's ctx.
+    pub fn build_ore_vein_dfs(&mut self) -> OreVeinDfs263 {
+        // y = YClampedGradient(-4064, 4062, ...) — the "minecraft:y" DF.
+        let y = y_clamped_gradient(-4064, 4062, -4064.0, 4062.0);
+        let mk = |name: &str, p: NP, s: &mut Self| -> Arc<N263> {
+            s.factory.normal(name, params(p.0, p.1, p.2, p.3))
+        };
+        let veininess = mk("ore_veininess", (0.955388882960065, -8, 1, &[]), self);
+        let vein_a = mk("ore_vein_a", (0.955388882960065, -7, 1, &[]), self);
+        let vein_b = mk("ore_vein_b", (0.955388882960065, -7, 1, &[]), self);
+        let vein_gap = mk("ore_gap", (0.955388882960065, -5, 1, &[]), self);
+
+        // toggle = cache(interpolated(range_choice(y, -64, 57, noise(veininess,1.5,1.5), 0), 4, 8))
+        let toggle = self.cache(interpolated(
+            sam(DfSam263::RangeChoice {
+                a: y.clone(),
+                min: -64.0,
+                max: 57.0,
+                in_range: noise_fn(veininess, 1.5, 1.5),
+                out_of_range: constant(0.0),
+            }),
+            4,
+            8,
+        ));
+
+        // veinnoise(n) = abs(interpolated(range_choice(y, -64, 57, noise(n,4,4), 1), 4, 8))
+        let veinnoise = |n: Arc<N263>| -> SamRef {
+            unary(UnOp::Abs, interpolated(
+                sam(DfSam263::RangeChoice {
+                    a: y.clone(),
+                    min: -64.0,
+                    max: 57.0,
+                    in_range: noise_fn(n, 4.0, 4.0),
+                    out_of_range: constant(1.0),
+                }),
+                4,
+                8,
+            ))
+        };
+        let mask = {
+            // when_out_of_range = 0.08 - max(abs_a, abs_b)
+            let outer = binary(
+                BinOp::Sub,
+                constant(0.08),
+                binary(BinOp::Max, veinnoise(vein_a), veinnoise(vein_b)),
+            );
+            self.cache(sam(DfSam263::RangeChoice {
+                a: toggle.clone(),
+                min: -0.4,
+                max: 0.4,
+                in_range: constant(-1.0),
+                out_of_range: outer,
+            }))
+        };
+
+        // edge_term = clamp(min(50-y, y-0), 0, 20) * 0.01 + (-0.2)
+        let edge_term = |top: f32, bottom: f32, s: &mut Self| -> SamRef {
+            let a = sam(DfSam263::Clamp {
+                a: binary(
+                    BinOp::Min,
+                    binary(BinOp::Sub, constant(top), y.clone()),
+                    binary(BinOp::Sub, y.clone(), constant(bottom)),
+                ),
+                min: 0.0,
+                max: 20.0,
+            });
+            binary(
+                BinOp::Add,
+                binary(BinOp::Mul, a, constant(0.01)),
+                constant(-0.2),
+            )
+        };
+
+        // copper: rc(y, 0, 50, rc(mask, 0, 1e6, rc((toggle-0.4) + edge(50,0), 0, 1e6, 0.7, -1), -1), -1)
+        let copper = sam(DfSam263::RangeChoice {
+            a: y.clone(),
+            min: 0.0,
+            max: 50.0,
+            in_range: sam(DfSam263::RangeChoice {
+                a: mask.clone(),
+                min: 0.0,
+                max: 1000000.0,
+                in_range: sam(DfSam263::RangeChoice {
+                    a: binary(
+                        BinOp::Add,
+                        sam(DfSam263::ConstAdd {
+                            a: toggle.clone(),
+                            c: -0.4,
+                        }),
+                        edge_term(50.0, 0.0, self),
+                    ),
+                    min: 0.0,
+                    max: 1000000.0,
+                    in_range: constant(0.7),
+                    out_of_range: constant(-1.0),
+                }),
+                out_of_range: constant(-1.0),
+            }),
+            out_of_range: constant(-1.0),
+        });
+
+        // iron: rc(y, -60, -8, rc(mask, 0, 1e6, rc((-toggle-0.4) + edge(-8,-60), 0, 1e6, 0.7, -1), -1), -1)
+        let iron = sam(DfSam263::RangeChoice {
+            a: y.clone(),
+            min: -60.0,
+            max: -8.0,
+            in_range: sam(DfSam263::RangeChoice {
+                a: mask.clone(),
+                min: 0.0,
+                max: 1000000.0,
+                in_range: sam(DfSam263::RangeChoice {
+                    a: binary(
+                        BinOp::Add,
+                        binary(
+                            BinOp::Sub,
+                            unary(UnOp::Negate, toggle.clone()),
+                            constant(0.4),
+                        ),
+                        edge_term(-8.0, -60.0, self),
+                    ),
+                    min: 0.0,
+                    max: 1000000.0,
+                    in_range: constant(0.7),
+                    out_of_range: constant(-1.0),
+                }),
+                out_of_range: constant(-1.0),
+            }),
+            out_of_range: constant(-1.0),
+        });
+
+        // richness = (clamp(abs(toggle), 0.4, 0.6) * 1.0) + (-0.3)
+        let richness = binary(
+            BinOp::Add,
+            binary(
+                BinOp::Mul,
+                sam(DfSam263::Clamp {
+                    a: unary(UnOp::Abs, toggle.clone()),
+                    min: 0.4,
+                    max: 0.6,
+                }),
+                constant(1.0),
+            ),
+            constant(-0.3),
+        );
+
+        // gap = -0.3 - noise(ore_gap, 1, 1)
+        let gap = sam(DfSam263::ConstSub {
+            c: -0.3,
+            a: noise_fn(vein_gap, 1.0, 1.0),
+        });
+
+        OreVeinDfs263 {
+            copper_density: copper,
+            iron_density: iron,
+            richness,
+            gap,
+        }
+    }
+}
+
+/// The four 26.3 ore-vein material-rule DFs (registry refs resolved).
+pub struct OreVeinDfs263 {
+    pub copper_density: SamRef,
+    pub iron_density: SamRef,
+    pub richness: SamRef,
+    pub gap: SamRef,
 }

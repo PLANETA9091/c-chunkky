@@ -40,6 +40,7 @@ pub mod carver263;
 pub mod aquifer263;
 pub mod fill263;
 pub mod biome263;
+pub mod surface263;
 pub mod cplugin;
 pub mod ffi;
 

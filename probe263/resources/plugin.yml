@@ -6,3 +6,12 @@ commands:
   biomedump:
     description: dump per-chunk biome fingerprints for loaded chunks
     usage: /biomedump <outfile>
+  blockdump:
+    description: dump per-chunk block fingerprints for loaded chunks
+    usage: /blockdump <outfile>
+  chunkdump:
+    description: dump full block palette of one chunk
+    usage: /chunkdump <cx> <cz> <outfile>
+  statdump:
+    description: dump per-chunk material histograms
+    usage: /statdump <outfile>

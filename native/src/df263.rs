@@ -1993,34 +1993,36 @@ fn interpolated_point(a: &DfSam263, ctx: &mut SamplerCtx263, x: i32, y: i32, z: 
     if x_in_cell == 0 && y_in_cell == 0 && z_in_cell == 0 {
         return a.sample_value(ctx, x, y, z);
     }
-    let volume = DensityVolume {
-        size_x: 2,
-        size_y: 2,
-        size_z: 2,
-        min_x: x - x_in_cell,
-        min_y: y - y_in_cell,
-        min_z: z - z_in_cell,
-        step_x: cell_xz,
-        step_y: cell_y,
-        step_z: cell_xz,
-    };
-    let mut buf = ctx.scratch.acquire(8);
-    a.sample_volume(ctx, &mut buf, &volume);
-    let result = n263::lerp3_f32(
+    // The 8 cell-corner values MUST come from the inner sampler's POINT
+    // path: Java's interpolated point sampler evaluates the inner function
+    // at the corners directly (DensitySampler.sampleValue). A 2x2x2 volume
+    // pass would run the inner's VOLUME path — for FindTopSurface that path
+    // is per-(x,z)-block over a sizeY==1 volume (Java throws on sizeY != 1)
+    // and yields different numbers. chunk_surface_level = interpolated(
+    // FindTopSurface, 16, 1) makes this exact distinction observable.
+    let (x0, y0, z0) = (x - x_in_cell, y - y_in_cell, z - z_in_cell);
+    let (x1, y1, z1) = (x0 + cell_xz, y0 + cell_y, z0 + cell_xz);
+    let v000 = a.sample_value(ctx, x0, y0, z0);
+    let v100 = a.sample_value(ctx, x1, y0, z0);
+    let v010 = a.sample_value(ctx, x0, y1, z0);
+    let v110 = a.sample_value(ctx, x1, y1, z0);
+    let v001 = a.sample_value(ctx, x0, y0, z1);
+    let v101 = a.sample_value(ctx, x1, y0, z1);
+    let v011 = a.sample_value(ctx, x0, y1, z1);
+    let v111 = a.sample_value(ctx, x1, y1, z1);
+    n263::lerp3_f32(
         x_in_cell as f32 / cell_xz as f32,
         y_in_cell as f32 / cell_y as f32,
         z_in_cell as f32 / cell_xz as f32,
-        buf[volume.index_unchecked(0, 0, 0)],
-        buf[volume.index_unchecked(1, 0, 0)],
-        buf[volume.index_unchecked(0, 1, 0)],
-        buf[volume.index_unchecked(1, 1, 0)],
-        buf[volume.index_unchecked(0, 0, 1)],
-        buf[volume.index_unchecked(1, 0, 1)],
-        buf[volume.index_unchecked(0, 1, 1)],
-        buf[volume.index_unchecked(1, 1, 1)],
-    );
-    ctx.scratch.release(buf);
-    result
+        v000,
+        v100,
+        v010,
+        v110,
+        v001,
+        v101,
+        v011,
+        v111,
+    )
 }
 
 fn find_surface_from(

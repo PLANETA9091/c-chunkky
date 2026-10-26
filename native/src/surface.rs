@@ -81,7 +81,14 @@ pub enum SrRule {
 
 pub enum SrCond {
     Biome { set: Vec<u32> },
-    NoiseThreshold { noise: u32, min: f64, max: f64 },
+    NoiseThreshold {
+        noise: u32,
+        min: f64,
+        max: f64,
+        /// 26.3 NoiseThresholdCondition.is3d — 3D sampler at the block pos
+        /// (false = legacy 2D at y=0).
+        is_3d: bool,
+    },
     StoneDepth { offset: i32, add_surface_depth: bool, secondary_range: i32, ceiling: bool },
     Water { offset: i32, surface_depth_multiplier: i32, add_stone_depth: bool },
     YAbove { anchor: i32, add_stone_depth: bool, surface_depth_multiplier: i32 },
@@ -291,16 +298,21 @@ impl<'a> Parser<'a> {
                 self.cfg.rules.len() - 1
             }
             "minecraft:block" => {
-                // "result" (pre-1.21 naming) / "result_state" (Terralith 2.5.x)
+                // "result" (pre-1.21 naming) / "result_state" (Terralith
+                // 2.5.x); 26.3 material rules carry a plain "minecraft:id"
+                // STRING (default state) instead of a {Name, Properties} obj.
                 let res = match j.get("result").or_else(|| j.get("result_state")) {
                     Some(r) => r,
                     None => { eprintln!("surface parse: block without result"); return None; }
                 };
-                let name = match res.get("Name").and_then(|v| v.as_str()) {
-                    Some(n) => n,
-                    None => { eprintln!("surface parse: block without Name"); return None; }
+                let (name, props) = match res {
+                    Json::Str(s) => (s.clone(), None),
+                    _ => match res.get("Name").and_then(|v| v.as_str()) {
+                        Some(n) => (n.to_string(), res.get("Properties")),
+                        None => { eprintln!("surface parse: block without Name"); return None; }
+                    },
                 };
-                let s = st_str(name, res.get("Properties"));
+                let s = st_str(&name, props);
                 let st = self.cfg.state(s);
                 self.cfg.rules.push(SrRule::Block { state: st });
                 self.cfg.rules.len() - 1
@@ -434,6 +446,10 @@ impl<'a> Parser<'a> {
                             }
                         }
                     }
+                } else if let Some(name) = node.as_str() {
+                    // 26.3 single-string form ("biome_is": "minecraft:desert")
+                    let bi = (self.biome_idx)(&canon(name))?;
+                    set.push(bi);
                 } else if let Some(name) = j.get("biomes").and_then(|b| b.as_str()) {
                     let bi = (self.biome_idx)(name)?;
                     set.push(bi);
@@ -461,7 +477,8 @@ impl<'a> Parser<'a> {
                 };
                 let min = match j.get("min_threshold").and_then(|v| v.as_f64()) { Some(v) => v, None => { eprintln!("surface parse: noise_threshold min missing"); return None; } };
                 let max = match j.get("max_threshold").and_then(|v| v.as_f64()) { Some(v) => v, None => { eprintln!("surface parse: noise_threshold max missing"); return None; } };
-                self.cfg.conds.push(SrCond::NoiseThreshold { noise, min, max });
+                let is_3d = j.get("is_3d").and_then(crate::json::Json::as_bool).unwrap_or(false);
+                self.cfg.conds.push(SrCond::NoiseThreshold { noise, min, max, is_3d });
                 self.cfg.conds.len() - 1
             }
             "minecraft:stone_depth" => {
