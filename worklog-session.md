@@ -2522,3 +2522,66 @@ Stage Summary:
   изолированно cont-51) — честный перф только CI-judge/4-core.
 - Следующее: (1) Java-оракул поверхности → закрыть sulfur-границу до
   0-divergent; (2) e2e-замер; (3) deco/features 26.3 (главный остаток ~16-23%).
+
+---
+## cont-54: SURFACE263 PARITY — БИОМ-FIDDLE + IS_3D Y-CACHE + CSL VOLUME-ПЛИТА (sulfur-гэп закрыт)
+
+Task: «продолжи» (без саб-агентов; GitHub = обязательный канал).
+
+Work Log:
+- ОКРУЖЕНИЕ восстановлено 4-й раз (sandbox reset): rustup 1.99.1, JDK25
+  (Temurin 25.0.5+8), paper-26.3-222.jar (fill v3 API, sha f64977...d488
+  совпал), vineflower 1.11.1, mojmap extract (paperclip patchonly), probe263
+  пересобран. cargo test 65/65 на входе. Локальный клон был на cont-41 —
+  origin/main ушёл вперёд (cont-42..53 + 26.3 retarget): git merge --ff-only.
+- ДЕКОМПИЛ 26.3 (vineflower): MaterialSystem/MaterialRuleContext/условия/
+  NoiseBasedChunkGenerator/ChunkStatusTasks/WorldGenRegion/BiomeManager/
+  MultiNoiseBiomeSource/Noises/NormalNoise/OreVeinRule/OverworldMaterialRules.
+  Семантика вскрыта:
+  * SURFACE-проход читает биомы через BiomeManager.getBiome = FIDDLE
+    (8 соседних quart-углов, LCG zoom seed = obfuscateSeed(worldSeed)),
+    затем контейнер чанка-владельца quart (LevelReader default);
+  * CARVER-MASK topMaterial: withDifferentSource(createUncachedResolver)
+    = POINT-путь клим.сэмплирования (без контейнера);
+  * getMinSurfaceLevel: chunk_surface_level из PREFILLED 16x1x16 ПЛИТЫ
+    на y=0 (VOLUME-путь sampleVolume!), НЕ point-путь;
+  * createNoiseSampler3d кэширует по lastUpdateY (per block);
+  * getBiome: `biome = null` на КАЖДЫЙ updateY (per block) — fiddle
+    меняет pick ВНУТРИ quart-строки ((y-2)&3);
+  * Noises.instantiate = factory.fromHashOf(ключ) — порядок не важен.
+- БАГИ (каждый = бит-расходимость), найдены A/B-бисекцией + трейсами:
+  1. Биом-fiddle ОТСУТСТВОВАЛ: натив брал quart по позиции из грида
+     центра. Фикс: surface263::fiddle_biome_pick (LCG/fiddle 1:1 c
+     BiomeManager), Neighborhood263 = 3x3 грида (V263_GRIDS clone-or-
+     compute), ChunkAccess clamp семантика (sectionY<0 -> rel 0).
+     sha256.rs (hand-rolled) для obfuscateSeed — Guava семантика
+     VERIFIED против реального BiomeManager.obfuscateSeed на classpath:
+     вход LE, digest[:8] LE (проба ObfSeedCheck.java + javap).
+  2. NoiseThreshold{is_3d} кэшировался по XZ (значение с верха колонки
+     на ВСЕ y!) — свопы SULFUR<->CINNABAR массово. Vanilla 3D-сэмплер
+     кэширует per-y. Фикс: is_y_lazy += NoiseThreshold{is_3d:true}.
+  3. min_surface: point-путь csl вместо VOLUME-плиты y=0. Фикс:
+     sample_volume по 16x1x16 slab (DensityVolume::block_step), чтение
+     index_of_block в update_xz.
+  4. biome_cache по (колонка, quart) — fiddle-пик внутри quart-строки
+     varies per block-y. Фикс: кэш убран (y_cache per-block достаточно).
+- ПРОВЕРКИ:
+  * cargo test 70/70 (65 старых + sha256 векторы + obfuscateSeed Guava
+    референсы + LCG/fiddle python-референсы + neighborhood quart/clamp).
+  * ДИАГ chunkdump (чанки 1019/1037, 1021/1034, native vs
+    CRUS_NO_NATIVE_SURFACE_263=1): core-расходимости 13630/9909 -> 0/0
+    (остаток 349/52 = vanilla deco nondeterminism — шум декора).
+  * ПОЛНЫЙ A/B 400 чанков (16320..16575): SULFUR delta +30056 -> 0,
+    CINNABAR -18504 -> 0, GRANITE 0, TUFF +198; stone-family дельту имеет
+    2/400 чанков — один аномальный (1032,1025) +12271 STONE / -11466
+    DEEPSLATE (след. сессия: локализация — вероятно каскад одной
+    биом-границы/vein), сосед -12. FNV-identical 123/400 (deco noise
+    доминирует остальное).
+- СЛЕДУЮЩЕЕ: (1) чанк (1032,1025) — бисекция каменной аномалии;
+  (2) e2e-замер; (3) carver-mask topMaterial (POINT-путь биома + fiddle)
+  — задокументированный гэп cont-49; (4) deco/features 26.3.
+
+Stage Summary:
+- surface263: fiddle+hood+sha256, is_3d y-lazy, csl volume-плита, biome
+  кэш per-block. Паритет sulfur-семейства ДОСТИГНУТ (0 дельта на 400
+  чанков). worklog: этот файл. Дальше — каменная аномалия (1032,1025).

@@ -373,6 +373,7 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
             marks,
             beard,
             surface,
+            biomes,
             ..
         } = st;
         let beard_list = std::mem::take(beard);
@@ -382,10 +383,13 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
         // status, right after NOISE, before carvers. The biome grid comes
         // from fillBiomes (BIOMES status runs first); without a grid the
         // tail is skipped (the vanilla surface stage then re-runs on top —
-        // same contract as the legacy surface_tail guard).
+        // same contract as the legacy surface_tail guard). The 26.3 biome
+        // read goes through BiomeManager.getBiome (fiddle) which can pick a
+        // NEIGHBOR chunk's container — the hood carries all 3x3 grids.
         if let Some(sf) = surface.as_ref() {
-            let grid = take_biome_grid263(cx, cz);
-            if let Some(gd) = grid {
+            let b263 = biomes.as_ref().map(|b| b as &std::sync::Arc<crate::biome263::BiomeState263>);
+            if let Some(hood) = hood263(b263, g.min_y, g.height, cx, cz) {
+                let zoom_seed = crate::sha256::obfuscate_seed(g.seed);
                 crate::surface263::apply_surface263(
                     sf,
                     g.min_y,
@@ -395,7 +399,8 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
                     cz,
                     out,
                     marks,
-                    &gd,
+                    &hood,
+                    zoom_seed,
                 );
             }
         }
@@ -981,6 +986,65 @@ pub fn store_biome_grid263(cx: i32, cz: i32, grid: &[i32]) {
 fn take_biome_grid263(cx: i32, cz: i32) -> Option<Box<[i32]>> {
     let mut guard = V263_GRIDS.lock().unwrap();
     guard.as_mut().and_then(|m| m.remove(&(cx, cz)))
+}
+
+/// Clone a grid WITHOUT consuming it (neighbors keep theirs for their own
+/// fill tail). Computes on the fly when the map entry is gone (eviction /
+/// concurrent consumption): fill_biomes263 is deterministic, so the result
+/// is identical either way.
+fn clone_or_compute_grid263(
+    b263: &std::sync::Arc<crate::biome263::BiomeState263>,
+    min_y: i32,
+    height: i32,
+    cx: i32,
+    cz: i32,
+) -> Option<Box<[i32]>> {
+    {
+        let guard = V263_GRIDS.lock().unwrap();
+        if let Some(m) = guard.as_ref() {
+            if let Some(g) = m.get(&(cx, cz)) {
+                return Some(g.clone());
+            }
+        }
+    }
+    let n = (height as usize) / 16 * 64;
+    let mut buf = vec![0i32; n].into_boxed_slice();
+    crate::biome263::fill_biomes263(b263, min_y, height, cx, cz, &mut buf);
+    Some(buf)
+}
+
+/// Build the 3x3 biome-grid neighborhood for the 26.3 surface pass (fiddle
+/// pick can land in a neighbor chunk's container). The center grid is
+/// consumed from V263_GRIDS (same contract as before); neighbors are cloned
+/// or recomputed. Returns None when the center grid is missing — the caller
+/// skips the native tail (vanilla Java surface re-runs on top).
+fn hood263(
+    b263: Option<&std::sync::Arc<crate::biome263::BiomeState263>>,
+    min_y: i32,
+    height: i32,
+    cx: i32,
+    cz: i32,
+) -> Option<crate::surface263::Neighborhood263> {
+    let center = take_biome_grid263(cx, cz)?;
+    let sections = (height as usize) / 16;
+    let mut grids: [Option<Box<[i32]>>; 9] = std::array::from_fn(|_| None);
+    grids[4] = Some(center);
+    for dz in -1i32..=1 {
+        for dx in -1i32..=1 {
+            if dx == 0 && dz == 0 {
+                continue;
+            }
+            grids[((dx + 1) * 3 + (dz + 1)) as usize] = b263
+                .and_then(|b| clone_or_compute_grid263(b, min_y, height, cx + dx, cz + dz));
+        }
+    }
+    Some(crate::surface263::Neighborhood263 {
+        cx,
+        cz,
+        min_y,
+        sections,
+        grids,
+    })
 }
 
 /// Bench helper: the v263 biome grid + global store (no JNI).

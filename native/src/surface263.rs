@@ -283,14 +283,142 @@ pub fn build_surface263(
     })
 }
 
+/// The 3x3 chunk neighborhood of biome grids (fillBiomes263 layout:
+/// sections*64, index = sy*64 + qx*16 + qy*4 + qz). The 26.3 surface pass
+/// resolves biomes through BiomeManager.getBiome — the fiddle can pick a
+/// parent quart OUTSIDE the center chunk (parentX = (x-2)>>2 spans chunk
+/// quart -1..4), and vanilla then reads the NEIGHBOR chunk's container
+/// (LevelReader.getNoiseBiome default -> chunk.getNoiseBiome).
+pub struct Neighborhood263 {
+    pub cx: i32,
+    pub cz: i32,
+    pub min_y: i32,
+    pub sections: usize,
+    /// [(dx+1)*3 + (dz+1)]; None = grid unavailable (degraded: biome
+    /// conditions resolve false — vanilla parity requires all 9).
+    pub grids: [Option<Box<[i32]>>; 9],
+}
+
+impl Neighborhood263 {
+    /// ChunkAccess.getNoiseBiome 26.3 (fiddle-resolved world quart coords):
+    /// sectionY = (qy>>2) - minSection; clamps: sectionY<0 -> (0, rel 0),
+    /// top overflow -> (last section, rel 3); x/z = local (qx&3, qz&3).
+    #[inline]
+    pub fn quart(&self, qx: i32, qy: i32, qz: i32) -> usize {
+        let dx = (qx >> 2) - self.cx;
+        let dz = (qz >> 2) - self.cz;
+        if !(dx >= -1 && dx <= 1 && dz >= -1 && dz <= 1) {
+            return usize::MAX;
+        }
+        let Some(g) = self.grids[((dx + 1) * 3 + (dz + 1)) as usize].as_deref() else {
+            return usize::MAX;
+        };
+        let mut section_y = (qy >> 2) - (self.min_y >> 4);
+        let mut rel = qy & 3;
+        if section_y < 0 {
+            section_y = 0;
+            rel = 0;
+        } else if section_y as usize >= self.sections {
+            section_y = self.sections as i32 - 1;
+            rel = 3;
+        }
+        let i = section_y as usize * 64
+            + ((qx & 3) as usize) * 16
+            + (rel as usize) * 4
+            + (qz & 3) as usize;
+        g.get(i).copied().unwrap_or(0).max(0) as usize
+    }
+}
+
+/// BiomeManager.getBiome 26.3 (WorldGenRegion wiring): fiddle over the 8
+/// parent quart corners (biomeZoomSeed = obfuscated world seed), then the
+/// picked chunk's biome container (LevelReader default). Returns the picked
+/// world quart + the resolved biome index (debug-facing, used by the walk).
+pub fn fiddle_biome_pick(
+    hood: &Neighborhood263,
+    seed: i64,
+    bx: i32,
+    y: i32,
+    bz: i32,
+) -> (i32, i32, i32, usize) {
+    let abs_x = bx - 2;
+    let abs_y = y - 2;
+    let abs_z = bz - 2;
+    let parent_x = abs_x >> 2;
+    let parent_y = abs_y >> 2;
+    let parent_z = abs_z >> 2;
+    let fract_x = (abs_x & 3) as f64 / 4.0;
+    let fract_y = (abs_y & 3) as f64 / 4.0;
+    let fract_z = (abs_z & 3) as f64 / 4.0;
+    let mut min_i = 0usize;
+    let mut min_d = f64::INFINITY;
+    for i in 0..8usize {
+        let x_even = (i & 4) == 0;
+        let y_even = (i & 2) == 0;
+        let z_even = (i & 1) == 0;
+        let corner_x = if x_even { parent_x } else { parent_x + 1 };
+        let corner_y = if y_even { parent_y } else { parent_y + 1 };
+        let corner_z = if z_even { parent_z } else { parent_z + 1 };
+        let dist_x = if x_even { fract_x } else { fract_x - 1.0 };
+        let dist_y = if y_even { fract_y } else { fract_y - 1.0 };
+        let dist_z = if z_even { fract_z } else { fract_z - 1.0 };
+        let next = fiddled_distance(seed, corner_x, corner_y, corner_z, dist_x, dist_y, dist_z);
+        if min_d > next {
+            min_i = i;
+            min_d = next;
+        }
+    }
+    let biome_x = if (min_i & 4) == 0 { parent_x } else { parent_x + 1 };
+    let biome_y = if (min_i & 2) == 0 { parent_y } else { parent_y + 1 };
+    let biome_z = if (min_i & 1) == 0 { parent_z } else { parent_z + 1 };
+    let bi = hood.quart(biome_x, biome_y, biome_z);
+    (biome_x, biome_y, biome_z, bi)
+}
+
+/// LinearCongruentialGenerator.next 26.3: rval *= rval*MULT + INCR; return
+/// rval + c (i64 wrap).
+#[inline]
+fn lcg_next(rval: i64, c: i64) -> i64 {
+    rval.wrapping_mul(rval.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407))
+        .wrapping_add(c)
+}
+
+/// BiomeManager.getFiddle: ((rval >> 24 & 1023) - 512) * 8.7890625e-4.
+#[inline]
+fn get_fiddle(rval: i64) -> f64 {
+    (((rval >> 24) & 1023) - 512) as f64 * 8.7890625e-4
+}
+
+/// BiomeManager.getFiddledDistance 26.3 (f64 path, exact add order Z+Y+X).
+fn fiddled_distance(seed: i64, xr: i32, yr: i32, zr: i32, dx: f64, dy: f64, dz: f64) -> f64 {
+    let mut rval = lcg_next(seed, xr as i64);
+    rval = lcg_next(rval, yr as i64);
+    rval = lcg_next(rval, zr as i64);
+    rval = lcg_next(rval, xr as i64);
+    rval = lcg_next(rval, yr as i64);
+    rval = lcg_next(rval, zr as i64);
+    let fx = get_fiddle(rval);
+    rval = lcg_next(rval, seed);
+    let fy = get_fiddle(rval);
+    rval = lcg_next(rval, seed);
+    let fz = get_fiddle(rval);
+    let z2 = (dz + fz) * (dz + fz);
+    let y2 = (dy + fy) * (dy + fy);
+    let x2 = (dx + fx) * (dx + fx);
+    z2 + y2 + x2
+}
+
 /// The 26.3 column walk (MaterialSystem.buildSurface + RuleEvaluator).
 struct Walk263<'a> {
     cfg: &'a SurfaceConfig,
     st: &'a SurfaceState263,
-    grid: &'a [i32],
+    hood: &'a Neighborhood263,
+    zoom_seed: i64,
     heightmap: &'a [i32; 256],
     // chunk volume + prefilled ore-vein buffers (density/richness)
     volume: DensityVolume,
+    csl_slab_volume: DensityVolume,
+    csl_slab: Vec<f32>,
     copper_buf: Vec<f32>,
     iron_buf: Vec<f32>,
     richness_buf: Vec<f32>,
@@ -315,7 +443,6 @@ struct Walk263<'a> {
     // per-site lazy caches (vanilla LazyXZ/LazyY)
     xz_cache: Vec<(u64, bool)>,
     y_cache: Vec<(u64, bool)>,
-    biome_cache: Vec<(u64, bool)>,
     sea_level: i32,
     /// state string is a fluid (water/lava) — for the postproc marks
     fluid_states: Vec<bool>,
@@ -343,7 +470,21 @@ impl<'a> Walk263<'a> {
         self.gradient_x = h(lx + 1, lz) - h(lx - 1, lz);
         self.gradient_z = h(lx, lz + 1) - h(lx, lz - 1);
         // minSurfaceLevel 26.3: floor(chunk_surface_level(x, 0, z)) + depth - 8
-        let csl = self.st.chunk_surface_level.sample_value(&mut self.ctx_csl, bx, 0, bz);
+        // — the csl value comes from the prefilled 16x1x16 slab at world y=0
+        // (MaterialRuleContext.getMinSurfaceLevel: VOLUME-path DensityBuffer
+        // read, not the point path; the two paths differ on interpolated /
+        // FindTopSurface nodes).
+        let si = self.csl_slab_volume.index_of_block(bx, 0, bz);
+        let csl = if si >= 0 {
+            self.csl_slab
+                .get(si as usize)
+                .copied()
+                .unwrap_or_else(|| self.st.chunk_surface_level.sample_value(&mut self.ctx_csl, bx, 0, bz))
+        } else {
+            // out-of-volume fallback (vanilla sampleValue branch; never hit
+            // for in-chunk columns)
+            self.st.chunk_surface_level.sample_value(&mut self.ctx_csl, bx, 0, bz)
+        };
         self.min_surface_level = mth_floor(csl as f64) + self.surface_depth - 8;
     }
 
@@ -368,13 +509,15 @@ impl<'a> Walk263<'a> {
 
     #[inline]
     fn biome_idx_at(&self, bx: i32, y: i32, bz: i32) -> usize {
-        let sy = ((y - self.cfg.min_y) >> 4).max(0) as usize;
-        let qy = ((y - self.cfg.min_y) >> 2) & 3;
-        let qx = (bx & 15) >> 2;
-        let qz = (bz & 15) >> 2;
-        let i = sy * 64 + (qx as usize) * 16 + (qy as usize) * 4 + qz as usize;
-        let v = self.grid.get(i).copied().unwrap_or(0);
-        v.max(0) as usize
+        let (qx, qy, qz, bi) = fiddle_biome_pick(self.hood, self.zoom_seed, bx, y, bz);
+        if let Some((tx, ty, tz)) = trace_target() {
+            if tx == bx && tz == bz {
+                eprintln!(
+                    "FIDDLE block=({bx},{y},{bz}) pick_quart=({qx},{qy},{qz}) bi={bi}"
+                );
+            }
+        }
+        bi
     }
 
     /// Biome.getTemperature 26.3 (f32 path; legacy-verified formulas).
@@ -446,6 +589,12 @@ impl<'a> Walk263<'a> {
                         | SrCond::VerticalGradient { .. }
                         | SrCond::Temperature
                         | SrCond::AbovePreliminary
+                        // 26.3 is_3d noise thresholds re-sample per block y
+                        // (vanilla MaterialRuleContext.createNoiseSampler3d
+                        // caches on lastUpdateY, NOT on the column) — the
+                        // xz-cache painted whole columns with the value from
+                        // the top block (sulfur/cinnabar band swaps).
+                        | SrCond::NoiseThreshold { is_3d: true, .. }
                 );
                 let counter = if is_y_lazy { self.y_counter } else { self.xz_counter };
                 let v = {
@@ -478,15 +627,14 @@ impl<'a> Walk263<'a> {
         match &self.cfg.conds[ci] {
             SrCond::Not(_) => unreachable!(),
             SrCond::Biome { set } => {
-                let qy = ((self.block_y - self.cfg.min_y) >> 2).max(0) as u64;
-                let key = ((self.xz_counter as u64) << 12) | (qy & 0xFFF);
-                let cached = self.biome_cache[ci];
-                if cached.0 == key {
-                    return cached.1;
-                }
+                // vanilla MaterialRuleContext.getBiome: `biome` resets on EVERY
+                // updateY (per solid block) — the fiddle pick varies WITHIN a
+                // quart row (parentY vs parentY+1 by (y-2)&3), so caching by
+                // (column, quart) painted whole quart rows with the biome of
+                // their first block (sulfur band Y-boundary divergences).
+                // The y_cache wrapper (y_counter) already dedupes per block-y.
                 let bi = self.biome_idx_at(self.block_x, self.block_y, self.block_z);
                 let v = set.contains(&(bi as u32));
-                self.biome_cache[ci] = (key, v);
                 if let Some((tx, ty, tz)) = trace_target() {
                     if tx == self.block_x && tz == self.block_z {
                         eprintln!(
@@ -693,13 +841,15 @@ pub fn apply_surface263(
     cz: i32,
     out: &mut [u16; crate::nochunk::OUT_LEN],
     marks: &mut Vec<i64>,
-    grid: &[i32],
+    hood: &Neighborhood263,
+    zoom_seed: i64,
 ) {
     // guards mirroring the legacy surface_tail (ids/temps must be live)
     if st.cfg.ids.len() != st.cfg.states.len()
         || st.cfg.bandlands.len() != 192
         || st.temps.is_empty()
-        || grid.len() < (height as usize) / 16 * 64
+        || hood.grids[4].as_deref().map(|g| g.len()).unwrap_or(0)
+            < (height as usize) / 16 * 64
     {
         return;
     }
@@ -742,14 +892,23 @@ pub fn apply_surface263(
     st.dfs[st.ore_copper as usize].sample_volume(&mut ctx_ore, &mut copper_buf, &volume);
     st.dfs[st.ore_iron as usize].sample_volume(&mut ctx_ore, &mut iron_buf, &volume);
     st.dfs[st.ore_richness as usize].sample_volume(&mut ctx_ore, &mut richness_buf, &volume);
+    // vanilla getMinSurfaceLevel: chunk_surface_level prefilled over the
+    // 16x1x16 slab at world y=0 (expectedVolume xz extent, y=0), VOLUME path.
+    let csl_slab_volume = DensityVolume::block_step((16, 1, 16), (cx * 16, 0, cz * 16));
+    let mut csl_slab = ctx_csl.scratch.acquire(256);
+    st.chunk_surface_level
+        .sample_volume(&mut ctx_csl, &mut csl_slab, &csl_slab_volume);
 
     let cond_count = st.cfg.conds.len();
     let mut walk = Walk263 {
         cfg: &st.cfg,
         st,
-        grid,
+        hood,
+        zoom_seed,
         heightmap: &hm,
         volume,
+        csl_slab_volume,
+        csl_slab,
         copper_buf,
         iron_buf,
         richness_buf,
@@ -771,7 +930,6 @@ pub fn apply_surface263(
         water_height: i32::MIN,
         xz_cache: vec![(0, false); cond_count],
         y_cache: vec![(0, false); cond_count],
-        biome_cache: vec![(0, false); cond_count],
         sea_level,
         fluid_states,
     };
@@ -989,5 +1147,74 @@ fn frozen_ocean_extension(
             }
         }
         y -= 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fiddle_distance_java_reference() {
+        // Python reference (i64 wrap LCG, exact f64 add order):
+        // seed = obfuscateSeed(3257840388504953787) = 3050481926029917891
+        let seed = 3050481926029917891i64;
+        let d = fiddled_distance(seed, 7, -3, 9, 0.25, -0.5, 0.75);
+        assert!((d - 1.1595440959930419).abs() < 1e-12, "d={d}");
+        let d = fiddled_distance(seed, -1, -16, -1, 0.0, 0.0, 0.0);
+        assert!((d - 0.17146654129028324).abs() < 1e-12, "d={d}");
+    }
+
+    #[test]
+    fn lcg_next_java_reference() {
+        // Python reference of the exact wrap semantics (rval*MULT+INCR, +c)
+        let v = lcg_next(5, 7);
+        assert_eq!(v, 296184137228677623);
+        // negative input chain
+        let v = lcg_next(3050481926029917891, -3);
+        assert_eq!(v, 4229891484463208511);
+    }
+
+    #[test]
+    fn neighborhood_quart_picks_neighbor_chunk() {
+        // 4 sections (64 y), center (5, 7): cell value = 1000 + (dx+1)*100 +
+        // (dz+1)*10 + (qx*16 + qy*4 + qz) so every path is observable.
+        let mk = |cx: i32, cz: i32, base: i32| -> Box<[i32]> {
+            (0..4 * 64)
+                .map(|i| {
+                    let qx = (i % 64) / 16;
+                    let qy = (i % 16) / 4;
+                    let qz = i % 4;
+                    base + qx * 100 + qy * 10 + qz
+                })
+                .collect()
+        };
+        let mut grids: [Option<Box<[i32]>>; 9] = std::array::from_fn(|_| None);
+        for dz in -1i32..=1 {
+            for dx in -1i32..=1 {
+                grids[((dx + 1) * 3 + (dz + 1)) as usize] =
+                    Some(mk(dx, dz, 100_000 + (dx + 1) * 1000 + (dz + 1) * 100));
+            }
+        }
+        let hood = Neighborhood263 { cx: 5, cz: 7, min_y: -64, sections: 4, grids };
+        // bases: center (0,0) = 101100; east (1,0) = 102100. Cell value =
+        // base + qx*100 + qy*10 + qz over the INDEX (sy*64+qx*16+qy*4+qz).
+        // center cell (qx&3=2, rel=1, qz&3=3) -> index 39 -> (2,1,3)
+        let qx = 5 * 4 + 2;
+        let qy = (-64 >> 2) + 1;
+        let qz = 7 * 4 + 3;
+        assert_eq!(hood.quart(qx, qy, qz), 101_100 + 200 + 10 + 3);
+        // neighbor east (dx=1): qx = 6*4+0 -> local 0, rel 0, qz&3=3
+        let qx = 6 * 4;
+        let qy = -64 >> 2;
+        assert_eq!(hood.quart(qx, qy, qz), 102_100 + 0 + 0 + 3);
+        // below the container: sectionY<0 clamps to (0, rel 0) -> same cell
+        let qy = (-64 >> 2) - 5;
+        assert_eq!(hood.quart(qx, qy, qz), 102_100 + 0 + 0 + 3);
+        // above the top: last section, rel 3 -> index 207 -> (0,3,3)
+        let qy = (-64 >> 2) + 4 * 4 + 9;
+        assert_eq!(hood.quart(qx, qy, qz), 102_100 + 0 + 30 + 3);
+        // out of the 3x3 range -> MAX
+        assert_eq!(hood.quart(5 * 4, -64 >> 2, 10 * 4), usize::MAX);
     }
 }
