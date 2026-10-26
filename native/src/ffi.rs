@@ -388,7 +388,20 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
         // NEIGHBOR chunk's container — the hood carries all 3x3 grids.
         if let Some(sf) = surface.as_ref() {
             let b263 = biomes.as_ref().map(|b| b as &std::sync::Arc<crate::biome263::BiomeState263>);
-            if let Some(hood) = hood263(b263, g.min_y, g.height, cx, cz) {
+            // The center grid is normally parked in V263_GRIDS by fillBiomes
+            // (BIOMES status). If it went missing (eviction/consumption race),
+            // the surface stage owns this chunk regardless (shouldGenerate-
+            // Surface=false) — a silent skip would leave RAW FILL (no bedrock,
+            // no deepslate, no surface rules). Compute it on the spot.
+            let center = take_biome_grid263(cx, cz).or_else(|| {
+                b263.map(|b| {
+                    let n = (g.height as usize) / 16 * 64;
+                    let mut buf = vec![0i32; n].into_boxed_slice();
+                    crate::biome263::fill_biomes263(b, g.min_y, g.height, cx, cz, &mut buf);
+                    buf
+                })
+            });
+            if let Some(hood) = hood263(b263, g.min_y, g.height, cx, cz, center) {
                 let zoom_seed = crate::sha256::obfuscate_seed(g.seed);
                 crate::surface263::apply_surface263(
                     sf,
@@ -1014,18 +1027,22 @@ fn clone_or_compute_grid263(
 }
 
 /// Build the 3x3 biome-grid neighborhood for the 26.3 surface pass (fiddle
-/// pick can land in a neighbor chunk's container). The center grid is
-/// consumed from V263_GRIDS (same contract as before); neighbors are cloned
-/// or recomputed. Returns None when the center grid is missing — the caller
-/// skips the native tail (vanilla Java surface re-runs on top).
+/// pick can land in a neighbor chunk's container). The center grid comes
+/// from `center_override` when given (compute-on-missing path), else from
+/// V263_GRIDS. Returns None only when no center grid is computable at all.
+#[allow(clippy::too_many_arguments)]
 fn hood263(
     b263: Option<&std::sync::Arc<crate::biome263::BiomeState263>>,
     min_y: i32,
     height: i32,
     cx: i32,
     cz: i32,
+    center_override: Option<Box<[i32]>>,
 ) -> Option<crate::surface263::Neighborhood263> {
-    let center = take_biome_grid263(cx, cz)?;
+    let center = match center_override {
+        Some(c) => c,
+        None => take_biome_grid263(cx, cz)?,
+    };
     let sections = (height as usize) / 16;
     let mut grids: [Option<Box<[i32]>>; 9] = std::array::from_fn(|_| None);
     grids[4] = Some(center);

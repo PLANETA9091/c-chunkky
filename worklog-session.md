@@ -2585,3 +2585,24 @@ Stage Summary:
 - surface263: fiddle+hood+sha256, is_3d y-lazy, csl volume-плита, biome
   кэш per-block. Паритет sulfur-семейства ДОСТИГНУТ (0 дельта на 400
   чанков). worklog: этот файл. Дальше — каменная аномалия (1032,1025).
+
+---
+## cont-54b: RAW-FILL АНОМАЛИЯ (1032,1025) — ПОТЕРЯННЫЙ ГРИД → COMPUTE-ON-MISSING
+
+Work Log:
+- Бисекция единственного stone-аномального чанка региона (chunkdump A/B):
+  native = RAW FILL (нет bedrock y -64/-63, нет deepslate ниже поверхности,
+  13388 дивергентов), vanilla = корректный (bedrock_floor + deepslate vgrad).
+- ROOT CAUSE: native surface tail молча SKIPнул чанк (center grid отсутствовал
+  в V263_GRIDS — потеря/потребление до tail), при этом Java surface УЖЕ
+  отключён плагином (shouldGenerateSurface=false) → чанк остался сырым fill.
+- ФИКС (ffi.rs fill tail): center grid = take(V263_GRIDS) ИЛИ compute на
+  месте (fill_biomes263, детерминирован); hood263 принял center_override.
+  Surface-стадия владеет чанком безусловно — silent skip больше невозможен.
+- ПРОВЕРКА: тот же чанк после фикса: 13388 -> 636 дивергентов, ВСЕ — deco
+  noise (jungle leaves/vines/log — ванильная недетерминированность декора);
+  core (stone/deepslate/bedrock) = 0. cargo test 70/70.
+
+Stage Summary:
+- Регион 400 чанков теперь: sulfur/cinnabar/granite = 0 дельта, stone-family
+  аномалий нет; остаток = только deco nondeterminism vanilla-vs-vanilla.
