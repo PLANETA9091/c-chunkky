@@ -2448,3 +2448,77 @@ Stage Summary:
 - СЛЕДУЮЩИЕ: (1) натив surface-rules 26.3 (движок surface.rs готов, нужен парс
   ванильных material_rule JSON 26.3 + хвост в fill263) — закроет 14-20%;
   (2) features/deco 26.3 (мега-проект, движок легаси готов); (3) gen-parallelism.
+
+---
+## cont-53: STAGE S-263 — NATIVE MATERIALSYSTEM (surface rules) LIVE
+
+Task: «продолжи на 100%» (без саб-агентов, GitHub = обязательный канал).
+
+Work Log:
+- ОКРУЖЕНИЕ восстановлено 3-й раз (sandbox reset): rustup 1.99.1, JDK25
+  (/home/z/tools/jdk-25.0.5+8), paper-26.3-222.jar (sha f64977...d488 совпал),
+  vineflower 1.11.1, mojmap extract (paperclip -Dpaperclip.patchonly=true).
+- ДЕКОМПИЛ 26.3 (vineflower): MaterialSystem/MaterialRuleContext/все условия/
+  OreVeinRule/FindTopSurfaceFunction/Aquifer/RandomState/NormalNoise/Biome.
+  Семантика заморожена:
+  * minSurfaceLevel = Mth.floor(chunk_surface_level(x,0,z)) + surfaceDepth - 8
+    (RandomState:61 preliminarySurfaceFunction = router.chunkSurfaceLevel;
+    легаси-обход initial_density УДАЛЁН в 26.3);
+  * NO default-block гейта: tryApply на КАЖДЫЙ solid (javap: между updateY и
+    tryApply только y-bounds);
+  * noise_threshold: is_3d (26.3 3D-сэмплер на блочном y);
+  * steep = gradientX<=-4 || gradientZ>=4 (тождественно легаси-формуле);
+  * eroded_badlands/frozen_ocean column extensions (легаси их НЕ имел —
+    закрыт старый гэп cont-41);
+  * fluid-writes правил → postproc marks;
+  * ore_vein: density/richness = VOLUME-path префилы (cell 4/8),
+    filler_gap = point-path; OreVeinDfs263 в df263_router (по JSON).
+- БАГИ, НАЙДЕННЫЕ И ИСПРАВЛЕННЫЕ (каждый = бит-расходимость):
+  1. mth_get_seed: X-терм = INT-умножение (i32 wrap!) widened ПОСЛЕ
+     (javap: imul→i2l); у меня было i64-умножение → расхождение всех
+     позиционных фабрик при |x|>=2155 (vgrad/джиттер/ore/frozen).
+     Java/Rust пробы совпали после фикса (0.0680002).
+  2. interpolated_point: углы ячейки сэмплируются через POINT-путь внутренней
+     функции (FindTopSurface.volume требует sizeY==1 и по-блочный upper_bound;
+     мой трюк 2x2x2-volume давал другие числа → chunk_surface_level занижен).
+  3. Грид-хэндофф: fillBiomes кладёт грид в surface ПЕРВОГО ctx, филлы берут
+     ЛЮБОЙ ctx пула → половина чанков raw stone. Фикс: GLOBAL V263_GRIDS
+     (per-chunk данные, не per-ctx) + cap 8192 (48-кап ронял гриды при пачке
+     BIOMES-шагов перед NOISE).
+  4. Парсер 26.3: result_state строкой (не {Name,Properties}); biome_is
+     одиночной строкой; NoiseThreshold is_3d (легаси игнорировал).
+  5. Плагин: CraftBlockData.fromData → createData (26.3 rename), fallback.
+- ПРОВЕРКА БИТ-РАВЕНСТВА пробами (Java реальные классы 26.3 vs Rust):
+  vgrad-фабрика (bedrock_floor): 0.3795393 / 0.0680002 ✓;
+  шум surface: 0.06662022 ✓; sulfur_cave_gradient: 6/6 позиций ✓;
+  биомы (biomedump native vs TRUE vanilla source, CRUS_NO_NATIVE_BIOMES_263=1):
+  0/25 чанков ✓ (fill_biomes263 бит-точен и на x=16544).
+- A/B server263 (9x9 регион, seed 3257840388504953787, wipe мира между
+  прогонами — иначе чанки грузятся с диска и сравнение мусорное):
+  * сэмплы чанков: 3/4 — 0 расходящихся блоков; 1 — 2 VINE;
+  * chunk (1022,1022): 16233 → 14 (после grid-фиксов, листья-шум);
+  * (1034,1033): 3783 расходящихся = sulfur/cinnabar Y-границы;
+  * statdump-дельты: SULFUR 29953 / CINNABAR 24443 / STONE 20671 /
+    DEEPSLATE 19649 блоков; vanilla-vs-vanilla шум декораций = 56/169 чанков
+    (vines/leaves НЕДЕТЕРМИНИРОВАНЫ между чистыми ванильными прогонами!).
+- ОТКРЫТЫЙ ВОПРОС (следующая сессия): нижняя Y-граница sulfur_cave_bands у
+  ванилы идёт до y≈-20, у натива обрывается на quart-границе биома 25/54
+  (y≈-9), при этом: биом-грид == живому ванильному источнику (хэш равен),
+  шум бит-равен в расходящихся точках, полосы в ДВУХ ветках дерева
+  (surface/biome_surface/sulfur_caves = [bands, STONE-фолбэк] и
+  underground = [biome sulfur_caves → bands, deepslate vgrad]).
+  Подозреваемые: (а) мой chunk_surface_level всё ещё занижен (min_surface
+  натива ≈ -5..-8 vs ванилы ≈ -4..-3 → другая ветка), (б) ванильный
+  biomeGetter во время SURFACE читает НЕ контейнер (moonrise resolver).
+  План: NMS-оракул — плагин-команда на ваниль-сервере, вытаскивает
+  RandomState из генератора (generatorInfo()), строит NoiseChunk+RuleEvaluator
+  для одной колонки и дампит ВСЕ решения (min_surface, cond-и, шумы, биомы).
+
+Stage Summary:
+- Коммит bea6994 «feat(263): native MaterialSystem (surface rules) — stage
+  S-263 live» + push в GitHub. cargo test 65/65.
+- Натив 26.3 теперь: fill + carvers + biomes + SURFACE (MaterialSystem).
+- e2e-замер не делался (2-core sandbox троттлит: fill p50 17-26ms vs 6.5
+  изолированно cont-51) — честный перф только CI-judge/4-core.
+- Следующее: (1) Java-оракул поверхности → закрыть sulfur-границу до
+  0-divergent; (2) e2e-замер; (3) deco/features 26.3 (главный остаток ~16-23%).
