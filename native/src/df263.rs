@@ -5,7 +5,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::n263::{self, BlendedNoise263, Noise263, NormalNoise263, NormalNoiseParameters};
+use crate::n263::{
+    self, gradient_dot_f32, lerp3_f32, mth_floor, smoothstep, wrap, BlendedNoise263, Noise263,
+    NormalNoise263, NormalNoiseParameters,
+};
 use crate::rng::XoroshiroPositionalRandomFactory;
 
 // ---------------------------------------------------------------- volume model
@@ -830,18 +833,25 @@ impl DfSam263 {
                         }
                     }
                 } else {
-                let mut index = 0usize;
-                for z in 0..vol.size_z {
-                    let bz = vol.block_z(z);
-                    for x in 0..vol.size_x {
-                        let bx = vol.block_x(x);
-                        for y in 0..vol.size_y {
-                            let by = vol.block_y(y);
-                            out[index] = noise.get(bx as f64 * xz_scale, by as f64 * y_scale, bz as f64 * xz_scale);
-                            index += 1;
-                        }
+                    // 3D: column kernels (per-column hoisted x/z prologue,
+                    // bit-exact vs the plain loop); plain per-point fallback
+                    // for Smeared/nested-stack shapes.
+                    let filled = match &**noise {
+                        N263::Normal(n) => stack263_fill_col(
+                            &n.stack.layers,
+                            out,
+                            vol,
+                            &|b| b as f64 * xz_scale,
+                            &|b| b as f64 * y_scale,
+                            &|b| b as f64 * xz_scale,
+                        ),
+                        // N263::Plain is never constructed by the factory;
+                        // anything but a Normal stack takes the plain path.
+                        _ => false,
+                    };
+                    if !filled {
+                        noise_plain_fill(noise, out, vol, *xz_scale, *y_scale);
                     }
-                }
                 }
             }
             DfSam263::ShiftedXz {
@@ -1341,37 +1351,34 @@ impl DfSam263 {
                 main_y_div,
             } => {
                 // 26.3 compiled BlendedNoise = NoiseFunction.Samplers: the z
-                // coordinate is scaled by xzMultiplier (NOT bare z). Scalar
-                // loop: the batch kernel measured slower (lookup-bound).
-                let mut index = 0usize;
-                let bxz = xz_multiplier;
-                let bym = y_multiplier;
-                let mdiv = main_xz_div;
-                let mydiv = main_y_div;
-                for z in 0..vol.size_z {
-                    let bz = vol.block_z(z) as f64 * bxz;
-                    for x in 0..vol.size_x {
-                        let bx = vol.block_x(x) as f64 * bxz;
-                        let bxm = bx / mdiv;
-                        let bzm = bz / mdiv;
-                        for y in 0..vol.size_y {
-                            let by = vol.block_y(y);
-                            let yv = by as f64 * bym;
-                            let ymv = yv / mydiv;
-                            let min = min_stack.get(bx, yv, bz);
-                            let max = max_stack.get(bx, yv, bz);
-                            let main = main_stack.get(bxm, ymv, bzm);
-                            let choice = mth_clamp(main + 0.5, 0.0, 1.0);
-                            out[index] = if choice == 0.0 {
-                                min
-                            } else if choice == 1.0 {
-                                max
-                            } else {
-                                mth_lerp(choice, min, max)
-                            };
-                            index += 1;
-                        }
-                    }
+                // coordinate is scaled by xzMultiplier (NOT bare z). Column
+                // kernels for the three stacks (min/max at (bx, yv, bz),
+                // main at the divided coords), then the per-point blend with
+                // the exact short-circuit semantics. Plain per-point
+                // fallback when a stack needs it (Smeared / nested).
+                let ok = blended_col_fill(
+                    min_stack,
+                    max_stack,
+                    main_stack,
+                    *xz_multiplier,
+                    *y_multiplier,
+                    *main_xz_div,
+                    *main_y_div,
+                    out,
+                    vol,
+                );
+                if !ok {
+                    blended_plain_fill(
+                        min_stack,
+                        max_stack,
+                        main_stack,
+                        *xz_multiplier,
+                        *y_multiplier,
+                        *main_xz_div,
+                        *main_y_div,
+                        out,
+                        vol,
+                    );
                 }
             }
             DfSam263::Spline {
@@ -2245,6 +2252,262 @@ fn spline_value_point(
 
 
 // ---------------------------------------------------------------------------
+// Column kernels: per-column hoisted x/z prologue for the noise leaves.
+//
+// The DensityVolume walk visits y innermost per (x,z) column, so a column of
+// consecutive out[] indices shares the wrap/floor/relative/smoothstep setup
+// and the p_adj chain roots (x0/x1) of both noise inputs. Every per-point
+// f32/f64 op keeps the EXACT order of the scalar paths (PerlinNoise263::get
+// / sample_and_lerp / NoiseStack263::get) — bit-exact by identity:
+//   * layer accumulation order unchanged (layer passes add amp*v in the
+//     same sequence the scalar accumulator would; 0.0 + (-0.0) == +0.0 both
+//     ways),
+//   * coordinate chains unchanged: (raw*node_scale)*freq per layer,
+//     (raw*node_scale)/div for Blended main,
+//   * mul by 1.0 (freq for direct perlin) is an IEEE identity.
+// ---------------------------------------------------------------------------
+
+/// PerlinNoise263 column fill, add-with-amplitude mode.
+/// `tx/ty/tz` map raw volume coords to the stack-level input (node scale);
+/// the lattice coordinate is `wrap(t(r) * freq) + offset`.
+#[allow(clippy::too_many_arguments)]
+fn perlin263_fill_col(
+    p: &[u16; 256],
+    freq: f64,
+    off_x: f64,
+    off_y: f64,
+    off_z: f64,
+    amp: f32,
+    out: &mut [f32],
+    vol: &DensityVolume,
+    tx: &dyn Fn(i32) -> f64,
+    ty: &dyn Fn(i32) -> f64,
+    tz: &dyn Fn(i32) -> f64,
+) {
+    let mut index = 0usize;
+    for z in 0..vol.size_z {
+        let wz = wrap(tz(vol.block_z(z)) * freq) + off_z;
+        let fz = mth_floor(wz);
+        let rz = (wz - fz as f64) as f32;
+        let rz1 = rz - 1.0f32;
+        let sz = smoothstep(rz);
+        for x in 0..vol.size_x {
+            let wx = wrap(tx(vol.block_x(x)) * freq) + off_x;
+            let fx = mth_floor(wx);
+            let rx = (wx - fx as f64) as f32;
+            let rx1 = rx - 1.0f32;
+            let sx = smoothstep(rx);
+            let x0 = p[(fx & 0xFF) as usize] as usize;
+            let x1 = x0 >> 8;
+            for y in 0..vol.size_y {
+                let wy = wrap(ty(vol.block_y(y)) * freq) + off_y;
+                let fy = mth_floor(wy);
+                let ry = (wy - fy as f64) as f32;
+                let ry1 = ry - 1.0f32;
+                // exact sample_and_lerp chain with the column-fixed parts
+                let xy00 = p[(x0.wrapping_add(fy as usize)) & 0xFF] as usize;
+                let xy01 = xy00 >> 8;
+                let z000 = p[(xy00.wrapping_add(fz as usize)) & 0xFF] as usize;
+                let z001 = p[(xy01.wrapping_add(fz as usize)) & 0xFF] as usize;
+                let d000 = gradient_dot_f32(z000 & 15, rx, ry, rz);
+                let d001 = gradient_dot_f32(z000 >> 8 & 15, rx, ry, rz1);
+                let d010 = gradient_dot_f32(z001 & 15, rx, ry1, rz);
+                let d011 = gradient_dot_f32(z001 >> 8 & 15, rx, ry1, rz1);
+                let xy10 = p[(x1.wrapping_add(fy as usize)) & 0xFF] as usize;
+                let xy11 = xy10 >> 8;
+                let z100 = p[(xy10.wrapping_add(fz as usize)) & 0xFF] as usize;
+                let z101 = p[(xy11.wrapping_add(fz as usize)) & 0xFF] as usize;
+                let d100 = gradient_dot_f32(z100 & 15, rx1, ry, rz);
+                let d101 = gradient_dot_f32(z100 >> 8 & 15, rx1, ry, rz1);
+                let d110 = gradient_dot_f32(z101 & 15, rx1, ry1, rz);
+                let d111 = gradient_dot_f32(z101 >> 8 & 15, rx1, ry1, rz1);
+                out[index] += amp * lerp3_f32(
+                    sx,
+                    smoothstep(ry),
+                    sz,
+                    d000,
+                    d100,
+                    d010,
+                    d110,
+                    d001,
+                    d101,
+                    d011,
+                    d111,
+                );
+                index += 1;
+            }
+        }
+    }
+}
+
+/// NoiseStack263 column fill. Returns false when a layer needs the plain
+/// per-point path (Smeared fudge-y / nested stacks) — the caller falls back.
+fn stack263_fill_col(
+    layers: &[(Noise263, f64, f32)],
+    out: &mut [f32],
+    vol: &DensityVolume,
+    tx: &dyn Fn(i32) -> f64,
+    ty: &dyn Fn(i32) -> f64,
+    tz: &dyn Fn(i32) -> f64,
+) -> bool {
+    for (noise, _, _) in layers {
+        match noise {
+            Noise263::Perlin(_) => {}
+            _ => return false,
+        }
+    }
+    out.fill(0.0);
+    for (noise, freq, amp) in layers {
+        match noise {
+            Noise263::Perlin(p) => perlin263_fill_col(
+                &p.p_adj,
+                *freq,
+                p.base.offset_x,
+                p.base.offset_y,
+                p.base.offset_z,
+                *amp,
+                out,
+                vol,
+                tx,
+                ty,
+                tz,
+            ),
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Plain per-point 3D fill for the Noise leaf (fallback + A/B reference).
+fn noise_plain_fill(noise: &N263, out: &mut [f32], vol: &DensityVolume, xz_scale: f64, y_scale: f64) {
+    let mut index = 0usize;
+    for z in 0..vol.size_z {
+        let bz = vol.block_z(z);
+        for x in 0..vol.size_x {
+            let bx = vol.block_x(x);
+            for y in 0..vol.size_y {
+                let by = vol.block_y(y);
+                out[index] = noise.get(bx as f64 * xz_scale, by as f64 * y_scale, bz as f64 * xz_scale);
+                index += 1;
+            }
+        }
+    }
+}
+/// Plain per-point BlendedNoise fill (fallback + A/B reference).
+#[allow(clippy::too_many_arguments)]
+fn blended_plain_fill(
+    min_stack: &Noise263,
+    max_stack: &Noise263,
+    main_stack: &Noise263,
+    xz_multiplier: f64,
+    y_multiplier: f64,
+    main_xz_div: f64,
+    main_y_div: f64,
+    out: &mut [f32],
+    vol: &DensityVolume,
+) {
+    let mut index = 0usize;
+    for z in 0..vol.size_z {
+        let bz = vol.block_z(z) as f64 * xz_multiplier;
+        for x in 0..vol.size_x {
+            let bx = vol.block_x(x) as f64 * xz_multiplier;
+            let bxm = bx / main_xz_div;
+            let bzm = bz / main_xz_div;
+            for y in 0..vol.size_y {
+                let by = vol.block_y(y);
+                let yv = by as f64 * y_multiplier;
+                let ymv = yv / main_y_div;
+                let min = min_stack.get(bx, yv, bz);
+                let max = max_stack.get(bx, yv, bz);
+                let main = main_stack.get(bxm, ymv, bzm);
+                let choice = mth_clamp(main + 0.5, 0.0, 1.0);
+                out[index] = if choice == 0.0 {
+                    min
+                } else if choice == 1.0 {
+                    max
+                } else {
+                    mth_lerp(choice, min, max)
+                };
+                index += 1;
+            }
+        }
+    }
+}
+
+/// BlendedNoise column fill: the three stacks into private buffers, then the
+/// exact per-point blend. Returns false when a stack needs the plain path.
+#[allow(clippy::too_many_arguments)]
+fn blended_col_fill(
+    min_stack: &Noise263,
+    max_stack: &Noise263,
+    main_stack: &Noise263,
+    xz_multiplier: f64,
+    y_multiplier: f64,
+    main_xz_div: f64,
+    main_y_div: f64,
+    out: &mut [f32],
+    vol: &DensityVolume,
+) -> bool {
+    let bxz = xz_multiplier;
+    let bym = y_multiplier;
+    let mdiv = main_xz_div;
+    let mydiv = main_y_div;
+    let mut minb = vec![0f32; vol.size()];
+    let mut maxb = vec![0f32; vol.size()];
+    let mut mainb = vec![0f32; vol.size()];
+    let min_ok = match min_stack {
+        Noise263::Stack(s) => stack263_fill_col(
+            &s.layers,
+            &mut minb,
+            vol,
+            &|b| b as f64 * bxz,
+            &|b| b as f64 * bym,
+            &|b| b as f64 * bxz,
+        ),
+        _ => false,
+    };
+    let max_ok = match max_stack {
+        Noise263::Stack(s) => stack263_fill_col(
+            &s.layers,
+            &mut maxb,
+            vol,
+            &|b| b as f64 * bxz,
+            &|b| b as f64 * bym,
+            &|b| b as f64 * bxz,
+        ),
+        _ => false,
+    };
+    let main_ok = match main_stack {
+        Noise263::Stack(s) => stack263_fill_col(
+            &s.layers,
+            &mut mainb,
+            vol,
+            &|b| (b as f64 * bxz) / mdiv,
+            &|b| (b as f64 * bym) / mydiv,
+            &|b| (b as f64 * bxz) / mdiv,
+        ),
+        _ => false,
+    };
+    if !(min_ok && max_ok && main_ok) {
+        return false;
+    }
+    for i in 0..out.len() {
+        let min = minb[i];
+        let max = maxb[i];
+        let main = mainb[i];
+        let choice = mth_clamp(main + 0.5, 0.0, 1.0);
+        out[i] = if choice == 0.0 {
+            min
+        } else if choice == 1.0 {
+            max
+        } else {
+            mth_lerp(choice, min, max)
+        };
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
 // Pointwise fusion: flat stack program for index-independent subtrees.
 //
 // The tree-walk sample_volume materializes a full-volume buffer at EVERY
@@ -2697,6 +2960,115 @@ impl FuseProg {
         }
         for b in slot_bufs {
             ctx.scratch.release(b);
+        }
+    }
+}
+
+#[cfg(test)]
+mod col_kernel_tests {
+    use super::*;
+    use crate::df263_router::NoiseParams263;
+    use crate::n263::Normalization;
+
+    fn np(p: (f64, i32, i32, &'static [f64])) -> NormalNoiseParameters {
+        NormalNoiseParameters {
+            base_amplitude: p.0,
+            base_octave: p.1,
+            octave_count: p.2,
+            normalize: Normalization::Enabled,
+            amplitude_modifiers: p.3.to_vec(),
+        }
+    }
+
+    fn volumes() -> Vec<DensityVolume> {
+        vec![
+            // full block volume
+            DensityVolume::block_step((16, 384, 16), (16 * 3, -64, 16 * 7)),
+            // cell lattice (4/8/4 strided)
+            DensityVolume {
+                size_x: 5,
+                size_y: 49,
+                size_z: 5,
+                min_x: 48,
+                min_y: -64,
+                min_z: 112,
+                step_x: 4,
+                step_y: 8,
+                step_z: 4,
+            },
+            // z-strip
+            DensityVolume::block_step((16, 384, 3), (16 * 3, -64, 16 * 7)),
+            // single column
+            DensityVolume::block_step((1, 384, 1), (-17, -64, 42)),
+        ]
+    }
+
+    /// Column kernels vs the plain per-point loop: bit-exact on real noise
+    /// stacks (the two heaviest lattice noises + a 16-octave one).
+    #[test]
+    fn col_kernel_bit_exact_vs_plain_normal_noise() {
+        let mut factory = NoiseFactory263::new(3257840388504953787);
+        let cases = vec![
+            ("continentalness", np(NoiseParams263::CONTINENTALNESS)),
+            ("cave_cheese", np(NoiseParams263::CAVE_CHEESE)),
+            ("jagged", np(NoiseParams263::JAGGED)),
+        ];
+        for (vi, vol) in volumes().iter().enumerate() {
+            for (name, p) in &cases {
+                let n = factory.normal(name, p.clone());
+                let mut plain = vec![0f32; vol.size()];
+                let mut col = vec![0f32; vol.size()];
+                noise_plain_fill(&n, &mut plain, vol, 1.0, 1.0);
+                let ok = match &*n {
+                    N263::Normal(nn) => stack263_fill_col(
+                        &nn.stack.layers,
+                        &mut col,
+                        vol,
+                        &|b| b as f64,
+                        &|b| b as f64,
+                        &|b| b as f64,
+                    ),
+                    _ => false,
+                };
+                assert!(ok, "{name} volume #{vi}: col kernel refused");
+                let bad = plain
+                    .iter()
+                    .zip(col.iter())
+                    .position(|(a, b)| a.to_bits() != b.to_bits());
+                assert!(
+                    bad.is_none(),
+                    "{name} volume #{vi}: diverged at {bad:?} (plain {:08x} col {:08x})",
+                    plain[bad.unwrap_or(0)].to_bits(),
+                    col[bad.unwrap_or(0)].to_bits()
+                );
+            }
+        }
+    }
+
+    /// BlendedNoise (base_3d): column path vs the plain per-point path.
+    #[test]
+    fn col_kernel_bit_exact_vs_plain_blended() {
+        let mut factory = NoiseFactory263::new(3257840388504953787);
+        let (min_s, max_s, main_s, xzm, ym, mxd, myd) =
+            factory.blended(0.25, 0.125, 80.0, 160.0, 8.0);
+        for (vi, vol) in volumes().iter().enumerate() {
+            let mut plain = vec![0f32; vol.size()];
+            let mut col = vec![0f32; vol.size()];
+            blended_plain_fill(&min_s, &max_s, &main_s, xzm, ym, mxd, myd, &mut plain, vol);
+            let ok = blended_col_fill(
+                &min_s, &max_s, &main_s, xzm, ym, mxd, myd, &mut col, vol,
+            );
+            assert!(ok, "blended volume #{vi}: col kernel refused");
+            let bad = plain
+                .iter()
+                .zip(col.iter())
+                .position(|(a, b)| a.to_bits() != b.to_bits());
+            assert!(
+                bad.is_none(),
+                "blended volume #{vi}: diverged at {bad:?} (plain {:08x} col {:08x})",
+                plain[bad.unwrap_or(0)].to_bits(),
+                col[bad.unwrap_or(0)].to_bits()
+            );
         }
     }
 }

@@ -87,6 +87,9 @@ pub struct Gen263 {
     /// Compiled pointwise fusion program for final_density (None = the
     /// subtree did not fit the stack budget; the tree walk is the fallback).
     pub final_density_fuse: Option<std::sync::Arc<FuseProg>>,
+    /// CRUS_FUSE=1 — opt-in fused interpreter (bit-exact but measured
+    /// slower than the walk on the current shallow-shell tree).
+    pub fuse_enabled: bool,
     pub aquifer_cfg: crate::aquifer263::AquiferConfig263,
     /// RandomState.getOrCreateRandomFactory("minecraft:aquifer").
     pub aquifer_factory: crate::rng::XoroshiroPositionalRandomFactory,
@@ -108,6 +111,7 @@ impl Gen263 {
             .root_from_hash_of("minecraft:aquifer")
             .fork_positional();
         let final_density_fuse = FuseProg::compile(&router.final_density).map(std::sync::Arc::new);
+        let fuse_enabled = std::env::var("CRUS_FUSE").ok().as_deref() == Some("1");
         Gen263 {
             seed,
             sea_level,
@@ -115,6 +119,7 @@ impl Gen263 {
             height,
             final_density: router.final_density.clone(),
             final_density_fuse,
+            fuse_enabled,
             aquifer_cfg,
             aquifer_factory,
             climate: [
@@ -149,9 +154,11 @@ impl Gen263 {
         )
     }
 
-    /// final_density volume sample: fused flat program when available
-    /// (bit-exact vs the tree walk), tree walk under the profiler (per-kind
-    /// exclusive timing needs the per-node instrumentation) or on fallback.
+    /// final_density volume sample: fused flat program when enabled AND
+    /// compiled (bit-exact vs the tree walk — CI-measured 0/175 parity —
+    /// but SLOWER on the real tree: 16 ops / 6 slots, the interpreter loses
+    /// to the walk's streaming auto-vectorized buffer passes). Opt-in via
+    /// CRUS_FUSE=1 for future deep-shell trees; default is the tree walk.
     #[inline]
     pub fn sample_final_density(
         &self,
@@ -161,8 +168,12 @@ impl Gen263 {
     ) {
         if PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed) {
             self.final_density.sample_volume(ctx, buf, vol);
-        } else if let Some(prog) = &self.final_density_fuse {
-            prog.run(ctx, buf, vol);
+        } else if self.fuse_enabled {
+            if let Some(prog) = &self.final_density_fuse {
+                prog.run(ctx, buf, vol);
+            } else {
+                self.final_density.sample_volume(ctx, buf, vol);
+            }
         } else {
             self.final_density.sample_volume(ctx, buf, vol);
         }
