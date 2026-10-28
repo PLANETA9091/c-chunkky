@@ -2755,3 +2755,34 @@ Stage Summary (ФИНАЛ, run 40677761380 / ce46df7, все 3 джобы SUCCES
 - Порт topMaterial 26.3 ВЕРИФИЦИРОВАН E2E на GitHub CI. Сборки и E2E живут только там.
 - Далее (отложено): (а) участвует ли SteepCondition в ванильном overworld-пресете 26.3;
   (б) deco/features 26.3 — следующий крупный этап.
+
+---
+## cont-56b: SteepCondition — ИСПРАВЛЕНИЕ ВЕРДИКТА + ЖИВОЙ ПУТЬ В 26.3
+
+Task: закрыть отложенный вопрос (а) cont-55/56 — участвует ли SteepCondition в
+ванильном overworld-пресете 26.3.
+
+Work Log:
+- Первичный вердикт по декомпилу («MaterialRules.steep() без вызывающих -> мёртвый
+  код») НЕВЕРЕН — повторение ловушки cont-54c: в 26.3 surface-правила ДАТА-ДРАЙВЕНЫ
+  (reference/vanilla263/data/minecraft/worldgen/material_rule/), и minecraft:steep
+  зовётся из JSON: biome_surface + under_biome_surface для jagged_peaks,
+  snowy_slopes, frozen_peaks (stone на крутых склонах пиковых биомов).
+- Java-side MaterialRules.steep() действительно без Java-вызывающих — но codec
+  зарегистрирован ("steep", MaterialRules.java:161) именно для дата-дривена.
+- Нативный движок: SrCond::Steep парсится из тех же JSON (surface263.rs:709),
+  семантика сверена с декомпилом SteepCondition.java: surfaceGradientX() <= -4 ||
+  surfaceGradientZ() >= 4 — асимметрия (x<=-4, z>=4) — ИЗНАЧАЛЬНАЯ причуда ванилы,
+  не наша опечатка; натив совпадает байт-в-байт.
+- Градиенты питаются от починенных высотокарт (GRAVEL=0 в A/B — путь точен).
+- ВАЖНО ДЛЯ A/B: surface-пара гейта гонялась на тестовом регионе — если в нём нет
+  крутых граней пиковых биомов, steep-ветка верифицирована конструктивно (декомпил),
+  но не покрыта E2E-регионом. Кандидат: добавить в будущий A/B регион с jagged/
+  frozen peaks или steep-террейном.
+
+Stage Summary:
+- Вопрос (а) закрыт: SteepCondition ЖИВОЙ в ванильном overworld 26.3 (через
+  дата-дривен JSON), натив реализует его точно.
+- Остаток портфеля: deco/features 26.3 — мега-проект (движок легаси stage F1 готов,
+  16k строк features_*.rs; CRUS_NATIVE_DECO opt-in, dptt держит ваниль до полной
+  готовности фич). Следующая сессия: скоупинг 26.3-адаптации.
