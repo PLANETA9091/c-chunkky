@@ -103,7 +103,7 @@ done
 sleep 8   # settle: flush async writes so the timed window starts idle
 
 # ---- timed window: reset stats, forceload fresh NxN, poll to completion -----
-$RCON crusgenstats reset >/dev/null
+$RCON "crusgenstats reset" >/dev/null
 target=$(( (N + 1) * (N + 1) ))
 t0=$(date +%s.%N)
 $RCON "forceload add $((RX * 16)) $((RZ * 16)) $(((RX + N) * 16 + 15)) $(((RZ + N) * 16 + 15))" >/dev/null
