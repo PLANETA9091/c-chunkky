@@ -158,6 +158,12 @@ jobs:
         run: |
           set -o pipefail
           SRV_DIR=server RCON_PORT=25576 CRUS_NATIVE_DECO=1 bash harness/e2e_ci.sh 2>&1 | tee e2e263_deco.log
+      - name: Far-coords native-gen probe (stall cliff bisect)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          chmod +x harness/farprobe_ci.sh
+          SRV_DIR=server RCON_PORT=25576 bash harness/farprobe_ci.sh 2>&1 | tee farprobe263.log
       - name: Upload judge artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -168,6 +174,7 @@ jobs:
             ab263_carvers.log
             e2e263_timing.log
             e2e263_deco.log
+            farprobe263.log
             ab263_out/
             server/run.out
           retention-days: 14

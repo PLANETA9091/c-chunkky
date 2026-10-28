@@ -11,6 +11,12 @@
 # Env: SRV_DIR (default server), RCON_PORT (25576), SEED, WX/WZ (warmup
 #      region origin, chunk coords), RX/RZ (timed region origin), N
 #      (chunk-side; NxN region), JAVA_BIN.
+#
+# DEFAULT COORDS: near-origin (~chunk 1050/1100), verified gen-active by the
+# A/B gates (block 16384 ≈ chunk 1024). CI 2026-10-28: far coords (chunk
+# 61440/70656) NEVER complete a single native gen — zero GenStats chunks in
+# 240s with the server healthy. Do not move the defaults far without a
+# far-gen fix (see harness/farprobe_ci.sh).
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -18,9 +24,9 @@ cd "$ROOT"
 SRV="${SRV_DIR:-$ROOT/server}"
 PORT="${RCON_PORT:-25576}"
 SEED="${SEED:-3257840388504953787}"
-WX="${WX:-61440}"; WZ="${WZ:-61440}"      # warmup 4x4 (chunk coords)
+WX="${WX:-1050}"; WZ="${WZ:-1050}"        # warmup 4x4 (chunk coords)
 WN="${WN:-3}"
-RX="${RX:-70656}"; RZ="${RZ:-70656}"      # timed region (chunk coords)
+RX="${RX:-1100}"; RZ="${RZ:-1100}"        # timed region (chunk coords)
 N="${N:-11}"                              # 12x12 = 144 chunks
 JAVA_BIN="${JAVA_BIN:-${JAVA_HOME:-}/bin/java}"
 [ -x "$JAVA_BIN" ] || JAVA_BIN="$(command -v java)"
@@ -89,7 +95,9 @@ fi
 echo "boot ok (e2e full-native, deco=${CRUS_NATIVE_DECO:-0})"
 
 stats_chunks() {
-  $RCON crusgenstats 2>/dev/null | grep -o "chunks=[0-9]*" | head -1 | cut -d= -f2
+  local c
+  c=$($RCON crusgenstats 2>/dev/null | grep -o "chunks=[0-9]*" | head -1 | cut -d= -f2)
+  echo "${c:-0}"
 }
 
 # ---- warmup: small far region (JIT/lib warm, ring buffer primed) ------------
@@ -97,7 +105,7 @@ $RCON "forceload add $((WX * 16)) $((WZ * 16)) $(((WX + WN) * 16 + 15)) $(((WZ +
 wtarget=$(( (WN + 1) * (WN + 1) ))
 for i in $(seq 1 240); do
   c=$(stats_chunks)
-  [ -n "$c" ] && [ "$c" -ge "$wtarget" ] && break
+  [ "$c" -ge "$wtarget" ] && break
   sleep 0.5
 done
 sleep 8   # settle: flush async writes so the timed window starts idle
@@ -110,7 +118,8 @@ $RCON "forceload add $((RX * 16)) $((RZ * 16)) $(((RX + N) * 16 + 15)) $(((RZ + 
 done=0
 for i in $(seq 1 480); do
   c=$(stats_chunks)
-  if [ -n "$c" ] && [ "$c" -ge "$target" ]; then done=1; break; fi
+  if [ "$c" -ge "$target" ]; then done=1; break; fi
+  if (( i % 60 == 0 )); then echo "  [window progress] chunks=$c / $target"; fi
   sleep 0.5
 done
 t1=$(date +%s.%N)
