@@ -409,10 +409,19 @@ fn decode_int_provider(j: &Json) -> Option<IP> {
         }
         "minecraft:clamped" => {
             // vanilla ClampedInt: inner sample then clamp (ALWAYS draws through
-            // the inner provider, even when the value is already in range)
-            let inner = decode_int_provider(j.get("value")?)?;
-            let lo = j.get("min").and_then(|v| v.as_i64())? as i32;
-            let hi = j.get("max").and_then(|v| v.as_i64())? as i32;
+            // the inner provider, even when the value is already in range);
+            // 26.3 renamed the inner field value -> source; bounds written
+            // min/max in the legacy loader and min_inclusive/max_inclusive in
+            // the 26.3 vanilla data — accept both
+            let inner = decode_int_provider(j.get("value").or_else(|| j.get("source"))?)?;
+            let lo = j
+                .get("min_inclusive")
+                .or_else(|| j.get("min"))
+                .and_then(|v| v.as_i64())? as i32;
+            let hi = j
+                .get("max_inclusive")
+                .or_else(|| j.get("max"))
+                .and_then(|v| v.as_i64())? as i32;
             Some(IP::Clamped { inner: Box::leak(Box::new(inner)), lo, hi })
         }
         "minecraft:clamped_normal" => {
@@ -1565,7 +1574,12 @@ fn decode_tree_cfg(c: &Json) -> FeatureCfg {
     let Some(Some(foliage_provider)) = c.get("foliage_provider").map(decode_state_provider) else {
         return bad("tree-foliage-provider");
     };
-    let Some(Some(dirt_provider)) = c.get("dirt_provider").map(decode_state_provider) else {
+    let Some(Some(dirt_provider)) = c
+        .get("dirt_provider")
+        // 26.3 renamed dirt_provider -> below_trunk_provider (TreeConfiguration)
+        .or_else(|| c.get("below_trunk_provider"))
+        .map(decode_state_provider)
+    else {
         return bad("tree-dirt-provider");
     };
     let ms = match c.get("minimum_size") {
