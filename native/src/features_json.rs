@@ -3,7 +3,7 @@
 //! server's registry loader too — parity by construction). Coverage stats in tests.
 
 use crate::features_deco::*;
-use crate::features_placement::{HeightProvider as HP, IntProvider as IP, Modifier as PM};
+use crate::features_placement::{Anchor, HeightProvider as HP, IntProvider as IP, Modifier as PM};
 use crate::json::{self, Json};
 use std::collections::HashMap;
 
@@ -429,6 +429,9 @@ fn decode_height(j: &Json) -> Option<HP> {
     if let Some(a) = j.get("below_top").and_then(|v| v.as_i64()) {
         return Some(HP::BelowTop(a as i32));
     }
+    if let Some(a) = j.get("relative_to_sea_level").and_then(|v| v.as_i64()) {
+        return Some(HP::SeaLevel(a as i32));
+    }
     let t = j.get("type")?.as_str()?;
     match t {
         "minecraft:uniform" => {
@@ -443,6 +446,36 @@ fn decode_height(j: &Json) -> Option<HP> {
             let plateau = j.get("plateau").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             Some(HP::Trapezoid { lo, hi, plateau })
         }
+        // 26.3 ConstantHeight explicit form: {"type":"constant","value":<anchor>}
+        "minecraft:constant" => decode_height(j.get("value")?),
+        // 26.3 BiasedToBottomHeight / VeryBiasedToBottomHeight (inner >= 1, default 1)
+        ty @ ("minecraft:biased_to_bottom" | "minecraft:very_biased_to_bottom") => {
+            let lo = decode_anchor_val(j.get("min_inclusive")?)?;
+            let hi = decode_anchor_val(j.get("max_inclusive")?)?;
+            let inner = j.get("inner").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+            if ty == "minecraft:biased_to_bottom" {
+                Some(HP::BiasedToBottom { lo, hi, inner })
+            } else {
+                Some(HP::VeryBiasedToBottom { lo, hi, inner })
+            }
+        }
+        // 26.3 WeightedListHeight: entries {data: <HeightProvider or anchor>, weight}
+        "minecraft:weighted_list" => {
+            let dist = j.get("distribution")?.as_arr()?;
+            let mut entries: Vec<(&'static HP, u32)> = Vec::new();
+            for e in dist {
+                let d = decode_height(e.get("data")?)?;
+                let w = e.get("weight").and_then(|v| v.as_i64())?;
+                if w <= 0 {
+                    return None;
+                }
+                entries.push((Box::leak(Box::new(d)), w as u32));
+            }
+            if entries.is_empty() {
+                return None;
+            }
+            Some(HP::WeightedList { entries: entries.leak() })
+        }
         _ => None,
     }
 }
@@ -455,19 +488,23 @@ fn decode_anchor(j: &Json) -> Option<HP> {
     decode_height(j)
 }
 
-/// flat i32 anchor value (already absolute/above_bottom/below_top variants)
-fn decode_anchor_val(j: &Json) -> Option<i32> {
+/// anchor object/int -> typed Anchor (26.3: bounds keep above_bottom/below_top/
+/// relative_to_sea_level semantics; resolving happens at sample time)
+fn decode_anchor_val(j: &Json) -> Option<Anchor> {
     if let Some(v) = j.as_i64() {
-        return Some(v as i32);
+        return Some(Anchor::Abs(v as i32));
     }
     if let Some(v) = j.get("absolute").and_then(|v| v.as_i64()) {
-        return Some(v as i32);
+        return Some(Anchor::Abs(v as i32));
     }
     if let Some(v) = j.get("above_bottom").and_then(|v| v.as_i64()) {
-        return Some(v as i32);
+        return Some(Anchor::AboveBottom(v as i32));
     }
     if let Some(v) = j.get("below_top").and_then(|v| v.as_i64()) {
-        return Some(v as i32);
+        return Some(Anchor::BelowTop(v as i32));
+    }
+    if let Some(v) = j.get("relative_to_sea_level").and_then(|v| v.as_i64()) {
+        return Some(Anchor::SeaLevel(v as i32));
     }
     None
 }
@@ -698,6 +735,58 @@ pub fn decode_placement_modifier(j: &Json) -> Mod {
             match (xz, y) {
                 (Some(xz), Some(y)) => Mod::Pure(PM::RandomOffset { xz, y }),
                 _ => Mod::Unsupported("random_offset-provider"),
+            }
+        }
+        // 26.3 renamed random_offset -> offset with three separate providers
+        // (x, y, z fields); draw order x -> y -> z (OffsetPlacement.modify)
+        "minecraft:offset" => {
+            let x = j.get("x").and_then(decode_int_provider);
+            let y = j.get("y").and_then(decode_int_provider);
+            let z = j.get("z").and_then(decode_int_provider);
+            match (x, y, z) {
+                (Some(x), Some(y), Some(z)) => Mod::Pure(PM::Offset3 { x, y, z }),
+                _ => Mod::Unsupported("offset-provider"),
+            }
+        }
+        // 26.3 RandomChancePlacement: nextFloat() < chance (float 0..1)
+        "minecraft:random_chance" => match j.get("chance").and_then(|v| v.as_f64()) {
+            Some(c) => Mod::Pure(PM::RandomChance(c as f32)),
+            None => Mod::Unsupported("chance"),
+        },
+        // 26.3 FixedPlacement: positions = [[x,y,z], ...] int triples; only
+        // positions inside the origin chunk pass (chunk filter at expand time)
+        "minecraft:fixed_placement" => {
+            let Some(arr) = j.get("positions").and_then(|v| v.as_arr()) else {
+                return Mod::Unsupported("fixed-positions");
+            };
+            let mut out: Vec<(i32, i32, i32)> = Vec::new();
+            for e in arr {
+                let Some(tri) = e.as_arr() else {
+                    return Mod::Unsupported("fixed-triple");
+                };
+                if tri.len() != 3 {
+                    return Mod::Unsupported("fixed-triple");
+                }
+                let (Some(x), Some(y), Some(z)) = (
+                    tri[0].as_i64(),
+                    tri[1].as_i64(),
+                    tri[2].as_i64(),
+                ) else {
+                    return Mod::Unsupported("fixed-triple");
+                };
+                out.push((x as i32, y as i32, z as i32));
+            }
+            Mod::Pure(PM::Fixed(out.leak()))
+        }
+        // 26.3 CuboidPlacement: y_size first, then xz_size twice
+        "minecraft:cuboid" => {
+            let xz = j.get("xz_size").and_then(decode_int_provider);
+            let y = j.get("y_size").and_then(decode_int_provider);
+            let include_edges = j.get("include_edges").and_then(|v| v.as_bool()).unwrap_or(true);
+            let include_interior = j.get("include_interior").and_then(|v| v.as_bool()).unwrap_or(true);
+            match (xz, y) {
+                (Some(xz), Some(y)) => Mod::Pure(PM::Cuboid { xz, y, include_edges, include_interior }),
+                _ => Mod::Unsupported("cuboid-provider"),
             }
         }
         "minecraft:height_range" => match j.get("height").and_then(decode_height) {

@@ -32,6 +32,10 @@ pub enum HeightmapTy {
 pub trait DecoLevel {
     fn min_y(&self) -> i32;
     fn max_y(&self) -> i32;
+    /// generator.getSeaLevel() (26.3 WorldGenerationContext); overworld default 63
+    fn sea_level(&self) -> i32 {
+        63
+    }
     fn height(&self, ty: HeightmapTy, x: i32, z: i32) -> i32;
     /// block state id at pos (0 = air); ids are opaque, resolved by the JVM bridge
     fn state(&self, pos: BlockPos) -> u32;
@@ -659,6 +663,7 @@ fn pure_expand_one(
     out: &mut Vec<BlockPos>,
     min_y: i32,
     gen_depth: i32,
+    sea_level: i32,
 ) {
     // mirrors features_placement::expand_rec single-variant bodies (bit-pinned there)
     match *m {
@@ -688,8 +693,47 @@ fn pure_expand_one(
             out.push(BlockPos::new(x, ny, z));
         }
         crate::features_placement::Modifier::HeightRange(hp) => {
-            let h = hp.sample(rng, min_y, gen_depth);
+            let h = hp.sample(rng, min_y, gen_depth, sea_level);
             out.push(BlockPos::new(pos.x, h, pos.z));
+        }
+        // mirrors of the 26.3 additions in features_placement::expand_rec
+        crate::features_placement::Modifier::Offset3 { x, y, z } => {
+            let nx = pos.x + x.sample(rng);
+            let ny = pos.y + y.sample(rng);
+            let nz = pos.z + z.sample(rng);
+            out.push(BlockPos::new(nx, ny, nz));
+        }
+        crate::features_placement::Modifier::RandomChance(chance) => {
+            if rng.next_f32() < chance {
+                out.push(pos);
+            }
+        }
+        crate::features_placement::Modifier::Fixed(positions) => {
+            let cx = pos.x >> 4;
+            let cz = pos.z >> 4;
+            for &(px, py, pz) in positions {
+                if (px >> 4) == cx && (pz >> 4) == cz {
+                    out.push(BlockPos::new(px, py, pz));
+                }
+            }
+        }
+        crate::features_placement::Modifier::Cuboid { xz, y, include_edges, include_interior } => {
+            let height = y.sample(rng);
+            let width = xz.sample(rng);
+            let length = xz.sample(rng);
+            for x in 0..=width {
+                for yy in 0..=height {
+                    for z in 0..=length {
+                        if (include_edges || x != 0 && x != width || yy != 0 && yy != height)
+                            && (include_edges || z != 0 && z != length || yy != 0 && yy != height)
+                            && (include_edges || x != 0 && x != width || z != 0 && z != length)
+                            && (include_interior || x == 0 || x == width || yy == 0 || yy == height || z == 0 || z == length)
+                        {
+                            out.push(BlockPos::new(pos.x + x, pos.y + yy, pos.z + z));
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -720,7 +764,7 @@ pub fn expand_deco(
         Mod::Pure(m) => {
             let gen_depth = level.max_y() - level.min_y() + 1;
             let mut next = Vec::new();
-            pure_expand_one(m, rng, pos, &mut next, level.min_y(), gen_depth);
+            pure_expand_one(m, rng, pos, &mut next, level.min_y(), gen_depth, level.sea_level());
             for p in next {
                 expand_deco(mods, idx + 1, level, rng, p, leaf, top_uid);
             }

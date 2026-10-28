@@ -19,7 +19,7 @@ jobs:
         run: cargo build --release --locked || cargo build --release
       - name: Native unit tests
         working-directory: native
-        run: cargo test --release
+        run: cargo test --release -- --nocapture
       - name: Bench smoke (fills a few chunks, checks ABI)
         working-directory: native
         run: cargo run --release --bin bench -- --smoke 2>/dev/null || cargo run --release --bin bench | head -20
