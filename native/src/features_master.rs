@@ -83,6 +83,16 @@ pub fn build_deco_ctx(
     assets: &crate::worldgen::Assets,
 ) -> Option<DecoCtx> {
     let src = crate::biomes::BiomeSourceData::from_assets(assets)?;
+    build_deco_ctx_src(assets, &src)
+}
+
+/// build_deco_ctx with an EXTERNAL biome-source (embedded-vanilla 26.3: the
+/// v263 ctx already owns BiomeState263.src from params263_overworld.json —
+/// re-parsing from synthetic assets would risk a divergent biome order).
+pub fn build_deco_ctx_src(
+    assets: &crate::worldgen::Assets,
+    src: &crate::biomes::BiomeSourceData,
+) -> Option<DecoCtx> {
     let mut biome_features: HashMap<String, Vec<Vec<String>>> = HashMap::new();
     for name in &src.biome_names {
         let (ns, file) = name.split_once(':')?;
@@ -174,6 +184,23 @@ pub fn build_deco_ctx(
     extra.sort();
     for n in extra {
         uid_names.push(n.clone());
+    }
+    // Seed the global BiomeFilter map from the decoded biome features when
+    // nothing was shipped yet. The Java setupDeco handshake only ships a map
+    // when a datapack is present (PackData) — for the embedded-vanilla 26.3
+    // ctx an EMPTY overwrite would make every native BiomeFilter answer
+    // false and silently drop all features (biome_has_feature reads ONLY
+    // BIOME_FULL). First seed wins; pack worlds overwrite via the handshake.
+    {
+        let mut bf = crate::features_snap::BIOME_FULL.write().unwrap();
+        if bf.is_empty() {
+            for (b, steps) in &biome_features {
+                bf.insert(
+                    b.clone(),
+                    steps.iter().flatten().cloned().collect::<Vec<String>>(),
+                );
+            }
+        }
     }
     Some(DecoCtx {
         state: crate::features_place_ffi::DecoState::seal(reg, &uid_names),

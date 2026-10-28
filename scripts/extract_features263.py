@@ -64,9 +64,14 @@ def emit_const(out, cname: str, entries, comment: str):
 def main() -> None:
     configured = load_dir("feature")
     placed = load_dir("placed_feature")
+    biomes = load_dir("biome")
 
     cfg_norm = [(n, normalize_configured(n, d)) for n, d in configured]
     pl_norm = [(n, normalize_placed(n, d)) for n, d in placed]
+    # biome JSONs pass through unchanged: build_deco_ctx reads the top-level
+    # "features" array (steps of placed-feature refs), shape is stable 26.3.
+    bio_norm = [(n, json.dumps(d, separators=(",", ":"), sort_keys=False))
+                for n, d in biomes]
 
     lines = []
     lines.append("//! VANILLA 26.3 worldgen feature data (GENERATED — do not edit).\n")
@@ -78,11 +83,14 @@ def main() -> None:
                f"vanilla 26.3 features ({len(cfg_norm)}), flat->config normalized")
     emit_const(lines, "VANILLA_PLACED_263", pl_norm,
                f"vanilla 26.3 placed features ({len(pl_norm)}), pass-through")
+    emit_const(lines, "VANILLA_BIOMES_263", bio_norm,
+               f"vanilla 26.3 biome JSONs ({len(bio_norm)}), features arrays intact")
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8") as f:
         f.write("".join(lines))
-    print(f"wrote {OUT}: {len(cfg_norm)} configured, {len(pl_norm)} placed")
+    print(f"wrote {OUT}: {len(cfg_norm)} configured, {len(pl_norm)} placed, "
+          f"{len(bio_norm)} biomes")
 
 
 if __name__ == "__main__":

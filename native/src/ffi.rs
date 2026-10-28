@@ -221,6 +221,31 @@ fn build_biome_state(
 pub(crate) static SESSIONS: Mutex<Option<HashMap<i64, Ctx>>> = Mutex::new(None);
 static NEXT_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
+/// Synthetic Assets from the embedded 26.3 vanilla blobs — feeds
+/// build_deco_ctx_src for the embedded-vanilla ctx (no datapack present).
+/// Path shape matches the assets convention "<ns>/worldgen/<kind>/<file>.json";
+/// the feature blobs are already normalized to the legacy {type,config} shape
+/// by scripts/extract_features263.py, so decode_registry consumes them
+/// unchanged and the 1.21.8 fallback loop inside build_deco_ctx_src adds
+/// nothing (the 26.3 set covers every name).
+fn embedded263_assets() -> crate::worldgen::Assets {
+    use crate::features_vanilla_data263 as VD;
+    let mut a = crate::worldgen::Assets::new();
+    for (name, text) in VD::VANILLA_BIOMES_263 {
+        let (ns, file) = name.split_once(':').expect("vanilla biome key");
+        a.insert(format!("{ns}/worldgen/biome/{file}.json"), text.as_bytes().to_vec());
+    }
+    for (name, text) in VD::VANILLA_CONFIGURED_263 {
+        let (ns, file) = name.split_once(':').expect("vanilla feature key");
+        a.insert(format!("{ns}/worldgen/configured_feature/{file}.json"), text.as_bytes().to_vec());
+    }
+    for (name, text) in VD::VANILLA_PLACED_263 {
+        let (ns, file) = name.split_once(':').expect("vanilla placed key");
+        a.insert(format!("{ns}/worldgen/placed_feature/{file}.json"), text.as_bytes().to_vec());
+    }
+    a
+}
+
 /// Create a generator context for (seed, minY, height, seaLevel). Returns the
 /// ctx id (non-zero) or 0 on failure.
 pub fn ctx_new(seed: i64, min_y: i32, height: i32, sea_level: i32) -> i64 {
@@ -284,6 +309,20 @@ pub fn ctx_new(seed: i64, min_y: i32, height: i32, sea_level: i32) -> i64 {
     } else {
         None
     };
+    // Native deco engine for the embedded-vanilla 26.3 overworld (the
+    // datapack path builds it inside ctx_new_assets). Requires the native
+    // biome stage (plan order = the 26.3 preset biome order). The Java
+    // setupDeco handshake only activates the driver behind CRUS_NATIVE_DECO=1.
+    let deco = v263
+        .as_ref()
+        .and_then(|s| s.biomes.as_ref())
+        .and_then(|b| {
+            let src = std::sync::Arc::clone(b);
+            std::panic::catch_unwind(move || {
+                crate::features_master::build_deco_ctx_src(&embedded263_assets(), &src.src)
+            })
+            .unwrap_or(None)
+        });
     let mut env: Box<DEnv> = Box::new(DEnv::new(seed));
     // The plugin resolves the datapack-aware sea level (NoiseGeneratorSettings
     // from the server registry); override the bundled-vanilla default.
@@ -294,7 +333,7 @@ pub fn ctx_new(seed: i64, min_y: i32, height: i32, sea_level: i32) -> i64 {
     let mut map = SESSIONS.lock().unwrap();
     map.get_or_insert_with(HashMap::new).insert(
         id,
-        Ctx { gen, v263, biomes: None, surface: None, deco: None },
+        Ctx { gen, v263, biomes: None, surface: None, deco },
     );
     id
 }

@@ -2260,7 +2260,15 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 bfr[bfi] = String.join("\u0001", e.getValue());
                 bfi++;
             }
-            ChunkGenNative.decoBiomeFeaturesFull(ctx0, bfn, bfr);
+            // Ship the pack biome->features map ONLY when pack data exists.
+            // decoBiomeFeaturesFull CLEARS the global map first — an empty
+            // overwrite (no pack, embedded-vanilla ctx) would make every
+            // native BiomeFilter answer false and drop all features; the
+            // native side seeds the map itself from the decoded biome JSONs
+            // (features_master build_deco_ctx_src).
+            if (!bf.isEmpty()) {
+                ChunkGenNative.decoBiomeFeaturesFull(ctx0, bfn, bfr);
+            }
             String[] names = ChunkGenNative.ctxBiomeNames(ctx0);
             java.util.Set<String> possible = names == null
                     ? null
