@@ -24,6 +24,7 @@ pub mod features_math;
 pub mod features_placement;
 pub mod features_tree;
 pub mod features_vanilla_data;
+pub mod features_vanilla_data263;
 pub mod features_deco;
 pub mod features_json;
 pub mod features_place;

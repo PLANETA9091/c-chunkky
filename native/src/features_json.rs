@@ -1877,3 +1877,69 @@ mod tests {
         String::new()
     }
 }
+
+/// cont-56c: the 26.3 vanilla feature set (flat-schema JSONs normalized to
+/// the legacy {type,config} shape by scripts/extract_features263.py) parsed
+/// through the SAME strict loader. This test MEASURES schema drift: every
+/// Unsupported entry is a 26.3 dialect item the F-263 dialect layer must
+/// learn. Baseline numbers are printed, not asserted — the worklist drives
+/// the next iterations; totals are asserted so regeneration breakage is loud.
+#[test]
+fn vanilla263_registry_parses() {
+    let reg = decode_registry(
+        crate::features_vanilla_data263::VANILLA_CONFIGURED_263
+            .iter()
+            .map(|(n, t)| (n.to_string(), t.to_string())),
+        crate::features_vanilla_data263::VANILLA_PLACED_263
+            .iter()
+            .map(|(n, t)| (n.to_string(), t.to_string())),
+    );
+    assert_eq!(reg.total_configured, 234, "26.3 configured feature count");
+    assert_eq!(reg.total_placed, 273, "26.3 placed feature count");
+
+    let mut bad_cfg: Vec<String> = reg
+        .configured
+        .iter()
+        .filter_map(|(n, c)| match c {
+            FeatureCfg::Unsupported(r) => Some(format!("{n}: {r}")),
+            _ => None,
+        })
+        .collect();
+    bad_cfg.sort();
+    println!(
+        "26.3 configured unsupported {}/{}:",
+        reg.unsupported_configured, reg.total_configured
+    );
+    for b in &bad_cfg {
+        println!("  {b}");
+    }
+    let mut bad_pl: Vec<String> = reg
+        .placed
+        .iter()
+        .filter_map(|(n, p)| {
+            let r = p
+                .placement
+                .iter()
+                .find_map(|m| match m {
+                    Mod::Unsupported(r) => Some(*r),
+                    _ => None,
+                })
+                .or_else(|| {
+                    if p.feature.is_empty() {
+                        Some("feature-ref-missing")
+                    } else {
+                        None
+                    }
+                })?;
+            Some(format!("{n}: {r}"))
+        })
+        .collect();
+    bad_pl.sort();
+    println!(
+        "26.3 placed unsupported {}/{}:",
+        reg.unsupported_placed, reg.total_placed
+    );
+    for b in &bad_pl {
+        println!("  {b}");
+    }
+}
