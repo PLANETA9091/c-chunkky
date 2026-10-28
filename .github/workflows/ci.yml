@@ -76,7 +76,7 @@ jobs:
       - name: Build plugin (full jar incl. NMS companions)
         run: |
           chmod +x plugin/build.sh
-          SRV_DIR=server ./plugin/build.sh
+          SRV_DIR="$GITHUB_WORKSPACE/server" ./plugin/build.sh
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -130,11 +130,11 @@ jobs:
       - name: Build plugin (full jar incl. NMS companions)
         run: |
           chmod +x plugin/build.sh
-          SRV_DIR=server ./plugin/build.sh
+          SRV_DIR="$GITHUB_WORKSPACE/server" ./plugin/build.sh
       - name: Build probe263
         run: |
           chmod +x probe263/build.sh
-          SRV_DIR=server ./probe263/build.sh
+          SRV_DIR="$GITHUB_WORKSPACE/server" ./probe263/build.sh
       - name: Sanity .so
         run: file native/target/release/libcrussty_chunkgen.so
       - name: A/B surface (native vs Java surface path, carvers off)
