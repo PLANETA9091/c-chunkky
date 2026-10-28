@@ -97,7 +97,10 @@ impl IntProvider {
             }
             IntProvider::VeryBiasedToBottom { lo, hi } => {
                 let range = (hi - lo + 1).max(1);
-                lo + rng.next_int_bound(rng.next_int_bound(rng.next_int_bound(range) + 1) + 1)
+                // Java evaluates the innermost nextInt first; keep the order
+                let d1 = rng.next_int_bound(range);
+                let d2 = rng.next_int_bound(d1 + 1);
+                lo + rng.next_int_bound(d2 + 1)
             }
         }
     }
