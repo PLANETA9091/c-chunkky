@@ -59,6 +59,13 @@ stop_server
 rm -rf "$SRV/world" "$SRV/world_nether" "$SRV/world_the_end"
 cp "$PLUGIN_JAR" "$SRV/plugins/CrusstyGen.jar"
 cp "$PROBE_JAR" "$SRV/plugins/CrusstyProbe263.jar"
+# Wire the native generator (see e2e_ci.sh: without bukkit.yml the noise
+# stage stays vanilla and the probe measures nothing).
+cat > "$SRV/bukkit.yml" <<EOF
+worlds:
+  world:
+    generator: CrusstyGen
+EOF
 rm -f "$SRV/run.in"
 mkfifo "$SRV/run.in"
 ( sleep 1800 > "$SRV/run.in" ) >/dev/null 2>&1 &

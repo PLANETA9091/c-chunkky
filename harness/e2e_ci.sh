@@ -70,6 +70,15 @@ stop_server
 rm -rf "$SRV/world" "$SRV/world_nether" "$SRV/world_the_end"
 cp "$PLUGIN_JAR" "$SRV/plugins/CrusstyGen.jar"
 cp "$PROBE_JAR" "$SRV/plugins/CrusstyProbe263.jar"
+# CRITICAL: wire the world generator or the noise stage stays VANILLA.
+# getDefaultWorldGenerator resolves only via bukkit.yml — without this the
+# boot logs surface/carver/biome handshakes but generateNoise is vanilla
+# (GenStats COUNT stays 0 forever; observed CI 2026-10-28).
+cat > "$SRV/bukkit.yml" <<EOF
+worlds:
+  world:
+    generator: CrusstyGen
+EOF
 rm -f "$SRV/run.in"
 mkfifo "$SRV/run.in"
 ( sleep 1800 > "$SRV/run.in" ) >/dev/null 2>&1 &
