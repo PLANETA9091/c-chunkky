@@ -139,10 +139,12 @@ jobs:
         run: file native/target/release/libcrussty_chunkgen.so
       - name: A/B surface (native vs Java surface path, carvers off)
         run: |
+          set -o pipefail
           chmod +x harness/ab263_ci.sh
           SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh surface 2>&1 | tee ab263_surface.log
       - name: A/B carvers (vanilla vs native carvers + topMaterial)
         run: |
+          set -o pipefail
           SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh carvers 2>&1 | tee ab263_carvers.log
       - name: Upload judge artifacts
         if: always()

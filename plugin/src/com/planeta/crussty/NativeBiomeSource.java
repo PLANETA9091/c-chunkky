@@ -10,7 +10,11 @@ import net.minecraft.world.level.biome.BiomeResolver;
 import net.minecraft.world.level.biome.BiomeSource;
 import net.minecraft.world.level.biome.Climate;
 
+import com.mojang.serialization.DataResult;
+import com.mojang.serialization.DynamicOps;
 import com.mojang.serialization.MapCodec;
+import com.mojang.serialization.MapLike;
+import com.mojang.serialization.RecordBuilder;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -80,9 +84,36 @@ public final class NativeBiomeSource extends BiomeSource {
         return possible.stream();
     }
 
+    /** Encode-only serialization stub: level.dat must be writable on fresh
+     *  worlds (Paper 26.3 runs saveEverything inside initServer, and the
+     *  dimensions map encodes the generator's biome source). We emit a
+     *  vanilla-shaped multi_noise overworld preset entry; the plugin re-swaps
+     *  the native source on EVERY world load (CrusstyChunkGenerator), so the
+     *  decoded value is only ever a transient placeholder — and a fresh world
+     *  (CI A/B protocol, first deploy) never decodes this entry at all.
+     *  The old throw made every fresh-world boot crash ("native biome source
+     *  is not serializable" -> initServer -> crash report). */
+    private static final MapCodec<BiomeSource> SERIALIZE_STUB = new MapCodec<>() {
+        @Override
+        public <T> DataResult<BiomeSource> decode(DynamicOps<T> ops, MapLike<T> map) {
+            return DataResult.error(() ->
+                "native biome source is rebuilt at world load (plugin swap), not decoded");
+        }
+        @Override
+        public <T> RecordBuilder<T> encode(BiomeSource input, DynamicOps<T> ops, RecordBuilder<T> prefix) {
+            return prefix.add("preset", ops.createString("minecraft:overworld"));
+        }
+        @Override
+        public <T> Stream<T> keys(DynamicOps<T> ops) {
+            return Stream.of(ops.createString("preset"));
+        }
+    };
+
     @Override
     protected MapCodec<? extends BiomeSource> codec() {
-        throw new UnsupportedOperationException("native biome source is not serializable");
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        MapCodec<? extends BiomeSource> stub = (MapCodec<? extends BiomeSource>) (MapCodec) SERIALIZE_STUB;
+        return stub;
     }
 
     /** 26.3: BiomeSource hands out BiomeResolver views of itself; the native
