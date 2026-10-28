@@ -105,8 +105,10 @@ fi
 echo "boot ok (e2e full-native, deco=${CRUS_NATIVE_DECO:-0})"
 # Kill the spawn region: its ~169-chunk background backlog THROTTLES while
 # forceload tickets are pending and RESUMES inside the timed window
-# (observed: fills=320 for a 144-chunk window even after a stable-count
-# settle). The DPTT judge uses the same gamerule.
+# (observed: fills=320/314 for a 144-chunk window). The gamerule alone does
+# NOT cancel already-scheduled spawn tasks — force-drain the whole spawn
+# area BEFORE the window instead (see the drain block below, after
+# stats_chunks).
 $RCON "gamerule spawnChunkRadius 0" >/dev/null 2>&1 || true
 
 stats_chunks() {
@@ -114,6 +116,20 @@ stats_chunks() {
   c=$($RCON crusgenstats 2>/dev/null | grep -o "chunks=[0-9]*" | head -1 | cut -d= -f2)
   echo "${c:-0}"
 }
+
+# force-drain the spawn backlog BEFORE the warmup/window (gamerule does not
+# cancel pending spawn tasks; ticketing the spawn area gives them priority
+# NOW so the timed window starts with an idle gen thread).
+$RCON "forceload add -112 -112 111 111" >/dev/null   # chunks -7..6 (spawn 13x13)
+last=-1; stable=0
+for i in $(seq 1 480); do
+  c=$(stats_chunks)
+  if [ "$c" = "$last" ]; then stable=$((stable + 1)); else stable=0; fi
+  [ "$stable" -ge 16 ] && break
+  last=$c; sleep 0.5
+done
+$RCON "forceload remove -112 -112 111 111" >/dev/null
+echo "spawn backlog drained (fills so far: ${last:-?})"
 
 # ---- warmup: small far region (JIT/lib warm, ring buffer primed) ------------
 # NOTE: the boot's spawn region (~169 chunks) keeps generating in the
