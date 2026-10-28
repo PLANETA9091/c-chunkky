@@ -2969,3 +2969,29 @@ Next-фронты к 1мс (по убыванию):
    префиллы с ранними аутами по y-диапазону.
 4. Scratch-arena: убрать defensive zero-fill на acquire (многие узлы
    перезаписывают весь буфер).
+
+---
+## cont-58c: ФИНАЛ СЕССИИ — fill_chunk 26.3: 7.99 -> 4.74ms (-41%), ВСЁ ЗЕЛЁНОЕ
+
+CI 2353516 (native+plugin+integration success): fill_chunk median 4.74
+(min 4.40, max 6.73); volume sample 7.33; FUSED parity 0/175 (инфраструктура
+фьюза жива под CRUS_FUSE=1); substance 1.06; interp fill 0.87.
+
+Итоговый стек сессии (7 перф-коммитов, все бит-точны):
+1. fill263bench в CI (честная разбивка 26.3 — bench perf/phases меряют легаси!)
+2. FuseProg (плоский поинтвайз-интерпретатор) — бит-точен, МЕДЛЕННЕЕ walk на
+   реальном дереве (16 ops/6 slots) — CRUS_FUSE=1 opt-in, урок зафиксирован
+3. cache_2d broadcast (y_scale=0: 1 get на колонку вместо 49)
+4. Колоночные кернелы Perlin/Stack/Blended (x/z-пролог хоистится на колонку;
+   Smeared-слои — smear_fudge-режим; точный порядок f32 оп-ций)
+5. Общий aquifer-префилл на стрипы (1 maxSurfaceLevel-walk вместо N)
+6. Scratch-arena: без defensive zero-fill (все ветки полностью пишут буфер)
+
+Перф-инвариант сессии: паритет ни разу не дрогнул — integration A/B
+(surface+carvers) зелёный в каждом прогоне; col/fuse A/B-тесты бит-точны.
+
+Next (worklog cont-58b): AVX2 y-векторизация кернелов (-30-40% noise),
+substance-объёмные префиллы, ENDGAME — compiled-lattice engine (легаси-стиль
+nochunk: плоская программа + плоскостная решётка + perm-dedup) — отдельный
+мегапроект; параллельно F-263 configured 82/234 (srs-inline, geode, lake,
+bamboo, huge_fungus, freeze_top_layer...).
