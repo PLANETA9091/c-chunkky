@@ -89,6 +89,9 @@ if [ "$up" != "1" ]; then
   exit 1
 fi
 echo "boot ok (farprobe)"
+# Spawn-region backlog pollutes the per-probe deltas (observed +45 chunks
+# for a 2x2 probe: 4 probe + 41 backlog). Kill the spawn region.
+$RCON "gamerule spawnChunkRadius 0" >/dev/null 2>&1 || true
 
 stats_chunks() {
   local c

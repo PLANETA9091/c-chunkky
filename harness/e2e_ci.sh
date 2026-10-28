@@ -103,6 +103,11 @@ if [ "$up" != "1" ]; then
   exit 1
 fi
 echo "boot ok (e2e full-native, deco=${CRUS_NATIVE_DECO:-0})"
+# Kill the spawn region: its ~169-chunk background backlog THROTTLES while
+# forceload tickets are pending and RESUMES inside the timed window
+# (observed: fills=320 for a 144-chunk window even after a stable-count
+# settle). The DPTT judge uses the same gamerule.
+$RCON "gamerule spawnChunkRadius 0" >/dev/null 2>&1 || true
 
 stats_chunks() {
   local c
