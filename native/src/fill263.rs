@@ -15,7 +15,7 @@
 //! Fluid-update marks packed BlockPos.asLong, same as the legacy path.
 
 use crate::aquifer263::{Aquifer263, FluidTy};
-use crate::df263::{DensityVolume, SamplerCtx263};
+use crate::df263::{DensityVolume, FuseProg, SamplerCtx263, PROF_ON_263};
 use crate::df263_router::RouterBuilder263;
 use crate::nochunk::OUT_LEN;
 
@@ -84,6 +84,9 @@ pub struct Gen263 {
     pub min_y: i32,
     pub height: i32,
     pub final_density: crate::df263::SamRef,
+    /// Compiled pointwise fusion program for final_density (None = the
+    /// subtree did not fit the stack budget; the tree walk is the fallback).
+    pub final_density_fuse: Option<std::sync::Arc<FuseProg>>,
     pub aquifer_cfg: crate::aquifer263::AquiferConfig263,
     /// RandomState.getOrCreateRandomFactory("minecraft:aquifer").
     pub aquifer_factory: crate::rng::XoroshiroPositionalRandomFactory,
@@ -104,12 +107,14 @@ impl Gen263 {
             .factory
             .root_from_hash_of("minecraft:aquifer")
             .fork_positional();
+        let final_density_fuse = FuseProg::compile(&router.final_density).map(std::sync::Arc::new);
         Gen263 {
             seed,
             sea_level,
             min_y,
             height,
             final_density: router.final_density.clone(),
+            final_density_fuse,
             aquifer_cfg,
             aquifer_factory,
             climate: [
@@ -142,6 +147,25 @@ impl Gen263 {
             volume,
             self.sea_level,
         )
+    }
+
+    /// final_density volume sample: fused flat program when available
+    /// (bit-exact vs the tree walk), tree walk under the profiler (per-kind
+    /// exclusive timing needs the per-node instrumentation) or on fallback.
+    #[inline]
+    pub fn sample_final_density(
+        &self,
+        ctx: &mut SamplerCtx263,
+        buf: &mut Vec<f32>,
+        vol: &DensityVolume,
+    ) {
+        if PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed) {
+            self.final_density.sample_volume(ctx, buf, vol);
+        } else if let Some(prog) = &self.final_density_fuse {
+            prog.run(ctx, buf, vol);
+        } else {
+            self.final_density.sample_volume(ctx, buf, vol);
+        }
     }
 
     /// One doFill pass. `beard_list` = the plugin-serialized Beardifier
@@ -221,7 +245,7 @@ impl Gen263 {
         let mut aquifer = self.aquifer_for(&mut ctx, &volume);
 
         let mut buf = ctx.scratch.acquire(volume.size());
-        self.final_density.sample_volume(&mut ctx, &mut buf, &volume);
+        self.sample_final_density(&mut ctx, &mut buf, &volume);
 
         for z in 0..volume.size_z {
             for x in 0..volume.size_x {
@@ -299,7 +323,7 @@ impl Gen263 {
         let mut buf = ctx.scratch.acquire(strip_vol.size());
         let mut strip_out: Box<[u16; OUT_LEN]> = vec![0u16; OUT_LEN].into_boxed_slice().try_into().unwrap();
         let mut marks: Vec<i64> = Vec::new();
-        self.final_density.sample_volume(&mut ctx, &mut buf, &strip_vol);
+        self.sample_final_density(&mut ctx, &mut buf, &strip_vol);
         for z in 0..strip_vol.size_z {
             let z_global = z0 + z;
             for x in 0..strip_vol.size_x {
@@ -355,7 +379,7 @@ impl Gen263 {
         let mut ctx = SamplerCtx263::cached();
         let mut aquifer = self.aquifer_for(&mut ctx, &volume);
         let mut buf = ctx.scratch.acquire(volume.size());
-        self.final_density.sample_volume(&mut ctx, &mut buf, &volume);
+        self.sample_final_density(&mut ctx, &mut buf, &volume);
         let mut result = self.min_y;
         for y in (0..volume.size_y).rev() {
             let block_y = volume.block_y(y);
@@ -634,6 +658,84 @@ fn merge_strip_rows(src: &[u16; OUT_LEN], dst: &mut [u16; OUT_LEN], z0: i32, z1:
         for z in z0..z1 {
             let start = (y * 256 + z * 16) as usize;
             dst[start..start + 16].copy_from_slice(&src[start..start + 16]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fusion A/B: the compiled flat program must be bit-identical to the
+    /// tree walk on every sampled volume shape (full chunk, z-strip,
+    /// single column). Fresh ctx per path — cache-cell state is pure
+    /// memoization, but a fresh ctx keeps the A/B honest end to end.
+    #[test]
+    fn fuse_bit_exact_vs_tree_walk() {
+        let g = Gen263::new(3257840388504953787, -64, 384, 63);
+        let prog = g
+            .final_density_fuse
+            .as_ref()
+            .expect("final_density must compile to a fuse program (stack budget 48)");
+        assert!(!prog.ops.is_empty());
+        assert!(!prog.slots.is_empty());
+
+        let volumes: Vec<DensityVolume> = vec![
+            // full chunk
+            DensityVolume::block_step((16, 384, 16), (16 * 3, -64, 16 * 7)),
+            DensityVolume::block_step((16, 384, 16), (-16 * 11, -64, -16 * 3)),
+            // z-strip (fill_strip shape)
+            DensityVolume {
+                size_x: 16,
+                size_y: 384,
+                size_z: 5,
+                min_x: 16 * 3,
+                min_y: -64,
+                min_z: 16 * 7 + 3,
+                step_x: 1,
+                step_y: 1,
+                step_z: 1,
+            },
+            // single column (base_height shape)
+            DensityVolume::block_step((1, 384, 1), (-17, -64, 42)),
+            // cell lattice shape (4/8/4 strided, as under Interpolated)
+            DensityVolume {
+                size_x: 5,
+                size_y: 49,
+                size_z: 5,
+                min_x: 0,
+                min_y: -64,
+                min_z: 0,
+                step_x: 4,
+                step_y: 8,
+                step_z: 4,
+            },
+        ];
+
+        for (vi, vol) in volumes.iter().enumerate() {
+            let mut walk = vec![0f32; vol.size()];
+            let mut fuse = vec![0f32; vol.size()];
+            {
+                let mut ctx = SamplerCtx263::cached();
+                ctx.beard = crate::beard263::Beardifier263::decode(&[0, 0]);
+                g.final_density.sample_volume(&mut ctx, &mut walk, vol);
+            }
+            {
+                let mut ctx = SamplerCtx263::cached();
+                ctx.beard = crate::beard263::Beardifier263::decode(&[0, 0]);
+                prog.run(&mut ctx, &mut fuse, vol);
+            }
+            let bad = walk
+                .iter()
+                .zip(fuse.iter())
+                .position(|(a, b)| a.to_bits() != b.to_bits());
+            assert!(
+                bad.is_none(),
+                "volume #{vi}: fused program diverged at index {:?} (walk {:08x} vs fuse {:08x})",
+                bad,
+                walk[bad.unwrap_or(0)].to_bits(),
+                fuse[bad.unwrap_or(0)].to_bits()
+            );
         }
     }
 }

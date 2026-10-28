@@ -2196,3 +2196,461 @@ fn spline_value_point(
         }
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// Pointwise fusion: flat stack program for index-independent subtrees.
+//
+// The tree-walk sample_volume materializes a full-volume buffer at EVERY
+// pointwise node (binary ops, const ops, unary, clamp, lerp, range choice,
+// round, interval select) — memory-bound passes over 98k+ f32 per node.
+// FuseProg compiles the pointwise spine once, materializes only barrier
+// leaves (noise family, interpolated, cache, slices, gradient, spline, ...),
+// then runs ONE pass over indices with a register stack. Per-index op order
+// is identical to the buffer path (each step a separate f32 op, no FMA
+// contraction — Rust never enables fp-contract), so results are bit-exact.
+// ---------------------------------------------------------------------------
+
+const FUSE_MAX_STACK: usize = 48;
+const FUSE_MAX_BRANCHES: usize = 16;
+
+/// One flat program step. Stack effects: PushConst/Load push 1; the n-ary
+/// ops pop their operands in reverse push order and push 1.
+#[derive(Clone, Debug)]
+pub enum FuseOp {
+    PushConst(f32),
+    Load(usize),
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Min,
+    Max,
+    ConstAdd(f32),
+    ConstSub(f32),
+    ConstMul(f32),
+    ConstDiv(f32),
+    ConstMin(f32),
+    ConstMax(f32),
+    Unary(UnOp),
+    Clamp(f32, f32),
+    /// pops second, first, alpha (alpha pushed first).
+    Lerp,
+    /// pops second, alpha (const first).
+    LerpConstFirst(f32),
+    /// pops first, alpha (const second).
+    LerpConstSecond(f32),
+    PowConstBase(f64),
+    PowConstExp(f64),
+    Pow,
+    RoundInt(RoundType),
+    /// pops mul, a (a pushed first): if mul==0 { a } else { round(a/mul)*mul }.
+    Round(RoundType),
+    /// pops out_of_range, in_range, a (a pushed first).
+    RangeChoice(f32, f32),
+    RangeChoiceConst { min: f32, max: f32, in_v: f32, out_v: f32 },
+    /// pops branches in reverse push order, then a (a pushed FIRST).
+    IntervalSelect(Arc<Vec<f32>>),
+}
+
+/// Compiled pointwise spine of a DfSam263 subtree. Barrier leaves are kept
+/// as shared SamRefs and materialized into slot buffers once per volume.
+pub struct FuseProg {
+    pub ops: Vec<FuseOp>,
+    pub slots: Vec<SamRef>,
+}
+
+impl FuseProg {
+    /// Compile a subtree into a flat program. Returns None when the subtree
+    /// exceeds the fixed stack/branch budget (caller falls back to the walk).
+    pub fn compile(root: &SamRef) -> Option<FuseProg> {
+        let mut ops = Vec::new();
+        let mut slots: Vec<SamRef> = Vec::new();
+        let mut depth = 0usize;
+        Self::compile_into(root, &mut ops, &mut slots, &mut depth)?;
+        Some(FuseProg { ops, slots })
+    }
+
+    fn compile_into(
+        node: &SamRef,
+        ops: &mut Vec<FuseOp>,
+        slots: &mut Vec<SamRef>,
+        depth: &mut usize,
+    ) -> Option<()> {
+        // +1 per stack push; bail out if the fixed budget would overflow.
+        macro_rules! push {
+            ($op:expr) => {{
+                *depth += 1;
+                if *depth > FUSE_MAX_STACK {
+                    return None;
+                }
+                ops.push($op);
+            }};
+        }
+        // pop `$pop` operands (net after the op's own push of 1).
+        macro_rules! pop_net {
+            ($op:expr, $pop:expr) => {{
+                *depth = depth.saturating_sub($pop);
+                ops.push($op);
+            }};
+        }
+        match &**node {
+            DfSam263::Constant(c) => push!(FuseOp::PushConst(*c)),
+            DfSam263::Binary { op, l, r, .. } => {
+                Self::compile_into(l, ops, slots, depth)?;
+                Self::compile_into(r, ops, slots, depth)?;
+                pop_net!(
+                    match op {
+                        BinOp::Add => FuseOp::Add,
+                        BinOp::Sub => FuseOp::Sub,
+                        BinOp::Mul => FuseOp::Mul,
+                        BinOp::Div => FuseOp::Div,
+                        BinOp::Min => FuseOp::Min,
+                        BinOp::Max => FuseOp::Max,
+                    },
+                    1
+                );
+            }
+            DfSam263::ConstAdd { a, c } => {
+                Self::compile_into(a, ops, slots, depth)?;
+                pop_net!(FuseOp::ConstAdd(*c), 0);
+            }
+            DfSam263::ConstSub { c, a } => {
+                Self::compile_into(a, ops, slots, depth)?;
+                pop_net!(FuseOp::ConstSub(*c), 0);
+            }
+            DfSam263::ConstMul { a, c } => {
+                Self::compile_into(a, ops, slots, depth)?;
+                pop_net!(FuseOp::ConstMul(*c), 0);
+            }
+            DfSam263::ConstDiv { c, a } => {
+                Self::compile_into(a, ops, slots, depth)?;
+                pop_net!(FuseOp::ConstDiv(*c), 0);
+            }
+            DfSam263::ConstMin { a, c } => {
+                Self::compile_into(a, ops, slots, depth)?;
+                pop_net!(FuseOp::ConstMin(*c), 0);
+            }
+            DfSam263::ConstMax { a, c } => {
+                Self::compile_into(a, ops, slots, depth)?;
+                pop_net!(FuseOp::ConstMax(*c), 0);
+            }
+            DfSam263::Unary { op, a } => {
+                Self::compile_into(a, ops, slots, depth)?;
+                pop_net!(FuseOp::Unary(*op), 0);
+            }
+            DfSam263::Clamp { a, min, max } => {
+                Self::compile_into(a, ops, slots, depth)?;
+                pop_net!(FuseOp::Clamp(*min, *max), 0);
+            }
+            DfSam263::Lerp { alpha, first, second } => {
+                Self::compile_into(alpha, ops, slots, depth)?;
+                Self::compile_into(first, ops, slots, depth)?;
+                Self::compile_into(second, ops, slots, depth)?;
+                pop_net!(FuseOp::Lerp, 2);
+            }
+            DfSam263::LerpConstFirst { alpha, first, second } => {
+                Self::compile_into(alpha, ops, slots, depth)?;
+                Self::compile_into(second, ops, slots, depth)?;
+                pop_net!(FuseOp::LerpConstFirst(*first), 1);
+            }
+            DfSam263::LerpConstSecond { alpha, first, second } => {
+                Self::compile_into(alpha, ops, slots, depth)?;
+                Self::compile_into(first, ops, slots, depth)?;
+                pop_net!(FuseOp::LerpConstSecond(*second), 1);
+            }
+            DfSam263::PowConstBase { base, exp } => {
+                Self::compile_into(exp, ops, slots, depth)?;
+                pop_net!(FuseOp::PowConstBase(*base), 0);
+            }
+            DfSam263::PowConstExp { a, exp } => {
+                Self::compile_into(a, ops, slots, depth)?;
+                pop_net!(FuseOp::PowConstExp(*exp), 0);
+            }
+            DfSam263::Pow { a, b } => {
+                Self::compile_into(a, ops, slots, depth)?;
+                Self::compile_into(b, ops, slots, depth)?;
+                pop_net!(FuseOp::Pow, 1);
+            }
+            DfSam263::RoundInt { ty, a } => {
+                Self::compile_into(a, ops, slots, depth)?;
+                pop_net!(FuseOp::RoundInt(*ty), 0);
+            }
+            DfSam263::Round { ty, a, mul } => {
+                Self::compile_into(a, ops, slots, depth)?;
+                Self::compile_into(mul, ops, slots, depth)?;
+                pop_net!(FuseOp::Round(*ty), 1);
+            }
+            DfSam263::RangeChoice { a, min, max, in_range, out_of_range } => {
+                Self::compile_into(a, ops, slots, depth)?;
+                Self::compile_into(in_range, ops, slots, depth)?;
+                Self::compile_into(out_of_range, ops, slots, depth)?;
+                pop_net!(FuseOp::RangeChoice(*min, *max), 2);
+            }
+            DfSam263::RangeChoiceConst { a, min, max, in_v, out_v } => {
+                Self::compile_into(a, ops, slots, depth)?;
+                pop_net!(
+                    FuseOp::RangeChoiceConst { min: *min, max: *max, in_v: *in_v, out_v: *out_v },
+                    0
+                );
+            }
+            DfSam263::IntervalSelect { a, thresholds, branches } => {
+                if branches.is_empty() || branches.len() > FUSE_MAX_BRANCHES {
+                    return None;
+                }
+                Self::compile_into(a, ops, slots, depth)?;
+                for b in branches {
+                    Self::compile_into(b, ops, slots, depth)?;
+                }
+                // op pops (branches.len()+1), pushes 1 -> net -= branches.len()
+                *depth = depth.saturating_sub(branches.len());
+                ops.push(FuseOp::IntervalSelect(Arc::new(thresholds.clone())));
+            }
+            // ---- barriers: materialize into a slot buffer, Load per index ----
+            _ => {
+                let slot = slots.len();
+                slots.push(node.clone());
+                push!(FuseOp::Load(slot));
+            }
+        }
+        Some(())
+    }
+
+    /// Run the flat program over a volume. Bit-exact vs the tree walk: every
+    /// slot is materialized through the unmodified tree path (cache cells,
+    /// sub-volumes, ctx state all behave identically), then one pass per
+    /// index applies the same f32 op sequence the buffer loops would.
+    pub fn run(&self, ctx: &mut SamplerCtx263, out: &mut Vec<f32>, vol: &DensityVolume) {
+        let n = vol.size();
+        let mut slot_bufs: Vec<Vec<f32>> = Vec::with_capacity(self.slots.len());
+        for s in &self.slots {
+            let mut b = ctx.scratch.acquire(n);
+            s.sample_volume(ctx, &mut b, vol);
+            slot_bufs.push(b);
+        }
+        let slot_ptrs: Vec<*const f32> = slot_bufs.iter().map(|b| b.as_ptr()).collect();
+        let mut stack = [0f32; FUSE_MAX_STACK];
+        let base = out.as_mut_ptr();
+        for i in 0..n {
+            let mut sp = 0usize;
+            for op in &self.ops {
+                match op {
+                    FuseOp::PushConst(c) => {
+                        stack[sp] = *c;
+                        sp += 1;
+                    }
+                    FuseOp::Load(s) => {
+                        stack[sp] = unsafe { *(*slot_ptrs.as_ptr().add(*s)).add(i) };
+                        sp += 1;
+                    }
+                    FuseOp::Add => {
+                        sp -= 1;
+                        let r = stack[sp];
+                        sp -= 1;
+                        stack[sp] = stack[sp] + r;
+                        sp += 1;
+                    }
+                    FuseOp::Sub => {
+                        sp -= 1;
+                        let r = stack[sp];
+                        sp -= 1;
+                        stack[sp] = stack[sp] - r;
+                        sp += 1;
+                    }
+                    FuseOp::Mul => {
+                        sp -= 1;
+                        let r = stack[sp];
+                        sp -= 1;
+                        stack[sp] = stack[sp] * r;
+                        sp += 1;
+                    }
+                    FuseOp::Div => {
+                        sp -= 1;
+                        let r = stack[sp];
+                        sp -= 1;
+                        stack[sp] = stack[sp] / r;
+                        sp += 1;
+                    }
+                    FuseOp::Min => {
+                        sp -= 1;
+                        let r = stack[sp];
+                        sp -= 1;
+                        let l = stack[sp];
+                        stack[sp] = if r < l { r } else { l };
+                        sp += 1;
+                    }
+                    FuseOp::Max => {
+                        sp -= 1;
+                        let r = stack[sp];
+                        sp -= 1;
+                        let l = stack[sp];
+                        stack[sp] = if r > l { r } else { l };
+                        sp += 1;
+                    }
+                    FuseOp::ConstAdd(c) => {
+                        sp -= 1;
+                        stack[sp] = stack[sp] + *c;
+                        sp += 1;
+                    }
+                    FuseOp::ConstSub(c) => {
+                        sp -= 1;
+                        stack[sp] = *c - stack[sp];
+                        sp += 1;
+                    }
+                    FuseOp::ConstMul(c) => {
+                        sp -= 1;
+                        stack[sp] = stack[sp] * *c;
+                        sp += 1;
+                    }
+                    FuseOp::ConstDiv(c) => {
+                        sp -= 1;
+                        stack[sp] = *c / stack[sp];
+                        sp += 1;
+                    }
+                    FuseOp::ConstMin(c) => {
+                        sp -= 1;
+                        let v = stack[sp];
+                        stack[sp] = if *c < v { *c } else { v };
+                        sp += 1;
+                    }
+                    FuseOp::ConstMax(c) => {
+                        sp -= 1;
+                        let v = stack[sp];
+                        stack[sp] = if *c > v { *c } else { v };
+                        sp += 1;
+                    }
+                    FuseOp::Unary(u) => {
+                        sp -= 1;
+                        stack[sp] = apply_unary(*u, stack[sp]);
+                        sp += 1;
+                    }
+                    FuseOp::Clamp(min, max) => {
+                        sp -= 1;
+                        stack[sp] = mth_clamp(stack[sp], *min, *max);
+                        sp += 1;
+                    }
+                    FuseOp::Lerp => {
+                        sp -= 1;
+                        let sb = stack[sp];
+                        sp -= 1;
+                        let fb = stack[sp];
+                        sp -= 1;
+                        let a = stack[sp];
+                        stack[sp] = if a == 0.0 {
+                            fb
+                        } else if a == 1.0 {
+                            sb
+                        } else {
+                            mth_lerp(a, fb, sb)
+                        };
+                        sp += 1;
+                    }
+                    FuseOp::LerpConstFirst(f) => {
+                        sp -= 1;
+                        let sb = stack[sp];
+                        sp -= 1;
+                        let a = stack[sp];
+                        stack[sp] = if a == 0.0 {
+                            *f
+                        } else if a == 1.0 {
+                            sb
+                        } else {
+                            mth_lerp(a, *f, sb)
+                        };
+                        sp += 1;
+                    }
+                    FuseOp::LerpConstSecond(s2) => {
+                        sp -= 1;
+                        let fb = stack[sp];
+                        sp -= 1;
+                        let a = stack[sp];
+                        stack[sp] = if a == 0.0 {
+                            fb
+                        } else if a == 1.0 {
+                            *s2
+                        } else {
+                            mth_lerp(a, fb, *s2)
+                        };
+                        sp += 1;
+                    }
+                    FuseOp::PowConstBase(b) => {
+                        sp -= 1;
+                        stack[sp] = (*b).powf(stack[sp] as f64) as f32;
+                        sp += 1;
+                    }
+                    FuseOp::PowConstExp(exp) => {
+                        sp -= 1;
+                        stack[sp] = (stack[sp] as f64).powf(*exp) as f32;
+                        sp += 1;
+                    }
+                    FuseOp::Pow => {
+                        sp -= 1;
+                        let b = stack[sp] as f64;
+                        sp -= 1;
+                        stack[sp] = (stack[sp] as f64).powf(b) as f32;
+                        sp += 1;
+                    }
+                    FuseOp::RoundInt(ty) => {
+                        sp -= 1;
+                        stack[sp] = apply_round(*ty, stack[sp]);
+                        sp += 1;
+                    }
+                    FuseOp::Round(ty) => {
+                        sp -= 1;
+                        let m = stack[sp];
+                        sp -= 1;
+                        let a = stack[sp];
+                        stack[sp] = if m == 0.0 {
+                            a
+                        } else {
+                            apply_round(*ty, a / m) * m
+                        };
+                        sp += 1;
+                    }
+                    FuseOp::RangeChoice(min, max) => {
+                        sp -= 1;
+                        let ob = stack[sp];
+                        sp -= 1;
+                        let ir = stack[sp];
+                        sp -= 1;
+                        let a = stack[sp];
+                        stack[sp] = if a >= *min && a < *max { ir } else { ob };
+                        sp += 1;
+                    }
+                    FuseOp::RangeChoiceConst { min, max, in_v, out_v } => {
+                        sp -= 1;
+                        let a = stack[sp];
+                        stack[sp] = if a >= *min && a < *max { *in_v } else { *out_v };
+                        sp += 1;
+                    }
+                    FuseOp::IntervalSelect(thresholds) => {
+                        let nb = thresholds.len() + 1;
+                        let mut vals = [0f32; FUSE_MAX_BRANCHES + 1];
+                        for k in (0..nb).rev() {
+                            sp -= 1;
+                            vals[k] = stack[sp];
+                        }
+                        sp -= 1;
+                        let input = stack[sp];
+                        let mut picked = nb - 1;
+                        for (ti, t) in thresholds.iter().enumerate() {
+                            if input < *t {
+                                picked = ti;
+                                break;
+                            }
+                        }
+                        stack[sp] = vals[picked];
+                        sp += 1;
+                    }
+                }
+            }
+            debug_assert_eq!(sp, 1);
+            unsafe {
+                *base.add(i) = stack[0];
+            }
+        }
+        for b in slot_bufs {
+            ctx.scratch.release(b);
+        }
+    }
+}

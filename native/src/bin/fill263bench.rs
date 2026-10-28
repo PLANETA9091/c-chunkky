@@ -21,6 +21,8 @@ fn main() {
     let mut t_aq = Vec::new();
     let mut t_vol = Vec::new();
     let mut t_sub = Vec::new();
+    let mut t_fuse = Vec::new();
+    let mut fuse_bad = 0usize;
     let mut out = [0u16; OUT_LEN];
     let mut marks = Vec::new();
 
@@ -71,6 +73,31 @@ fn main() {
             }
             t_sub.push(s0.elapsed().as_secs_f64() * 1e3);
             let _ = n;
+
+            // fused flat-program timing: honest production ordering — fresh
+            // ctx + its own aquifer prefill (the aquifer warms the same
+            // cache cells the walk would), then the fused volume sample.
+            match &g.final_density_fuse {
+                Some(prog) => {
+                    let mut fctx = SamplerCtx263::cached();
+                    let _faq = g.aquifer_for(&mut fctx, &volume);
+                    let mut fbuf = fctx.scratch.acquire(volume.size());
+                    let f0 = std::time::Instant::now();
+                    prog.run(&mut fctx, &mut fbuf, &volume);
+                    t_fuse.push(f0.elapsed().as_secs_f64() * 1e3);
+                    // bit-parity check against the walk buffer (caches are
+                    // pure memoization — results must not depend on them)
+                    if fbuf
+                        .iter()
+                        .zip(buf.iter())
+                        .any(|(a, b)| a.to_bits() != b.to_bits())
+                    {
+                        fuse_bad += 1;
+                    }
+                    fctx.scratch.release(fbuf);
+                }
+                None => t_fuse.push(f64::NAN),
+            }
             ctx.scratch.release(buf);
         }
     }
@@ -107,6 +134,19 @@ fn main() {
         "volume sample median {:.2}ms",
         median(&mut t_vol)
     );
+    let fuse_nan = t_fuse.iter().any(|v| v.is_nan());
+    if fuse_nan {
+        println!("volume FUSED    : n/a (compile returned None — stack budget)");
+    } else {
+        let prog = g.final_density_fuse.as_ref().unwrap();
+        println!(
+            "volume FUSED    median {:.2}ms  (ops {}, slots {}, bit-parity fails: {fuse_bad}/{})",
+            median(&mut t_fuse),
+            prog.ops.len(),
+            prog.slots.len(),
+            t_fuse.len()
+        );
+    }
     println!(
         "substance loop median {:.2}ms",
         median(&mut t_sub)
