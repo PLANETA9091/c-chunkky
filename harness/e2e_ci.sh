@@ -86,7 +86,7 @@ if [ "$up" != "1" ]; then
   stop_server
   exit 1
 fi
-echo "boot ok (e2e full-native)"
+echo "boot ok (e2e full-native, deco=${CRUS_NATIVE_DECO:-0})"
 
 stats_chunks() {
   $RCON crusgenstats 2>/dev/null | grep -o "chunks=[0-9]*" | head -1 | cut -d= -f2
@@ -123,11 +123,11 @@ STATS="$($RCON crusgenstats 2>/dev/null)"
 sleep 2
 stop_server
 
-python3 - "$t0" "$t1" "$nchunks" <<'PYEOF'
+python3 - "$t0" "$t1" "$nchunks" "${CRUS_NATIVE_DECO:-0}" <<'PYEOF'
 import sys
-t0, t1, n = float(sys.argv[1]), float(sys.argv[2]), int(sys.argv[3])
+t0, t1, n, deco = float(sys.argv[1]), float(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 w = t1 - t0
-print(f"=== e2e window ({n} chunks, fresh region, full-native) ===")
+print(f"=== e2e window ({n} chunks, fresh region, full-native, deco={deco}) ===")
 print(f"e2e_ms_per_chunk={w * 1000 / n:.1f}  wall={w:.2f}s  chunks={n}")
 PYEOF
 
