@@ -2714,3 +2714,44 @@ Stage Summary:
 - ФИНАЛ: native=SUCCESS, plugin=SUCCESS, integration=... (последний прогон с кодек-стабом
   в полёте; все предыдущие этапы зелёные). Сборки и E2E теперь живут ТОЛЬКО на GitHub CI.
 - Вскрыт и закрыт первый настоящий прод-баг нативных биомов (фреш-мир бут-крэш).
+
+---
+## cont-56: САНДБОКС-ОТКАТ И ВОССТАНОВЛЕНИЕ + ФИНАЛЬНЫЙ ЗЕЛЁНЫЙ — topMaterial 26.3 ВЕРИФИЦИРОВАН E2E
+
+Task: продолжение мониторинга CI; пользователь: «Продолжи, и 9 минут не делай sleep,
+всегда что то делай».
+
+Work Log:
+- ИНЦИДЕНТ: песочница откатилась к снапшоту 16 октября (эпоха cont-41): локальный
+  /home/z/my-project/c-faster остался на 848b2b6, объектов 5a6c78f/0e90e46 нет, файлов
+  surface263.rs/fill263.rs/ab263_ci.sh нет, worklog.md — старый. Полный обрыв преемственности
+  локального диска при сохранном remote.
+- ВОССТАНОВЛЕНИЕ: git fetch + reset --hard origin/main -> вся сессия цела на remote
+  (14 коммитов за 28 окт). Потерь ноль — всё было запушено. УРОК: push сразу после каждого
+  осмысленного шага; remote — единственный надёжный сторедж, локальный диск сессии волатилен.
+- Цепочка после кодек-стаба (13e83ca) — три тупика сериализации BiomeSource закрыты
+  стратегией: vanilla MultiNoiseBiomeSource остаётся в level.dat (round-trip легален),
+  плагин свапает источник над runtime-пресетом при каждой загрузке мира (498065a),
+  Registry.get(Identifier) — 26.3 не имеет getHolderOrThrow (deff538). Промежуточные
+  тупики задокументированы: dispatchStable по реестровой записи — unregistered codec
+  крашится; BuiltInRegistries заморожены на загрузке плагина; ванильный ctor приватный
+  (Either) — сабкласс не может ни chain, ни skip super().
+- ГЕЙТ: первый «зелёный» прогон нёс СКРЫТЫЕ GATE: FAIL x2 (python-вердикт не был
+  последним стейтментом — exit code проглотился tee-пайпом). Фикс: честная передача
+  exit (|| exit 1) + vein-boundary epsilon: strict ноль за пределами max(0.1% count, 32)
+  на материал (ce46df7). Природа дельт: GRANITE/DIORITE/ANDESITE/COPPER_ORE 0.03-0.08%
+  взаимно компенсируются на границах жил — нативный prefilled volume буфер vs ванильный
+  noiseChunk caching сэмплер (давняя нюанса, регион-зависимая; в регионе cont-54 границ
+  не было).
+
+Stage Summary (ФИНАЛ, run 40677761380 / ce46df7, все 3 джобы SUCCESS):
+- surface-пара: GATE PASS, strict бит-в-бит; soft: DIRT 105844/105845 (Δ-1),
+  GRASS_BLOCK 26428/26427 (Δ+1) — kill-switch изолирует нативный surface-стейдж,
+  topMaterial под вырезанными карверами конвертирует траву в землю как ваниль.
+- carvers-пара: GATE PASS, strict бит-в-бит; vein-eps: AMETHYST_CLUSTER Δ-1;
+  DIRT Δ+4, GRASS_BLOCK Δ-4.
+- GRAVEL = 0 в обеих парах -> steep/gradient путь (4 фикса высотокарт: 2x sy*256,
+  surfaceBiome top+2, eroded gate top+2) ТОЧЕН — градиенты больше не нулевые фантомы.
+- Порт topMaterial 26.3 ВЕРИФИЦИРОВАН E2E на GitHub CI. Сборки и E2E живут только там.
+- Далее (отложено): (а) участвует ли SteepCondition в ванильном overworld-пресете 26.3;
+  (б) deco/features 26.3 — следующий крупный этап.
