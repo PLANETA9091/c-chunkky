@@ -111,14 +111,27 @@ stats_chunks() {
 }
 
 # ---- warmup: small far region (JIT/lib warm, ring buffer primed) ------------
+# NOTE: the boot's spawn region (~169 chunks) keeps generating in the
+# background well after "Done" — wait for before+warmup, not a bare target,
+# or the stats reset lands mid-spawn-gen and the timed window mixes in ~170
+# foreign fills (observed: chunks=313 for a 144-chunk window).
+before=$(stats_chunks)
 $RCON "forceload add $((WX * 16)) $((WZ * 16)) $(((WX + WN) * 16 + 15)) $(((WZ + WN) * 16 + 15))" >/dev/null
-wtarget=$(( (WN + 1) * (WN + 1) ))
+wtarget=$((before + (WN + 1) * (WN + 1)))
 for i in $(seq 1 240); do
   c=$(stats_chunks)
   [ "$c" -ge "$wtarget" ] && break
   sleep 0.5
 done
-sleep 8   # settle: flush async writes so the timed window starts idle
+# settle: wait until the count goes STABLE (spawn-region backlog drained) —
+# the timed window must start with an idle gen thread.
+last=-1; stable=0
+for i in $(seq 1 480); do
+  c=$(stats_chunks)
+  if [ "$c" = "$last" ]; then stable=$((stable + 1)); else stable=0; fi
+  [ "$stable" -ge 8 ] && break
+  last=$c; sleep 0.5
+done
 
 # ---- timed window: reset stats, forceload fresh NxN, poll to completion -----
 $RCON "crusgenstats reset" >/dev/null
