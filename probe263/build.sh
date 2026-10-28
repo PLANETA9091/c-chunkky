@@ -18,8 +18,11 @@ else
 fi
 [ -n "$API_JAR" ] && [ -f "$API_JAR" ] || { echo "missing paper-api under $SRV_DIR/libraries"; exit 1; }
 ADV="$(find "$SRV_DIR/libraries" -name 'adventure-api*.jar' -o -name 'adventure-key*.jar' -o -name 'examination-api*.jar' -o -name 'bungeecord-chat*.jar' 2>/dev/null | tr '\n' ':')"
+# 26.3 paper-api signatures carry jetbrains/jspecify annotations — javac
+# needs them on the classpath or it dies with "cannot access NotNull"
+ANNOT="$(find "$SRV_DIR/libraries" -name 'jetbrains-annotations*.jar' -o -name 'annotations-*.jar' -o -name 'jspecify*.jar' 2>/dev/null | tr '\n' ':')"
 rm -rf probe263/classes && mkdir -p probe263/classes
-"${JAVAC_CMD[@]}" -encoding UTF-8 -cp "$API_JAR:$ADV" -d probe263/classes \
+"${JAVAC_CMD[@]}" -encoding UTF-8 -cp "$API_JAR:$ADV:$ANNOT" -d probe263/classes \
   probe263/src/com/planeta/crussty/probe/ProbePlugin.java
 cp probe263/resources/plugin.yml probe263/classes/
 "${JAR_CMD[@]}" --create --file probe263/CrusstyProbe263.jar -C probe263/classes .
