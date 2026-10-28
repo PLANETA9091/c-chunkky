@@ -35,6 +35,8 @@ jobs:
           CRUS_BENCH_SEED=3257840388504953787 cargo run --release --bin bench -- perf 64
           echo "=== phases (real seed) ==="
           cargo run --release --bin phases
+          echo "=== fill263 stage breakdown (per-kind exclusive, real seed) ==="
+          cargo run --release --bin fill263bench
           # Noise control on the shared 2-core runner: neighbor VMs inject
           # additive-only noise into a chunk time, so the MIN of repeated
           # p50s is the honest noise-free estimate (p50 alone swings ~15%).
