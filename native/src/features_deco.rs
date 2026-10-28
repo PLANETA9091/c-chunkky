@@ -653,6 +653,11 @@ pub enum Mod {
         factor: f64,
         offset: f64,
     },
+    /// 26.3 CountOnEveryLayerPlacement (deprecated but data-used): per-layer
+    /// surface scan, MOTION_BLOCKING start, do-while while any found
+    CountOnEveryLayer(IntProvider),
+    /// 26.3 NoiseThresholdCountPlacement: BIOME_INFO_NOISE(x/200, z/200)
+    NoiseThresholdCount { noise_level: f64, below: i32, above: i32 },
     Unsupported(&'static str),
 }
 
@@ -872,6 +877,74 @@ pub fn expand_deco(
                 expand_deco(mods, idx + 1, level, rng, pos, leaf, top_uid);
             }
         }
+        Mod::CountOnEveryLayer(ip) => {
+            // 26.3 modify(): do-while over layers; per layer ONE count draw
+            // then per-attempt x/z draws; MOTION_BLOCKING start height
+            let min_y = level.min_y();
+            let mut layer = 0i32;
+            loop {
+                let mut found_any = false;
+                let n = ip.sample(rng).max(0);
+                for _ in 0..n {
+                    let x = rng.next_int_bound(16) + pos.x;
+                    let z = rng.next_int_bound(16) + pos.z;
+                    let start_y = level.height(HeightmapTy::MotionBlocking, x, z);
+                    let y = find_on_ground_y(level, x, start_y, z, layer, min_y);
+                    if y != i32::MAX {
+                        found_any = true;
+                        expand_deco(mods, idx + 1, level, rng, BlockPos::new(x, y, z), leaf, top_uid);
+                    }
+                }
+                if !found_any {
+                    break;
+                }
+                layer += 1;
+            }
+        }
+        Mod::NoiseThresholdCount { noise_level, below, above } => {
+            // 26.3 count(): BIOME_INFO_NOISE(x/200.0, z/200.0) threshold
+            let v = biome_info_noise().value(pos.x as f64 / 200.0, pos.z as f64 / 200.0);
+            let n = if v < *noise_level { below } else { above };
+            for _ in 0..(*n).max(0) {
+                expand_deco(mods, idx + 1, level, rng, pos, leaf, top_uid);
+            }
+        }
         Mod::Unsupported(_) => {}
     }
+}
+
+/// 26.3 findOnGroundYPosition: walk down from the MOTION_BLOCKING surface;
+/// the Nth (layerToPlaceOn) non-bedrock ground under an empty cell wins.
+/// isEmpty = isAir || WATER || LAVA. Returns Integer.MAX_VALUE when exhausted.
+fn find_on_ground_y(
+    level: &dyn DecoLevelExt,
+    x: i32,
+    start_y: i32,
+    z: i32,
+    layer_to_place_on: i32,
+    min_y: i32,
+) -> i32 {
+    let is_empty = |level: &dyn DecoLevelExt, p: BlockPos| -> bool {
+        if level.is_air(p) {
+            return true;
+        }
+        let n = level.state_name(p);
+        n == "minecraft:water" || n == "minecraft:lava"
+    };
+    let mut current_empty = is_empty(level, BlockPos::new(x, start_y, z));
+    let mut current_layer = 0i32;
+    let mut y = start_y;
+    while y >= min_y + 1 {
+        let below = BlockPos::new(x, y - 1, z);
+        let below_empty = is_empty(level, below);
+        if !below_empty && current_empty && level.state_name(below) != "minecraft:bedrock" {
+            if current_layer == layer_to_place_on {
+                return y; // vanilla: currentPos.getY() + 1 where setY(y-1)
+            }
+            current_layer += 1;
+        }
+        current_empty = below_empty;
+        y -= 1;
+    }
+    i32::MAX
 }

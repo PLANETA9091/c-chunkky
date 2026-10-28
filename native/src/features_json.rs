@@ -893,6 +893,27 @@ pub fn decode_placement_modifier(j: &Json) -> Mod {
                 _ => Mod::Unsupported("noise-count"),
             }
         }
+        // 26.3 NoiseThresholdCountPlacement: BIOME_INFO_NOISE(x/200, z/200) threshold
+        "minecraft:noise_threshold_count" => {
+            let nl = j.get("noise_level").and_then(|v| v.as_f64());
+            let b = j.get("below_noise").and_then(|v| v.as_i64());
+            let a = j.get("above_noise").and_then(|v| v.as_i64());
+            match (nl, b, a) {
+                (Some(nl), Some(b), Some(a)) => Mod::NoiseThresholdCount {
+                    noise_level: nl,
+                    below: b as i32,
+                    above: a as i32,
+                },
+                _ => Mod::Unsupported("noise-threshold"),
+            }
+        }
+        // 26.3 CountOnEveryLayerPlacement (deprecated, 8 vanilla uses)
+        "minecraft:count_on_every_layer" => {
+            match decode_int_provider(j.get("count").unwrap_or(&Json::Num(1.0))) {
+                Some(p) => Mod::CountOnEveryLayer(p),
+                None => Mod::Unsupported("coe-count"),
+            }
+        }
         _ => Mod::Unsupported("modifier"),
     }
 }
