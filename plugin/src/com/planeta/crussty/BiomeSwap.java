@@ -51,7 +51,7 @@ public final class BiomeSwap {
         @SuppressWarnings("unchecked")
         net.minecraft.core.Registry<net.minecraft.world.level.biome.Biome> biomeReg =
                 (net.minecraft.core.Registry<net.minecraft.world.level.biome.Biome>) biomeRegistry;
-        NativeBiomeSource nbs = new NativeBiomeSource(biomeReg,
+        NativeBiomeSource nbs = NativeBiomeSource.create(biomeReg,
                 (ctx, cx, cz, out) -> filler.fill(ctx, cx, cz, out),
                 names, sections, minQuartY);
         bf.set(gen, nbs);

@@ -2674,3 +2674,43 @@ Work Log:
 Stage Summary:
 - topMaterial-порт логически завершён и сверен с декомпилом; высоткарты выровнены с vanilla.
 - Коммит + push → GitHub CI (сборка/тесты/E2E — только там). worklog: этот файл.
+
+---
+## cont-55b: CI = ЕДИНСТВЕННЫЙ КАНАЛ СБОРОК/E2E — 26.3 ПАЙПЛАЙН ПОДНЯТ С НУЛЯ (4 фикс-итерации)
+
+Task: правило пользователя «E2E и сборки не делай локально, все на гитхаб ci» —
+перевод всего конвейера на GitHub CI.
+
+Work Log:
+- ci.yml был мёртв с cfc8645 (25 окт): plugin-джоба ждала probe/paper-api-26.3.jar,
+  а CI качал 1.21.8-API под старым именем; integration целиком остался в эпохе 1.21.8.
+- plugin-джоба: JDK25 (Temurin 25.0.5) + кэш bootstrap/extract (fill v3 build 222,
+  paperclip -Dpaperclip.patchonly=true -> versions/26.3/paper-26.3.jar + libraries,
+  вкл. paper-api-26.3.build.222-stable.jar) -> полный CrusstyGen.jar с NMS-компаньонами.
+  build.sh: SRV_DIR env + glob-фоллбек API_JAR. Итерации: имя API-джарника, абсолютный
+  SRV_DIR (build.sh делает cd plugin/).
+- integration-джоба: полный 26.3 E2E A/B — bootstrap 222 -> patchonly-экстракт ->
+  native (cargo) + plugin + probe263 -> 4 бута сервера (2 пары: surface native-vs-Java,
+  carvers vanilla-vs-native+topMaterial) -> statdump-гейт по материалам
+  (strict/soft/deco-бакеты; deco = порядок кросс-чанковых фич, недетерминирован).
+  Новый harness/ab263_ci.sh (env-параметризованный близнец ab_surface263.sh).
+- Фиксы по логам CI: (1) probe263 classpath — аннотации+guava (Material.getItemAttributes
+  возвращает Multimap; отсутствие guava маскировалось под «Cannot attach type annotations»);
+  org.jetbrains.annotations всегда с Maven (в экстракте только jspecify).
+  (2) JDK 25.0.4 на раннере падал на type-use аннотациях paper-api — пин 25.0.5.
+  (3) НОВЫЙ РЕАЛЬНЫЙ БАГ: NativeBiomeSource.codec() бросал «not serializable» —
+  Paper 26.3 делает saveEverything ВНУТРИ initServer, свежий мир энкодит биом-источник
+  -> крэш каждого первого бута с загруженной нативой. Локально не проявлялось: на тех
+  бутах .so отсутствовал в java.library.path -> swap падал -> оставались ванильные биомы.
+  Фикс: encode-only стаб ({"preset":"minecraft:overworld"}); декод невозможен по дизайну —
+  плагин пересвайпает источник при каждой загрузке мира. (4) pipefail на A/B-шагах
+  (BOOT FAILED исчезал в tee -> false-green «success»).
+- ИНСТРУМЕНТАЛЬНЫЙ УРОК: транспортный слой терминала глотает последовательности «[m»/«[h»
+  в ВЫВОДЕ (branches: [main] -> «ain]», noises[h -> «noises as usize]», Box::new([min_y ->
+  «Box::new(in_y») — вся «порча файлов» оказалась артефактом отображения; истина — только
+  hex/байтовые подсчёты (python count) и git-индекс.
+
+Stage Summary:
+- ФИНАЛ: native=SUCCESS, plugin=SUCCESS, integration=... (последний прогон с кодек-стабом
+  в полёте; все предыдущие этапы зелёные). Сборки и E2E теперь живут ТОЛЬКО на GitHub CI.
+- Вскрыт и закрыт первый настоящий прод-баг нативных биомов (фреш-мир бут-крэш).

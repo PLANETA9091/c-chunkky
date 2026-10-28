@@ -2,6 +2,7 @@ package com.planeta.crussty;
 
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
@@ -9,12 +10,11 @@ import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.BiomeResolver;
 import net.minecraft.world.level.biome.BiomeSource;
 import net.minecraft.world.level.biome.Climate;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterLists;
 
-import com.mojang.serialization.DataResult;
-import com.mojang.serialization.DynamicOps;
-import com.mojang.serialization.MapCodec;
-import com.mojang.serialization.MapLike;
-import com.mojang.serialization.RecordBuilder;
+import com.mojang.datafixers.util.Either;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,8 +31,21 @@ import java.util.stream.Stream;
  *
  * Compiled against the mojmap paper jar (NOT paper-api) — plugin/build.sh
  * includes it only when that jar is present (bootstrap ran first).
+ *
+ * SERIALIZATION: extends MultiNoiseBiomeSource (preset variant) so level.dat
+ * stays vanilla-shaped. Paper 26.3 runs saveEverything INSIDE initServer —
+ * a fresh world encodes the dimensions map including the generator's biome
+ * source, and BiomeSource.CODEC dispatches by the codec's registry entry
+ * (byNameCodec().dispatchStable(codec, identity)); an unregistered custom
+ * codec is an "Unregistered holder" crash on every first boot. With the
+ * preset parent the registered vanilla MultiNoiseBiomeSource.CODEC encodes
+ * {"type":"minecraft:multi_noise","preset":"minecraft:overworld"}; decode
+ * reconstructs a transient vanilla source that the plugin re-swaps on load.
+ * The vanilla parent ctor is private (Either-based) — instances are built
+ * through create() via sun.misc.Unsafe (no ctor runs) + reflective field
+ * init.
  */
-public final class NativeBiomeSource extends BiomeSource {
+public final class NativeBiomeSource extends MultiNoiseBiomeSource {
 
     /** Bulk-fill callback: fills out[0..sections*64] with biome indexes for
      *  one chunk in the vanilla fillBiomesFromNoise order; returns the count
@@ -48,9 +61,43 @@ public final class NativeBiomeSource extends BiomeSource {
     private final int minQuartY;
     private final Map<Long, int[]> chunkCache = new ConcurrentHashMap<>();
 
+    /** Factory: the vanilla parent ctor is private and unchainable from a
+     *  subclass; allocate without running any ctor (serialization semantics)
+     *  and set the parent's serialization shape + our state reflectively. */
+    public static NativeBiomeSource create(Registry<Biome> biomeRegistry, BulkFiller filler,
+                                           String[] names, int sections, int minQuartY) {
+        NativeBiomeSource s;
+        try {
+            sun.misc.Unsafe u = UnsafeHolder.UNSAFE;
+            s = (NativeBiomeSource) u.allocateInstance(NativeBiomeSource.class);
+            var f = MultiNoiseBiomeSource.class.getDeclaredField("parameters");
+            f.setAccessible(true);
+            f.set(s, Either.right(BuiltInRegistries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST
+                .getHolderOrThrow(MultiNoiseBiomeSourceParameterLists.OVERWORLD)));
+        } catch (ReflectiveOperationException | SecurityException e) {
+            throw new IllegalStateException("NativeBiomeSource allocation failed", e);
+        }
+        s.init(biomeRegistry, filler, names, sections, minQuartY);
+        return s;
+    }
+
+    /** sun.misc.Unsafe (jdk.unsupported — exported, used by kryo/netty). */
+    private static final class UnsafeHolder {
+        static final sun.misc.Unsafe UNSAFE;
+        static {
+            try {
+                var fld = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+                fld.setAccessible(true);
+                UNSAFE = (sun.misc.Unsafe) fld.get(null);
+            } catch (ReflectiveOperationException e) {
+                throw new ExceptionInInitializerError(e);
+            }
+        }
+    }
+
     @SuppressWarnings("unchecked")
-    public NativeBiomeSource(Registry<Biome> biomeRegistry, BulkFiller filler, String[] names,
-                             int sections, int minQuartY) {
+    private void init(Registry<Biome> biomeRegistry, BulkFiller filler, String[] names,
+                      int sections, int minQuartY) {
         this.filler = filler;
         this.sections = sections;
         this.minQuartY = minQuartY;
@@ -76,44 +123,32 @@ public final class NativeBiomeSource extends BiomeSource {
     }
 
     /** Precomputed possible-biome set (base-class Supplier is lazy; we have
-     *  the list at construction time). */
-    private final java.util.Set<Holder<Biome>> possible;
+     *  the list at init time — non-final: Unsafe allocation skips ctors, so
+     *  final definite-assignment rules would reject the reflective init). */
+    private java.util.Set<Holder<Biome>> possible;
 
     @Override
     protected Stream<Holder<Biome>> collectPossibleBiomes() {
         return possible.stream();
     }
 
-    /** Encode-only serialization stub: level.dat must be writable on fresh
-     *  worlds (Paper 26.3 runs saveEverything inside initServer, and the
-     *  dimensions map encodes the generator's biome source). We emit a
-     *  vanilla-shaped multi_noise overworld preset entry; the plugin re-swaps
-     *  the native source on EVERY world load (CrusstyChunkGenerator), so the
-     *  decoded value is only ever a transient placeholder — and a fresh world
-     *  (CI A/B protocol, first deploy) never decodes this entry at all.
-     *  The old throw made every fresh-world boot crash ("native biome source
-     *  is not serializable" -> initServer -> crash report). */
-    private static final MapCodec<BiomeSource> SERIALIZE_STUB = new MapCodec<>() {
-        @Override
-        public <T> DataResult<BiomeSource> decode(DynamicOps<T> ops, MapLike<T> map) {
-            return DataResult.error(() ->
-                "native biome source is rebuilt at world load (plugin swap), not decoded");
-        }
-        @Override
-        public <T> RecordBuilder<T> encode(BiomeSource input, DynamicOps<T> ops, RecordBuilder<T> prefix) {
-            return prefix.add("preset", ops.createString("minecraft:overworld"));
-        }
-        @Override
-        public <T> Stream<T> keys(DynamicOps<T> ops) {
-            return Stream.of(ops.createString("preset"));
-        }
-    };
-
     @Override
     protected MapCodec<? extends BiomeSource> codec() {
-        @SuppressWarnings({"unchecked", "rawtypes"})
-        MapCodec<? extends BiomeSource> stub = (MapCodec<? extends BiomeSource>) (MapCodec) SERIALIZE_STUB;
-        return stub;
+        // the registered vanilla codec; our inherited `parameters` field holds
+        // Either.right(overworld preset) -> {"type":"minecraft:multi_noise",
+        // "preset":"minecraft:overworld"} in level.dat
+        return MultiNoiseBiomeSource.CODEC;
+    }
+
+    /** The chunk-volume resolver (createResolverForChunk) must route to the
+     *  native grid too — the parent's climate-volume path would answer from
+     *  the vanilla preset instead of the native fill. */
+    @Override
+    public BiomeResolver createResolverForChunk(
+        Climate.Sampler sampler, int minQuartX, int minQuartY, int minQuartZ,
+        int quartSizeX, int quartSizeY, int quartSizeZ
+    ) {
+        return createResolver(sampler);
     }
 
     /** 26.3: BiomeSource hands out BiomeResolver views of itself; the native
