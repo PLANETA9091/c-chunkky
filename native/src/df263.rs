@@ -808,6 +808,28 @@ impl DfSam263 {
                 // x/z lattice + hashes per column, like the legacy
                 // noise_col4 kernels) is the future direction; the batch
                 // kernel + bit-exact tests stay in n263.rs for that work.
+                if *y_scale == 0.0 {
+                    // 2D noise (cache_2d semantics): the sampled y is
+                    // block_y(y)*0.0 = ±0.0 for EVERY row of a column — the
+                    // same value by construction (sign-of-zero only; every
+                    // downstream comparison treats them equal). Evaluate
+                    // once per (x,z) column, broadcast over y — vanilla's
+                    // Cache2D turns 49 redundant perlin evals per column
+                    // into 1, the same way.
+                    let by0 = vol.block_y(0) as f64 * y_scale;
+                    let mut index = 0usize;
+                    for z in 0..vol.size_z {
+                        let bz = vol.block_z(z);
+                        for x in 0..vol.size_x {
+                            let bx = vol.block_x(x);
+                            let v = noise.get(bx as f64 * xz_scale, by0, bz as f64 * xz_scale);
+                            for _y in 0..vol.size_y {
+                                out[index] = v;
+                                index += 1;
+                            }
+                        }
+                    }
+                } else {
                 let mut index = 0usize;
                 for z in 0..vol.size_z {
                     let bz = vol.block_z(z);
@@ -820,6 +842,7 @@ impl DfSam263 {
                         }
                     }
                 }
+                }
             }
             DfSam263::ShiftedXz {
                 shift_x,
@@ -831,6 +854,28 @@ impl DfSam263 {
                 shift_x.sample_volume(ctx, out, vol);
                 let mut sz = ctx.scratch.acquire(vol.size());
                 shift_z.sample_volume(ctx, &mut sz, vol);
+                if *y_scale == 0.0 {
+                    // 2D shifted noise (cache_2d semantics, see the Noise
+                    // branch): the shift children of THIS tree are y-invariant
+                    // by construction (router shift_x/shift_z wrap y_scale=0.0
+                    // noises / the transposed ShiftB), so the y0 row carries
+                    // the whole column. One noise.get per (x,z), broadcast.
+                    let by0 = vol.block_y(0) as f64 * y_scale;
+                    let mut index = 0usize;
+                    for z in 0..vol.size_z {
+                        let base_z = vol.block_z(z) as f64 * xz_scale;
+                        for x in 0..vol.size_x {
+                            let base_x = vol.block_x(x) as f64 * xz_scale;
+                            let nx = base_x + out[index] as f64;
+                            let nz = base_z + sz[index] as f64;
+                            let v = noise.get(nx, by0, nz);
+                            for _y in 0..vol.size_y {
+                                out[index] = v;
+                                index += 1;
+                            }
+                        }
+                    }
+                } else {
                 let mut index = 0usize;
                 for z in 0..vol.size_z {
                     let base_z = vol.block_z(z) as f64 * xz_scale;
@@ -844,6 +889,7 @@ impl DfSam263 {
                             index += 1;
                         }
                     }
+                }
                 }
                 ctx.scratch.release(sz);
             }
