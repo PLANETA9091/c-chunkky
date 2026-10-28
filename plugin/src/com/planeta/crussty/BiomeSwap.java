@@ -57,8 +57,11 @@ public final class BiomeSwap {
         @SuppressWarnings("unchecked")
         net.minecraft.core.Registry<net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList> plReg =
                 (net.minecraft.core.Registry<net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList>) presetListReg;
+        // 26.3 Registry: get(Identifier) -> Optional<Holder.Reference<T>>
         net.minecraft.core.Holder<net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList> preset =
-                plReg.getHolderOrThrow(net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterLists.OVERWORLD);
+                plReg.get(net.minecraft.resources.Identifier.withDefaultNamespace("overworld"))
+                        .orElseThrow(() -> new IllegalStateException(
+                                "overworld multi_noise parameter list not registered"));
         Object nbs = net.minecraft.world.level.biome.MultiNoiseBiomeSource.createFromPreset(preset);
         bf.set(gen, nbs);
     }
