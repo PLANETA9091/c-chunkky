@@ -3,7 +3,10 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-API_JAR="${API_JAR:-server263/libraries/io/papermc/paper/paper-api/26.3.build.222-stable/paper-api-26.3.build.222-stable.jar}"
+SRV_DIR="${SRV_DIR:-server263}"
+# paper-api jar name is build-pinned (26.3.build.<N>-stable) — resolve by glob,
+# explicit env wins
+API_JAR="${API_JAR:-$(find "$SRV_DIR/libraries/io/papermc/paper/paper-api" -name 'paper-api-*.jar' 2>/dev/null | sort | tail -1)}"
 JAVAC="${JAVAC:-$(command -v javac || true)}"
 [ -z "$JAVAC" ] && JAVAC="$(ls /home/z/tools/jdk-*/bin/javac 2>/dev/null | sort | tail -1 || true)"
 [ -z "$JAVAC" ] && JAVAC="java -m jdk.compiler/com.sun.tools.javac.Main"
@@ -13,8 +16,8 @@ if [ "${JAVAC_CMD[0]}" = "java" ]; then
 else
   JAR_CMD=("$(dirname "${JAVAC_CMD[0]}")/jar")
 fi
-[ -f "$API_JAR" ] || { echo "missing $API_JAR"; exit 1; }
-ADV="$(find server263/libraries -name 'adventure-api*.jar' -o -name 'adventure-key*.jar' -o -name 'examination-api*.jar' -o -name 'bungeecord-chat*.jar' 2>/dev/null | tr '\n' ':')"
+[ -n "$API_JAR" ] && [ -f "$API_JAR" ] || { echo "missing paper-api under $SRV_DIR/libraries"; exit 1; }
+ADV="$(find "$SRV_DIR/libraries" -name 'adventure-api*.jar' -o -name 'adventure-key*.jar' -o -name 'examination-api*.jar' -o -name 'bungeecord-chat*.jar' 2>/dev/null | tr '\n' ':')"
 rm -rf probe263/classes && mkdir -p probe263/classes
 "${JAVAC_CMD[@]}" -encoding UTF-8 -cp "$API_JAR:$ADV" -d probe263/classes \
   probe263/src/com/planeta/crussty/probe/ProbePlugin.java

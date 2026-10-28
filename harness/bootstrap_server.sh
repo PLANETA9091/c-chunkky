@@ -43,7 +43,7 @@ grep -q "eula=true" "$SRV/eula.txt" 2>/dev/null || echo "eula=true" > "$SRV/eula
 # --- server.properties (deterministic judge config) -------------------------
 PROPS="$SRV/server.properties"
 cat > "$PROPS" <<EOF
-level-name=vanilla
+level-name=${LEVEL_NAME:-vanilla}
 level-seed=$SEED
 level-type=minecraft\:normal
 allow-nether=false
@@ -51,7 +51,7 @@ allow-end=false
 generate-structures=true
 online-mode=false
 enable-rcon=true
-rcon.port=25575
+rcon.port=${RCON_PORT:-25575}
 rcon.password=crussty
 sync-chunk-writes=true
 view-distance=10

@@ -48,150 +48,111 @@ jobs:
 
   plugin:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '21'
-      - name: Fetch paper-api + libs (same versions as probe/)
+          java-version: '25'
+      - name: Cache paper 26.3 (paperclip + mojmap extraction)
+        uses: actions/cache@v4
+        with:
+          path: |
+            server/paper.jar
+            server/versions
+            server/libraries
+          key: paper-26.3-b222-v1
+      - name: Bootstrap + extract Paper 26.3 (fill v3, patchonly)
         run: |
-          mkdir -p probe/libs
-          # reuse committed probe/paper-api.jar if present, else download (Fill v3; v2 sunset)
-          if [ ! -f probe/paper-api.jar ]; then
-            URL=$(curl -sf "https://fill.papermc.io/v3/projects/paper/versions/1.21.8/builds/latest" | python3 -c "import sys,json;print(json.load(sys.stdin)['downloads']['server:default']['url'])")
-            curl -sL -o probe/paper-api.jar "$URL"
+          chmod +x harness/bootstrap_server.sh
+          LEVEL_NAME=world bash harness/bootstrap_server.sh 222
+          cd server
+          if [ ! -f versions/26.3/paper-26.3.jar ]; then
+            java -Dpaperclip.patchonly=true -jar paper.jar
           fi
-      - name: Build plugin
+          ls versions/26.3/
+          ls libraries/io/papermc/paper/paper-api/*/
+      - name: Build plugin (full jar incl. NMS companions)
         run: |
           chmod +x plugin/build.sh
-          ./plugin/build.sh
+          SRV_DIR=server ./plugin/build.sh
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: crussty-artifacts
           path: |
-            native/target/release/libcrussty_chunkgen.so
             plugin/CrusstyGen.jar
           retention-days: 7
 
-  # Full parity judge on a real Paper 1.21.8 server: native noise stage +
-  # vanilla rest, pregen 8x8 region, dump, block-for-block diff vs the
-  # reference dumps captured from pure vanilla. Two worlds: vanilla and
-  # the custom-datapack world (sea_level 63->40). Gate: block diff% must not
-  # exceed reference/judge_gate.txt thresholds (regression = fail).
+  # 26.3 E2E: two A/B pairs on a real Paper 26.3 server with the native
+  # engine, statdump material-count gate (deco-noise tolerant):
+  #   surface — native surface rules vs the plugin's Java surface path
+  #   carvers — native carvers (aquifer substance + topMaterial) vs vanilla
+  # The legacy 1.21.8 judge (reference-dump diff) was removed with the 26.3
+  # retarget; honest 26.3 parity is the A/B kill-switch protocol.
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '21'
-
+          java-version: '25'
       - name: Cache cargo target
         uses: actions/cache@v4
         with:
           path: native/target
           key: cargo-${{ runner.os }}-${{ hashFiles('native/Cargo.lock') }}
-      - name: Cache paper server (paperclip extraction)
+      - name: Cache paper 26.3 (paperclip + mojmap extraction)
         uses: actions/cache@v4
         with:
           path: |
+            server/paper.jar
             server/versions
             server/libraries
-            server/paper.jar
-          key: paper-1.21.8-b60
-
+          key: paper-26.3-b222-v1
       - name: Build native (release)
         working-directory: native
         run: cargo build --release --locked || cargo build --release
-      - name: Build plugin
-        run: |
-          chmod +x plugin/build.sh
-          ./plugin/build.sh
-      - name: Bootstrap server dir (paper.jar + eula + props)
+      - name: Bootstrap + extract Paper 26.3 (fill v3, patchonly)
         run: |
           chmod +x harness/bootstrap_server.sh
-          bash harness/bootstrap_server.sh 60
+          LEVEL_NAME=world bash harness/bootstrap_server.sh 222
+          cd server
+          if [ ! -f versions/26.3/paper-26.3.jar ]; then
+            java -Dpaperclip.patchonly=true -jar paper.jar
+          fi
+          ls versions/26.3/
+          ls libraries/io/papermc/paper/paper-api/*/
+      - name: Build plugin (full jar incl. NMS companions)
+        run: |
+          chmod +x plugin/build.sh
+          SRV_DIR=server ./plugin/build.sh
+      - name: Build probe263
+        run: |
+          chmod +x probe263/build.sh
+          SRV_DIR=server ./probe263/build.sh
       - name: Sanity .so
         run: file native/target/release/libcrussty_chunkgen.so
-
-      - name: Vanilla aquifer marks oracle (flag parity diagnostic)
+      - name: A/B surface (native vs Java surface path, carvers off)
         run: |
-          ORACLE_CHUNKLIST="2:-2,2:-3,3:-2,3:-3" bash harness/oracle_marks.sh 2>&1 | tee oracle_marks.log || true
-          # native marks for the same chunks + xref vs vanilla flags
-          ./native/target/release/bench marks 2 -2 > native_marks_2_-2.tsv
-          ./native/target/release/bench marks 2 -3 > native_marks_2_-3.tsv
-          ./native/target/release/bench marks 3 -2 > native_marks_3_-2.tsv
-          ./native/target/release/bench marks 3 -3 > native_marks_3_-3.tsv
-          python3 scripts/oracle_marks_xref.py oracle_marks_out \
-            native_marks_2_-2.tsv native_marks_2_-3.tsv native_marks_3_-2.tsv native_marks_3_-3.tsv \
-            | tee oracle_xref.log || true
-
-      - name: Judge world=vanilla
+          chmod +x harness/ab263_ci.sh
+          SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh surface 2>&1 | tee ab263_surface.log
+      - name: A/B carvers (vanilla vs native carvers + topMaterial)
         run: |
-          set -o pipefail
-          timeout 900 env CRUS_FRESH=1 CRUS_SERIAL_GC=1 CRUS_DIFF_SAMPLES=1 bash harness/plugin_bench.sh vanilla 2>&1 | tee judge_vanilla.log || true
-          D=$(grep -oP 'OVERALL: \d+/\d+ blocks differ = \K[0-9.]+' judge_vanilla.log | tail -1)
-          echo "vanilla diff% = $D"
-          python3 harness/judge_gate.py "${D:-999}" "${CRUS_GATE_VANILLA:-35.0}" vanilla
-        env:
-          CRUS_GATE_VANILLA: 0.05
-
-      - name: Judge world=datapack
-        run: |
-          set -o pipefail
-          timeout 900 env CRUS_FRESH=1 CRUS_SERIAL_GC=1 bash harness/plugin_bench.sh datapack 2>&1 | tee judge_datapack.log || true
-          D=$(grep -oP 'OVERALL: \d+/\d+ blocks differ = \K[0-9.]+' judge_datapack.log | tail -1)
-          echo "datapack diff% = $D"
-          python3 harness/judge_gate.py "${D:-999}" "${CRUS_GATE_DATAPACK:-35.0}" datapack
-        env:
-          CRUS_GATE_DATAPACK: 0.05
-
-      - name: Judge world=dptt (Terralith+Tectonic real packs, unmodified)
-        run: |
-          set -o pipefail
-          python3 scripts/fetch_datapacks.py server_datapacks 1.21.8
-          timeout 1500 env CRUS_FRESH=1 CRUS_SERIAL_GC=1 DATAPACKS_DIR=server_datapacks \
-            bash harness/plugin_bench.sh dptt 2>&1 | tee judge_dptt.log || true
-          D=$(grep -oP 'OVERALL: \d+/\d+ blocks differ = \K[0-9.]+' judge_dptt.log | tail -1)
-          echo "dptt diff% = $D"
-          python3 harness/judge_gate.py "${D:-999}" "${CRUS_GATE_DPTT:-35.0}" dptt
-        env:
-          # cont-58 tightened 0.10 -> 0.05: the water-matching fix
-          # (bare ids in matching_blocks resolve to minecraft:* — vanilla
-          # ResourceLocation default-namespace semantics) + native
-          # glow_lichen dropped the local residual 0.066% -> 0.041%
-          # (HEIGHTMAP 0/16384, judge dptt_cont58). The residual remains
-          # the static pack-surface band (ocean-floor gravel/stone patches
-          # on Tectonic surface rules + kelp placement margins).
-          CRUS_GATE_DPTT: 0.05
-
-      - name: Timing summary
-        if: always()
-        run: |
-          grep -h "native noise stage" judge_*.log reference/plugin_stats_*.txt 2>/dev/null || true
-
+          SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh carvers 2>&1 | tee ab263_carvers.log
       - name: Upload judge artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: judge-${{ github.run_id }}
+          name: ab263-${{ github.run_id }}
           path: |
-            judge_vanilla.log
-            judge_datapack.log
-            judge_dptt.log
-            oracle_marks.log
-            oracle_xref.log
-            oracle_marks_out/
-            native_marks_*.tsv
-            reference/plugin_stats_vanilla.txt
-            reference/plugin_stats_datapack.txt
-            reference/dumps_plugin/
+            ab263_surface.log
+            ab263_carvers.log
+            ab263_out/
             server/run.out
           retention-days: 14
           if-no-files-found: warn
