@@ -330,17 +330,10 @@ impl Neighborhood263 {
     }
 }
 
-/// BiomeManager.getBiome 26.3 (WorldGenRegion wiring): fiddle over the 8
-/// parent quart corners (biomeZoomSeed = obfuscated world seed), then the
-/// picked chunk's biome container (LevelReader default). Returns the picked
-/// world quart + the resolved biome index (debug-facing, used by the walk).
-pub fn fiddle_biome_pick(
-    hood: &Neighborhood263,
-    seed: i64,
-    bx: i32,
-    y: i32,
-    bz: i32,
-) -> (i32, i32, i32, usize) {
+/// The 8-corner fiddle pick (BiomeManager.getBiome geometry) — returns the
+/// picked parent quart coords. Shared by the grid path (container read) and
+/// the point path (climate resampler, topMaterial biomeGetter).
+fn fiddle_pick_quart(seed: i64, bx: i32, y: i32, bz: i32) -> (i32, i32, i32) {
     let abs_x = bx - 2;
     let abs_y = y - 2;
     let abs_z = bz - 2;
@@ -371,8 +364,52 @@ pub fn fiddle_biome_pick(
     let biome_x = if (min_i & 4) == 0 { parent_x } else { parent_x + 1 };
     let biome_y = if (min_i & 2) == 0 { parent_y } else { parent_y + 1 };
     let biome_z = if (min_i & 1) == 0 { parent_z } else { parent_z + 1 };
+    (biome_x, biome_y, biome_z)
+}
+
+/// BiomeManager.getBiome 26.3, GRID path (WorldGenRegion wiring): the fiddle
+/// over the 8 parent quart corners, then the picked chunk's biome container
+/// (LevelReader default). Returns the picked world quart + biome index.
+pub fn fiddle_biome_pick(
+    hood: &Neighborhood263,
+    seed: i64,
+    bx: i32,
+    y: i32,
+    bz: i32,
+) -> (i32, i32, i32, usize) {
+    let (biome_x, biome_y, biome_z) = fiddle_pick_quart(seed, bx, y, bz);
     let bi = hood.quart(biome_x, biome_y, biome_z);
     (biome_x, biome_y, biome_z, bi)
+}
+
+/// MultiNoiseBiomeSource POINT path at a parent quart corner
+/// (createUncachedResolver -> Climate.Sampler.sample 26.3): the six raw
+/// climate router functions evaluated at the corner's BLOCK coords
+/// (QuartPos.toBlock), Climate.target quantization ((long)(f*10000f)),
+/// then the preset RTree find_value. Returns the biome name-table index.
+pub fn point_biome263(
+    b: &crate::biome263::BiomeState263,
+    ctx: &mut crate::df263::SamplerCtx263,
+    qx: i32,
+    qy: i32,
+    qz: i32,
+) -> usize {
+    let (px, py, pz) = (qx * 4, qy * 4, qz * 4);
+    let mut v = [0f32; 6];
+    for (i, slot) in v.iter_mut().enumerate() {
+        *slot = b.climate[i].sample_value(ctx, px, py, pz);
+    }
+    let values = [
+        crate::biome263::quantize_f32(v[0]),
+        crate::biome263::quantize_f32(v[1]),
+        crate::biome263::quantize_f32(v[2]),
+        crate::biome263::quantize_f32(v[3]),
+        crate::biome263::quantize_f32(v[4]),
+        crate::biome263::quantize_f32(v[5]),
+        0, // offset: every vanilla preset entry carries 0
+    ];
+    let leaf = b.src.find_value(&values);
+    b.src.entries[leaf].biome_idx as usize
 }
 
 /// LinearCongruentialGenerator.next 26.3: rval *= rval*MULT + INCR; return
@@ -409,10 +446,18 @@ fn fiddled_distance(seed: i64, xr: i32, yr: i32, zr: i32, dx: f64, dy: f64, dz: 
 }
 
 /// The 26.3 column walk (MaterialSystem.buildSurface + RuleEvaluator).
+/// Biome resolution: `point_biomes` = Some -> the topMaterial POINT path
+/// (fiddle corners resolved via the climate resampler + preset RTree, the
+/// createUncachedResolver semantics); None -> the chunk-grid fiddle
+/// (Neighborhood263, the buildSurface container semantics).
 struct Walk263<'a> {
     cfg: &'a SurfaceConfig,
     st: &'a SurfaceState263,
-    hood: &'a Neighborhood263,
+    hood: Option<&'a Neighborhood263>,
+    point_biomes: Option<(
+        &'a crate::biome263::BiomeState263,
+        std::cell::RefCell<crate::df263::SamplerCtx263>,
+    )>,
     zoom_seed: i64,
     heightmap: &'a [i32; 256],
     // chunk volume + prefilled ore-vein buffers (density/richness)
@@ -509,7 +554,16 @@ impl<'a> Walk263<'a> {
 
     #[inline]
     fn biome_idx_at(&self, bx: i32, y: i32, bz: i32) -> usize {
-        let (qx, qy, qz, bi) = fiddle_biome_pick(self.hood, self.zoom_seed, bx, y, bz);
+        if let Some((b, rc)) = &self.point_biomes {
+            // topMaterial biomeGetter: correctBiomeManager::getBiome =
+            // withDifferentSource(createUncachedResolver) — the fiddle
+            // geometry over POINT-path corner biomes (no container).
+            let mut ctx = rc.borrow_mut();
+            let (qx, qy, qz) = fiddle_pick_quart(self.zoom_seed, bx, y, bz);
+            return point_biome263(b, &mut ctx, qx, qy, qz);
+        }
+        let hood = self.hood.expect("Walk263: hood or point_biomes required");
+        let (qx, qy, qz, bi) = fiddle_biome_pick(hood, self.zoom_seed, bx, y, bz);
         if let Some((tx, ty, tz)) = trace_target() {
             if tx == bx && tz == bz {
                 eprintln!(
@@ -866,7 +920,7 @@ pub fn apply_surface263(
         for lx in 0..16i32 {
             let mut top = min_y - 1;
             for sy in (0..sections).rev() {
-                let base = sy * 256 + (lz * 16 + lx) as usize;
+                let base = sy * 4096 + (lz * 16 + lx) as usize;
                 let y0 = min_y + (sy as i32) * 16;
                 let mut found = false;
                 for yy in (0..16).rev() {
@@ -903,7 +957,8 @@ pub fn apply_surface263(
     let mut walk = Walk263 {
         cfg: &st.cfg,
         st,
-        hood,
+        hood: Some(hood),
+        point_biomes: None,
         zoom_seed,
         heightmap: &hm,
         volume,
@@ -941,7 +996,9 @@ pub fn apply_surface263(
             let col_base = lz * 16 + lx;
             let top = hm[col_base as usize]; // topmost non-air y
             walk.update_xz(bx, bz);
-            let surface_biome = walk.biome_idx_at(bx, top + 1, bz) as u32;
+            // vanilla buildSurface: surfaceBiome at startingHeight =
+            // getHeight(WORLD_SURFACE_WG) + 1 = topmost non-air + 2
+            let surface_biome = walk.biome_idx_at(bx, top + 2, bz) as u32;
             if Some(surface_biome) == st.eroded_badlands_biome {
                 eroded_badlands_extension(&mut walk, out, min_y, top);
             }
@@ -1027,7 +1084,8 @@ fn eroded_badlands_extension(
     let extension_top = 64.0 + (pillar_buffer * pillar_buffer * 2.5)
         .min((pillar_floor * 50.0).ceil() + 24.0);
     let start_y = mth_floor(extension_top);
-    if top + 1 > start_y {
+    // vanilla gate: proceed iff startingHeight (topmost + 2) <= startY
+    if top + 2 > start_y {
         return;
     }
     // scan down for the default block (stone identity) or water (abort)
@@ -1148,6 +1206,181 @@ fn frozen_ocean_extension(
         }
         y -= 1;
     }
+}
+
+// ---------------------------------------------------------------------------
+// topMaterial 26.3 (the carver-mask grass→surface fix)
+// ---------------------------------------------------------------------------
+
+/// Block-id lookup tables for the carve-stage topMaterial hook (fill263).
+/// The io ids are NOT the base 0..21 materials when the surface rule writes
+/// the same block: extendPalette appends EVERY state string (22, 23, ...),
+/// and the section pack maps NMS states back by IDENTITY (last index wins),
+/// so a surface-written grass_block/dirt carries the EXTENDED id. The sets
+/// therefore unite the base id with every surface-state id of the block.
+pub struct TopMatIds {
+    /// ids whose NMS state is grass_block or mycelium (vanilla hasGrass).
+    pub grass: Vec<u16>,
+    /// ids whose NMS state is dirt (the vanilla helperPos check).
+    pub dirt: Vec<u16>,
+    /// ids whose state carries a non-empty fluid state (water/lava) — for
+    /// the vanilla postproc marks on the substance and topMaterial writes.
+    pub fluid: Vec<u16>,
+}
+
+impl TopMatIds {
+    pub fn build(sf: Option<&SurfaceState263>) -> TopMatIds {
+        let mut t = TopMatIds {
+            grass: vec![4],
+            dirt: vec![5],
+            fluid: vec![3, 17],
+        };
+        if let Some(s) = sf {
+            for (i, name) in s.cfg.states.iter().enumerate() {
+                let Some(&id) = s.cfg.ids.get(i) else {
+                    continue;
+                };
+                if id < 22 {
+                    continue; // base material — already in the set
+                }
+                let base = name.split('[').next().unwrap_or(name);
+                match base {
+                    "minecraft:grass_block" | "minecraft:mycelium" => {
+                        if !t.grass.contains(&id) {
+                            t.grass.push(id);
+                        }
+                    }
+                    "minecraft:dirt" => {
+                        if !t.dirt.contains(&id) {
+                            t.dirt.push(id);
+                        }
+                    }
+                    "minecraft:water" | "minecraft:lava" => {
+                        if !t.fluid.contains(&id) {
+                            t.fluid.push(id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        t
+    }
+
+    #[inline]
+    pub fn is_grass(&self, id: u16) -> bool {
+        self.grass.contains(&id)
+    }
+
+    #[inline]
+    pub fn is_dirt(&self, id: u16) -> bool {
+        self.dirt.contains(&id)
+    }
+
+    #[inline]
+    pub fn is_fluid(&self, id: u16) -> bool {
+        self.fluid.contains(&id)
+    }
+}
+
+/// MaterialSystem.topMaterial 26.3 (decompile-frozen semantics):
+/// a FRESH 1x1x1 MaterialRuleContext at the helper pos, biomeGetter =
+/// correctBiomeManager::getBiome (fiddle geometry over the POINT-path
+/// climate resampler), updateXZ with the chunk's frozen post-fill
+/// WORLD_SURFACE_WG gradients (the _WG heightmap stops updating at the
+/// TERRAIN status — heightmapsAfter — so vanilla reads the post-fill map
+/// during the whole carve), updateY(1, 1, underFluid ? y+1 : MIN, y), then
+/// one rule.tryApply. Density getters inside the rule: ore density/richness
+/// sample the VOLUME path over the 1x1x1 expectedVolume (getDensitiesInChunk
+/// prefill=true), filler_gap is a point eval (prefill=false), and the
+/// min-surface csl reads the 1x1x1 preliminarySurfaceVolume at (x, 0, z)
+/// (VOLUME path — indexOfBlock(x, 0, z) == 0 in this context, never -1).
+/// Empty rule result -> None (vanilla keeps the dirt).
+#[allow(clippy::too_many_arguments)]
+pub fn top_material263(
+    st: &SurfaceState263,
+    b263: &crate::biome263::BiomeState263,
+    zoom_seed: i64,
+    wg_hm: &[i32; 256],
+    min_y: i32,
+    height: i32,
+    sea_level: i32,
+    px: i32,
+    py: i32,
+    pz: i32,
+    under_fluid: bool,
+) -> Option<u16> {
+    // guards mirroring apply_surface263 (ids/temps must be live)
+    if st.cfg.ids.len() != st.cfg.states.len()
+        || st.cfg.bandlands.len() != 192
+        || st.temps.is_empty()
+    {
+        return None;
+    }
+    let fluid_states: Vec<bool> = st
+        .cfg
+        .states
+        .iter()
+        .map(|s| s.starts_with("minecraft:water") || s.starts_with("minecraft:lava"))
+        .collect();
+    // the 1x1x1 expectedVolume at the helper pos (vanilla topMaterial) +
+    // the 1x1x1 preliminarySurfaceVolume at (x, 0, z)
+    let volume = DensityVolume::block_step((1, 1, 1), (px, py, pz));
+    let csl_slab_volume = DensityVolume::block_step((1, 1, 1), (px, 0, pz));
+    // fresh, uncached contexts — vanilla constructs a brand-new
+    // MaterialRuleContext per topMaterial call (cold LazyXZ/LazyY caches;
+    // the sampler values themselves are coordinate-deterministic).
+    let mut ctx_ore = SamplerCtx263::uncached();
+    let mut ctx_csl = SamplerCtx263::uncached();
+    let mut copper_buf = ctx_ore.scratch.acquire(1);
+    let mut iron_buf = ctx_ore.scratch.acquire(1);
+    let mut richness_buf = ctx_ore.scratch.acquire(1);
+    st.dfs[st.ore_copper as usize].sample_volume(&mut ctx_ore, &mut copper_buf, &volume);
+    st.dfs[st.ore_iron as usize].sample_volume(&mut ctx_ore, &mut iron_buf, &volume);
+    st.dfs[st.ore_richness as usize].sample_volume(&mut ctx_ore, &mut richness_buf, &volume);
+    let mut csl_slab = ctx_csl.scratch.acquire(1);
+    st.chunk_surface_level
+        .sample_volume(&mut ctx_csl, &mut csl_slab, &csl_slab_volume);
+
+    let cond_count = st.cfg.conds.len();
+    let mut walk = Walk263 {
+        cfg: &st.cfg,
+        st,
+        hood: None,
+        point_biomes: Some((b263, std::cell::RefCell::new(SamplerCtx263::uncached()))),
+        zoom_seed,
+        heightmap: wg_hm,
+        volume,
+        csl_slab_volume,
+        csl_slab,
+        copper_buf,
+        iron_buf,
+        richness_buf,
+        ctx_ore,
+        ctx_csl,
+        block_x: 0,
+        block_z: 0,
+        surface_depth: 0,
+        surface_secondary: 0.0,
+        min_surface_level: 0,
+        gradient_x: 0,
+        gradient_z: 0,
+        xz_counter: 0,
+        y_counter: 0,
+        last_sec_update: 0,
+        block_y: 0,
+        stone_depth_above: 0,
+        stone_depth_below: 0,
+        water_height: i32::MIN,
+        xz_cache: vec![(0, false); cond_count],
+        y_cache: vec![(0, false); cond_count],
+        sea_level,
+        fluid_states,
+    };
+    walk.update_xz(px, pz);
+    let water_height = if under_fluid { py + 1 } else { i32::MIN };
+    walk.update_y(1, 1, water_height, py);
+    walk.try_apply(st.cfg.root)
 }
 
 #[cfg(test)]

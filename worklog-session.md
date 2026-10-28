@@ -2634,3 +2634,43 @@ Stage Summary:
 - Push: 5939fde (parity-фиксы), f988399 (grid fallback). cargo test 70/70.
 - Следующая сессия: (1) topMaterial по плану выше; (2) deco/features 26.3
   (главный остаток ~16-23%); (3) e2e на CI 4-core.
+
+---
+## cont-55: ТОПМАТЕРИАЛ (carver-mask) — ПОРТ ЗАВЕРШЁН + ПАРИТЕТ-ФИКСЫ ВЫСОТКАРТ (верификация = GitHub CI)
+
+Task: «продолжить topMaterial-порт»; НОВОЕ ПРАВИЛО ПОЛЬЗОВАТЕЛЯ: E2E и сборки НЕ делать
+локально — всё на GitHub CI (push → ci.yml: build + cargo test + bench smoke).
+
+Work Log:
+- topMaterial-каркас из прошлой сессии (незакоммиченный WIP) вычитан построчно и сверен с
+  декомпилом 26.3 (reference/dec263): applyCarvingMask (NoiseBasedChunkGenerator.java:283),
+  MaterialSystem.topMaterial (:239), MaterialRuleContext (конструктор/getMinSurfaceLevel).
+- ПОДТВЕРЖДЕНО декомпилом: (1) topMaterial вызывается ТОЛЬКО при state != null (substance
+  применён); (2) underFluid = !substance.getFluidState().isEmpty() (не helper!); (3) helperPos =
+  blockPos.below(), проверка .is(Blocks.DIRT) на живом состоянии; (4) updateY(1, 1, underFluid ?
+  y+1 : MIN, y); (5) preliminarySurfaceVolume КОНСТРУИРУЕТСЯ из expectedVolume
+  (sizeX x 1 x sizeZ при y=0) — для fresh 1x1x1 контекста это 1x1x1 при (x, 0, z) →
+  indexOfBlock(x,0,z) == 0 → VOLUME-путь csl (заметка cont-54c про «POINT-fallback» была
+  НЕВЕРНА, WIP-реализация верна).
+- ФИКСЫ ВЫСОТКАРТ (реальные баги, найдены сверкой с Heightmap.java/MaterialSystem.java):
+  1. world_surface_heightmap (fill263, новая): скан-цикл сканировал слои 0..38 вместо всех
+     (base = sy*256 вместо sy*4096) — переписан в чистый top-down по колонкам.
+  2. apply_surface263 (surface263:923): ТОТ ЖЕ баг sy*256 → sy*4096 — латентный с момента
+     commита: walk стартовал с мусорного top (~319), градиенты ≈ 0 (SteepCondition не
+     срабатывал), surfaceBiome сэмплировался в небе (y=321).
+  3. surfaceBiome y: top+1 → top+2 (vanilla startingHeight = getFirstAvailable+1 =
+     topmost non-air + 2; Heightmap.java: setHeight хранит y+1).
+  4. eroded_badlands_extension гейт: top+1 > start_y → top+2 > start_y (vanilla: proceed iff
+     startingHeight <= startY).
+- ВЕРИФИКАЦИЯ ИНСТРУМЕНТАМИ: транспортный слой терминала «глотал» подстроки [mi/[h в выводе
+  (ложные «битые скобки»/«typo in_y») — разрулено byte-точными python-подсчётами по дискy:
+  все 6 фиксов + все новые символы (park/take/wsh, TopMatIds, top_material263,
+  point_biome263, fiddle_pick_quart, point_biomes, STATES_BY_ID apply, ffi carve sf/b263)
+  НА МЕСТЕ. cargo test НЕ запускался (правило пользователя) — компиляцию и тесты делает CI.
+- Незакрытые вопросы: (а) StepCondition в ванильном overworld-пресете — не проверено
+  используется ли; фикс градиентов в любом случае двигает к ваниле; (б) deco/features 26.3 —
+  следующий крупный этап.
+
+Stage Summary:
+- topMaterial-порт логически завершён и сверен с декомпилом; высоткарты выровнены с vanilla.
+- Коммит + push → GitHub CI (сборка/тесты/E2E — только там). worklog: этот файл.

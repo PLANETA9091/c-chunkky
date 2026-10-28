@@ -37,7 +37,7 @@ pub struct BiomeState263 {
 }
 
 #[inline]
-fn quantize_f32(v: f32) -> i64 {
+pub(crate) fn quantize_f32(v: f32) -> i64 {
     let q = v * 10000.0f32;
     if q.is_nan() {
         0

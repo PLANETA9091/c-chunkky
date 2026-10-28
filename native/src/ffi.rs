@@ -379,6 +379,14 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
         let beard_list = std::mem::take(beard);
         g.fill_chunk(cx, cz, &beard_list, out, marks);
         *beard = beard_list;
+        // Park the POST-FILL _WG heightmap for the carve stage's topMaterial
+        // (vanilla freezes the _WG maps at the TERRAIN status — the surface
+        // and carve writes only touch the FINAL heightmaps).
+        crate::fill263::park_wg_heightmap(
+            cx,
+            cz,
+            crate::fill263::world_surface_heightmap(g.min_y, g.height, out),
+        );
         // Native surface tail 26.3 — vanilla order: surface at the SURFACE
         // status, right after NOISE, before carvers. The biome grid comes
         // from fillBiomes (BIOMES status runs first); without a grid the
@@ -486,8 +494,10 @@ pub fn carve(
     let pack = crate::fill263::SectionPack { bits, raw, raw_off, pal, pal_off };
     let g = &st.g;
     let (marks_buf, ops_buf) = (&mut st.marks, &mut st.ops);
+    let sf = st.surface.as_ref();
+    let b263 = st.biomes.as_ref();
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        g.carve_chunk(cx, cz, seed, &pack, io, marks_buf, ops_buf);
+        g.carve_chunk(cx, cz, seed, &pack, io, marks_buf, ops_buf, sf, b263);
     }));
     match res {
         Ok(()) => st.ops.len() as i32,

@@ -22,6 +22,61 @@ use crate::nochunk::OUT_LEN;
 pub const STONE_ID: u16 = 1;
 pub const WATER_ID: u16 = 3;
 pub const LAVA_ID: u16 = 17;
+pub const DIRT_ID: u16 = 5;
+
+// ---------------------------------------------------------------------------
+// post-fill WORLD_SURFACE_WG heightmap handoff (fill -> carve)
+//
+// Vanilla 26.3 freezes the _WG heightmaps at the BIOMES->TERRAIN transition:
+// doFill updates them directly (worldSurface.update per written block), but
+// every setBlockState during TERRAIN (surface + carve) touches only the
+// FINAL heightmaps (ChunkStatus.heightmapsAfter). The carver-mask topMaterial
+// therefore reads its surface gradients from the POST-FILL map even though
+// the chunk has since been surfaced and carved. The plugin's pipeline has no
+// Java-side _WG map at all — the fill parks the post-fill map here and the
+// carve consumes it (same handoff pattern as V263_GRIDS).
+// ---------------------------------------------------------------------------
+
+static V263_WG_HM: std::sync::Mutex<Option<std::collections::HashMap<(i32, i32), Box<[i32; 256]>>>> =
+    std::sync::Mutex::new(None);
+
+/// Topmost non-air block y per column (WORLD_SURFACE_WG semantics, the same
+/// algorithm apply_surface263 uses; none -> min_y - 1).
+pub fn world_surface_heightmap(min_y: i32, height: i32, out: &[u16]) -> Box<[i32; 256]> {
+    let mut hm = Box::new([min_y - 1; 256]);
+    for col in 0..256usize {
+        // single top-down scan per column over the flat y-major layout
+        // (index = (y - min_y) * 256 + z * 16 + x)
+        let mut top = min_y - 1;
+        for ly in (0..height as usize).rev() {
+            if out[ly * 256 + col] != 0 {
+                top = min_y + ly as i32;
+                break;
+            }
+        }
+        hm[col] = top;
+    }
+    hm
+}
+
+/// Park the post-fill _WG heightmap for the carve stage (keyed by chunk).
+/// The map is capped defensively: entries are consumed by the carve, and a
+/// worldgen abort could otherwise grow it without bound.
+pub fn park_wg_heightmap(cx: i32, cz: i32, hm: Box<[i32; 256]>) {
+    let mut guard = V263_WG_HM.lock().unwrap();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    if map.len() >= 8192 {
+        map.clear();
+    }
+    map.insert((cx, cz), hm);
+}
+
+/// Consume the parked post-fill _WG heightmap (None = the chunk was never
+/// filled natively — the caller falls back to the post-surface buffer).
+pub fn take_wg_heightmap(cx: i32, cz: i32) -> Option<Box<[i32; 256]>> {
+    let mut guard = V263_WG_HM.lock().unwrap();
+    guard.as_mut()?.remove(&(cx, cz))
+}
 
 pub struct Gen263 {
     pub seed: i64,
@@ -331,10 +386,19 @@ impl Gen263 {
     /// NoiseBasedChunkGenerator.applyCarvingMask 26.3 over the carver mask:
     /// per masked cell (top-down): UNCARVABLE (bedrock) guard, grass flag,
     /// aquifer.computeSubstance(x, y, z, 0.0) -> null keeps the block,
-    /// AIR carves, fluids write + marks. The vanilla grass→dirt
-    /// topMaterial replacement is deferred to the MaterialSystem port
-    /// (vanilla keeps the dirt when the optional is empty).
+    /// AIR carves, fluids write + marks, then the vanilla grass→dirt
+    /// topMaterial fix: once a grass_block/mycelium was seen in the column,
+    /// every carved cell whose below-block is dirt runs
+    /// surfaceSystem.topMaterial(helperPos, underFluid) — a fresh 1x1x1
+    /// MaterialRuleContext on the POINT-path biome resampler, with the
+    /// FROZEN post-fill WORLD_SURFACE_WG gradients (the _WG heightmaps stop
+    /// updating at the TERRAIN status). A Some result replaces the dirt and
+    /// marks it for postprocessing when the material carries a fluid.
     /// `io` is the post-surface center chunk buffer (JNI layout).
+    /// `wg_hm` = the frozen post-fill WORLD_SURFACE_WG heightmap (parked by
+    /// the fill stage); `top_ids` = the grass/dirt/fluid id tables of the
+    /// extended surface palette.
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_carvers(
         &self,
         cx: i32,
@@ -342,6 +406,10 @@ impl Gen263 {
         seed: i64,
         io: &mut [u16],
         changed: &mut Vec<i64>,
+        sf: Option<&crate::surface263::SurfaceState263>,
+        b263: Option<&std::sync::Arc<crate::biome263::BiomeState263>>,
+        wg_hm: Option<&[i32; 256]>,
+        top_ids: &crate::surface263::TopMatIds,
     ) -> Vec<i64> {
         let mut marks = Vec::new();
         let mask = crate::carver263::generate_carver_mask(seed, cx, cz, self.min_y, self.height);
@@ -353,6 +421,21 @@ impl Gen263 {
         let mut aquifer = self.aquifer_for(&mut ctx, &volume);
         let min_x = cx * 16;
         let min_z = cz * 16;
+        // the frozen post-fill _WG heightmap for the topMaterial gradients;
+        // fallback (chunk filled before this handoff existed): the current
+        // post-surface buffer (vanilla-in-plugin priming order).
+        let hm_fallback;
+        let wg_hm: &[i32; 256] = match wg_hm {
+            Some(h) => h,
+            None => {
+                hm_fallback = world_surface_heightmap(self.min_y, self.height, io);
+                &hm_fallback
+            }
+        };
+        // the topMaterial context needs the surface + biome state live;
+        // without either, the fix degrades to keep-dirt (vanilla's common case).
+        let zoom_seed = crate::sha256::obfuscate_seed(self.seed);
+        let top_ready = sf.is_some() && b263.is_some();
         mask.visit(|x, z, bottom_y, top_y| {
             let mut has_grass = false;
             let world_x = min_x + x;
@@ -363,8 +446,8 @@ impl Gen263 {
                 if block == 2 {
                     continue; // bedrock — the whole UNCARVABLE tag in 26.3
                 }
-                if block == 4 {
-                    has_grass = true; // grass_block (mycelium not in the id table)
+                if top_ids.is_grass(block) {
+                    has_grass = true; // grass_block / mycelium (extended ids included)
                 }
                 let Some(ty) = aquifer.compute_substance(&mut ctx, world_x, world_y, world_z, 0.0)
                 else {
@@ -392,7 +475,43 @@ impl Gen263 {
                         io[idx] = w;
                     }
                 }
-                let _ = has_grass;
+                // vanilla grass→dirt topMaterial: helperPos = the block below
+                // (DIRT-checked on the live state). The rule runs for AIR
+                // carves too — underFluid = !state.getFluidState().isEmpty()
+                // only feeds updateY's waterHeight.
+                if has_grass && world_y > self.min_y && top_ready {
+                    let below_idx = idx - 256;
+                    let below = io[below_idx];
+                    if top_ids.is_dirt(below) {
+                        let under_fluid = !matches!(ty, crate::aquifer263::FluidTy::Air);
+                        let tm = crate::surface263::top_material263(
+                            sf.unwrap(),
+                            b263.unwrap(),
+                            zoom_seed,
+                            wg_hm,
+                            self.min_y,
+                            self.height,
+                            self.sea_level,
+                            world_x,
+                            world_y - 1,
+                            world_z,
+                            under_fluid,
+                        );
+                        if let Some(tm) = tm {
+                            // vanilla setBlockState unconditionally; mark per
+                            // the material's fluid state (independent of change)
+                            io[below_idx] = tm;
+                            changed.push(((below_idx as i64) << 16) | tm as i64);
+                            if top_ids.is_fluid(tm) {
+                                marks.push(crate::aquifer263::pos_as_long(
+                                    world_x,
+                                    world_y - 1,
+                                    world_z,
+                                ));
+                            }
+                        }
+                    }
+                }
             }
             true
         });
@@ -416,7 +535,11 @@ pub struct SectionPack<'a> {
 impl Gen263 {
     /// JNI carve pipeline: decode sections -> carver mask + apply -> changed
     /// cells + fluid marks. `ops` receives (idx << 16 | newId) for every
-    /// mask cell whose block changed; Java applies them via the NMS states.
+    /// changed cell (substance writes + the topMaterial grass→dirt fix);
+    /// Java applies them via the NMS state table. `sf`/`b263` = the surface
+    /// + biome engine state for the topMaterial context (None degrades the
+    /// fix to keep-dirt).
+    #[allow(clippy::too_many_arguments)]
     pub fn carve_chunk(
         &self,
         cx: i32,
@@ -426,6 +549,8 @@ impl Gen263 {
         io: &mut [u16; OUT_LEN],
         marks: &mut Vec<i64>,
         ops: &mut Vec<i64>,
+        sf: Option<&crate::surface263::SurfaceState263>,
+        b263: Option<&std::sync::Arc<crate::biome263::BiomeState263>>,
     ) {
         io.fill(0);
         for s in 0..24usize {
@@ -453,7 +578,19 @@ impl Gen263 {
                 }
             }
         }
-        let changed_marks = self.apply_carvers(cx, cz, seed, io, ops);
+        let top_ids = crate::surface263::TopMatIds::build(sf);
+        let wg_hm = take_wg_heightmap(cx, cz);
+        let changed_marks = self.apply_carvers(
+            cx,
+            cz,
+            seed,
+            io,
+            ops,
+            sf,
+            b263,
+            wg_hm.as_deref(),
+            &top_ids,
+        );
         marks.extend(changed_marks);
     }
 }

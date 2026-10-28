@@ -19,9 +19,11 @@ import java.util.logging.Logger;
  *   2. JNI carve (mask over the 17x17 sources + substance apply),
  *   3. apply the changed cells via getAndSetUnchecked + rebuild counters,
  *   4. feed the fluid-update marks into the ProtoChunk postprocessing bridge.
- * KNOWN GAP (documented): the vanilla grass→dirt topMaterial replacement
- * under carved grass is deferred to the MaterialSystem port (vanilla keeps
- * the dirt when the optional is empty — the common case).
+ * The carver-mask topMaterial fix (the vanilla grass→dirt replacement under
+ * carved grass) runs natively: the ops carry the replaced material ids from
+ * the full sectionStatesById table (base materials + extended surface
+ * states), so the apply loop reads STATES_BY_ID directly instead of the
+ * air/water/lava-only fast path.
  */
 public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
     private static final Logger LOG = Logger.getLogger("CrusstyGen");
@@ -176,6 +178,10 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
             long[] marks = new long[1024];
             int nm = ChunkGenNative.carveMarks(ctx, marks);
             // ---- apply changed cells ----
+            // ids span the full palette (base materials + the extended
+            // surface states the topMaterial fix can write, e.g. dirt/grass
+            // at ids 22+). Unknown/out-of-range ids are skipped defensively.
+            Object[] statesById = STATES_BY_ID;
             for (int i = 0; i < got; i++) {
                 long op = ops[i];
                 int idx = (int) (op >>> 16);
@@ -186,12 +192,7 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
                 int rem = cell & 0xFF;
                 int sx = rem & 15;
                 int sz = rem >> 4;
-                Object state = switch (id) {
-                    case 0 -> AIR_STATE;
-                    case 3 -> WATER_STATE;
-                    case 17 -> LAVA_STATE;
-                    default -> null;
-                };
+                Object state = id >= 0 && id < statesById.length ? statesById[id] : null;
                 if (state == null || s >= sections) {
                     continue;
                 }
