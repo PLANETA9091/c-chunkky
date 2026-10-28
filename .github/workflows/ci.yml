@@ -164,6 +164,16 @@ jobs:
           set -o pipefail
           chmod +x harness/farprobe_ci.sh
           SRV_DIR=server RCON_PORT=25576 bash harness/farprobe_ci.sh 2>&1 | tee farprobe263.log
+      - name: E2E serial-fill probe (threads=1 — thread-thrash discriminator)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          CRUS_FILL_THREADS_263=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_serial.log
+      - name: E2E near-origin probe (coord-cost discriminator)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          RX=-20 RZ=-20 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_near.log
       - name: Upload judge artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -175,6 +185,8 @@ jobs:
             e2e263_timing.log
             e2e263_deco.log
             farprobe263.log
+            e2e263_serial.log
+            e2e263_near.log
             ab263_out/
             server/run.out
           retention-days: 14
