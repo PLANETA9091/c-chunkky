@@ -2879,3 +2879,21 @@ Stage Summary:
 Приоритет следующей сессии: (1) srs-inline + re-measure; (2) семейства
 overworld (geode, lake, bamboo, huge_fungus, freeze_top_layer — видны в
 ванильном спавне); (3) tree-декораторы 26.3; (4) остальное.
+
+---
+## cont-57c: ФИНАЛ СЕССИИ — PLACEMENT 100%, ИЗМЕРЕНИЕ ПАРУ 175/83 -> 82/0
+
+Прогоны (все 3 джобы SUCCESS): 8222204, 838996a, c781788, 81915da, 58b17e8.
+
+- placed unsupported: 83/273 -> 0/273 — ВЕСЬ 26.3 placement-слой декодируется
+  (offset/trapezoid/count_on_every_layer/noise_threshold/fixed/cuboid/...).
+- configured unsupported: 175/234 -> 82/234. Остаток:
+  cf-type 54 (28 типов — decode+runtime, следующий этап);
+  tree-dec-pog 7 (tree decorators 26.3: shelf_mushroom/append_loot);
+  tree-trunk-ty 6 (poplar_trunk_placer); bc-allowed-unsupported 5
+  (block_column allowed — композитные предикаты); srs-entry 5 (speleothem);
+  tree-ch-fields 2; spring-valid 2; rs-atp-unsupported 1.
+- Дополнительные фиксы: clamped value->source + bounds spellings;
+  dirt_provider->below_trunk_provider (37 деревьев); weighted/rotated алиасы.
+- Инструменты: vineflower + Temurin JDK25 + paper-26.3-222 (sha OK) в
+  scripts/; measurement через cargo test -- --nocapture в CI.
