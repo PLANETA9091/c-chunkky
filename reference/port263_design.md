@@ -199,3 +199,61 @@ path must emulate its YSampler(0) compile wrap; (3) elevation noise yScale 0.0 (
 4. DensityFunctionCompiler ✅ 5. NoiseRouterData ✅ 6. FindTopSurface ✅ 7. NoiseRouter/
 RandomState ✅ 8. material/MaterialSystem — NEXT (surface step) 9. moonrise chunk_gen —
 with fill wiring. Utils: Mth/Interval/CubicSpline/TerrainProvider ✅ (dec263_util).
+
+## Stage F-263 scoping — features/deco (cont-56c, decompile-verified)
+
+Prize: features = 16-23% of gen-worker Java time (JFR cont-52b). Engine legacy
+(stage F1, 1.21.8) готов: features_*.rs ~16k строк, CRUS_NATIVE_DECO opt-in,
+DecoDriver handshake. Ниже — что изменилось в 26.3 и план адаптации.
+
+### Deltas 1.21.8 -> 26.3
+
+1. Placement driver переписан (placement/FeaturePlacer.java): рекурсивный lazy-stream
+   pull -> итеративный DFS на явных стеках positions+modifierIndices; модификаторы
+   теперь consumer-based: modify(ctx, random, pos, Consumer<BlockPos>). ТЕОРЕМА
+   (трасса на 3 модификаторах): реверс-пуш даёт порядок feature.place идентичный
+   lazy-pull (p,q,r,s обоими способами) — при сохранении per-modifier порядка
+   выдачи. Модель порядка легаси (expand_rec, features_placement.rs) остаётся
+   валидной; рекурсивный драйвер менять не нужно.
+2. Feature JSON schema ПЛОСКАЯ: 1.21.8 {"type","config":{}} -> 26.3 {"type",...config
+   inline...} (feature/ore_dirt.json). Данные: reference/vanilla263 — 235 feature /
+   273 placed_feature JSON. features_json.rs нужен 26.3-режим (strict unknown->skip).
+3. placed_feature schema БЕЗ ИЗМЕНЕНИЙ; PlacementContext той же формы.
+4. addVanillaDecorations (ChunkGenerator.java:388): та же структура шагов x
+   sorted-index; сидирование не изменилось (setDecorationSeed(level.getSeed(),
+   origin.x, origin.z); setFeatureSeed на фичу; paper featureSeeds override есть).
+   Дельты: FeaturePlacer-инстанс per call; possibleBiomes из 3x3 секций (GlobalPalette
+   спец-кейс) + retainAll(biomeSource.possibleBiomes()); debugVoidTerrain guard.
+5. GenerationStep.Decoration: те же 11 шагов.
+6. НОВЫЙ тип placement: CuboidPlacement (registered "cuboid", класс в feature/,
+   ванильными данными не используется, но датапак-видим -> нужен для dptt).
+7. Использование модификаторов в ванильных данных 26.3: biome 211, count 201,
+   in_square 198, block_predicate_filter 155, heightmap 111, offset 93, height_range 86,
+   rarity_filter 55, surface_water_depth_filter 26, environment_scan 12,
+   count_on_every_layer 8, noise_threshold_count 6, noise_based_count 4,
+   surface_relative_threshold_filter 3, fixed_placement 1. Не используются ванилью:
+   random_chance, randomly_selected, repeating, cuboid.
+8. Покрытие легаси: ядро RNG-модификаторов в features_placement.rs (InSquare, Count,
+   RarityFilter, RandomOffset, HeightRange); level-модификаторы в features_deco.rs
+   (SurfaceWaterDepth, SurfaceRelativeThreshold, NoiseBasedCount, ...). Гэпы:
+   count_on_every_layer (runtime), random_chance / randomly_selected / repeating /
+   cuboid; для "json-only" набора сверить наличие runtime-реализаций.
+9. Структуры: CRUS_NATIVE_DECO гейт выключает addVanillaDecorations ЦЕЛИКОМ
+   (структуры И фичи) — F-263 должен решить: ре-ранн structuresByStep внутри
+   DecoDriver или пере-скоупить гейт (сначала проверить форму гейта в Paper 26.3
+   CustomChunkGenerator).
+
+### Build order (предложение)
+
+1. Данные: 26.3 vanilla feature/placed JSON -> features_vanilla_data (нормализация
+   плоской схемы во внутренний Cfg; strict unknown->skip как в 1.21.8-загрузчике).
+2. Modifier parity sweep: декомпил-сверка каждого из 15 используемых модификаторов
+   (порядок RNG-дров per modifier); реализовать count_on_every_layer + cuboid
+   (+ random_chance/randomly_selected/repeating для полноты реестра).
+3. Драйвер: рекурсивная модель порядка легаси остаётся; голдены ChainRef.java +
+   новые 26.3-голдены на эквивалентность итеративному стеку.
+4. Handshake: DecoDriver/FeaturesMaster против NMS 26.3 (Identifier-ререйны,
+   Registry.get вместо getHolderOrThrow); политики структур; kill-switch
+   CRUS_NATIVE_DECO_263.
+5. E2E: третья пара ab263_ci.sh `deco` (CRUS_NATIVE_DECO_263=0/1); deco-бакеты гейта
+   уже обкатаны на surface/carvers парах.
