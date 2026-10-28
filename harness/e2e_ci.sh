@@ -85,6 +85,7 @@ mkfifo "$SRV/run.in"
 (
   cd "$SRV"
   env CRUS_NATIVE_CARVERS=1 CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" \
+    CRUS_FILL263_PROF="${CRUS_FILL263_PROF:-0}" \
     setsid "$JAVA_BIN" -Xms2G -Xmx3G -Dpaper.chunk-system.gen-parallelism=false \
     -Djava.library.path="$ROOT/native/target/release" \
     -jar paper.jar nogui < run.in > run.out 2>&1 &

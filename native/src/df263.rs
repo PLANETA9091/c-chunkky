@@ -298,6 +298,45 @@ pub type SamRef = Arc<DfSam263>;
 // ---- volume-sample profiling (fill263bench: prof report) ----------------
 pub static PROF_ON_263: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+/// Fill-call counter for the in-server prof snapshot (per-fill means).
+pub static PROF_FILLS_263: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Reset every 26.3 prof counter (JNI: crusgenstats reset). Re-arms the
+/// gate from the env so a window reset keeps the env-driven mode on.
+pub fn prof263_reset() {
+    let on = std::env::var("CRUS_FILL263_PROF").ok().as_deref() == Some("1");
+    PROF_ON_263.store(on, std::sync::atomic::Ordering::Relaxed);
+    PROF_FILLS_263.store(0, std::sync::atomic::Ordering::Relaxed);
+    for k in PROF_KINDS.iter() {
+        k.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+    PROF_INTERP_CELL.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_INTERP_FILL.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Per-fill mean snapshot in the fill263bench format (ms/chunk).
+pub fn prof263_snapshot() -> String {
+    let n = PROF_FILLS_263.load(std::sync::atomic::Ordering::Relaxed) as f64;
+    let n = if n < 1.0 { 1.0 } else { n };
+    let ms = |v: &std::sync::atomic::AtomicU64| {
+        v.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6 / n
+    };
+    let mut s = format!("fills={} ", PROF_FILLS_263.load(std::sync::atomic::Ordering::Relaxed));
+    for (i, name) in PROF_KIND_NAMES.iter().enumerate() {
+        let v = ms(&PROF_KINDS[i]);
+        if v > 0.001 {
+            s.push_str(&format!("{name}={v:.3}ms "));
+        }
+    }
+    s.push_str(&format!(
+        "interp_cell={:.3}ms interp_fill={:.3}ms",
+        ms(&PROF_INTERP_CELL),
+        ms(&PROF_INTERP_FILL)
+    ));
+    s
+}
+
 /// Exclusive per-kind nanos: 0 shell, 1 noise-family, 2 blended, 3 spline,
 /// 4 gradient, 5 beard, 6 slice, 7 cache, 8 interpolated-shell.
 pub static PROF_KINDS: [std::sync::atomic::AtomicU64; 9] = [

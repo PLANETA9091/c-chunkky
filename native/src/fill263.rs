@@ -101,6 +101,11 @@ pub struct Gen263 {
 
 impl Gen263 {
     pub fn new(seed: i64, min_y: i32, height: i32, sea_level: i32) -> Self {
+        // In-server per-kind profiling gate (crusgenstats exposes the
+        // snapshot; the e2e window boots with CRUS_FILL263_PROF=1).
+        if std::env::var("CRUS_FILL263_PROF").ok().as_deref() == Some("1") {
+            crate::df263::PROF_ON_263.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut builder = RouterBuilder263::new(seed);
         let router = builder.build_overworld();
         let aquifer_cfg = builder.build_aquifer_config();
@@ -228,6 +233,9 @@ impl Gen263 {
         marks: &mut Vec<i64>,
     ) {
         marks.clear();
+        if crate::df263::PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::df263::PROF_FILLS_263.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         // The pool may hand us a reused array — vanilla semantics: AIR cells
         // are NOT written, so the destination must start zeroed.
         out.fill(0);

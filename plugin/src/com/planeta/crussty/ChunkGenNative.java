@@ -202,6 +202,12 @@ public final class ChunkGenNative {
     /** Global per-fill phase snapshot from the native (JNI diagnostics). */
     public static native String profStatsGlobal();
 
+    /** 26.3 per-kind fill profile (fill263bench format, per-fill means). */
+    public static native String fill263Prof();
+
+    /** Zeroes the 26.3 fill profile counters and re-arms the env gate. */
+    public static native void fill263ProfReset();
+
     // ------------------------------------------------------------------
     // Native carvers 26.3 (CRUS_NATIVE_CARVERS=1). Protocol: Java packs the
     // 24 sections (bits[24] + rawOff[24] + palOff[24], concatenated BitStorage

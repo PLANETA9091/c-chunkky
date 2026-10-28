@@ -784,6 +784,31 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_baseHeight
     base_height(ctx as i64, x as i32, z as i32, mode as i32)
 }
 
+/// fill263Prof() -> String: the 26.3 per-kind fill profile snapshot
+/// (fill263bench format, per-fill means). Empty string when never reset.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fill263Prof(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+) -> jni_sys::jstring {
+    let s = crate::df263::prof263_snapshot();
+    let tbl = *env;
+    let c = match std::ffi::CString::new(s) {
+        Ok(c) => c,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    ((*tbl).v1_1.NewStringUTF)(env, c.as_ptr())
+}
+
+/// fill263ProfReset(): zero every 26.3 prof counter and re-arm the env gate.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fill263ProfReset(
+    _env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+) {
+    crate::df263::prof263_reset();
+}
+
 /// profStatsGlobal() -> String: the global per-fill phase snapshot.
 #[no_mangle]
 pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_profStatsGlobal(

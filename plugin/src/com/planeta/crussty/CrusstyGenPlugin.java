@@ -57,6 +57,10 @@ public final class CrusstyGenPlugin extends JavaPlugin {
             if (args.length >= 1 && args[0].equalsIgnoreCase("reset")) {
                 GenStats.reset();
                 DecoStats.reset();
+                try {
+                    ChunkGenNative.fill263ProfReset();
+                } catch (Throwable ignored) {
+                }
                 sender.sendMessage("[CrusstyGen] stats window reset");
                 return true;
             }
@@ -68,6 +72,10 @@ public final class CrusstyGenPlugin extends JavaPlugin {
             try {
                 sb.append(" | [CrusstyGen] native deco stage: ").append(DecoStats.snapshot())
                         .append(DecoStats.delegateNames()).append(DecoStats.surviveHist()).append(DecoStats.hTyHist());
+            } catch (Throwable ignored) {
+            }
+            try {
+                sb.append(" | [CrusstyGen] fill263 prof: ").append(ChunkGenNative.fill263Prof());
             } catch (Throwable ignored) {
             }
             try {
