@@ -2283,7 +2283,7 @@ fn perlin263_fill_col(
     tx: &dyn Fn(i32) -> f64,
     ty: &dyn Fn(i32) -> f64,
     tz: &dyn Fn(i32) -> f64,
-    /// SmearedPerlin fudge-y scale (None = plain Perlin).
+    // SmearedPerlin fudge-y scale (None = plain Perlin).
     smear_fudge: Option<f64>,
 ) {
     let mut index = 0usize;
