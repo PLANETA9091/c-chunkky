@@ -118,7 +118,14 @@ impl Scratch263 {
     pub fn acquire(&mut self, size: usize) -> Vec<f32> {
         match self.pool.pop() {
             Some(mut v) if v.capacity() >= size => {
-                v.clear();
+                // Stale values are FINE: every sample_volume branch fully
+                // assigns out[0..size] before any read (Constant fill, Noise
+                // leaves, Binary/Const/Unary/Clamp/Lerp/Range per-index
+                // walks, cache copy_from_slice, interpolated fill_cell, slice
+                // broadcast, ShiftB explicit fill). resize only zero-fills
+                // the GROWTH tail; truncation is free — steady-state pooled
+                // acquires do no memset at all. (The A/B tests, oracle
+                // goldens and the E2E A/B gates guard this invariant.)
                 v.resize(size, 0.0);
                 v
             }
