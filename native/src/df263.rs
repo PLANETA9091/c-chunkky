@@ -2283,6 +2283,8 @@ fn perlin263_fill_col(
     tx: &dyn Fn(i32) -> f64,
     ty: &dyn Fn(i32) -> f64,
     tz: &dyn Fn(i32) -> f64,
+    /// SmearedPerlin fudge-y scale (None = plain Perlin).
+    smear_fudge: Option<f64>,
 ) {
     let mut index = 0usize;
     for z in 0..vol.size_z {
@@ -2302,7 +2304,29 @@ fn perlin263_fill_col(
             for y in 0..vol.size_y {
                 let wy = wrap(ty(vol.block_y(y)) * freq) + off_y;
                 let fy = mth_floor(wy);
-                let ry = (wy - fy as f64) as f32;
+                let rel_y_f64 = wy - fy as f64;
+                // plain Perlin: ry == original (f32); Smeared: the dots use
+                // the FUDGED f32 y while smoothstep uses the UNfudged cast
+                // (sample_and_lerp's original_relative_y == relative_y as f32
+                // of the pre-fudge double) — both exactly as scalar get().
+                let (ry, sy) = match smear_fudge {
+                    None => {
+                        let ry = rel_y_f64 as f32;
+                        (ry, smoothstep(ry))
+                    }
+                    Some(fudge_scale) => {
+                        let original_y = ty(vol.block_y(y)) * freq;
+                        let fudge_limit = if original_y >= 0.0 && original_y < rel_y_f64 {
+                            original_y
+                        } else {
+                            rel_y_f64
+                        };
+                        let fudge = (fudge_limit / fudge_scale + 1.0e-7f32 as f64).floor()
+                            * fudge_scale;
+                        let ry = (rel_y_f64 - fudge) as f32;
+                        (ry, smoothstep(rel_y_f64 as f32))
+                    }
+                };
                 let ry1 = ry - 1.0f32;
                 // exact sample_and_lerp chain with the column-fixed parts
                 let xy00 = p[(x0.wrapping_add(fy as usize)) & 0xFF] as usize;
@@ -2323,7 +2347,7 @@ fn perlin263_fill_col(
                 let d111 = gradient_dot_f32(z101 >> 8 & 15, rx1, ry1, rz1);
                 out[index] += amp * lerp3_f32(
                     sx,
-                    smoothstep(ry),
+                    sy,
                     sz,
                     d000,
                     d100,
@@ -2352,7 +2376,7 @@ fn stack263_fill_col(
 ) -> bool {
     for (noise, _, _) in layers {
         match noise {
-            Noise263::Perlin(_) => {}
+            Noise263::Perlin(_) | Noise263::Smeared(_) => {}
             _ => return false,
         }
     }
@@ -2371,6 +2395,21 @@ fn stack263_fill_col(
                 tx,
                 ty,
                 tz,
+                None,
+            ),
+            Noise263::Smeared(s) => perlin263_fill_col(
+                &s.perlin.p_adj,
+                *freq,
+                s.perlin.base.offset_x,
+                s.perlin.base.offset_y,
+                s.perlin.base.offset_z,
+                *amp,
+                out,
+                vol,
+                tx,
+                ty,
+                tz,
+                Some(s.fudge_y_scale),
             ),
             _ => return false,
         }
