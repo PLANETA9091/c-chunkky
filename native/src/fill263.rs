@@ -14,7 +14,7 @@
 //! (0 air, 1 stone, 3 water, 17 lava), layout (y-minY)*256 + z*16 + x.
 //! Fluid-update marks packed BlockPos.asLong, same as the legacy path.
 
-use crate::aquifer263::{Aquifer263, FluidTy};
+use crate::aquifer263::{Aquifer263, AquiferPrefill263, FluidTy};
 use crate::df263::{DensityVolume, FuseProg, SamplerCtx263, PROF_ON_263};
 use crate::df263_router::RouterBuilder263;
 use crate::nochunk::OUT_LEN;
@@ -133,6 +133,44 @@ impl Gen263 {
         }
     }
 
+    /// Shared aquifer prefill for the strip threads (deterministic per
+    /// chunk: quart surface-level cache + skip-above bound). Compute once
+    /// in fill_chunk, hand &pre to every fill_strip — removes the
+    /// per-strip maxSurfaceLevel walk (was 0.37ms x strips).
+    pub fn aquifer_prefill(&self, volume: &DensityVolume) -> AquiferPrefill263 {
+        let mut ctx = SamplerCtx263::cached();
+        let cfg = crate::aquifer263::AquiferConfig263 {
+            barrier: self.aquifer_cfg.barrier.clone(),
+            floodedness: self.aquifer_cfg.floodedness.clone(),
+            spread: self.aquifer_cfg.spread.clone(),
+            lava: self.aquifer_cfg.lava.clone(),
+            exclusion: self.aquifer_cfg.exclusion.clone(),
+            surface_level: self.aquifer_cfg.surface_level.clone(),
+        };
+        Aquifer263::prefill(&mut ctx, &cfg, volume)
+    }
+
+    pub fn aquifer_with_prefill(
+        &self,
+        volume: &DensityVolume,
+        pre: &AquiferPrefill263,
+    ) -> Aquifer263 {
+        Aquifer263::new_with_prefill(
+            crate::aquifer263::AquiferConfig263 {
+                barrier: self.aquifer_cfg.barrier.clone(),
+                floodedness: self.aquifer_cfg.floodedness.clone(),
+                spread: self.aquifer_cfg.spread.clone(),
+                lava: self.aquifer_cfg.lava.clone(),
+                exclusion: self.aquifer_cfg.exclusion.clone(),
+                surface_level: self.aquifer_cfg.surface_level.clone(),
+            },
+            self.aquifer_factory.clone(),
+            volume,
+            self.sea_level,
+            pre,
+        )
+    }
+
     pub fn aquifer_for<'a>(
         &'a self,
         ctx: &mut SamplerCtx263,
@@ -206,6 +244,9 @@ impl Gen263 {
         if threads > 1 && volume.size_z >= threads as i32 {
             let strips: Vec<(i32, i32)> = split_strips(volume.size_z, threads);
             if strips.len() > 1 {
+                // shared aquifer prefill (deterministic per chunk): one
+                // maxSurfaceLevel walk instead of one per strip
+                let pre = self.aquifer_prefill(&volume);
                 // per-strip private out buffer (disjoint z rows) merged
                 // sequentially afterwards; marks concatenate in strip order —
                 // identical to the sequential walk's z-major order.
@@ -215,12 +256,12 @@ impl Gen263 {
                     let mut handles = Vec::with_capacity(strips.len() - 1);
                     for &(z0, z1) in &strips[1..] {
                         handles.push(scope.spawn(move || {
-                            self.fill_strip(cx, cz, beard_ref, volume_ref, z0, z1)
+                            self.fill_strip(cx, cz, beard_ref, volume_ref, z0, z1, &pre)
                         }));
                     }
                     let mut results = Vec::with_capacity(strips.len());
                     let (z0, z1) = strips[0];
-                    results.push(self.fill_strip(cx, cz, beard_list, &volume, z0, z1));
+                    results.push(self.fill_strip(cx, cz, beard_list, &volume, z0, z1, &pre));
                     for h in handles {
                         if let Ok(r) = h.join() {
                             results.push(r);
@@ -315,6 +356,7 @@ impl Gen263 {
         volume: &DensityVolume,
         z0: i32,
         z1: i32,
+        pre: &AquiferPrefill263,
     ) -> (Vec<i64>, Box<[u16; OUT_LEN]>) {
         let strip_vol = DensityVolume {
             size_x: volume.size_x,
@@ -329,8 +371,9 @@ impl Gen263 {
         };
         let mut ctx = SamplerCtx263::cached();
         ctx.beard = crate::beard263::Beardifier263::decode(beard_list);
-        // full-volume prefill so the aquifer grid is complete per thread
-        let mut aquifer = self.aquifer_for(&mut ctx, volume);
+        // aquifer from the SHARED prefill (the full-volume grid walk ran
+        // once in fill_chunk — the strip grid converges to identical values)
+        let mut aquifer = self.aquifer_with_prefill(volume, pre);
         let mut buf = ctx.scratch.acquire(strip_vol.size());
         let mut strip_out: Box<[u16; OUT_LEN]> = vec![0u16; OUT_LEN].into_boxed_slice().try_into().unwrap();
         let mut marks: Vec<i64> = Vec::new();

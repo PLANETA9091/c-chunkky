@@ -96,6 +96,13 @@ pub struct AquiferConfig263 {
     pub surface_level: SamRef,
 }
 
+/// Deterministic per-chunk aquifer prefill (surface-level quart cache +
+/// skip-above bound) — shared across strip aquifers (see Aquifer263::prefill).
+pub struct AquiferPrefill263 {
+    pub surface_level_cache: HashMap<(i32, i32), i32>,
+    pub skip_sampling_above_y: i32,
+}
+
 pub struct Aquifer263 {
     cfg: AquiferConfig263,
     factory: XoroshiroPositionalRandomFactory,
@@ -172,6 +179,75 @@ impl Aquifer263 {
         volume: &DensityVolume,
         sea_level: i32,
     ) -> Self {
+        let pre = Self::prefill(ctx, &cfg, volume);
+        Self::new_with_prefill(cfg, factory, volume, sea_level, &pre)
+    }
+
+    /// Deterministic per-chunk prefill (pure function of the chunk bounds):
+    /// the quart surface-level cache + the skip-above bound. Computed ONCE
+    /// per chunk and shared across strip aquifers — the maxSurfaceLevel walk
+    /// (prelim FindTopSurface tree over the quart grid, ~0.37ms) used to run
+    /// once per strip. The result is ctx-independent (cache cells are pure
+    /// memoization), so a throwaway ctx is fine.
+    pub fn prefill(
+        ctx: &mut SamplerCtx263,
+        cfg: &AquiferConfig263,
+        volume: &DensityVolume,
+    ) -> AquiferPrefill263 {
+        let min_grid_x = grid_x(volume.min_x + -5);
+        let max_grid_x = grid_x(volume.max_block_x() + -5) + 1;
+        let min_grid_y = grid_y(volume.min_y + 1) + -1;
+        let max_grid_y = grid_y(volume.max_block_y() + 1) + 1;
+        let min_grid_z = grid_z(volume.min_z + -5);
+        let max_grid_z = grid_z(volume.max_block_z() + -5) + 1;
+
+        // maxSurfaceLevel over the quart grid (strided (4,1,4) volume)
+        let min_quart_x = from_grid_x(min_grid_x, 0).div_euclid(4);
+        let max_quart_x = from_grid_x(max_grid_x, 9).div_euclid(4);
+        let min_quart_z = from_grid_z(min_grid_z, 0).div_euclid(4);
+        let max_quart_z = from_grid_z(max_grid_z, 9).div_euclid(4);
+        let qvol = DensityVolume {
+            size_x: max_quart_x - min_quart_x + 1,
+            size_y: 1,
+            size_z: max_quart_z - min_quart_z + 1,
+            min_x: min_quart_x * 4,
+            min_y: 0,
+            min_z: min_quart_z * 4,
+            step_x: 4,
+            step_y: 1,
+            step_z: 4,
+        };
+        let mut buf = ctx.scratch.acquire(qvol.size());
+        (cfg.surface_level.clone()).sample_volume(ctx, &mut buf, &qvol);
+        let mut max_y = i32::MIN;
+        let mut surface_level_cache = HashMap::new();
+        for z in 0..qvol.size_z {
+            for x in 0..qvol.size_x {
+                let level = mth_floor(buf[qvol.index_unchecked(x, 0, z)]);
+                surface_level_cache.insert(chunk_pack(qvol.block_x(x), qvol.block_z(z)), level);
+                if level > max_y {
+                    max_y = level;
+                }
+            }
+        }
+        ctx.scratch.release(buf);
+
+        let max_adjusted = max_y + 8; // adjustSurfaceLevel
+        let skip_grid_y = grid_y(max_adjusted + 12) - -1;
+        AquiferPrefill263 {
+            surface_level_cache,
+            skip_sampling_above_y: from_grid_y(skip_grid_y, 11) - 1,
+        }
+    }
+
+    /// Assemble the aquifer from a shared prefill (no DF sampling).
+    pub fn new_with_prefill(
+        cfg: AquiferConfig263,
+        factory: XoroshiroPositionalRandomFactory,
+        volume: &DensityVolume,
+        sea_level: i32,
+        pre: &AquiferPrefill263,
+    ) -> Self {
         let min_grid_x = grid_x(volume.min_x + -5);
         let max_grid_x = grid_x(volume.max_block_x() + -5) + 1;
         let grid_size_x = max_grid_x - min_grid_x + 1;
@@ -182,7 +258,7 @@ impl Aquifer263 {
         let max_grid_z = grid_z(volume.max_block_z() + -5) + 1;
         let grid_size_z = max_grid_z - min_grid_z + 1;
         let total = (grid_size_x * grid_size_y * grid_size_z) as usize;
-        let mut aq = Aquifer263 {
+        Aquifer263 {
             cfg,
             factory,
             aquifer_cache: vec![None; total],
@@ -194,26 +270,17 @@ impl Aquifer263 {
             grid_size_y,
             grid_size_z,
             sea_level,
-            skip_sampling_above_y: i32::MAX,
-            surface_level_cache: HashMap::new(),
+            skip_sampling_above_y: pre.skip_sampling_above_y,
+            surface_level_cache: pre.surface_level_cache.clone(),
             should_schedule: false,
-        };
-        let max_surface = aq.max_surface_level(
-            ctx,
-            from_grid_x(min_grid_x, 0),
-            from_grid_z(min_grid_z, 0),
-            from_grid_x(max_grid_x, 9),
-            from_grid_z(max_grid_z, 9),
-        );
-        let max_adjusted = aq.adjust_surface_level(max_surface);
-        let skip_grid_y = grid_y(max_adjusted + 12) - -1;
-        aq.skip_sampling_above_y = from_grid_y(skip_grid_y, 11) - 1;
-        aq
+        }
     }
 
     /// maxSurfaceLevel — strided (4,1,4) volume sample of the surface_level
     /// DF over the quart grid; fills the surface level cache and returns the
-    /// max floor'ed level.
+    /// max floor'ed level. Superseded by Aquifer263::prefill (kept for
+    /// reference/A-B).
+    #[allow(dead_code)]
     fn max_surface_level(&mut self, ctx: &mut SamplerCtx263, min_x: i32, min_z: i32, max_x: i32, max_z: i32) -> i32 {
         let min_quart_x = min_x.div_euclid(4);
         let max_quart_x = max_x.div_euclid(4);
