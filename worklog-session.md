@@ -2995,3 +2995,52 @@ substance-объёмные префиллы, ENDGAME — compiled-lattice engine
 nochunk: плоская программа + плоскостная решётка + perm-dedup) — отдельный
 мегапроект; параллельно F-263 configured 82/234 (srs-inline, geode, lake,
 bamboo, huge_fungus, freeze_top_layer...).
+
+---
+## cont-59: E2E-ОКНО В CI — РАЗОБЛАЧЕНИЕ БАЗОВОЙ ЛЖИ (noise-стейдж не был в A/B) 
+
+Task: «реальные 4мс на реальных чанках e2e» (пользователь: агенты видели
+«48мс/чанк», я цитировал fill_chunk 4.74мс — обе цифры про РАЗНОЕ).
+
+ПРОСВЕТЛЕНИЕ БАЗОВОЙ ЛИНИИ:
+- 4.74мс = ТОЛЬКО fill_chunk (нативный density-объём, fill263bench, Milan
+  4vCPU, strip-par) — НЕ e2e. Legacy bench perf/phases меряют легаси-движок
+  (bench seed-0 14.4мс, phases 6.61мс, par-2t 3.40мс) — не 26.3.
+- Прошлый честный e2e был только cont-54c: 221.5мс/чанк на 2-core sandbox
+  (fill p50 там 29-52мс против 6.5 на 4-core) — троттлинг, не прод-цифра.
+- НАХОДКА-БОМБА: A/B-гейты (surface/carvers) НИКОГДА не гоняли нативный
+  noise-стейдж! В bukkit.yml бутов нет `worlds.world.generator: CrusstyGen`
+  -> getDefaultWorldGenerator не вызывается -> мир генерит ВАНИЛЬНЫЙ
+  NoiseBasedChunkGenerator; нативные surface/carvers/biomes аттачатся
+  поверх ванили (handshake-логи это подтверждают), а GenStats COUNT
+  остаётся 0 навсегда. Гейты изолированно верифицируют surface/carvers/
+  biomes НА ВАНИЛЬНОМ шуме — так и задумано, но e2e-тайминг полного
+  нативного пути требует проводки генератора.
+
+ЧТО СДЕЛАНО:
+- harness/e2e_ci.sh: e2e-окно в CI (integration-джоба): тёп-up 4x4 ->
+  crusgenstats reset -> forceload свежего 12x12 (144 чанка, чанк 1100)
+  -> poll -> e2e_ms_per_chunk + полный GenStats-брейкдаун ровно по окну.
+- bukkit.yml-проводка генератора в e2e/farprobe (ROOT CAUSE первого
+  нулевого окна: без неё noise ванильный, COUNT=0, все поллы выгорают —
+  724 rcon-вызова, 0 чанков, "no chunks generated yet").
+- rcon.py берёт ОДИН argv — `crusgenstats reset` обязан быть в кавычках
+  (иначе reset молча превращается в stats-дамп).
+- harness/farprobe_ci.sh: бисекция дальних координат (64..61440) по 2x2,
+  continue-on-error — с проводкой генератора теперь реальный нативный
+  far-тест (прошлое окно FAR НЕ БЫЛО багом дальних координат — ваниль
+  спокойно генерила).
+- e2e native-deco probe: CRUS_NATIVE_DECO=1 vs 0 — дельта DecoDriver
+  (нативные фичи 152/234 + делегаты) против ванильного Java-декора.
+
+ДИАГНОСТИЧЕСКИЙ СЛЕД (первое окно, артефакт ab263-40729665260):
+boot 12.8с OK; "Marked 16 chunks"/"Marked 144 chunks" — билеты выданы;
+1448 строк RCON Client = 724 вызова = 240(warmup)+480(window)+4 полла
+ВЫГОРЕЛИ ЦЕЛИКОМ; финал: fills=0, "no chunks generated yet"; сервер жив.
+Первоначальная гипотеза «far-coords native hang» ОПРОВЕРГНУТА — просто
+нативный noise не был подключён.
+
+Next: (1) e2e-цифры нативного полного пути (mode-0) и дельта deco (mode-1);
+(2) приоритет по брейкдауну: fill 4.87 (bench) vs layout/beard/marks/biome/
+deco vs Paper-оверхед; (3) farprobe-клиф нативного пути; (4) цель — e2e
+4мс: fill -> 1мс (интерп-клетки+noise) и/или нативный декор (F-263 82/234).
