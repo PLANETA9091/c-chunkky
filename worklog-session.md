@@ -2847,3 +2847,35 @@ Stage Summary:
 - CI: 8222204 все 3 зелёные; 8ed66a2 native fail (borrow) -> 838996a фикс.
 - F-263 идёт по канону: измерение -> декод -> повтор. Рантайм-семантика
   placement 26.3 эквивалентна легаси (декомпил+трасса), работа = декод-слой.
+
+---
+## cont-57b: F-263 КАНОНИЧЕСКИЙ WORKLIST (кенсус включая внутренние типы)
+
+Кенсус ВСЕХ minecraft:*type*-значений в 26.3 данных (top-level + inline inner),
+которых нет в декодере (после раундов 1-2 + weighted/rotated алиасы):
+153 вхождения / ~40 типов. Группы:
+
+- Рэнеймы провайдеров (алиасы, decode-only): weighted (42) — ex
+  weighted_state_provider; rotated (1) — ex rotated_block_provider;
+  rule_based (3) — ловится wrapper-путём (fallback/rules) без правок.
+- НОВЫЕ декораторы деревьев 26.3: shelf_mushroom (7), append_loot (2) —
+  в features_tree.rs (легаси-декораторы готовы как модель).
+- НОВЫЕ фичи/провайдеры 26.3: randomized_int (5 — state provider с
+  randomizing int-свойством), stepped_column_cluster (4), speleothem (4) +
+  speleothem_cluster (2), single_block_pillar (5), coral_tree/claw (10 —
+  rename старых coral?), overlay (8 — sulfur springs), fallen_tree (6),
+  projected_random_patchy_square (1 — sculk), random_neighbor_spread (1).
+- Классика без декода: huge_fungus (4), lake (2), iceberg (2), bamboo (2),
+  sculk_patch (2), fossil (2), end_podium/gateway/island/platform/spike (8),
+  spike (1), delta_feature (1), large_dripstone (1), chorus_plant (1),
+  geode (1 — amethyst, виден в A/B gate!), blue_ice (1), block_blob (1),
+  huge_red/brown_mushroom (2), freeze_top_layer (1), bonus_chest (1),
+  void_start_platform (1), randomly_selected (2 — placement в конфиге?).
+- srs-entry: simple_random_selector с INLINE placed-entries (5) — нужен
+  decode_inline_placed в srs-ветке.
+- tree-trunk-ty: poplar_trunk_placer (новый танк-плейсер, 6 фич poplar);
+  tree-ch-fields: cherry-поля.
+
+Приоритет следующей сессии: (1) srs-inline + re-measure; (2) семейства
+overworld (geode, lake, bamboo, huge_fungus, freeze_top_layer — видны в
+ванильном спавне); (3) tree-декораторы 26.3; (4) остальное.
