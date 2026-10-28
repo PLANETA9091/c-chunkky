@@ -2786,3 +2786,64 @@ Stage Summary:
 - Остаток портфеля: deco/features 26.3 — мега-проект (движок легаси stage F1 готов,
   16k строк features_*.rs; CRUS_NATIVE_DECO opt-in, dptt держит ваниль до полной
   готовности фич). Следующая сессия: скоупинг 26.3-адаптации.
+
+---
+## cont-57: F-263 СТАРТ — СКОУПИНГ + ИЗМЕРЕНИЕ + ДВА РАУНДА ДИАЛЕКТ-СЛОЯ
+
+Task: продолжение (б) — deco/features 26.3, мега-проект. Правило CI: сборки/E2E
+только на GitHub.
+
+Work Log:
+- ВОССТАНОВЛЕНИЕ ПОСЛЕ ОТКАТА (2-й раз): песочница снова на снапшоте cont-41;
+  remote цел (318f49c) — fetch + reset --hard. Remote URL у старого .git указывал
+  на c-faster (редирект "Moved Permanently"); каноничное имя репо = c-chunkky,
+  set-url поправлен.
+- SteepCondition ЗАКРЫТ (cont-56b): жив через дата-дривен JSON (jagged/snowy/
+  frozen peaks), SrCond::Steep совпадает с декомпилом (асимметрия x<=-4||z>=4 —
+  изначальная причуда ванилы).
+- СКОУПИНГ 26.3 (port263_design.md): FeaturePlacer (итеративный DFS) эквивалентен
+  ленивому pull легаси (трасса: реверс-пуш = тот же порядок feature.place);
+  addVanillaDecorations — та же структура сидирования; плоская schema фич
+  (234/273); НОВЫЙ тип cuboid; GenerationStep те же 11 шагов; PlacementContext
+  без изменений формы.
+- ИНСТРУМЕНТЫ ВОССТАНОВЛЕНЫ: vineflower 1.11.1 (maven), Temurin JDK25
+  (adoptium), paper-26.3-222 paperclip (sha f64977 совпал с cont-52) ->
+  patchonly -> mojmap jar -> точечный декомпил valueproviders (dec263 не
+  содержал их).
+- ШАГ 1 ДАННЫХ: scripts/extract_features263.py -> features_vanilla_data263.rs
+  (234 feature flat->config normalize, 273 placed pass-through, 0 inline);
+  тест vanilla263_registry_parses: totals asserted, unsupported печатается
+  (--nocapture добавлен в ci.yml — stdout теста без него проглатывается).
+- ИЗМЕРЕНИЕ (8222204, базовая линия): 175/234 configured + 83/273 placed
+  unsupported. Плaced-бакеты: offset-provider 67 (IntProvider trapezoid на
+  min/max полях — единственный провайдер с рэнеймом), modifier 14
+  (count_on_every_layer 8 + noise_threshold_count 6), count-provider 2.
+- РАУНД 1 (8222204): Anchor enum (Abs/AboveBottom/BelowTop/SeaLevel) —
+  границы uniform/trapezoid/biased сохраняют ТИП якоря (латентный баг легаси:
+  above_bottom/below_top внутри uniform резолвились как абсолюты — 89
+  вхождений в данных 26.3: руды!); HP: +SeaLevel/+BiasedToBottom/
+  +VeryBiasedToBottom/+WeightedList (формулы 26.3, guard пустого диапазона
+  не жжёт RNG); Modifier: +Offset3 (+random_chance/+Fixed/+Cuboid);
+  DecoLevel.sea_level() default 63; expand_chain_ctx/pure_expand_one
+  +sea_level. Голдены ChainRef выдержали.
+- РАУНД 2 (8ed66a2 + фикс 838996a): IP::Trapezoid (min/max, симметричный
+  шорткат 2 дрова) + IP::VeryBiasedToBottom (последовательные дрова —
+  borrow-checker против вложенных nextInt; порядок Java сохранён);
+  state-шортхенд 26.3 ({id, properties}, голый "ns:block") в state_string +
+  decode_state_provider (снимает tree/simple_block/pile/disk/bc/vp семьи);
+  RuleTest: +HeightMatch/+Not/+AnyOf/+AllOf (short-circuit как стримы ванилы)
+  — 22 руды с композитными таргетами.
+- ОСТАВШИЙСЯ WORKLIST configured (после раунда 2 ожидается ~60-70):
+  cf-type ~54 фичи / 28 типов (weighted_random_selector 8, fallen_tree 6,
+  huge_fungus 4, overlay 4 [26.3-новый], sequence 3, geode [амethyst из A/B],
+  end_* 8, fossil, bamboo, speleothem_cluster, lake, iceberg, delta,
+  large_dripstone, chorus, blue_ice, block_blob, random_neighbor_spread
+  [26.3-новый], freeze_top_layer, bonus_chest, void_start_platform, spike);
+  modifier 14 (count_on_every_layer + noise_threshold_count — level-dependent);
+  tree-trunk-ty (poplar — новый танк-плейсер), tree-ch-fields (cherry),
+  spring-valid, srs-entry, rs-*.
+
+Stage Summary:
+- CI: 8222204 все 3 зелёные; 8ed66a2 native fail (borrow) -> 838996a фикс.
+- F-263 идёт по канону: измерение -> декод -> повтор. Рантайм-семантика
+  placement 26.3 эквивалентна легаси (декомпил+трасса), работа = декод-слой.
