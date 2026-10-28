@@ -245,8 +245,10 @@ impl Gen263 {
             let strips: Vec<(i32, i32)> = split_strips(volume.size_z, threads);
             if strips.len() > 1 {
                 // shared aquifer prefill (deterministic per chunk): one
-                // maxSurfaceLevel walk instead of one per strip
-                let pre = self.aquifer_prefill(&volume);
+                // maxSurfaceLevel walk instead of one per strip. The
+                // reference is Copy — every spawned strip closure captures
+                // its own copy; the temp lives to the end of this block.
+                let pre = &self.aquifer_prefill(&volume);
                 // per-strip private out buffer (disjoint z rows) merged
                 // sequentially afterwards; marks concatenate in strip order —
                 // identical to the sequential walk's z-major order.

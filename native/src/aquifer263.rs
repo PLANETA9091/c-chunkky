@@ -99,7 +99,7 @@ pub struct AquiferConfig263 {
 /// Deterministic per-chunk aquifer prefill (surface-level quart cache +
 /// skip-above bound) — shared across strip aquifers (see Aquifer263::prefill).
 pub struct AquiferPrefill263 {
-    pub surface_level_cache: HashMap<(i32, i32), i32>,
+    pub surface_level_cache: HashMap<i64, i32>,
     pub skip_sampling_above_y: i32,
 }
 
