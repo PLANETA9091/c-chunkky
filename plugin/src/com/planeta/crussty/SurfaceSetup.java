@@ -13,7 +13,7 @@ import net.minecraft.world.level.block.state.BlockState;
  * Mojmap-compiled companion: completes the native surface engine handshake.
  * resolveBlockState + extendPalette need the mojmap server jar (the block
  * state registry + property system), so they live here — compiled together
- * with NativeBiomeSource/BiomeSwap by plugin/build.sh when the server jar is
+ * with BiomeSwap and friends by plugin/build.sh when the server jar is
  * present.
  */
 public final class SurfaceSetup {
