@@ -3142,3 +3142,32 @@ dripstone_cluster/large_dripstone/pointed_dripstone, monster_room 26.3-
 дрейф (тип «обрабатывается», но делегирует — проверить поля 26.3),
 lake (lava_surface/underground), amethyst_geode, freeze_top_layer,
 patch_sugar_cane (random_patch-дрейф).
+
+---
+## cont-59e: ФИНАЛ СЕССИИ — PROF РАЗОБЛАЧИЛ: FILL РАБОТАЕТ 16МС, СТЕНА = ГОЛОД CPU
+
+ПОСЛЕДНИЙ РАН (bc5b1e7-методология, но бэклог ещё протекал): окна
+mode-0 164.1 / deco 179.9 / serial 172.0 / near 116.2 / prof 171.9.
+
+PROF-ОКНО (fills=320 = 144 timed + 176 spawn-бэклог, среда смешанная):
+noise-family 8.49мс, shell 3.77, gradient 1.08, spline 0.55, cache 0.54,
+interp-shell 0.75, interp_fill 0.74, beard 0.006 => СОБСТВЕННАЯ РАБОТА
+FILL ~16мс (с проф-оверхедом) против 3.25 bench — ~5х (память/кэши/
+инструментация), а НЕ 20х.
+=> GenStats nat_p50 66-107мс = СТЕНА JNI (голод CPU: спавн-бэклог +
+   Java/GC/свет на 4 ядрах), не вычисление. Bench-процесс был честен.
+
+БЭКЛОГ-МЕХАНИКА: Paper ТОРМОЗИТ спавн-генерацию при forceload-тикетах и
+ВОЗОБНОВЛЯЕТ её внутри окна — stability-wait не ловит (бэклог идёт
+пачками с паузами >4с). fills=320 в 144-окне. ФИКС c1f6f04:
+`gamerule spawnChunkRadius 0` в e2e/farprobe (как в DPTT-judge) —
+следующий ран даст ЧИСТЫЕ окна: 144 филла, окно = 144 генерации.
+
+farprobe-дельты тоже были загрязнены (+45 на 2x2: 4+41 бэклог) —
+теперь чистые.
+
+СОСТОЯНИЕ ЦЕЛИ «e2e 4мс»: честные компоненты на CI-4vCPU (загрязнённые
+стены завышены): fill ~16 (раб., 3.25 bench) + deco 12.2 + layout 0.2+
+биомы+свет+Paper. После чистого замера: (1) fill-контекст (память/кэш),
+(2) deco Batch A (census: fallen_tree->trees_plains, dripstone ×3,
+monster_room дрейф, lake, geode, freeze_top), (3) ре-оценка.
