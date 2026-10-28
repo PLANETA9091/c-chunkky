@@ -556,7 +556,8 @@ fn decode_state_provider(j: &Json) -> Option<StateSrc> {
             let s = j.get("state")?;
             Some(StateSrc::Simple(state_string(s)?))
         }
-        "minecraft:weighted_state_provider" | "minecraft:weighted_list_state_provider" => {
+        // 26.3 renamed weighted_state_provider -> weighted (same entries shape)
+        "minecraft:weighted_state_provider" | "minecraft:weighted_list_state_provider" | "minecraft:weighted" => {
             // WeightedStateProvider codec field = "entries" (1.21.8)
             let arr = j
                 .get("entries")
@@ -570,7 +571,8 @@ fn decode_state_provider(j: &Json) -> Option<StateSrc> {
             }
             Some(StateSrc::Weighted(v))
         }
-        "minecraft:rotated_block_provider" | "minecraft:rotated_state_provider" => {
+        // 26.3 renamed rotated_block_provider -> rotated (same shape)
+        "minecraft:rotated_block_provider" | "minecraft:rotated_state_provider" | "minecraft:rotated" => {
             // RotatedBlockProvider codec: BlockState.CODEC.fieldOf("state")
             let s = j.get("state")?;
             Some(StateSrc::Simple(format!("ROTATED\0{}", state_string(s)?)))
