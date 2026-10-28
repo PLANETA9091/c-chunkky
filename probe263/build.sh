@@ -21,13 +21,12 @@ ADV="$(find "$SRV_DIR/libraries" -name 'adventure-api*.jar' -o -name 'adventure-
 # 26.3 paper-api signatures carry jetbrains/jspecify annotations — javac
 # needs them on the classpath or it dies with "cannot access NotNull"
 ANNOT="$(find "$SRV_DIR/libraries" -name 'jetbrains-annotations*.jar' -o -name 'annotations-*.jar' -o -name 'jspecify*.jar' 2>/dev/null | tr '\n' ':')"
-if [ -z "$ANNOT" ]; then
-  # extraction may not ship the annotation artifacts — pull from Maven Central
-  JB="/tmp/jb-annotations.jar"
-  curl -sfL -o "$JB" "https://repo1.maven.org/maven2/org/jetbrains/annotations/26.0.2-1/annotations-26.0.2-1.jar" \
-    || curl -sfL -o "$JB" "https://repo1.maven.org/maven2/org/jetbrains/annotations/24.1.0/annotations-24.1.0.jar"
-  [ -f "$JB" ] && ANNOT="$JB:"
-fi
+# org.jetbrains.annotations (NotNull etc.) is ALWAYS pulled from Maven —
+# the extraction's single annot jar is jspecify, which lacks NotNull
+JB="/tmp/jb-annotations.jar"
+[ -f "$JB" ] || curl -sfL -o "$JB" "https://repo1.maven.org/maven2/org/jetbrains/annotations/26.0.2-1/annotations-26.0.2-1.jar" \
+  || curl -sfL -o "$JB" "https://repo1.maven.org/maven2/org/jetbrains/annotations/24.1.0/annotations-24.1.0.jar"
+[ -f "$JB" ] && ANNOT="$JB:$ANNOT"
 echo "probe263 classpath: api=$(basename "$API_JAR") adv=$(echo "$ADV" | tr ':' '\n' | grep -c .) annot=$(echo "$ANNOT" | tr ':' '\n' | grep -c .)"
 rm -rf probe263/classes && mkdir -p probe263/classes
 "${JAVAC_CMD[@]}" -encoding UTF-8 -cp "$API_JAR:$ADV:$ANNOT" -d probe263/classes \
