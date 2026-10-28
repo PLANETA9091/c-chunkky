@@ -3115,3 +3115,30 @@ continue-on-error окно с CRUS_FILL263_PROF=1 (основные окна ч�
 Важный артефакт дисциплины: 5 окон на ран — integration-джоба ~50мин.
 После диагностики лишние окна снести (serial/near/prof), оставить
 mode-0 + deco.
+
+---
+## cont-59d: CENSUS ДЕЛЕГАТОВ = ПЛАН F-263 + fallen_tree ДРЕЙФ
+
+DecoDriver АКТИВИРОВАЛСЯ (de1970f-ран, deco-окно): chunks=238,
+p50 12.18мс (run=11.71 доминирует, deleg=0.43, apply=0.27), ops=5948/чанк,
+features=56.7/чанк, delegate=12.9/чанк (23%), upcalls 45.7/чанк,
+snap-sec 81/чанк (0.157мс). ВАЖНО: нативный декор ~12мс vs ваниль ~12мс —
+но это на фоне fill 100мс; после починки fill декор станет главным фронтом.
+
+CENSUS (deleg-names, per 238 чанков) — КАЖДЫЙ ЧАНК: pointed_dripstone,
+monster_room(+deep), lake_lava_surface(+underground), trees_plains (!),
+large_dripstone, patch_sugar_cane, freeze_top_layer, dripstone_cluster,
+amethyst_geode. Частичные: trees_birch_and_oak_leaf_litter=152,
+forest_flowers=152, seagrass_river=116, trees_savanna=28.
+
+КЛЮЧЕВОЙ ДРЕЙФ: trees_plains -> random_selector -> **minecraft:fallen_tree**
+— НОВЫЙ 26.3-тип (log_length uniform, stump_decorators/trunk_vine,
+log_decorators/attached_to_logs c weighted block_provider, directions).
+Один несуппортед иннер -> ВЕСЬ placed делегирует => ВСЕ деревья равнин
+сейчас в ванили. Фикс fallen_tree вернёт native деревья равнин/берёз.
+
+ДОРАБОТКА ПРИОРИТЕТОВ (batch A, каждый чанк): fallen_tree (деревья),
+dripstone_cluster/large_dripstone/pointed_dripstone, monster_room 26.3-
+дрейф (тип «обрабатывается», но делегирует — проверить поля 26.3),
+lake (lava_surface/underground), amethyst_geode, freeze_top_layer,
+patch_sugar_cane (random_patch-дрейф).
