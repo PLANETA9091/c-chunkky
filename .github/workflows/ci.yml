@@ -148,6 +148,11 @@ jobs:
         run: |
           set -o pipefail
           SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh carvers 2>&1 | tee ab263_carvers.log
+      - name: E2E per-chunk timing (fresh 12x12, GenStats window)
+        run: |
+          set -o pipefail
+          chmod +x harness/e2e_ci.sh
+          SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_timing.log
       - name: Upload judge artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -156,6 +161,7 @@ jobs:
           path: |
             ab263_surface.log
             ab263_carvers.log
+            e2e263_timing.log
             ab263_out/
             server/run.out
           retention-days: 14
