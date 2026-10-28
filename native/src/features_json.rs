@@ -19,6 +19,14 @@ pub enum RuleTest {
     TagMatch(String),
     /// RandomBlockMatchTest: state.is(block) && nextFloat() < probability
     RandomBlock { block: String, probability: f32 },
+    /// 26.3 HeightMatchTest: min_inclusive <= y <= max_inclusive (no RNG)
+    HeightMatch { lo: i32, hi: i32 },
+    /// 26.3 NotRuleTest
+    Not(Box<RuleTest>),
+    /// 26.3 AnyOfRuleTest: short-circuit on first true
+    AnyOf(Vec<RuleTest>),
+    /// 26.3 AllOfRuleTest: short-circuit on first false
+    AllOf(Vec<RuleTest>),
 }
 
 #[derive(Clone, Debug)]
@@ -415,6 +423,18 @@ fn decode_int_provider(j: &Json) -> Option<IP> {
             let hi = j.get("max_inclusive").and_then(|v| v.as_i64())? as i32;
             Some(IP::ClampedNormal { mean, deviation: dev, lo, hi })
         }
+        // 26.3 TrapezoidInt — the ONLY int provider on min/max field names
+        "minecraft:trapezoid" => {
+            let lo = j.get("min").and_then(|v| v.as_i64())? as i32;
+            let hi = j.get("max").and_then(|v| v.as_i64())? as i32;
+            let plateau = j.get("plateau").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            Some(IP::Trapezoid { lo, hi, plateau })
+        }
+        "minecraft:very_biased_to_bottom" => {
+            let lo = j.get("min_inclusive").and_then(|v| v.as_i64())? as i32;
+            let hi = j.get("max_inclusive").and_then(|v| v.as_i64())? as i32;
+            Some(IP::VeryBiasedToBottom { lo, hi })
+        }
         _ => None,
     }
 }
@@ -525,6 +545,11 @@ fn decode_state_provider(j: &Json) -> Option<StateSrc> {
         }
         return Some(StateSrc::RuleBased { fallback: Box::new(fb), rules });
     }
+    // 26.3 flat block-state shorthand (BlockState codec, no provider wrapper):
+    // {"id": "ns:block", "properties": {...}} or a bare "ns:block" string
+    if j.get("id").and_then(|v| v.as_str()).is_some() || j.as_str().is_some() {
+        return Some(StateSrc::Simple(state_string(j)?));
+    }
     let t = j.get("type")?.as_str()?;
     match t {
         "minecraft:simple_state_provider" => {
@@ -567,8 +592,17 @@ fn decode_state_provider(j: &Json) -> Option<StateSrc> {
 
 /// canonical "ns:block[k=v,...]" string from a vanilla state JSON
 pub fn state_string(j: &Json) -> Option<String> {
-    let name = j.get("Name").and_then(|v| v.as_str()).or_else(|| j.as_str())?;
-    if let Some(props) = j.get("Properties") {
+    // 1.21.8: {"Name": ..., "Properties": {...}}; 26.3 flat state:
+    // {"id": ..., "properties": {...}} or a bare "ns:block" string
+    let name = j
+        .get("Name")
+        .and_then(|v| v.as_str())
+        .or_else(|| j.get("id").and_then(|v| v.as_str()))
+        .or_else(|| j.as_str())?;
+    let props = j
+        .get("Properties")
+        .or_else(|| j.get("properties"));
+    if let Some(props) = props {
         let mut kv = Vec::new();
         if let Some(obj) = props.as_obj() {
             for (k, v) in obj {
@@ -610,6 +644,24 @@ fn decode_rule_test(j: &Json) -> Option<RuleTest> {
             block: normalize_block_id(j.get("block")?.as_str()?.to_string()),
             probability: j.get("probability")?.as_f64()? as f32,
         },
+        // 26.3 ore targets: composite + height rule tests
+        "minecraft:height_match" => RuleTest::HeightMatch {
+            lo: j.get("min_inclusive")?.as_i64()? as i32,
+            hi: j.get("max_inclusive")?.as_i64()? as i32,
+        },
+        "minecraft:not" => RuleTest::Not(Box::new(decode_rule_test(j.get("rule")?)?)),
+        "minecraft:any_of" | "minecraft:all_of" => {
+            let arr = j.get("rules")?.as_arr()?;
+            let mut rules = Vec::new();
+            for e in arr {
+                rules.push(decode_rule_test(e)?);
+            }
+            if t == "minecraft:any_of" {
+                RuleTest::AnyOf(rules)
+            } else {
+                RuleTest::AllOf(rules)
+            }
+        }
         _ => return None,
     })
 }

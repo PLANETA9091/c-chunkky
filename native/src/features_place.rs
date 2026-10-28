@@ -626,6 +626,11 @@ fn rule_test_matches(
             level.state_is(pos, std::slice::from_ref(block))
                 && rng.next_f32() < *probability
         }
+        // 26.3 composites: stream allMatch/anyMatch short-circuit semantics
+        RuleTest::HeightMatch { lo, hi } => *lo <= pos.y && pos.y <= *hi,
+        RuleTest::Not(inner) => !rule_test_matches(inner, level, pos, rng),
+        RuleTest::AnyOf(rules) => rules.iter().any(|r| rule_test_matches(r, level, pos, rng)),
+        RuleTest::AllOf(rules) => rules.iter().all(|r| rule_test_matches(r, level, pos, rng)),
     }
 }
 

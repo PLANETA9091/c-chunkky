@@ -41,6 +41,11 @@ pub enum IntProvider {
     /// ClampedNormalInt: (int) clamp(mean + deviation * nextGaussian, lo, hi)
     /// — f32 mean/deviation, f64 gaussian; Mth.clamp on f32.
     ClampedNormal { mean: f32, deviation: f32, lo: i32, hi: i32 },
+    /// 26.3 TrapezoidInt (min/max/plateau fields): symmetric shortcut
+    /// (plateau==0 && max==-min) draws 2; else 3 draws.
+    Trapezoid { lo: i32, hi: i32, plateau: i32 },
+    /// 26.3 VeryBiasedToBottomInt: min + nextInt(nextInt(nextInt(range+1)+1)+1)
+    VeryBiasedToBottom { lo: i32, hi: i32 },
 }
 
 impl IntProvider {
@@ -73,6 +78,26 @@ impl IntProvider {
                 let g = rng.next_gaussian();
                 let v = (mean as f64 + deviation as f64 * g) as f32;
                 v.clamp(lo as f32, hi as f32) as i32
+            }
+            IntProvider::Trapezoid { lo, hi, plateau } => {
+                // 26.3 TrapezoidInt.sample: symmetric shortcut (2 draws),
+                // plateau==range (1 draw), else 3 draws (end then start)
+                if plateau == 0 && hi == -lo {
+                    rng.next_int_bound((hi + 1).max(1)) - rng.next_int_bound((hi + 1).max(1))
+                } else {
+                    let range = hi - lo;
+                    if plateau >= range {
+                        rng.next_int_bound((range + 1).max(1)) + lo
+                    } else {
+                        let ps = (range - plateau) / 2;
+                        let pe = range - ps;
+                        lo + rng.next_int_bound(pe + 1) + rng.next_int_bound(ps + 1)
+                    }
+                }
+            }
+            IntProvider::VeryBiasedToBottom { lo, hi } => {
+                let range = (hi - lo + 1).max(1);
+                lo + rng.next_int_bound(rng.next_int_bound(rng.next_int_bound(range) + 1) + 1)
             }
         }
     }
