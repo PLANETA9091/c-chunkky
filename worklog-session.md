@@ -2937,3 +2937,35 @@ Next: (a) CI-вердикт broadcast+kernels -> новый baseline fill_chunk;
 prefill (point-path деревьев aquifer -> объёмные fill'ы с кернелами);
 (d) endgame к 1мс: компиляция 26.3-дерева в legacy-стиль (плоская
 программа + плоская решётка) — отдельный мегапроект.
+
+---
+## cont-58b: ВЕРДИКТ — КОЛОНОЧНЫЕ КЕРНЕЛЫ + BROADCAST: fill_chunk -38%
+
+CI e7526b9 (все 3 джобы зелёные, integration A/B прошёл — паритет держится
+через broadcast+кернелы). fill263bench (Milan 7763):
+
+- fill_chunk median 7.99 -> 4.94ms (min 4.53) — стрип-параллель 4т.
+- volume sample (serial walk) 9.89 -> 7.12ms (-28%).
+- Per-kind (prof, относительные): noise-family 20.16 -> 9.66 (-52%),
+  shell 5.28 -> 3.42, interp cell-grid 21.3 -> 10.8, cache 0.43 -> 0.17,
+  spline 0.65 -> 0.25. Substance 1.03 -> 1.07 (не тронут).
+- Фиксы по дороге: Smeared-слои BlendedNoise (create_fbm!) не поддерживались
+  кернелом — smear_fudge-режим (точки — фуджнутый f32 y, smoothstep —
+  НЕфуджнутый каст; точный split SmearedPerlin.get); doc-comment на
+  параметре fn запрещён; префилл-шаринг: тип кэша i64 (chunk_pack), pre
+  через Copy-ссылку в strip-closure.
+- Общий aquifer-префилл: 1 maxSurfaceLevel-walk на чанк вместо стрипов.
+
+Оценка честного serial: ~5.9-6.2ms (volume 7.12 prof-независимо + substance
+1.07 + interp fill 0.73 + прочее). На судье (2 ядра, par-2t) ожидаемо
+~3.2-3.6ms натив.
+
+Next-фронты к 1мс (по убыванию):
+1. AVX2 y-векторизация колоночных кернелов (8 y-точек на колонку: dots+
+   lerp3 в векторах, x/z-пролог общий) — noise ещё -30-40%.
+2. Compiled-lattice engine (легаси-стиль nochunk: плоская программа +
+   плоскостная решётка + perm-dedup) — мегапроект, главный рычаг.
+3. Substance-loop: поинтовые деревья aquifer -> колоночные объёмные
+   префиллы с ранними аутами по y-диапазону.
+4. Scratch-arena: убрать defensive zero-fill на acquire (многие узлы
+   перезаписывают весь буфер).
