@@ -2897,3 +2897,43 @@ overworld (geode, lake, bamboo, huge_fungus, freeze_top_layer — видны в
   dirt_provider->below_trunk_provider (37 деревьев); weighted/rotated алиасы.
 - Инструменты: vineflower + Temurin JDK25 + paper-26.3-222 (sha OK) в
   scripts/; measurement через cargo test -- --nocapture в CI.
+
+---
+## cont-58: ПЕРФ-ФРОНТ 26.3 — ПЕРВАЯ ЧЕСТНАЯ РАЗБИВКА + 3 ОПТИМИЗАЦИИ
+
+Task: «Продолжи дальше до 1мс». Ключевое открытие сессии: bench perf/phases
+в CI меряют ЛЕГАси-движок (ChunkGen/Env::new), продовый 26.3-путь (Gen263)
+меряется только fill263bench — добавлен в ci.yml (per-kind разбивка).
+
+БАЗА (ce46328, Milan 7763, serial): fill_chunk 7.99ms; volume sample 9.89;
+substance 1.03; interp trilinear fill 0.795; aq ctor 0.37. Per-kind (prof,
+относительные доли): noise-family 74%, shell(plain ops) 19%, spline 2.4%.
+BlendedNoise 26.3 = min(32 перлина FBM -15) + max(32) + main(16) = 80
+get/точку — доминанта. par-2t bench (легаси!) 3.39 — к цели 1мс относится
+только fill263bench/E2E-окно.
+
+- ФЬЮЗ (612bed7): FuseProg — плоская стек-программа поинтвайз-хребта
+  (16 ops / 6 slot-барьеров), бит-точна (CI parity 0/175, тест на 5
+  формах объёмов). НО МЕДЛЕННЕЕ walk: 12.96 vs 9.89ms — мелкий хребет,
+  walk-проходы стримятся и авто-векторизуются, интерпретатор нет.
+  Урок: фьюз — не серебряная пуля; CRUS_FUSE=1 opt-in (516fe84).
+- CACHE_2D BROADCAST (96e672d): y_scale=0.0 шумы (климат-сплайны + сдвиги)
+  сэмплились 49x на колонку решётки; теперь 1 get/(x,z) + broadcast
+  (знак нуля — единственная гипотетическая разница; оракул-гольдены
+  подписанный ноль толерируют; downstream-сравнения эквивалентны).
+- КОЛОНОЧНЫЕ КЕРНЕЛЫ (516fe84): perlin263_fill_col — x/z-пролог
+  (wrap/floor/rel/smoothstep/x0/x1) хоистится на колонку, на точку —
+  6 зависимых table-load + dots + lerp3; порядок f32/f64 оп-ций ТОЧНО
+  скалярный ((raw*scale)*freq, накопление слоёв по порядку) — бит-точность
+  по тождеству; 2 новых A/B-теста (continentalness/cave_cheese/jagged +
+  Blended min/max/main, 4 формы объёмов). Smeared/nested -> plain fallback.
+  BlendedNoise: 3 стека в приватные буферы + точный per-point blend
+  (short-circuit choice==0/1 сохранён).
+- ВЕРДИКТ CI 612bed7: все 3 джобы зелёные; integration A/B (surface+carvers)
+  прошёл с фьюзом в прод-пути — фьюз корректен, просто не быстрее.
+
+Next: (a) CI-вердикт broadcast+kernels -> новый baseline fill_chunk;
+(b) interp trilinear fill SIMD (0.8ms -> ~0.3); (c) substance-loop volume
+prefill (point-path деревьев aquifer -> объёмные fill'ы с кернелами);
+(d) endgame к 1мс: компиляция 26.3-дерева в legacy-стиль (плоская
+программа + плоская решётка) — отдельный мегапроект.
