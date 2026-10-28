@@ -3044,3 +3044,40 @@ Next: (1) e2e-цифры нативного полного пути (mode-0) и 
 (2) приоритет по брейкдауну: fill 4.87 (bench) vs layout/beard/marks/biome/
 deco vs Paper-оверхед; (3) farprobe-клиф нативного пути; (4) цель — e2e
 4мс: fill -> 1мс (интерп-клетки+noise) и/или нативный декор (F-263 82/234).
+
+---
+## cont-59b: ПЕРВЫЕ ЧЕСТНЫЕ E2E-ЦИФРЫ + DECO-ДВИЖОК ДЛЯ EMBEDDED CTX
+
+E2E-ОКНА (CI 4vCPU, EPYC 9V45, avx512=true, нативный ШУМ ВКЛЮЧЁН):
+- mode-0 (ванильный декор): e2e 161.3 мс/чанк (wall 23.23с/144)
+- mode-1 (деко=1): 157.8 — DecoDriver НЕ СТАРТОВАЛ: v263 ctx строился
+  с deco: None (движок строился только в ctx_new_assets для датапаков!)
+- GenStats mode-0: native fill p50 = 65.97мс (!), mean generateNoise 68.1мс,
+  layout 0.20, beard 0.02, marks 0.01; sections mixed=2877 air=4851;
+  chunks=322 в окне (144 timed + ~178 фоновых spawn-региона).
+- ИЗОЛИРОВАННЫЙ БЕНЧ ТЕХ ЖЕ СБОРКИ (native-джоба, тот же CPU-модель):
+  fill_chunk median 3.25мс — 20х ПРОСАДКА В СЕРВЕРЕ. Старый замер эпохи
+  легаси давал 3-4х (nat_p50 5.1-7.3 vs 1.8, «spawn/join при насыщенном
+  CPU»); 20х — что-то новое (кандидаты: strip-thread spawn/join на
+  насыщенном 4-ядернике + GC + Prefetch-тред; координаты 1100 vs 0-4 в
+  бенче). Дискриминаторы запущены: serial (threads=1) и near-origin (-20).
+- farprobe: ВСЕ дистанции OK (64..61440) — far-бага НЕТ, натив генерит
+  везде (первая гипотеза опровергнута вторым прогоном).
+
+DECO-ДВИЖОК ДЛЯ EMBEDDED 26.3 (de1970f):
+- scripts/extract_features263.py: +VANILLA_BIOMES_263 (67 биомных JSON,
+  features-массивы целы) — референс-экстракция reference/vanilla263.
+- ffi.rs: embedded263_assets() (синтетический Assets из 234+273+67 блобов,
+  пути "<ns>/worldgen/<kind>/<file>.json") -> build_deco_ctx_src — НОВАЯ
+  сигнатура с внешним BiomeSourceData (v263 уже держит src из
+  params263_overworld.json — репарс дал бы риск разъезда порядка биомов).
+- BIOME_FULL самосев: build_deco_ctx_src заполняет глобальную карту
+  biome->refs если пуста; Java setupDeco шлёт decoBiomeFeaturesFull ТОЛЬКО
+  при pack-данных — пустой оверрайт делал бы ВСЕ BiomeFilter false
+  (biome_has_feature читает только BIOME_FULL) и молча дропал фичи.
+- Данные фич 26.3 уже в legacy {type,config}-норме -> 1.21.8-fallback
+  внутри build_deco_ctx_src ничего не подмешивает (сет 26.3 покрывает всё).
+
+Next: (1) дискриминаторы 66мс; (2) deco mode-1 с живым движком (census
+делегатов -> приоритет F-263 остатка 82/234); (3) persistent worker pool
+если thread-теория подтвердится; (4) путь к e2e 4мс.
