@@ -138,6 +138,22 @@ fn index_states_cfg(
                 }
             }
         }
+        FC::Speleothem { base_block, pointed_block, .. } => {
+            note(base_block, states, idx);
+            // every thickness/direction/waterlogged combination the column
+            // builder can write (canonical alphabetical property order)
+            for th in ["base", "frustum", "middle", "tip", "tip_merge"] {
+                for td in ["down", "up"] {
+                    for wl in ["false", "true"] {
+                        note(
+                            &format!("{pointed_block}[thickness={th},tip_direction={td},waterlogged={wl}]"),
+                            states,
+                            idx,
+                        );
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }

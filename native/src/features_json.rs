@@ -131,6 +131,18 @@ pub enum FeatureCfg {
         stump_decos: Vec<TreeDeco>,
         log_decos: Vec<TreeDeco>,
     },
+    /// minecraft:speleothem (26.3: the 1.21.8 pointed_dripstone feature was
+    /// renamed/generalized). Stalactite/stalagmite column + base patch.
+    Speleothem {
+        base_block: String,
+        pointed_block: String,
+        /// replaceable_blocks holder-set tag (WITHOUT the '#')
+        replaceable_tag: String,
+        chance_taller: f32,
+        chance_dir_spread: f32,
+        chance_r2: f32,
+        chance_r3: f32,
+    },
     /// minecraft:vegetation_patch / waterlogged_vegetation_patch
     VegetationPatch(VegetationPatchCfg),
     // --- batch-1 simple types (dptt delegate killers) --------------------
@@ -1295,6 +1307,43 @@ pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry
                 log_length,
                 stump_decos,
                 log_decos,
+            }
+        }
+        "minecraft:speleothem" => {
+            // 26.3 SpeleothemFeature: base/pointed BlockStates, replaceable
+            // tag holder-set (#-prefixed), 4 optional chance floats.
+            let Some(Some(base)) = cfg.get("base_block").map(state_string) else {
+                return FeatureCfg::Unsupported("sp-base");
+            };
+            let Some(Some(pointed)) = cfg.get("pointed_block").map(state_string) else {
+                return FeatureCfg::Unsupported("sp-pointed");
+            };
+            let Some(rt) = cfg
+                .get("replaceable_blocks")
+                .and_then(|v| v.as_str())
+            else {
+                return FeatureCfg::Unsupported("sp-replaceable");
+            };
+            FeatureCfg::Speleothem {
+                base_block: crate::features_deco::state_block_name(&base).to_string(),
+                pointed_block: crate::features_deco::state_block_name(&pointed).to_string(),
+                replaceable_tag: rt.trim_start_matches('#').to_string(),
+                chance_taller: cfg
+                    .get("chance_of_taller_generation")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.2) as f32,
+                chance_dir_spread: cfg
+                    .get("chance_of_directional_spread")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.7) as f32,
+                chance_r2: cfg
+                    .get("chance_of_spread_radius2")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.5) as f32,
+                chance_r3: cfg
+                    .get("chance_of_spread_radius3")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.5) as f32,
             }
         }
         "minecraft:vegetation_patch" | "minecraft:waterlogged_vegetation_patch" => {

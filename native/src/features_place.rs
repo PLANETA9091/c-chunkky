@@ -262,6 +262,7 @@ fn cfg_fully_supported(reg: &FeatureRegistry, cfg_name: &str, depth: u32) -> boo
         // lists are limited to the native set (trunk_vine/attached_to_logs);
         // shelf_mushroom (fallen_poplar) falls back to Unsupported at decode.
         FeatureCfg::FallenTree { .. } => true,
+        FeatureCfg::Speleothem { .. } => true,
         FeatureCfg::RandomSelector { entries, default } => {
             entries.iter().all(|(_, n)| placed_fully_supported(reg, n, depth + 1))
                 && placed_fully_supported(reg, default, depth + 1)
@@ -442,6 +443,27 @@ pub fn place_configured(
             log_decos,
         } => crate::features_tree::place_fallen_tree(
             ctx, trunk, log_length, stump_decos, log_decos, rng, pos, ops,
+        ),
+        FeatureCfg::Speleothem {
+            base_block,
+            pointed_block,
+            replaceable_tag,
+            chance_taller,
+            chance_dir_spread,
+            chance_r2,
+            chance_r3,
+        } => place_speleothem(
+            ctx,
+            base_block,
+            pointed_block,
+            replaceable_tag,
+            *chance_taller,
+            *chance_dir_spread,
+            *chance_r2,
+            *chance_r3,
+            rng,
+            pos,
+            ops,
         ),
         FeatureCfg::VegetationPatch(cfg) => {
             crate::features_tree::place_vegetation_patch(ctx, cfg, rng, pos, ops)
@@ -743,6 +765,140 @@ fn place_replace_blobs(
         }
     }
     any
+}
+
+/// SpeleothemFeature (26.3 — the renamed pointed_dripstone feature):
+/// stalactite/stalagmite column + base patch. Dec263 semantics; the float
+/// draws happen even when the branch will not fire (`!(nextFloat() > p)`),
+/// and the taller-check short-circuit evaluates nextFloat() ALWAYS — the
+/// draw order is parity-critical.
+const DIRS6_SP: [(i32, i32, i32); 6] = [
+    (0, -1, 0), // DOWN
+    (0, 1, 0),  // UP
+    (0, 0, -1), // NORTH
+    (0, 0, 1),  // SOUTH
+    (-1, 0, 0), // WEST
+    (1, 0, 0),  // EAST
+];
+const PLANE_HORIZONTAL_SP: [u8; 4] = [2, 5, 3, 4]; // N, E, S, W
+
+#[allow(clippy::too_many_arguments)]
+fn place_speleothem(
+    ctx: &PlaceCtx,
+    base_block: &str,
+    pointed_block: &str,
+    tag: &str,
+    p_taller: f32,
+    p_dir: f32,
+    p_r2: f32,
+    p_r3: f32,
+    rng: &mut WorldgenRandom,
+    origin: BlockPos,
+    ops: &mut Vec<DecoOp>,
+) -> bool {
+    // isBase: state.is(baseBlock) || state.is(replaceableBlocks)
+    let is_base = |p: BlockPos| -> bool {
+        ctx.level.state_name(p) == base_block || ctx.level.tag_is(p, tag)
+    };
+    let empty_or_water = |p: BlockPos| -> bool {
+        ctx.level.is_air(p) || ctx.level.fluid_is(p, &["minecraft:water".to_string()])
+    };
+    // placeBaseBlockIfPossible: ONLY the replaceable tag gates the write
+    let mut place_base = |p: BlockPos, ops: &mut Vec<DecoOp>| -> bool {
+        if ctx.level.tag_is(p, tag) {
+            ctx.emit(ops, p, base_block, 0);
+            true
+        } else {
+            false
+        }
+    };
+    let step = |d: u8| -> (i32, i32, i32) { DIRS6_SP[d as usize] };
+    // getTipDirection: above/below base checks draw NOTHING; both -> nextBoolean
+    let above = is_base(BlockPos::new(origin.x, origin.y + 1, origin.z));
+    let below = is_base(BlockPos::new(origin.x, origin.y - 1, origin.z));
+    // Direction ordinals: DOWN=0, UP=1 (nextBoolean true -> DOWN)
+    let tip: u8 = if above && below {
+        if rng.next_bits(1) != 0 {
+            0
+        } else {
+            1
+        }
+    } else if above {
+        0
+    } else if below {
+        1
+    } else {
+        return false;
+    };
+    let (tdx, tdy, tdz) = step(tip);
+    // rootPos = origin.relative(tip.opposite())
+    let root = BlockPos::new(origin.x - tdx, origin.y - tdy, origin.z - tdz);
+    // ---- createPatchOfBaseBlocks(rootPos) --------------------------------
+    place_base(root, ops);
+    for &hd in PLANE_HORIZONTAL_SP.iter() {
+        if rng.next_f32() <= p_dir {
+            let (hdx, hdy, hdz) = step(hd);
+            let pos1 = BlockPos::new(root.x + hdx, root.y + hdy, root.z + hdz);
+            place_base(pos1, ops);
+            if rng.next_f32() <= p_r2 {
+                let (r2x, r2y, r2z) = step(rng.next_int_bound(6) as u8);
+                let pos2 = BlockPos::new(pos1.x + r2x, pos1.y + r2y, pos1.z + r2z);
+                place_base(pos2, ops);
+                if rng.next_f32() <= p_r3 {
+                    let (r3x, r3y, r3z) = step(rng.next_int_bound(6) as u8);
+                    let pos3 = BlockPos::new(pos2.x + r3x, pos2.y + r3y, pos2.z + r3z);
+                    place_base(pos3, ops);
+                }
+            }
+        }
+    }
+    // ---- height: taller float drawn ALWAYS, env check only when it passes
+    let height = if rng.next_f32() < p_taller
+        && empty_or_water(BlockPos::new(origin.x + tdx, origin.y + tdy, origin.z + tdz))
+    {
+        2
+    } else {
+        1
+    };
+    // ---- growSpeleothem(origin, tip, height, merged=false) ----------------
+    if is_base(root) {
+        // buildBaseToTipColumn: BASE, (len-3) MIDDLE, FRUSTUM, TIP — tip first
+        let tip_name = if tip == 0 { "down" } else { "up" };
+        let mut states: Vec<&str> = Vec::with_capacity(height as usize);
+        if height >= 3 {
+            states.push("base");
+            for _ in 0..(height - 3) {
+                states.push("middle");
+            }
+        }
+        if height >= 2 {
+            states.push("frustum");
+        }
+        if height >= 1 {
+            states.push("tip"); // mergedTip=false
+        }
+        let mut px = origin.x;
+        let mut py = origin.y;
+        let mut pz = origin.z;
+        for th in states {
+            let wl = if ctx
+                .level
+                .fluid_is(BlockPos::new(px, py, pz), &["minecraft:water".to_string()])
+            {
+                "true"
+            } else {
+                "false"
+            };
+            let st = format!(
+                "{pointed_block}[thickness={th},tip_direction={tip_name},waterlogged={wl}]"
+            );
+            ctx.emit(ops, BlockPos::new(px, py, pz), &st, 0);
+            px += tdx;
+            py += tdy;
+            pz += tdz;
+        }
+    }
+    true
 }
 
 /// SeagrassFeature: dx/dz offsets (2 draws each), OCEAN_FLOOR height, water
