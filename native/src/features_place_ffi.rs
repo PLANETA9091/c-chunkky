@@ -130,6 +130,14 @@ fn index_states_cfg(
             index_state_src(root_state, states, idx);
             index_state_src(hanging_root_state, states, idx);
         }
+        FC::FallenTree { trunk, stump_decos, log_decos, .. } => {
+            index_state_src(trunk, states, idx);
+            for d in stump_decos.iter().chain(log_decos.iter()) {
+                if let crate::features_json::TreeDeco::AttachedToLogs { provider, .. } = d {
+                    index_state_src(provider, states, idx);
+                }
+            }
+        }
         _ => {}
     }
 }

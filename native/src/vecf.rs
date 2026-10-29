@@ -275,14 +275,14 @@ mod avx512 {
     #[target_feature(enable = "avx512f")]
     pub unsafe fn round_pd(ty: RType, v: __m512) -> __m512 {
         match ty {
-            RType::Floor => _mm512_floor_ps(v),
-            RType::Ceil => _mm512_ceil_ps(v),
+            RType::Floor => _mm512_roundscale_ps::<{ _MM_FROUND_TO_NEG_INF }>(v),
+            RType::Ceil => _mm512_roundscale_ps::<{ _MM_FROUND_TO_POS_INF }>(v),
             RType::Truncate => _mm512_roundscale_ps::<{ _MM_FROUND_TO_ZERO }>(v),
             RType::Round => {
                 // Java Math.round: floor(v+0.5), half away from zero.
                 let sign = _mm512_and_ps(v, _mm512_set1_ps(-0.0f32));
                 let a = _mm512_andnot_ps(_mm512_set1_ps(-0.0f32), v); // |v|
-                let t = _mm512_floor_ps(_mm512_add_ps(a, _mm512_set1_ps(0.5)));
+                let t = _mm512_roundscale_ps::<{ _MM_FROUND_TO_NEG_INF }>(_mm512_add_ps(a, _mm512_set1_ps(0.5)));
                 _mm512_or_ps(t, sign)
             }
         }
@@ -325,9 +325,9 @@ mod avx512 {
                 let r = _mm512_mask_blend_ps(zero, r, _mm512_set1_ps(0.0));
                 _mm512_mask_mov_ps(r, nan, v)
             }
-            V1::Floor => _mm512_floor_ps(v),
+            V1::Floor => _mm512_roundscale_ps::<{ _MM_FROUND_TO_NEG_INF }>(v),
             V1::Round => round_pd(RType::Round, v),
-            V1::Ceil => _mm512_ceil_ps(v),
+            V1::Ceil => _mm512_roundscale_ps::<{ _MM_FROUND_TO_POS_INF }>(v),
             V1::Truncate => _mm512_roundscale_ps::<{ _MM_FROUND_TO_ZERO }>(v),
         }
     }

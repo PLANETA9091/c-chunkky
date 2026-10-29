@@ -123,6 +123,14 @@ pub enum FeatureCfg {
     },
     /// minecraft:tree (stage F5) — full trunk/foliage/root/decorator engine
     Tree(TreeCfg),
+    /// minecraft:fallen_tree (26.3 new type) — stump + horizontal log with
+    /// ground-gap tolerance; decorators over {stump} and the log set.
+    FallenTree {
+        trunk: StateSrc,
+        log_length: IP,
+        stump_decos: Vec<TreeDeco>,
+        log_decos: Vec<TreeDeco>,
+    },
     /// minecraft:vegetation_patch / waterlogged_vegetation_patch
     VegetationPatch(VegetationPatchCfg),
     // --- batch-1 simple types (dptt delegate killers) --------------------
@@ -1259,6 +1267,32 @@ pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry
             }
         }
         "minecraft:tree" => decode_tree_cfg(&cfg),
+        "minecraft:fallen_tree" => {
+            // FallenTreeFeature (26.3): trunk_provider + log_length IntProvider
+            // (0..16) + stump/log decorator lists. Decorators limited to the
+            // natively supported set — anything else delegates the feature.
+            let Some(Some(trunk)) = cfg.get("trunk_provider").map(decode_state_provider) else {
+                return FeatureCfg::Unsupported("ft-trunk");
+            };
+            if matches!(trunk, StateSrc::Unsupported(_)) {
+                return FeatureCfg::Unsupported("ft-trunk-unsupported");
+            }
+            let Some(Some(log_length)) = cfg.get("log_length").map(decode_int_provider) else {
+                return FeatureCfg::Unsupported("ft-len");
+            };
+            let Some(stump_decos) = decode_fallen_tree_decos(cfg.get("stump_decorators")) else {
+                return FeatureCfg::Unsupported("ft-stump-decos");
+            };
+            let Some(log_decos) = decode_fallen_tree_decos(cfg.get("log_decorators")) else {
+                return FeatureCfg::Unsupported("ft-log-decos");
+            };
+            FeatureCfg::FallenTree {
+                trunk,
+                log_length,
+                stump_decos,
+                log_decos,
+            }
+        }
         "minecraft:vegetation_patch" | "minecraft:waterlogged_vegetation_patch" => {
             decode_vegetation_patch_cfg(&cfg, t.ends_with("waterlogged_vegetation_patch"))
         }
@@ -1430,6 +1464,42 @@ fn trunk_parts(c: &Json) -> Option<(i32, i32, i32)> {
 
 fn foliage_parts(c: &Json) -> Option<(IP, IP)> {
     Some((ip(c.get("radius")?)?, ip(c.get("offset")?)?))
+}
+
+/// Fallen-tree decorator lists: only the natively supported subset
+/// (trunk_vine / attached_to_logs). Anything else -> None (delegate).
+/// A missing key is treated as an empty list (the vanilla codec requires the
+/// field, so a miss means the data was hand-written — harmless default).
+fn decode_fallen_tree_decos(v: Option<&Json>) -> Option<Vec<TreeDeco>> {
+    let Some(arr) = v.and_then(|d| d.as_arr()) else {
+        return Some(Vec::new());
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for d in arr {
+        let dt = d.get("type").and_then(|x| x.as_str()).unwrap_or("");
+        match dt {
+            "minecraft:trunk_vine" => out.push(TreeDeco::TrunkVine),
+            "minecraft:attached_to_logs" => {
+                let (Some(prob), Some(provider), Some(dirs)) = (
+                    d.get("probability").and_then(|x| x.as_f64()),
+                    decode_state_provider(d.get("block_provider")?),
+                    d.get("directions").and_then(decode_dirs),
+                ) else {
+                    return None;
+                };
+                if matches!(provider, StateSrc::Unsupported(_)) {
+                    return None;
+                }
+                out.push(TreeDeco::AttachedToLogs {
+                    probability: prob as f32,
+                    provider,
+                    dirs,
+                });
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 fn decode_tree_cfg(c: &Json) -> FeatureCfg {

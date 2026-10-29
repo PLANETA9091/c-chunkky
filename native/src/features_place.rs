@@ -258,6 +258,10 @@ fn cfg_fully_supported(reg: &FeatureRegistry, cfg_name: &str, depth: u32) -> boo
         // spawner entity draws live inside the vanilla RNG stream — parity
         // first until the op protocol can carry them.
         FeatureCfg::MonsterRoom => false,
+        // FallenTree: parse-time guarded — trunk provider + both decorator
+        // lists are limited to the native set (trunk_vine/attached_to_logs);
+        // shelf_mushroom (fallen_poplar) falls back to Unsupported at decode.
+        FeatureCfg::FallenTree { .. } => true,
         FeatureCfg::RandomSelector { entries, default } => {
             entries.iter().all(|(_, n)| placed_fully_supported(reg, n, depth + 1))
                 && placed_fully_supported(reg, default, depth + 1)
@@ -431,6 +435,14 @@ pub fn place_configured(
             place_disk(ctx, provider, target, radius, *half_height, rng, pos, ops)
         }
         FeatureCfg::Tree(cfg) => crate::features_tree::place_tree(ctx, cfg, rng, pos, ops),
+        FeatureCfg::FallenTree {
+            trunk,
+            log_length,
+            stump_decos,
+            log_decos,
+        } => crate::features_tree::place_fallen_tree(
+            ctx, trunk, log_length, stump_decos, log_decos, rng, pos, ops,
+        ),
         FeatureCfg::VegetationPatch(cfg) => {
             crate::features_tree::place_vegetation_patch(ctx, cfg, rng, pos, ops)
         }

@@ -1726,7 +1726,13 @@ impl<'a, 'b> TreeRunner<'a, 'b> {
     }
 
     pub fn run_decorators(&mut self, cfg: &TreeCfg, rng: &mut WorldgenRandom) {
-        for d in &cfg.decorators {
+        self.run_deco_list(&cfg.decorators, rng);
+    }
+
+    /// Decorator list runner shared by TreeCfg and FallenTree lists (the
+    /// context's log set lives in self.logs at call time).
+    fn run_deco_list(&mut self, decos: &[TreeDeco], rng: &mut WorldgenRandom) {
+        for d in decos {
             match d {
                 TreeDeco::LeaveVine(p) => self.deco_leave_vine(*p, rng),
                 TreeDeco::TrunkVine => self.deco_trunk_vine(rng),
@@ -1745,7 +1751,9 @@ impl<'a, 'b> TreeRunner<'a, 'b> {
                 TreeDeco::PaleMoss { leaves, trunk, ground } => {
                     self.deco_pale_moss(*leaves, *trunk, *ground, rng)
                 }
-                TreeDeco::CreakingHeart(p) => self.deco_creaking_heart(*p, rng),
+                TreeDeco::CreakingHeart(p) => {
+                    self.deco_creaking_heart(*p, rng)
+                }
             }
         }
     }
@@ -2502,6 +2510,133 @@ pub fn place_tree(
         true
     } else {
         false
+    }
+}
+
+/// FallenTreeFeature (26.3, reference/dec263 FallenTreeFeature.java): stump +
+/// horizontal log with ground-gap tolerance. Always returns true (vanilla
+/// place() ignores outcomes). RNG order is parity-critical:
+///   1. stump setBlock (trunk provider draw if it draws) + stump decorators;
+///   2. HORIZONTAL.getRandomDirection (N,E,S,W — nextInt(4));
+///   3. log_length.sample() - 2;
+///   4. nextInt(2) gap: start = origin + dir*(2+gap);
+///   5. ground settle: up 1 then up to 6 drops to mayPlaceOn (NO rng);
+///   6. canPlaceEntireFallenLog walk (NO rng — gap tolerance 2);
+///   7. per-log setBlock with AXIS override + log decorators over the set.
+pub fn place_fallen_tree(
+    ctx: &PlaceCtx,
+    trunk: &crate::features_json::StateSrc,
+    log_length: &crate::features_placement::IntProvider,
+    stump_decos: &[TreeDeco],
+    log_decos: &[TreeDeco],
+    rng: &mut WorldgenRandom,
+    pos: BlockPos,
+    ops: &mut Vec<crate::features_place::DecoOp>,
+) -> bool {
+    let mut t = TreeRunner {
+        ctx,
+        ops,
+        roots: JSetSim::new(),
+        logs: JSetSim::new(),
+        leaves: JSetSim::new(),
+        decos: JSetSim::new(),
+    };
+    t.fallen_do(pos, trunk, log_length, stump_decos, log_decos, rng);
+    true
+}
+
+impl<'a, 'b> TreeRunner<'a, 'b> {
+    /// placeLogBlock: setBlockAndUpdate writes UNCONDITIONALLY (validTreePos
+    /// only lives in the placement check), then markAboveForPostProcessing.
+    fn fallen_log_block(
+        &mut self,
+        pos: BlockPos,
+        trunk: &crate::features_json::StateSrc,
+        rng: &mut WorldgenRandom,
+        axis: Option<u8>,
+    ) {
+        let mut flags = 0u8;
+        if let Some(st) = sample_state(trunk, self.ctx.level, pos, rng, &mut flags) {
+            self.write_log(pos, &st, axis);
+        }
+    }
+
+    /// isOverSolidGround: below.isFaceSturdy(UP) — dir code 1 = UP.
+    fn over_solid_ground(&self, p: BlockPos) -> bool {
+        self.ctx
+            .level
+            .has_sturdy_face(BlockPos::new(p.x, p.y - 1, p.z), 1)
+    }
+
+    fn fallen_do(
+        &mut self,
+        origin: BlockPos,
+        trunk: &crate::features_json::StateSrc,
+        log_length: &crate::features_placement::IntProvider,
+        stump_decos: &[TreeDeco],
+        log_decos: &[TreeDeco],
+        rng: &mut WorldgenRandom,
+    ) {
+        // ---- placeStump: setBlock + stump decorators over {stump} --------
+        self.fallen_log_block(origin, trunk, rng, None);
+        self.logs.add(origin);
+        self.run_deco_list(stump_decos, rng);
+
+        // ---- direction, length, gap draws (exact order) -------------------
+        let dir = HORIZONTAL[rng.next_int_bound(4) as usize]; // N, E, S, W
+        let len = log_length.sample(rng) - 2;
+        let gap = rng.next_int_bound(2) as i32;
+        let (dx, _, dz) = dir_step(dir);
+        let sx = origin.x + dx * (2 + gap);
+        let sz = origin.z + dz * (2 + gap);
+
+        // ---- setGroundHeightForFallenLogStartPos: up 1, <=6 drops ---------
+        let mut sy = origin.y + 1;
+        for _ in 0..6 {
+            let p = BlockPos::new(sx, sy, sz);
+            if valid_tree_pos(self.ctx.level, p) && self.over_solid_ground(p) {
+                break;
+            }
+            sy -= 1;
+        }
+
+        // ---- canPlaceEntireFallenLog (no rng; gap tolerance 2) ------------
+        let (mut cx, mut cz) = (sx, sz);
+        let mut gap_in_ground = 0;
+        let mut ok = true;
+        for _ in 0..len {
+            let p = BlockPos::new(cx, sy, cz);
+            if !valid_tree_pos(self.ctx.level, p) {
+                ok = false;
+                break;
+            }
+            if !self.over_solid_ground(p) {
+                gap_in_ground += 1;
+                if gap_in_ground > 2 {
+                    ok = false;
+                    break;
+                }
+            } else {
+                gap_in_ground = 0;
+            }
+            cx += dx;
+            cz += dz;
+        }
+
+        if ok && len > 0 {
+            // ---- placeFallenLog over a FRESH set (stump decos saw {stump})
+            self.logs = JSetSim::new();
+            let axis = dir_code_axis(dir);
+            let (mut px, mut pz) = (sx, sz);
+            for _ in 0..len {
+                self.fallen_log_block(BlockPos::new(px, sy, pz), trunk, rng, Some(axis));
+                px += dx;
+                pz += dz;
+            }
+            self.run_deco_list(log_decos, rng);
+        }
+        // len <= 0: vanilla still runs the decorators over an EMPTY log set —
+        // no rng draws, no writes; skipping is equivalent.
     }
 }
 
