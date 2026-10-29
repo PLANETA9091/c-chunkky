@@ -415,7 +415,7 @@ pub fn v263_fill_tail(
     surface: Option<&crate::surface263::SurfaceState263>,
     cx: i32,
     cz: i32,
-    beard_list: &[i64],
+    beard_list: &[i32],
     out: &mut [u16; OUT_LEN],
     marks: &mut Vec<i64>,
 ) {
@@ -1184,8 +1184,8 @@ fn clone_or_compute_grid263(
 ) -> Option<Box<[i32]>> {
     {
         let guard = V263_GRIDS.lock().unwrap();
-        if let Some(m) = guard.as_ref() {
-            if let Some(g) = m.get(&(cx, cz)) {
+        if let Some(c) = guard.as_ref() {
+            if let Some(g) = c.map.get(&(cx, cz)) {
                 return Some(g.clone());
             }
         }
