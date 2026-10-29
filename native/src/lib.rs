@@ -36,6 +36,7 @@ pub mod features_survive;
 pub mod n263;
 pub mod df263;
 pub mod df263_router;
+pub mod vecf;
 pub mod beard263;
 pub mod carver263;
 pub mod aquifer263;

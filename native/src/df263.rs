@@ -953,83 +953,66 @@ impl DfSam263 {
                 l.sample_volume(ctx, out, vol);
                 let mut rb = ctx.scratch.acquire(vol.size());
                 r.sample_volume(ctx, &mut rb, vol);
-                for i in 0..out.len() {
-                    let l = out[i];
-                    let rv = rb[i];
-                    out[i] = match op {
-                        BinOp::Add => l + rv,
-                        BinOp::Sub => l - rv,
-                        BinOp::Mul => l * rv,
-                        BinOp::Div => l / rv,
-                        BinOp::Min => {
-                            if rv < l {
-                                rv
-                            } else {
-                                l
-                            }
-                        }
-                        BinOp::Max => {
-                            if rv > l {
-                                rv
-                            } else {
-                                l
-                            }
-                        }
-                    };
-                }
+                let vop = match op {
+                    BinOp::Add => crate::vecf::V2::Add,
+                    BinOp::Sub => crate::vecf::V2::Sub,
+                    BinOp::Mul => crate::vecf::V2::Mul,
+                    BinOp::Div => crate::vecf::V2::Div,
+                    BinOp::Min => crate::vecf::V2::Min,
+                    BinOp::Max => crate::vecf::V2::Max,
+                };
+                crate::vecf::map2(out, &rb, vop);
                 ctx.scratch.release(rb);
             }
             DfSam263::ConstAdd { a, c } => {
                 a.sample_volume(ctx, out, vol);
-                for v in out.iter_mut() {
-                    *v += *c;
-                }
+                crate::vecf::mapc(out, *c, crate::vecf::VC::CAdd);
             }
             DfSam263::ConstSub { c, a } => {
                 a.sample_volume(ctx, out, vol);
-                for v in out.iter_mut() {
-                    *v = *c - *v;
-                }
+                crate::vecf::mapc(out, *c, crate::vecf::VC::CSub);
             }
             DfSam263::ConstMul { a, c } => {
                 a.sample_volume(ctx, out, vol);
-                for v in out.iter_mut() {
-                    *v *= *c;
-                }
+                crate::vecf::mapc(out, *c, crate::vecf::VC::CMul);
             }
             DfSam263::ConstDiv { c, a } => {
                 a.sample_volume(ctx, out, vol);
-                for v in out.iter_mut() {
-                    *v = *c / *v;
-                }
+                crate::vecf::mapc(out, *c, crate::vecf::VC::CDiv);
             }
             DfSam263::ConstMin { a, c } => {
                 a.sample_volume(ctx, out, vol);
-                for v in out.iter_mut() {
-                    if *c < *v {
-                        *v = *c;
-                    }
-                }
+                crate::vecf::mapc(out, *c, crate::vecf::VC::CMin);
             }
             DfSam263::ConstMax { a, c } => {
                 a.sample_volume(ctx, out, vol);
-                for v in out.iter_mut() {
-                    if *c > *v {
-                        *v = *c;
-                    }
-                }
+                crate::vecf::mapc(out, *c, crate::vecf::VC::CMax);
             }
             DfSam263::Unary { op, a } => {
                 a.sample_volume(ctx, out, vol);
-                for v in out.iter_mut() {
-                    *v = apply_unary(*op, *v);
+                match op {
+                    UnOp::Log => {
+                        for v in out.iter_mut() {
+                            *v = apply_unary(*op, *v);
+                        }
+                    }
+                    UnOp::Abs => crate::vecf::map1(out, crate::vecf::V1::Abs),
+                    UnOp::Square => crate::vecf::map1(out, crate::vecf::V1::Square),
+                    UnOp::Cube => crate::vecf::map1(out, crate::vecf::V1::Cube),
+                    UnOp::Sqrt => crate::vecf::map1(out, crate::vecf::V1::Sqrt),
+                    UnOp::HalfNegative => crate::vecf::map1(out, crate::vecf::V1::HalfNegative),
+                    UnOp::QuarterNegative => {
+                        crate::vecf::map1(out, crate::vecf::V1::QuarterNegative)
+                    }
+                    UnOp::Reciprocal => crate::vecf::map1(out, crate::vecf::V1::Reciprocal),
+                    UnOp::Negate => crate::vecf::map1(out, crate::vecf::V1::Negate),
+                    UnOp::Squeeze => crate::vecf::map1(out, crate::vecf::V1::Squeeze),
+                    UnOp::Sign => crate::vecf::map1(out, crate::vecf::V1::Sign),
                 }
             }
             DfSam263::Clamp { a, min, max } => {
                 a.sample_volume(ctx, out, vol);
-                for v in out.iter_mut() {
-                    *v = mth_clamp(*v, *min, *max);
-                }
+                crate::vecf::clamp(out, *min, *max);
             }
             DfSam263::Lerp {
                 alpha,
@@ -1041,16 +1024,7 @@ impl DfSam263 {
                 first.sample_volume(ctx, &mut fb, vol);
                 let mut sb = ctx.scratch.acquire(vol.size());
                 second.sample_volume(ctx, &mut sb, vol);
-                for i in 0..out.len() {
-                    let a = out[i];
-                    out[i] = if a == 0.0 {
-                        fb[i]
-                    } else if a == 1.0 {
-                        sb[i]
-                    } else {
-                        mth_lerp(a, fb[i], sb[i])
-                    };
-                }
+                crate::vecf::lerp3(out, &fb, &sb);
                 ctx.scratch.release(sb);
                 ctx.scratch.release(fb);
             }
@@ -1062,16 +1036,7 @@ impl DfSam263 {
                 alpha.sample_volume(ctx, out, vol);
                 let mut sb = ctx.scratch.acquire(vol.size());
                 second.sample_volume(ctx, &mut sb, vol);
-                for i in 0..out.len() {
-                    let a = out[i];
-                    out[i] = if a == 0.0 {
-                        *first
-                    } else if a == 1.0 {
-                        sb[i]
-                    } else {
-                        mth_lerp(a, *first, sb[i])
-                    };
-                }
+                crate::vecf::lerp_cf(out, *first, &sb);
                 ctx.scratch.release(sb);
             }
             DfSam263::LerpConstSecond {
@@ -1082,16 +1047,7 @@ impl DfSam263 {
                 alpha.sample_volume(ctx, out, vol);
                 let mut fb = ctx.scratch.acquire(vol.size());
                 first.sample_volume(ctx, &mut fb, vol);
-                for i in 0..out.len() {
-                    let a = out[i];
-                    out[i] = if a == 0.0 {
-                        fb[i]
-                    } else if a == 1.0 {
-                        *second
-                    } else {
-                        mth_lerp(a, fb[i], *second)
-                    };
-                }
+                crate::vecf::lerp_cs(out, &fb, *second);
                 ctx.scratch.release(fb);
             }
             DfSam263::PowConstBase { base, exp } => {
@@ -1117,22 +1073,30 @@ impl DfSam263 {
             }
             DfSam263::RoundInt { ty, a } => {
                 a.sample_volume(ctx, out, vol);
-                for v in out.iter_mut() {
-                    *v = apply_round(*ty, *v);
-                }
+                crate::vecf::round_ty(
+                    out,
+                    match ty {
+                        RoundType::Floor => crate::vecf::RType::Floor,
+                        RoundType::Round => crate::vecf::RType::Round,
+                        RoundType::Ceil => crate::vecf::RType::Ceil,
+                        RoundType::Truncate => crate::vecf::RType::Truncate,
+                    },
+                );
             }
             DfSam263::Round { ty, a, mul } => {
                 a.sample_volume(ctx, out, vol);
                 let mut mb = ctx.scratch.acquire(vol.size());
                 mul.sample_volume(ctx, &mut mb, vol);
-                for i in 0..out.len() {
-                    let m = mb[i];
-                    out[i] = if m == 0.0 {
-                        out[i]
-                    } else {
-                        apply_round(*ty, out[i] / m) * m
-                    };
-                }
+                crate::vecf::round_mul(
+                    out,
+                    &mb,
+                    match ty {
+                        RoundType::Floor => crate::vecf::RType::Floor,
+                        RoundType::Round => crate::vecf::RType::Round,
+                        RoundType::Ceil => crate::vecf::RType::Ceil,
+                        RoundType::Truncate => crate::vecf::RType::Truncate,
+                    },
+                );
                 ctx.scratch.release(mb);
             }
             DfSam263::RangeChoice {

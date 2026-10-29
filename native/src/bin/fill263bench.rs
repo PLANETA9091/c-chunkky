@@ -109,6 +109,39 @@ fn main() {
         }
     }
 
+    // ---- SIMD pointwise parity: scalar-forced walk vs auto-width walk must
+    // be bit-identical over full chunk volumes (the vectorized Const/Unary/
+    // Clamp/Lerp/Binary shell passes vs their scalar references).
+    {
+        let mut simd_bad = 0usize;
+        for &(cx, cz) in &chunks {
+            let volume =
+                DensityVolume::block_step((16, g.height, 16), (cx * 16, g.min_y, cz * 16));
+            let mut sctx = SamplerCtx263::cached();
+            let mut sbuf = sctx.scratch.acquire(volume.size());
+            crussty_chunkgen::vecf::set_enabled(false);
+            g.final_density.sample_volume(&mut sctx, &mut sbuf, &volume);
+            crussty_chunkgen::vecf::set_enabled(true);
+            let mut vctx = SamplerCtx263::cached();
+            let mut vbuf = vctx.scratch.acquire(volume.size());
+            g.final_density.sample_volume(&mut vctx, &mut vbuf, &volume);
+            if sbuf
+                .iter()
+                .zip(vbuf.iter())
+                .any(|(a, b)| a.to_bits() != b.to_bits())
+            {
+                simd_bad += 1;
+            }
+            sctx.scratch.release(sbuf);
+            vctx.scratch.release(vbuf);
+        }
+        println!(
+            "shell SIMD parity: fails {}/{}",
+            simd_bad,
+            chunks.len()
+        );
+    }
+
     // ---- prof report (exclusive per-kind + interp internals) ----
     use crussty_chunkgen::df263::{PROF_INTERP_CELL, PROF_INTERP_FILL, PROF_KINDS, PROF_KIND_NAMES, PROF_ON_263};
     PROF_ON_263.store(true, std::sync::atomic::Ordering::Relaxed);
