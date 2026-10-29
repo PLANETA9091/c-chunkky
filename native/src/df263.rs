@@ -2227,7 +2227,7 @@ unsafe fn fill_cell_v8(
             _mm256_add_epi32(cell_row, _mm256_set1_epi32(zr * csx * csy)),
         );
         let g = |off: i32| {
-            _mm256_i32gather_ps::<4>(_mm256_add_epi32(idx, _mm256_set1_epi32(off)), cb)
+            _mm256_i32gather_ps::<4>(cb, _mm256_add_epi32(idx, _mm256_set1_epi32(off)))
         };
         let a0 = g(0);
         let a1 = g(csy);
