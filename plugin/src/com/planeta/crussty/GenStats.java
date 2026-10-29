@@ -108,6 +108,7 @@ public final class GenStats {
     private static final AtomicLong WIN_LAYOUT = new AtomicLong();
     private static final AtomicLong WIN_BEARD = new AtomicLong();
     private static final AtomicLong WIN_MARKS = new AtomicLong();
+    private static final AtomicLong WIN_CARVER = new AtomicLong();
     private static volatile long WIN_T_FIRST, WIN_T_LAST;
 
     /** Arm the window: only chunks with x in [rx..rx+n], z in [rz..rz+n] are
@@ -122,6 +123,7 @@ public final class GenStats {
         WIN_LAYOUT.set(0);
         WIN_BEARD.set(0);
         WIN_MARKS.set(0);
+        WIN_CARVER.set(0);
         WIN_T_FIRST = 0;
         WIN_T_LAST = 0;
     }
@@ -146,14 +148,15 @@ public final class GenStats {
         double cnt = n;
         return String.format(
                 "window[%d..%d,%d..%d] inside=%d span=%.2fms e2e=%.2fms/chunk"
-                        + " gen=%.2f native=%.2f layout=%.2f beard=%.2f marks=%.2f",
+                        + " gen=%.2f native=%.2f layout=%.2f beard=%.2f marks=%.2f carver=%.2f",
                 WIN_MIN_X, WIN_MIN_X + WIN_N, WIN_MIN_Z, WIN_MIN_Z + WIN_N,
                 n, spanMs, spanMs / n,
                 WIN_TOTAL.get() / cnt / 1e6,
                 WIN_NATIVE.get() / cnt / 1e6,
                 WIN_LAYOUT.get() / cnt / 1e6,
                 WIN_BEARD.get() / cnt / 1e6,
-                WIN_MARKS.get() / cnt / 1e6);
+                WIN_MARKS.get() / cnt / 1e6,
+                WIN_CARVER.get() / cnt / 1e6);
     }
 
     /** Zero the ring buffer + all counters: starts a fresh measurement window
@@ -188,6 +191,17 @@ public final class GenStats {
         BEARD_PIECES.set(0);
         java.util.Arrays.fill(NANOS, 0L);
         java.util.Arrays.fill(NATIVE_NANOS, 0L);
+    }
+
+    /** Carver stage (CarverDriver.populate): per-chunk wall + window slice.
+     *  Population runs OUTSIDE generateNoise (POPULATE status) — without this
+     *  counter the carver cost is invisible inside the honest window's
+     *  span−gen residual. (cx, cz) attributes to the region rectangle. */
+    static void recordCarver(long nanos, int cx, int cz) {
+        if (WIN_N > 0 && cx >= WIN_MIN_X && cx <= WIN_MIN_X + WIN_N
+                && cz >= WIN_MIN_Z && cz <= WIN_MIN_Z + WIN_N) {
+            WIN_CARVER.addAndGet(nanos);
+        }
     }
 
     static void record(long nanos, long nativeNs, long layoutNs, long beardNs,

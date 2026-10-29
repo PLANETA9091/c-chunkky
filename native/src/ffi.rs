@@ -260,7 +260,7 @@ pub fn build_v263_stack(
     crate::fill263::Gen263,
     Option<std::sync::Arc<crate::biome263::BiomeState263>>,
     Option<crate::surface263::SurfaceState263>,
-) {
+)> {
     std::panic::catch_unwind(|| {
         let g = crate::fill263::Gen263::new(seed, min_y, height, sea_level);
             // Native biome stage (stage B-263): the runtime-extracted 26.3

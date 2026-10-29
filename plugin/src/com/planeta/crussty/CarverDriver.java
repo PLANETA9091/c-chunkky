@@ -91,6 +91,7 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
         if (!ACTIVE) {
             return;
         }
+        long tCarver0 = System.nanoTime();
         java.util.concurrent.locks.ReentrantLock[] lockBox =
                 new java.util.concurrent.locks.ReentrantLock[1];
         long ctx = CrusstyChunkGenerator.decoAcquire(lockBox);
@@ -208,6 +209,7 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
             LOG.warning("carver driver failed: " + t);
         } finally {
             CrusstyChunkGenerator.decoRelease(lockBox);
+            GenStats.recordCarver(System.nanoTime() - tCarver0, cx, cz);
         }
     }
 
