@@ -36,7 +36,12 @@ jobs:
           echo "=== phases (real seed) ==="
           cargo run --release --bin phases
           echo "=== fill263 stage breakdown (per-kind exclusive, real seed) ==="
-          cargo run --release --bin fill263bench
+          cargo run --release --bin fill263bench | tee fill263bench.log
+          # HARD GATE: the vectorized paths (pointwise shell + trilinear
+          # kernel) must be bit-identical to their scalar references over the
+          # full-volume A/B — a single diff means silent worldgen drift.
+          grep -q "shell SIMD parity: fails 0/25" fill263bench.log \
+            || { echo "SIMD PARITY GATE FAILED"; exit 1; }
           # Noise control on the shared 2-core runner: neighbor VMs inject
           # additive-only noise into a chunk time, so the MIN of repeated
           # p50s is the honest noise-free estimate (p50 alone swings ~15%).
