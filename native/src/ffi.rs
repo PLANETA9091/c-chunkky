@@ -416,16 +416,35 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
             ..
         } = st;
         let beard_list = std::mem::take(beard);
+        // Stage timers (CRUS_FILL263_PROF=1): split the fill wall into the
+        // bench-measurable terrain vs the takeover tails (surface stage C,
+        // 3x3 biome hood, parked heightmap). Each add is one relaxed fetch_add
+        // per fill — negligible when the prof is off (single load).
+        let prof_on = crate::df263::PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed);
+        let t_terr = std::time::Instant::now();
         g.fill_chunk(cx, cz, &beard_list, out, marks);
+        if prof_on {
+            crate::df263::PROF_STAGE_TERRAIN.fetch_add(
+                t_terr.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         *beard = beard_list;
         // Park the POST-FILL _WG heightmap for the carve stage's topMaterial
         // (vanilla freezes the _WG maps at the TERRAIN status — the surface
         // and carve writes only touch the FINAL heightmaps).
+        let t_park = std::time::Instant::now();
         crate::fill263::park_wg_heightmap(
             cx,
             cz,
             crate::fill263::world_surface_heightmap(g.min_y, g.height, out),
         );
+        if prof_on {
+            crate::df263::PROF_STAGE_PARK.fetch_add(
+                t_park.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         // Native surface tail 26.3 — vanilla order: surface at the SURFACE
         // status, right after NOISE, before carvers. The biome grid comes
         // from fillBiomes (BIOMES status runs first); without a grid the
@@ -440,6 +459,7 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
             // the surface stage owns this chunk regardless (shouldGenerate-
             // Surface=false) — a silent skip would leave RAW FILL (no bedrock,
             // no deepslate, no surface rules). Compute it on the spot.
+            let t_hood = std::time::Instant::now();
             let center = take_biome_grid263(cx, cz).or_else(|| {
                 b263.map(|b| {
                     let n = (g.height as usize) / 16 * 64;
@@ -448,8 +468,16 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
                     buf
                 })
             });
-            if let Some(hood) = hood263(b263, g.min_y, g.height, cx, cz, center) {
+            let hood = hood263(b263, g.min_y, g.height, cx, cz, center);
+            if prof_on {
+                crate::df263::PROF_STAGE_HOOD.fetch_add(
+                    t_hood.elapsed().as_nanos() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+            if let Some(hood) = hood {
                 let zoom_seed = crate::sha256::obfuscate_seed(g.seed);
+                let t_surf = std::time::Instant::now();
                 crate::surface263::apply_surface263(
                     sf,
                     g.min_y,
@@ -462,6 +490,12 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
                     &hood,
                     zoom_seed,
                 );
+                if prof_on {
+                    crate::df263::PROF_STAGE_SURFACE.fetch_add(
+                        t_surf.elapsed().as_nanos() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
             }
         }
         return;
@@ -1096,7 +1130,16 @@ fn clone_or_compute_grid263(
     }
     let n = (height as usize) / 16 * 64;
     let mut buf = vec![0i32; n].into_boxed_slice();
+    let prof_on = crate::df263::PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed);
+    let t0 = std::time::Instant::now();
     crate::biome263::fill_biomes263(b263, min_y, height, cx, cz, &mut buf);
+    if prof_on {
+        crate::df263::PROF_STAGE_HOOD_COMPUTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::df263::PROF_STAGE_HOOD_COMPUTE.fetch_add(
+            t0.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
     Some(buf)
 }
 

@@ -3296,3 +3296,46 @@ BATCH A DECO (все пер-чанковые делегаты из census):
 NEXT: (1) integration 989f872 — первые ЧИСТЫЕ окна (inside=144!) + SIMD
 паритет + COLD bench; (2) по брейкдауну окна: fill-контекст vs свет/Paper;
 (3) freeze_top_layer/geode по остатку; (4) interp_cell/noise-фронты к 1мс.
+
+---
+## cont-61: STAGE-SPLIT проф — где 66мс серверного fill против 3мс бенча
+
+Задача: «каждый чанк E2E 1мс». Честные окна cont-60 дали базлайн (run
+40849778619, HEAD 49ae59cd, все 3 окна inside=144/144):
+
+| окно            | e2e span | gen    | native fill        | beard |
+|-----------------|----------|--------|--------------------|-------|
+| mode-0 (deco=0) | 186.9мс  | 99.5мс | 66.4 mean/89.3 p50 | 0.02  |
+| deco=1          | 200.0мс  | 100.5  | 66.8/91.3 +deco12.6| 0.03  |
+| NO_BEARD=1      | 196.7мс  | 100.2  | 67.7/90.4          | 0.00  |
+
+ГИПОТЕЗА «31x В COLLECTBEARD» ОПРОВЕРГНУТА: no-beard окно beard=0.00,
+native те же ~90мс p50. Beard_chunks=0 вообще. Диспетч-оверход
+(span−gen≈87мс/чанк) — планировщик Paper, не генерация.
+
+ГЛАВНАЯ ЗАГАДКА: fill263bench той же сборки на том же раннере
+(2-core shared VM, nproc=2): fill_chunk median 2.69мс, COLD 3.05мс.
+В сервере — 67мс mean / 90мс p50 / min 21мс (бимодально! p50>mean).
+Разрыв ~22x ВНУТРИ нативного JNI-вызова (native≈99% gen).
+
+КЛЮЧЕВОЕ ОТЛИЧИЕ ПУТЕЙ: бенч меряет ГОЛЫЙ g.fill_chunk(beard=[0,0]).
+Серверный ffi::fill() v263 делает ПОСЛЕ fill_chunk ещё:
+  1. park_wg_heightmap (_WG карта для carve topMaterial);
+  2. hood263: 3x3 СЕДСКИХ biome-грида; центр берётся из V263_GRIDS
+     (потребляется один раз — remove!), соседи — clone-or-COMPUTE:
+     при конкурентных филлах кэш промахивается -> fill_biomes263
+     (multi_noise RTree) до 8 раз НА ЧАНК на лету;
+  3. apply_surface263 (stage C, material-правила по всей колонке).
+
+СТЕЙДЖ-ПРОФ (этот коммит): PROF_STAGE_{TERRAIN,SURFACE,HOOD,
+HOOD_COMPUTE,HOOD_COMPUTED,PARK} в df263 (гейт PROF_ON_263), проводка
+в ffi::fill + clone_or_compute; снапшот дополнен
+"stage[terrain= surface= hood= hood_compute= ncomp= park=]".
+ci.yml: mode-0 окно теперь CRUS_FILL263_PROF=1 (per-kind + stage
+ровно по тайминг-окну; чистые wall-числа остаются в no-beard окне
+без профа). Reset на границе окна переармливает из env.
+
+NEXT: (1) CI-ран — разрез 66мс; (2) если hood_compute доминирует —
+инвалидация V263_GRIDS (не потреблять, а маркировать; отдавать
+клон соседям), кэш 3x3 у fill; (3) если surface — SIMD-правила;
+(4) если terrain всё же ~60мс — пер-кинд проф скажет какой.

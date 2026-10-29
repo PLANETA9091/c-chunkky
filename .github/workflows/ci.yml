@@ -152,7 +152,10 @@ jobs:
         run: |
           set -o pipefail
           chmod +x harness/e2e_ci.sh
-          SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_timing.log
+          # CRUS_FILL263_PROF=1: per-kind density profile + stage split
+          # (terrain/surface/hood/park) for exactly the timed window —
+          # locates the in-server vs bench gap (66ms vs 3ms COLD).
+          CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_timing.log
       - name: E2E native-deco probe (DecoDriver vs vanilla deco delta)
         continue-on-error: true
         run: |

@@ -313,6 +313,12 @@ pub fn prof263_reset() {
     }
     PROF_INTERP_CELL.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_INTERP_FILL.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_STAGE_TERRAIN.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_STAGE_SURFACE.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_STAGE_HOOD.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_STAGE_HOOD_COMPUTE.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_STAGE_HOOD_COMPUTED.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_STAGE_PARK.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Per-fill mean snapshot in the fill263bench format (ms/chunk).
@@ -334,6 +340,18 @@ pub fn prof263_snapshot() -> String {
         ms(&PROF_INTERP_CELL),
         ms(&PROF_INTERP_FILL)
     ));
+    // Stage split (server fill path only — ffi.rs v263): the bare fill_chunk
+    // vs the takeover tails the bench does NOT measure. Divided by the same
+    // per-fill count.
+    s.push_str(&format!(
+        " | stage[terrain={:.3} surface={:.3} hood={:.3} hood_compute={:.3} ncomp={} park={:.3}]",
+        ms(&PROF_STAGE_TERRAIN),
+        ms(&PROF_STAGE_SURFACE),
+        ms(&PROF_STAGE_HOOD),
+        ms(&PROF_STAGE_HOOD_COMPUTE),
+        PROF_STAGE_HOOD_COMPUTED.load(std::sync::atomic::Ordering::Relaxed),
+        ms(&PROF_STAGE_PARK)
+    ));
     s
 }
 
@@ -354,6 +372,28 @@ pub static PROF_KINDS: [std::sync::atomic::AtomicU64; 9] = [
 pub static PROF_INTERP_CELL: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub static PROF_INTERP_FILL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// In-server STAGE timers (ffi.rs fill path, v263): where the fill wall goes
+/// beyond the bare fill_chunk terrain the bench measures. All gated by
+/// PROF_ON_263 (armed by CRUS_FILL263_PROF=1 / crusgenstats reset).
+/// TERRAIN = g.fill_chunk (what fill263bench measures), SURFACE =
+/// apply_surface263 (stage C), HOOD = 3x3 biome-grid neighborhood build
+/// (incl. center compute-on-missing), HOOD_COMPUTE = fill_biomes263 time
+/// spent ON THE FLY inside clone_or_compute (cache misses — the anti-
+/// invariant: concurrent fills consume grids before neighbors can clone),
+/// PARK = parked _WG heightmap write.
+pub static PROF_STAGE_TERRAIN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_STAGE_SURFACE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_STAGE_HOOD: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_STAGE_HOOD_COMPUTE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_STAGE_HOOD_COMPUTED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_STAGE_PARK: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 thread_local! { static PROF_CHILD_T: std::cell::Cell<u64> = std::cell::Cell::new(0); }
 
