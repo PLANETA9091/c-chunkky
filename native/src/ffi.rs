@@ -404,6 +404,104 @@ pub fn ctx_free(id: i64) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Background biome-grid prefetch (hood wave-front). When a fill runs, its
+// surface tail needs the 3x3 neighborhood's biome grids; chunks at the
+// generation frontier have neighbors whose BIOMES step has not run yet, so
+// the hood computes them ON THE FLY inside the fill wall (~5.5ms each,
+// honest-window residual ~1.25 computes/fill). One worker thread prefills
+// missing grids in parallel with the serial terrain fill, hiding that
+// latency: grids are pure functions of (cx, cz) — thread-safe and
+// bit-identical wherever they are computed, and the fill's own hood still
+// computes inline when the worker has not caught up (duplicate work is
+// harmless). CRUS_GRID_PF=0 disables the worker.
+// ---------------------------------------------------------------------------
+type PrefetchReq = (std::sync::Arc<crate::biome263::BiomeState263>, i32, i32, i32, i32);
+static GRID_PF_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<PrefetchReq>>> =
+    std::sync::Mutex::new(None);
+static GRID_PF_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Submit a (biome-state, chunk) pair for background grid prefill.
+fn grid_prefetch(
+    b: &std::sync::Arc<crate::biome263::BiomeState263>,
+    min_y: i32,
+    height: i32,
+    cx: i32,
+    cz: i32,
+) {
+    // 0 = not probed, 1 = disabled, 2 = enabled
+    let st = GRID_PF_STATE.load(std::sync::atomic::Ordering::Relaxed);
+    let st = if st == 0 {
+        let s = if std::env::var("CRUS_GRID_PF").ok().as_deref() == Some("0") {
+            1
+        } else {
+            2
+        };
+        GRID_PF_STATE.store(s, std::sync::atomic::Ordering::Relaxed);
+        s
+    } else {
+        st
+    };
+    if st != 2 {
+        return;
+    }
+    let tx = {
+        let mut guard = GRID_PF_TX.lock().unwrap();
+        if guard.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel::<PrefetchReq>();
+            let spawned = std::thread::Builder::new()
+                .name("grid-prefetch".into())
+                .spawn(move || {
+                    while let Ok((b, mn, h, x, z)) = rx.recv() {
+                        let missing = {
+                            let g = V263_GRIDS.lock().unwrap();
+                            !g.as_ref()
+                                .map_or(false, |c| c.map.contains_key(&(x, z)))
+                        };
+                        if missing {
+                            let n = (h as usize) / 16 * 64;
+                            let mut buf = vec![0i32; n].into_boxed_slice();
+                            crate::biome263::fill_biomes263(&b, mn, h, x, z, &mut buf);
+                            store_biome_grid263(x, z, &buf);
+                        }
+                    }
+                });
+            if spawned.is_ok() {
+                *guard = Some(tx);
+            }
+        }
+        guard.clone()
+    };
+    if let Some(tx) = tx {
+        let _ = tx.send((b.clone(), min_y, height, cx, cz));
+    }
+}
+
+/// Queue background prefill of the 3x3 hood grids around (cx, cz) that are
+/// not cached yet (the fill's own center usually arrives via fillBiomes).
+fn grid_prefetch_hood(
+    b: &std::sync::Arc<crate::biome263::BiomeState263>,
+    min_y: i32,
+    height: i32,
+    cx: i32,
+    cz: i32,
+) {
+    for dz in -1i32..=1 {
+        for dx in -1i32..=1 {
+            if dx == 0 && dz == 0 {
+                continue;
+            }
+            let missing = {
+                let g = V263_GRIDS.lock().unwrap();
+                !g.as_ref().map_or(false, |c| c.map.contains_key(&(cx + dx, cz + dz)))
+            };
+            if missing {
+                grid_prefetch(b, min_y, height, cx + dx, cz + dz);
+            }
+        }
+    }
+}
+
 /// The v263 fill tail — the EXACT server-side fill wall, shared by the JNI
 /// fill path and the bench's server-parity section: terrain (fill_chunk, the
 /// only part the old bench measured) + parked _WG heightmap + 3x3 biome hood
@@ -419,6 +517,11 @@ pub fn v263_fill_tail(
     out: &mut [u16; OUT_LEN],
     marks: &mut Vec<i64>,
 ) {
+    // Kick the background prefill BEFORE the terrain stage so the worker has
+    // the whole fill wall (~5.7ms) to produce the frontier grids.
+    if let Some(b) = biomes {
+        grid_prefetch_hood(b, g.min_y, g.height, cx, cz);
+    }
     let prof_on = crate::df263::PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed);
     let t_terr = std::time::Instant::now();
     g.fill_chunk(cx, cz, beard_list, out, marks);
