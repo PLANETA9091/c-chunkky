@@ -1013,8 +1013,34 @@ fn column_scan(
     Some((floor, ceiling))
 }
 
+/// Mth's 65536-entry quantized sin/cos table (26.3 Mth.sin/cos are LOOKUP,
+/// not Math.sin/cos — geometry parity for the speleothem family circles and
+/// the large-dripstone wind vector).
+fn mth_sin_table(i: f64) -> f32 {
+    static SIN: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    const SCALE: f64 = 10430.378350470453;
+    let tab = SIN.get_or_init(|| {
+        (0..65536)
+            .map(|k| ((k as f64) / SCALE).sin() as f32)
+            .collect()
+    });
+    tab[(((i * SCALE) as i64) & 65535) as usize]
+}
+
+fn mth_cos_table(i: f64) -> f32 {
+    static SIN: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    const SCALE: f64 = 10430.378350470453;
+    const COS_OFFSET: f64 = 16384.0;
+    let tab = SIN.get_or_init(|| {
+        (0..65536)
+            .map(|k| ((k as f64) / SCALE).sin() as f32)
+            .collect()
+    });
+    tab[(((i * SCALE) + COS_OFFSET) as i64 & 65535) as usize]
+}
+
 /// SpeleothemUtils.isCircleMostlyEmbeddedInStone: arc sample every
-/// 6/radius radians, (int) truncation on the offsets.
+/// 6/radius radians, (int) truncation on the offsets, Mth.cos/sin tables.
 fn circle_mostly_embedded(
     level: &dyn DecoLevelExt,
     center: BlockPos,
@@ -1028,8 +1054,8 @@ fn circle_mostly_embedded(
     let inc = 6.0f32 / radius_f;
     let mut angle = 0.0f32;
     while angle < std::f64::consts::PI as f32 * 2.0 {
-        let dx = (f64::from(angle).cos() * f64::from(radius_f)) as i32;
-        let dz = (f64::from(angle).sin() * f64::from(radius_f)) as i32;
+        let dx = (mth_cos_table(f64::from(angle)) * radius_f) as i32;
+        let dz = (mth_sin_table(f64::from(angle)) * radius_f) as i32;
         if empty_or_water_or_lava(BlockPos::new(center.x + dx, center.y, center.z + dz)) {
             return false;
         }
@@ -1126,12 +1152,13 @@ fn place_large_dripstone(
         && sg.radius >= min_radius_for_wind
         && sg.bluntness >= f64::from(min_bluntness_for_wind)
     {
-        let speed = wind_speed.sample(rng) as f64;
+        let speed = wind_speed.sample(rng); // f32
         let dir = random_between_f(rng, 0.0, std::f64::consts::PI as f32) as f64;
+        // vanilla: (double)(Mth.cos(dir) * speed) — f32 multiply THEN widen
         Some(Wind {
             origin_y: origin.y,
-            vx: dir.cos() * speed,
-            vz: dir.sin() * speed,
+            vx: (mth_cos_table(dir) * speed) as f64,
+            vz: (mth_sin_table(dir) * speed) as f64,
             max_off: 16 - radius,
         })
     } else {
