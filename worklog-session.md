@@ -3339,3 +3339,41 @@ NEXT: (1) CI-ран — разрез 66мс; (2) если hood_compute доми�
 инвалидация V263_GRIDS (не потреблять, а маркировать; отдавать
 клон соседям), кэш 3x3 у fill; (3) если surface — SIMD-правила;
 (4) если terrain всё же ~60мс — пер-кинд проф скажет какой.
+
+---
+## cont-62: STAGE-SPLIT ОТВЕТИЛ — hood=50.8мс/филл (ncomp=8.0!), keep-grid фикс
+
+CI fb4d81f4 (run 40877774606, все зелёные):
+stage[terrain=6.723 surface=9.867 hood=50.814 hood_compute=44.968 ncomp=7532 park=0.075]
+при 942 филлах: 7532/942 = 8.00 on-the-fly вычислений НА КАЖДЫЙ филл —
+кэш V263_GRIDS с remove-семантикой был бесполезен на 100% (центр
+потреблялся до того, как сосед успевал клонировать; волна филлов
+промахивалась по всем 8 соседям всегда). 45мс/филл чистого
+fill_biomes263 = те самые «пропавшие» 60мс разрыва 66-vs-3.
+
+ПЕР-КИНД (prof-on, timing-окно): interp_cell=13.8 noise-family=12.0
+shell=4.2 gradient=1.0 interp-shell=1.0 spline=0.6 cache=0.6
+interp_fill=1.0 (сумма ~34мс работы с prof-оверходом — согласуется с
+terrain 6.7 wall + surface 9.9 без профа).
+
+ФИКСЫ (этот коммит):
+1. GridCache263: keep-cache вместо remove — take = get+clone, entry
+   ЖИВЁТ для поздних соседей; детерминизм гридов делает это бит-точным;
+   cap 4096 гридов (24МБ), эвикция старшей ПОЛОВИНЫ (не clear() —
+   pending-хендоффы fillBiomes не роняем), store-back вычисленных
+   on-the-fly гридов.
+2. build_v263_stack() pub — стек (Gen263+BiomeState+SurfaceState) с теми
+   же kill-switches, что и JNI-путь; ctx_new переведён на него.
+3. v263_fill_tail() pub — ТОЧНЫЙ серверный fill-хвост (terrain+park+
+   hood+surface), fill() делегирует; бенч fill263bench получил секцию
+   SERVER PARITY (server_fill median/COLD) — итерации оптимизации
+   серверного пути теперь минутный бенч вместо 20-минутного CI.
+4. ci.yml: mode-0 окно с CRUS_FILL263_PROF=1 (per-kind + stage ровно
+   по тайминг-окну).
+
+ОЖИДАНИЕ CI: hood 50.8 -> ~0.1 (клоны), fill 67 -> ~17, e2e ~190 -> ~110.
+СЛЕДУЮЩИЕ ФРОНТЫ: surface aux-объёмы (3 полных volume sample ~10мс),
+terrain interp_cell (5-7мс), Paper-сторона ~90мс span−gen (carvers/
+light/диспетч — не в GenStats, нужен свой таймер).
+БЕНЧ-ШУМ РАННЕРА: fill_chunk median 2.69->4.59 между ранами (±40-70%,
+соседние VM) — сравнивать с COLD на том же ране.

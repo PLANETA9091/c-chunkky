@@ -142,6 +142,73 @@ fn main() {
         );
     }
 
+    // ---- SERVER PARITY: the full JNI fillBeard wall — fill_chunk + parked
+    // _WG heightmap + 3x3 biome hood + native surface (stage C) — the path
+    // the in-server honest window actually pays. The fill_chunk sections
+    // above measure ONLY the terrain stage; the honest window showed the
+    // server paying ~66-90ms per fill vs the 3ms COLD bench median, and the
+    // difference lives exactly in this tail. Grids are pre-stored for every
+    // chunk (the server steady state: fillBiomes hands its grid to the
+    // cache before the matching fill); COLD = round 0 of the loop.
+    {
+        let Some((mut gs, biomes, surface)) =
+            crussty_chunkgen::ffi::build_v263_stack(seed, -64, 384, 63)
+        else {
+            println!("server_fill  SKIPPED (v263 stack build failed)");
+            return;
+        };
+        for &(cx, cz) in &chunks {
+            let n = (gs.height as usize) / 16 * 64;
+            let mut grid = vec![0i32; n];
+            if let Some(b) = biomes.as_ref() {
+                crussty_chunkgen::biome263::fill_biomes263(
+                    b,
+                    gs.min_y,
+                    gs.height,
+                    cx,
+                    cz,
+                    &mut grid,
+                );
+                crussty_chunkgen::ffi::store_biome_grid263(cx, cz, &grid);
+            }
+        }
+        let mut t_srv = Vec::new();
+        let mut t_srv_cold = Vec::new();
+        for round in 0..rounds {
+            for &(cx, cz) in &chunks {
+                let t0 = std::time::Instant::now();
+                crussty_chunkgen::ffi::v263_fill_tail(
+                    &mut gs,
+                    biomes.as_ref(),
+                    surface.as_ref(),
+                    cx,
+                    cz,
+                    &[0, 0],
+                    &mut out,
+                    &mut marks,
+                );
+                let dt = t0.elapsed().as_secs_f64() * 1e3;
+                t_srv.push(dt);
+                if round == 0 {
+                    t_srv_cold.push(dt);
+                }
+            }
+        }
+        println!(
+            "server_fill median {:.2}ms  min {:.2}  max {:.2}  (fill+park+hood+surface = JNI wall)",
+            median(&mut t_srv),
+            t_srv.iter().cloned().fold(f64::MAX, f64::min),
+            t_srv.iter().cloned().fold(f64::MIN, f64::max),
+        );
+        if !t_srv_cold.is_empty() {
+            println!(
+                "server_fill COLD   median {:.2}ms  (round 0, {} chunks)",
+                median(&mut t_srv_cold),
+                t_srv_cold.len(),
+            );
+        }
+    }
+
     // ---- prof report (exclusive per-kind + interp internals) ----
     use crussty_chunkgen::df263::{PROF_INTERP_CELL, PROF_INTERP_FILL, PROF_KINDS, PROF_KIND_NAMES, PROF_ON_263};
     PROF_ON_263.store(true, std::sync::atomic::Ordering::Relaxed);

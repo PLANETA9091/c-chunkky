@@ -246,17 +246,23 @@ fn embedded263_assets() -> crate::worldgen::Assets {
     a
 }
 
-/// Create a generator context for (seed, minY, height, seaLevel). Returns the
-/// ctx id (non-zero) or 0 on failure.
-pub fn ctx_new(seed: i64, min_y: i32, height: i32, sea_level: i32) -> i64 {
-    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // 26.3-only directive: the overworld signature (minY -64 / height 384)
-    // builds the bit-exact 26.3 engine (df263 + aquifer 26.3). Other
-    // dimensions (nether/end signatures) stay on the legacy engine until
-    // their 26.3 routers are ported.
-    let v263 = if min_y == -64 && height == 384 && std::env::var("CRUS_LEGACY").as_deref() != Ok("1") {
-        match std::panic::catch_unwind(|| {
-            let g = crate::fill263::Gen263::new(seed, min_y, height, sea_level);
+/// Build the FULL v263 overworld generation stack — terrain engine + native
+/// biome stage + native surface stage (stage C) — with the same kill-switches
+/// and panic guards the JNI ctx path uses. Shared by ctx_new and the bench's
+/// server-parity section (the bench iterates the exact server fill wall
+/// without a 20-minute CI round trip).
+pub fn build_v263_stack(
+    seed: i64,
+    min_y: i32,
+    height: i32,
+    sea_level: i32,
+) -> Option<(
+    crate::fill263::Gen263,
+    Option<std::sync::Arc<crate::biome263::BiomeState263>>,
+    Option<crate::surface263::SurfaceState263>,
+) {
+    std::panic::catch_unwind(|| {
+        let g = crate::fill263::Gen263::new(seed, min_y, height, sea_level);
             // Native biome stage (stage B-263): the runtime-extracted 26.3
             // overworld preset + the six climate router nodes. A/B kill-switch
             // restores the vanilla Java BIOMES status for parity testing.
@@ -297,15 +303,25 @@ pub fn ctx_new(seed: i64, min_y: i32, height: i32, sea_level: i32) -> i64 {
                 .unwrap_or(None)
             };
             (g, biomes, surface)
-        }) {
-            Ok((g, biomes263, surface263)) => {
-                if surface263.is_some() {
-                    crate::ffi::log_warn("surface263: native MaterialSystem built");
-                }
-                Some(Gen263State { g, marks: Vec::new(), beard: Vec::new(), ops: Vec::new(), biomes: biomes263, surface: surface263 })
+    })
+    .ok()
+}
+
+/// Create a generator context for (seed, minY, height, seaLevel). Returns the
+/// ctx id (non-zero) or 0 on failure.
+pub fn ctx_new(seed: i64, min_y: i32, height: i32, sea_level: i32) -> i64 {
+    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // 26.3-only directive: the overworld signature (minY -64 / height 384)
+    // builds the bit-exact 26.3 engine (df263 + aquifer 26.3). Other
+    // dimensions (nether/end signatures) stay on the legacy engine until
+    // their 26.3 routers are ported.
+    let v263 = if min_y == -64 && height == 384 && std::env::var("CRUS_LEGACY").as_deref() != Ok("1") {
+        build_v263_stack(seed, min_y, height, sea_level).map(|(g, biomes, surface)| {
+            if surface.is_some() {
+                crate::ffi::log_warn("surface263: native MaterialSystem built");
             }
-            Err(_) => None,
-        }
+            Gen263State { g, marks: Vec::new(), beard: Vec::new(), ops: Vec::new(), biomes, surface }
+        })
     } else {
         None
     };
@@ -388,6 +404,99 @@ pub fn ctx_free(id: i64) {
     }
 }
 
+/// The v263 fill tail — the EXACT server-side fill wall, shared by the JNI
+/// fill path and the bench's server-parity section: terrain (fill_chunk, the
+/// only part the old bench measured) + parked _WG heightmap + 3x3 biome hood
+/// + native surface (stage C). Stage timers (CRUS_FILL263_PROF=1) split the
+/// wall; each add is one relaxed fetch_add per fill — negligible when off.
+pub fn v263_fill_tail(
+    g: &mut crate::fill263::Gen263,
+    biomes: Option<&std::sync::Arc<crate::biome263::BiomeState263>>,
+    surface: Option<&crate::surface263::SurfaceState263>,
+    cx: i32,
+    cz: i32,
+    beard_list: &[i64],
+    out: &mut [u16; OUT_LEN],
+    marks: &mut Vec<i64>,
+) {
+    let prof_on = crate::df263::PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed);
+    let t_terr = std::time::Instant::now();
+    g.fill_chunk(cx, cz, beard_list, out, marks);
+    if prof_on {
+        crate::df263::PROF_STAGE_TERRAIN.fetch_add(
+            t_terr.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    // Park the POST-FILL _WG heightmap for the carve stage's topMaterial
+    // (vanilla freezes the _WG maps at the TERRAIN status — the surface
+    // and carve writes only touch the FINAL heightmaps).
+    let t_park = std::time::Instant::now();
+    crate::fill263::park_wg_heightmap(
+        cx,
+        cz,
+        crate::fill263::world_surface_heightmap(g.min_y, g.height, out),
+    );
+    if prof_on {
+        crate::df263::PROF_STAGE_PARK.fetch_add(
+            t_park.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    // Native surface tail 26.3 — vanilla order: surface at the SURFACE
+    // status, right after NOISE, before carvers. The biome grid comes
+    // from fillBiomes (BIOMES status runs first); without a grid the
+    // tail is skipped (the vanilla surface stage then re-runs on top —
+    // same contract as the legacy surface_tail guard). The 26.3 biome
+    // read goes through BiomeManager.getBiome (fiddle) which can pick a
+    // NEIGHBOR chunk's container — the hood carries all 3x3 grids.
+    if let Some(sf) = surface {
+        // The center grid is normally parked in V263_GRIDS by fillBiomes
+        // (BIOMES status). If it went missing (eviction/consumption race),
+        // the surface stage owns this chunk regardless (shouldGenerate-
+        // Surface=false) — a silent skip would leave RAW FILL (no bedrock,
+        // no deepslate, no surface rules). Compute it on the spot.
+        let t_hood = std::time::Instant::now();
+        let center = take_biome_grid263(cx, cz).or_else(|| {
+            biomes.map(|b| {
+                let n = (g.height as usize) / 16 * 64;
+                let mut buf = vec![0i32; n].into_boxed_slice();
+                crate::biome263::fill_biomes263(b, g.min_y, g.height, cx, cz, &mut buf);
+                buf
+            })
+        });
+        let hood = hood263(biomes, g.min_y, g.height, cx, cz, center);
+        if prof_on {
+            crate::df263::PROF_STAGE_HOOD.fetch_add(
+                t_hood.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        if let Some(hood) = hood {
+            let zoom_seed = crate::sha256::obfuscate_seed(g.seed);
+            let t_surf = std::time::Instant::now();
+            crate::surface263::apply_surface263(
+                sf,
+                g.min_y,
+                g.height,
+                g.sea_level,
+                cx,
+                cz,
+                out,
+                marks,
+                &hood,
+                zoom_seed,
+            );
+            if prof_on {
+                crate::df263::PROF_STAGE_SURFACE.fetch_add(
+                    t_surf.elapsed().as_nanos() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+        }
+    }
+}
+
 pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
     // RAW-BORROW INVARIANT (stage B-263 perf fix): the pointer is taken under
     // the sessions lock and the fill runs WITHOUT it. Safety:
@@ -416,88 +525,17 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
             ..
         } = st;
         let beard_list = std::mem::take(beard);
-        // Stage timers (CRUS_FILL263_PROF=1): split the fill wall into the
-        // bench-measurable terrain vs the takeover tails (surface stage C,
-        // 3x3 biome hood, parked heightmap). Each add is one relaxed fetch_add
-        // per fill — negligible when the prof is off (single load).
-        let prof_on = crate::df263::PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed);
-        let t_terr = std::time::Instant::now();
-        g.fill_chunk(cx, cz, &beard_list, out, marks);
-        if prof_on {
-            crate::df263::PROF_STAGE_TERRAIN.fetch_add(
-                t_terr.elapsed().as_nanos() as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-        }
-        *beard = beard_list;
-        // Park the POST-FILL _WG heightmap for the carve stage's topMaterial
-        // (vanilla freezes the _WG maps at the TERRAIN status — the surface
-        // and carve writes only touch the FINAL heightmaps).
-        let t_park = std::time::Instant::now();
-        crate::fill263::park_wg_heightmap(
+        v263_fill_tail(
+            g,
+            biomes.as_ref(),
+            surface.as_ref(),
             cx,
             cz,
-            crate::fill263::world_surface_heightmap(g.min_y, g.height, out),
+            &beard_list,
+            out,
+            marks,
         );
-        if prof_on {
-            crate::df263::PROF_STAGE_PARK.fetch_add(
-                t_park.elapsed().as_nanos() as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-        }
-        // Native surface tail 26.3 — vanilla order: surface at the SURFACE
-        // status, right after NOISE, before carvers. The biome grid comes
-        // from fillBiomes (BIOMES status runs first); without a grid the
-        // tail is skipped (the vanilla surface stage then re-runs on top —
-        // same contract as the legacy surface_tail guard). The 26.3 biome
-        // read goes through BiomeManager.getBiome (fiddle) which can pick a
-        // NEIGHBOR chunk's container — the hood carries all 3x3 grids.
-        if let Some(sf) = surface.as_ref() {
-            let b263 = biomes.as_ref().map(|b| b as &std::sync::Arc<crate::biome263::BiomeState263>);
-            // The center grid is normally parked in V263_GRIDS by fillBiomes
-            // (BIOMES status). If it went missing (eviction/consumption race),
-            // the surface stage owns this chunk regardless (shouldGenerate-
-            // Surface=false) — a silent skip would leave RAW FILL (no bedrock,
-            // no deepslate, no surface rules). Compute it on the spot.
-            let t_hood = std::time::Instant::now();
-            let center = take_biome_grid263(cx, cz).or_else(|| {
-                b263.map(|b| {
-                    let n = (g.height as usize) / 16 * 64;
-                    let mut buf = vec![0i32; n].into_boxed_slice();
-                    crate::biome263::fill_biomes263(b, g.min_y, g.height, cx, cz, &mut buf);
-                    buf
-                })
-            });
-            let hood = hood263(b263, g.min_y, g.height, cx, cz, center);
-            if prof_on {
-                crate::df263::PROF_STAGE_HOOD.fetch_add(
-                    t_hood.elapsed().as_nanos() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-            }
-            if let Some(hood) = hood {
-                let zoom_seed = crate::sha256::obfuscate_seed(g.seed);
-                let t_surf = std::time::Instant::now();
-                crate::surface263::apply_surface263(
-                    sf,
-                    g.min_y,
-                    g.height,
-                    g.sea_level,
-                    cx,
-                    cz,
-                    out,
-                    marks,
-                    &hood,
-                    zoom_seed,
-                );
-                if prof_on {
-                    crate::df263::PROF_STAGE_SURFACE.fetch_add(
-                        t_surf.elapsed().as_nanos() as u64,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                }
-            }
-        }
+        *beard = beard_list;
         return;
     }
     ctx.gen.fill(cx, cz, out);
@@ -1087,26 +1125,50 @@ pub fn store_biome_grid(c: &Ctx, cx: i32, cz: i32, grid: &[i32]) {
 /// (cx, cz): fillBiomes runs on pool.firstCtx() while fills acquire ANY pool
 /// ctx — a per-ctx cache would skip the surface tail on every other ctx
 /// (raw-stone chunks). The grid is per-chunk data, not per-ctx state.
-static V263_GRIDS: std::sync::Mutex<Option<std::collections::HashMap<(i32, i32), Box<[i32]>>>> =
-    std::sync::Mutex::new(None);
+static V263_GRIDS: std::sync::Mutex<Option<GridCache263>> = std::sync::Mutex::new(None);
+
+/// KEEP-cache for biome grids (anti-invariant fix): the fill tail used to
+/// REMOVE the center grid on consumption, so any LATER fill whose neighbor
+/// already filled always MISSED and recomputed up to 8 fill_biomes263
+/// (~3-6ms each) per chunk. Grids are deterministic per (cx, cz), so keeping
+/// consumed entries is bit-safe; memory is bounded by the cap (evict oldest
+/// half — NOT clear(), which would drop PENDING fillBiomes handoffs).
+struct GridCache263 {
+    map: std::collections::HashMap<(i32, i32), Box<[i32]>>,
+    order: std::collections::VecDeque<(i32, i32)>,
+}
+
+const GRID_CAP: usize = 4096; // 6 KiB/grid worst case = 24 MiB off-heap cap
 
 pub fn store_biome_grid263(cx: i32, cz: i32, grid: &[i32]) {
     let mut guard = V263_GRIDS.lock().unwrap();
-    let map = guard.get_or_insert_with(std::collections::HashMap::new);
-    // generous cap: the chunk system may run many BIOMES steps before the
-    // matching NOISE fills (per-chunk status ordering, gen single-threaded);
-    // a tight cap + clear() would drop pending grids -> raw-stone chunks.
-    // 6 KiB per grid, consumed (removed) by the fill tail immediately after.
-    if map.len() > 8192 {
-        map.clear();
+    let c = guard.get_or_insert_with(|| GridCache263 {
+        map: std::collections::HashMap::new(),
+        order: std::collections::VecDeque::new(),
+    });
+    if !c.map.contains_key(&(cx, cz)) {
+        c.order.push_back((cx, cz));
     }
-    map.insert((cx, cz), Box::from(grid));
+    c.map.insert((cx, cz), Box::from(grid));
+    // evict oldest HALF (pending grids stay: they were inserted later)
+    if c.map.len() > GRID_CAP {
+        let drop_n = c.map.len() / 2;
+        for _ in 0..drop_n {
+            if let Some(k) = c.order.pop_front() {
+                c.map.remove(&k);
+            }
+        }
+    }
 }
 
-/// Take the cached grid for (cx, cz) (the fill tail consumes it once).
+/// Clone the cached grid for (cx, cz) — the fill tail CONSUMES the value but
+/// the entry STAYS for later neighbor lookups (see GridCache263).
 fn take_biome_grid263(cx: i32, cz: i32) -> Option<Box<[i32]>> {
-    let mut guard = V263_GRIDS.lock().unwrap();
-    guard.as_mut().and_then(|m| m.remove(&(cx, cz)))
+    let guard = V263_GRIDS.lock().unwrap();
+    guard
+        .as_ref()
+        .and_then(|c| c.map.get(&(cx, cz)))
+        .cloned()
 }
 
 /// Clone a grid WITHOUT consuming it (neighbors keep theirs for their own
@@ -1140,6 +1202,9 @@ fn clone_or_compute_grid263(
             std::sync::atomic::Ordering::Relaxed,
         );
     }
+    // store-back: deterministic per (cx, cz) — later fills clone instead of
+    // recompute (bounded by GRID_CAP eviction, pending grids never dropped).
+    store_biome_grid263(cx, cz, &buf);
     Some(buf)
 }
 
