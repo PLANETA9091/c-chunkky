@@ -110,6 +110,15 @@ pub fn set_enabled(v: bool) {
     let _ = v;
 }
 
+/// Effective lane width for kernels that vectorize beyond the pointwise
+/// shell passes (the trilinear cell fill): 1 = scalar (forced or no AVX),
+/// 2 = AVX2 f32x8, 3 = AVX-512 f32x16. Honors set_enabled(false) — the A/B
+/// bit-parity harness flips this to diff vector vs scalar on identical
+/// inputs, so every consumer must dispatch through this, not its own probe.
+pub fn enabled_width() -> u8 {
+    state()
+}
+
 #[inline]
 fn lanes() -> usize {
     match state() {

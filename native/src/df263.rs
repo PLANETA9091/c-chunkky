@@ -2002,6 +2002,20 @@ fn interpolated_volume(
     };
 
     let fill_done = std::cell::Cell::new(false);
+    // Trilinear dispatch: the vanilla cell shape (4x8x4) at full alignment
+    // fills a whole 4x4xz column block per cell — vectorize 16 (x,z) lanes
+    // (AVX-512) / 8 (AVX2) with gathers from the corner grid and scatters to
+    // the y-contiguous output. Bit-exact by construction: mth_lerp is a
+    // plain mul+add pair (no FMA contraction, same as scalar), and the
+    // per-lane y chain repeats the scalar's incremental adds in lockstep.
+    // Clipped cells (slab volumes) and forced-scalar A/B runs take the
+    // scalar reference loop below.
+    let vec_w = crate::vecf::enabled_width();
+    let full_cells = cell_xz == 4
+        && cell_y == 8
+        && cell_volume.size_x >= 5
+        && cell_volume.size_z >= 5
+        && vol.size_y >= 8;
     for cell_z in 0..cell_count_z {
         let next_cell_z = (cell_z + 1).min(cell_volume.size_z - 1);
         for cell_x in 0..cell_count_x {
@@ -2016,10 +2030,54 @@ fn interpolated_volume(
                 let v110 = cell_buf[cell_volume.index_unchecked(next_cell_x, next_cell_y, cell_z)];
                 let v011 = cell_buf[cell_volume.index_unchecked(cell_x, next_cell_y, next_cell_z)];
                 let v111 = cell_buf[cell_volume.index_unchecked(next_cell_x, next_cell_y, next_cell_z)];
-                fill_cell(
-                    out, vol, &cell_volume, cell_x, cell_yy, cell_z, v000, v100, v010, v110, v001, v101, v011, v111,
-                    cell_xz, cell_y, inv_xz, inv_y,
-                );
+                let cell_output_x = cell_volume.block_x(cell_x) - vol.min_x;
+                let cell_output_y = cell_volume.block_y(cell_yy) - vol.min_y;
+                let cell_output_z = cell_volume.block_z(cell_z) - vol.min_z;
+                let full = full_cells
+                    && cell_output_x >= 0
+                    && cell_output_y >= 0
+                    && cell_output_z >= 0
+                    && cell_output_x + 4 <= vol.size_x
+                    && cell_output_y + 8 <= vol.size_y
+                    && cell_output_z + 4 <= vol.size_z;
+                if full && vec_w == 3 {
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        fill_cell_v16(
+                            out, vol, &cell_volume, &cell_buf, cell_x, cell_yy, cell_z,
+                            cell_output_x, cell_output_y, cell_output_z, inv_xz, inv_y,
+                        );
+                    }
+                    #[cfg(not(target_arch = "x86_64"))]
+                    {
+                        let _ = (inv_xz, inv_y);
+                        fill_cell(
+                            out, vol, &cell_volume, cell_x, cell_yy, cell_z, v000, v100, v010,
+                            v110, v001, v101, v011, v111, cell_xz, cell_y, inv_xz, inv_y,
+                        );
+                    }
+                } else if full && vec_w == 2 {
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        fill_cell_v8(
+                            out, vol, &cell_volume, &cell_buf, cell_x, cell_yy, cell_z,
+                            cell_output_x, cell_output_y, cell_output_z, inv_xz, inv_y,
+                        );
+                    }
+                    #[cfg(not(target_arch = "x86_64"))]
+                    {
+                        let _ = (inv_xz, inv_y);
+                        fill_cell(
+                            out, vol, &cell_volume, cell_x, cell_yy, cell_z, v000, v100, v010,
+                            v110, v001, v101, v011, v111, cell_xz, cell_y, inv_xz, inv_y,
+                        );
+                    }
+                } else {
+                    fill_cell(
+                        out, vol, &cell_volume, cell_x, cell_yy, cell_z, v000, v100, v010, v110,
+                        v001, v101, v011, v111, cell_xz, cell_y, inv_xz, inv_y,
+                    );
+                }
                 v000 = v010;
                 v100 = v110;
                 v001 = v011;
@@ -2031,6 +2089,178 @@ fn interpolated_volume(
         PROF_INTERP_FILL.fetch_add(prof_now() - prof_t2, std::sync::atomic::Ordering::Relaxed);
     }
     ctx.scratch.release(cell_buf);
+}
+
+/// Vectorized trilinear cell fill — 16 (x,z) lanes (AVX-512), the FULL 4x8x4
+/// vanilla cell in one pass. Bit-exact vs fill_cell: same mul/add rounds (no
+/// FMA), same per-lane incremental y chain (every lane repeats the scalar's
+/// add sequence in lockstep), same `v_0_ + step*0.0` start add. Gathers read
+/// the 8 corner planes; scatters write the y-contiguous output columns.
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
+#[target_feature(enable = "avx512f")]
+unsafe fn fill_cell_v16(
+    out: &mut [f32],
+    vol: &DensityVolume,
+    cell_volume: &DensityVolume,
+    cell_buf: &[f32],
+    cx: i32,
+    cy: i32,
+    cz: i32,
+    ox: i32,
+    oy: i32,
+    oz: i32,
+    inv_xz: f32,
+    inv_y: f32,
+) {
+    use std::arch::x86_64::*;
+    let csx = cell_volume.size_x as i32;
+    let csy = cell_volume.size_y as i32;
+    let osx = vol.size_x as i32;
+    let osy = vol.size_y as i32;
+    // lane = lz*4 + lx (z-major, x-minor)
+    let lx: [i32; 16] = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+    let lz: [i32; 16] = [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3];
+    let vlx = _mm512_loadu_si512(lx.as_ptr() as *const __m512i);
+    let vlz = _mm512_loadu_si512(lz.as_ptr() as *const __m512i);
+    // cell_buf corner index per lane: base + lx*csy + lz*csx*csy (y fastest)
+    let cell_idx = _mm512_add_epi32(
+        _mm512_set1_epi32(cy + (cx + cz * csx) * csy),
+        _mm512_add_epi32(
+            _mm512_mullo_epi32(vlx, _mm512_set1_epi32(csy)),
+            _mm512_mullo_epi32(vlz, _mm512_set1_epi32(csx * csy)),
+        ),
+    );
+    let cb = cell_buf.as_ptr();
+    let g = |off: i32| {
+        _mm512_i32gather_ps(_mm512_add_epi32(cell_idx, _mm512_set1_epi32(off)), cb, 4)
+    };
+    let a0 = g(0); // v000 (x,   y,   z)
+    let a1 = g(csy); // v100 (x+1, y,   z)
+    let b0 = g(csx * csy); // v001 (x,   y,   z+1)
+    let b1 = g(csy + csx * csy); // v101 (x+1, y,   z+1)
+    let c0 = g(1); // v010 (x,   y+1, z)
+    let c1 = g(1 + csy); // v110 (x+1, y+1, z)
+    let d0 = g(1 + csx * csy); // v011 (x,   y+1, z+1)
+    let d1 = g(1 + csy + csx * csy); // v111 (x+1, y+1, z+1)
+    let az = _mm512_mul_ps(_mm512_cvtepi32_ps(vlz), _mm512_set1_ps(inv_xz));
+    let ax = _mm512_mul_ps(_mm512_cvtepi32_ps(vlx), _mm512_set1_ps(inv_xz));
+    // mth_lerp(alpha, p0, p1) = p0 + alpha*(p1 - p0) — plain mul+add, no FMA.
+    #[inline(always)]
+    unsafe fn vlerp(a: __m512, p0: __m512, p1: __m512) -> __m512 {
+        _mm512_add_ps(p0, _mm512_mul_ps(a, _mm512_sub_ps(p1, p0)))
+    }
+    let v00_ = vlerp(az, a0, b0);
+    let v01_ = vlerp(az, c0, d0);
+    let v10_ = vlerp(az, a1, b1);
+    let v11_ = vlerp(az, c1, d1);
+    let v0_ = vlerp(ax, v00_, v10_);
+    let v1_ = vlerp(ax, v01_, v11_);
+    let step = _mm512_mul_ps(_mm512_sub_ps(v1_, v0_), _mm512_set1_ps(inv_y));
+    // scalar starts `v_0_ + value_step * y0` with y0 = 0 — keep the mul+add
+    // (−0.0 + +0.0 rounds to +0.0; dropping the add would flip that bit).
+    let mut val = _mm512_add_ps(v0_, _mm512_mul_ps(step, _mm512_set1_ps(0.0)));
+    // out column base per lane: oy + ((ox+lx) + (oz+lz)*osx)*osy; y stride 1.
+    let out_idx = _mm512_add_epi32(
+        _mm512_set1_epi32(oy + (ox + oz * osx) * osy),
+        _mm512_add_epi32(
+            _mm512_mullo_epi32(vlx, _mm512_set1_epi32(osy)),
+            _mm512_mullo_epi32(vlz, _mm512_set1_epi32(osx * osy)),
+        ),
+    );
+    let ob = out.as_mut_ptr();
+    for k in 0..8i32 {
+        _mm512_i32scatter_ps(ob, _mm512_add_epi32(out_idx, _mm512_set1_epi32(k)), val, 4);
+        val = _mm512_add_ps(val, step);
+    }
+}
+
+/// Vectorized trilinear cell fill — 8 (x,z) lanes (AVX2), two z-row groups
+/// per 4x8x4 cell. Same bit-exactness contract as fill_cell_v16.
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
+#[target_feature(enable = "avx2")]
+unsafe fn fill_cell_v8(
+    out: &mut [f32],
+    vol: &DensityVolume,
+    cell_volume: &DensityVolume,
+    cell_buf: &[f32],
+    cx: i32,
+    cy: i32,
+    cz: i32,
+    ox: i32,
+    oy: i32,
+    oz: i32,
+    inv_xz: f32,
+    inv_y: f32,
+) {
+    use std::arch::x86_64::*;
+    let csx = cell_volume.size_x as i32;
+    let csy = cell_volume.size_y as i32;
+    let osx = vol.size_x as i32;
+    let osy = vol.size_y as i32;
+    let lx: [i32; 8] = [0, 1, 2, 3, 0, 1, 2, 3];
+    let lz: [i32; 8] = [0, 0, 0, 0, 1, 1, 1, 1];
+    let vlx = _mm256_loadu_si256(lx.as_ptr() as *const __m256i);
+    let vlz = _mm256_loadu_si256(lz.as_ptr() as *const __m256i);
+    let cell_base = _mm256_set1_epi32(cy + (cx + cz * csx) * csy);
+    let cell_row = _mm256_add_epi32(
+        _mm256_mullo_epi32(vlx, _mm256_set1_epi32(csy)),
+        _mm256_mullo_epi32(vlz, _mm256_set1_epi32(csx * csy)),
+    );
+    let cb = cell_buf.as_ptr();
+    let az_v = _mm256_mul_ps(_mm256_cvtepi32_ps(vlz), _mm256_set1_ps(inv_xz));
+    let ax = _mm256_mul_ps(_mm256_cvtepi32_ps(vlx), _mm256_set1_ps(inv_xz));
+    let out_base = _mm256_set1_epi32(oy + (ox + oz * osx) * osy);
+    let out_row = _mm256_add_epi32(
+        _mm256_mullo_epi32(vlx, _mm256_set1_epi32(osy)),
+        _mm256_mullo_epi32(vlz, _mm256_set1_epi32(osx * osy)),
+    );
+    #[inline(always)]
+    unsafe fn vlerp8(a: __m256, p0: __m256, p1: __m256) -> __m256 {
+        _mm256_add_ps(p0, _mm256_mul_ps(a, _mm256_sub_ps(p1, p0)))
+    }
+    // two lane groups: z-rows {0,1} then {2,3}
+    for zr in 0..2i32 {
+        let idx = _mm256_add_epi32(
+            cell_base,
+            _mm256_add_epi32(cell_row, _mm256_set1_epi32(zr * csx * csy)),
+        );
+        let g = |off: i32| {
+            _mm256_i32gather_ps(_mm256_add_epi32(idx, _mm256_set1_epi32(off)), cb, 4)
+        };
+        let a0 = g(0);
+        let a1 = g(csy);
+        let b0 = g(csx * csy);
+        let b1 = g(csy + csx * csy);
+        let c0 = g(1);
+        let c1 = g(1 + csy);
+        let d0 = g(1 + csx * csy);
+        let d1 = g(1 + csy + csx * csy);
+        let az = _mm256_add_ps(az_v, _mm256_set1_ps(zr as f32 * inv_xz));
+        let v00_ = vlerp8(az, a0, b0);
+        let v01_ = vlerp8(az, c0, d0);
+        let v10_ = vlerp8(az, a1, b1);
+        let v11_ = vlerp8(az, c1, d1);
+        let v0_ = vlerp8(ax, v00_, v10_);
+        let v1_ = vlerp8(ax, v01_, v11_);
+        let step = _mm256_mul_ps(_mm256_sub_ps(v1_, v0_), _mm256_set1_ps(inv_y));
+        let mut val = _mm256_add_ps(v0_, _mm256_mul_ps(step, _mm256_set1_ps(0.0)));
+        let oi = _mm256_add_epi32(
+            out_base,
+            _mm256_add_epi32(out_row, _mm256_set1_epi32(zr * osx * osy)),
+        );
+        // AVX2 has NO scatter (that is AVX512F+VL) — store lanes scalar. The
+        // adds stay vectorized (the hot part); stores are 8 per level.
+        let idx_arr: [i32; 8] = std::mem::transmute::<__m256i, [i32; 8]>(oi);
+        for k in 0..8i32 {
+            let arr: [f32; 8] = std::mem::transmute::<__m256, [f32; 8]>(val);
+            for lane in 0..8usize {
+                out[(idx_arr[lane] + k) as usize] = arr[lane];
+            }
+            val = _mm256_add_ps(val, step);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
