@@ -3242,3 +3242,57 @@ e2e_ci.sh теперь печатает harness_wall (диспетч-оверх�
 NEXT: (1) CI-ран — верифицировать inside=144/144 и первые ЧЕСТНЫЕ числа;
 (2) fill-работа в сервере (interp_cell+noise) → SIMD-фронты; (3) deco
 Batch A; (4) свет+Paper-оверхед = span − gen — из честного окна.
+
+---
+## cont-60b: ЧЕСТНЫЙ БАЗЛАЙН-ФРОНТ + BATCH A РАЗГОН
+
+Задача: «каждый чанк E2E 1мс, а не только часть».
+
+РАЗОБЛАЧЕНИЕ БЕНЧА (fill263bench той же сборки, что in-server prof):
+- per-kind числа = РАБОТА (сумма по стрипам), fill_chunk median = WALL
+  (≈ работа/3 параллельных). interp_cell=10.975 ИНКЛЮЗИВЕН (содержит
+  вложенные noise/shell kinds) — холодный проход профа ~15.3мс работы
+  против медианы 5.03: горячий цикл бенча отогревал CPU-кэши повторными
+  филлами тех же чанков. Сервер платит ХОЛОДНЫЕ филлы.
+- fill263bench: добавлен COLD median (round-0 single-touch) — сервер-
+  видимое число, не cache-warmed loop.
+
+SIMD SHELL (acedc93): pointwise-проходки (Binary/Const*/Unary/Clamp/Lerp/
+Round*) объёмов векторизованы f32x16 AVX-512 / f32x8 AVX2 / скалярный
+фолбэк — vecf.rs, бит-точность by construction (без FMA, NaN-fixup min/max
+под скалярные if-семантики, exact-equality lerp-маски, Java Math.round =
+floor(|v|+0.5)+sign; Log/Pow скалярные). Бит-паритет секция в бенче
+(скаляр-forced vs auto) — 25 полных объёмов. fuse в проде ВЫКЛЮЧЕН по
+умолчанию (CRUS_FUSE=1 opt-in) — tree walk с short-circuit быстрее.
+
+HONEST WINDOW (3c82c49, integration в полёте): keep-spawn-loaded:false в
+paper-world-defaults.yml ДО первого бута (спавн 13x13 вообще не генерится —
+источник fills=314/144 окон) + регион-ограниченный счёт в GenStats
+(window RX RZ N / wincount / windowSnapshot с сервер-сайд span) — e2e =
+span/inside, иммунен к rcon-латентности и фоновому бэклогу.
+
+BATCH A DECO (все пер-чанковые делегаты из census):
+- fallen_tree (5213b49): 26.3-тип из dec263; деревья равнин (trees_plains:
+  1/3 fancy_oak + 0.0125 fallen_oak + oak_bees) вернулись в натив.
+  JSetSim hash-order + Y-sort паритет для обоих наборов декораторов.
+- speleothem (78bfcd6): 26.3 переименовал pointed_dripstone -> speleothem;
+  getTipDirection/base-patch/grow-колонка с каноническими
+  pointed_dripstone[thickness,tip_direction,waterlogged] стейтами.
+- speleothem_cluster + large_dripstone (f8eacdd): Column.scan,
+  clampedMap=clampedLerp(inverseLerp) (реверсивные границы корректны),
+  WindOffsetter, pool-placement, merge-tips. FloatProv
+  (uniform/clamped_normal), IntProvider.min/max_value accessors.
+- matching_block_tag предикат (84f53c1): patch_sugar_cane (block_column)
+  натив. tag_is через JNI BlockState.is(TagKey).
+- Остаток census: monster_room (намеренный гибрид — chest loot seed),
+  lake/geode (rarity-гейты — ставятся редко, Java-оверхед мал),
+  freeze_top_layer (нужны biome-запросы coldEnoughToSnow).
+
+УРОК: исчерпывающие match по FeatureCfg в бинах (delegcensus, f1dbg) —
+каждый новый вариант = правки во всех; FFI index_states_cfg обязан
+индексировать ВСЕ стейты, которые фича пишет (иначе state_index.lookup=0
+=AIR — тихая поломка).
+
+NEXT: (1) integration 989f872 — первые ЧИСТЫЕ окна (inside=144!) + SIMD
+паритет + COLD bench; (2) по брейкдауну окна: fill-контекст vs свет/Paper;
+(3) freeze_top_layer/geode по остатку; (4) interp_cell/noise-фронты к 1мс.
