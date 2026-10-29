@@ -2201,9 +2201,10 @@ unsafe fn fill_cell_v8(
         _mm256_add_ps(p0, _mm256_mul_ps(a, _mm256_sub_ps(p1, p0)))
     }
     let s = |v: f32| _mm256_set1_ps(v);
-    // two lane groups: z-rows {0,1} then {2,3}
+    // two lane groups: z-rows {0,1} then {2,3} — each group spans TWO
+    // z-rows, so the group offset is zr*2 (az and store base alike).
     for zr in 0..2i32 {
-        let az = _mm256_add_ps(az_v, _mm256_set1_ps(zr as f32 * inv_xz));
+        let az = _mm256_add_ps(az_v, _mm256_set1_ps((zr * 2) as f32 * inv_xz));
         let v00_ = vlerp8(az, s(v000), s(v001));
         let v01_ = vlerp8(az, s(v010), s(v011));
         let v10_ = vlerp8(az, s(v100), s(v101));
@@ -2214,7 +2215,7 @@ unsafe fn fill_cell_v8(
         let mut val = _mm256_add_ps(v0_, _mm256_mul_ps(step, _mm256_set1_ps(0.0)));
         let oi = _mm256_add_epi32(
             out_base,
-            _mm256_add_epi32(out_row, _mm256_set1_epi32(zr * osx * osy)),
+            _mm256_add_epi32(out_row, _mm256_set1_epi32(zr * 2 * osx * osy)),
         );
         // AVX2 has NO scatter (that is AVX512F+VL) — store lanes scalar. The
         // adds stay vectorized (the hot part); stores are 8 per level.
