@@ -158,6 +158,11 @@ jobs:
         run: |
           set -o pipefail
           SRV_DIR=server RCON_PORT=25576 CRUS_NATIVE_DECO=1 bash harness/e2e_ci.sh 2>&1 | tee e2e263_deco.log
+      - name: E2E no-beard discriminator (structure-start cost of the bridge)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          CRUS_NO_BEARD=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_nobeard.log
       - name: Far-coords native-gen probe (stall cliff bisect)
         continue-on-error: true
         run: |
@@ -175,6 +180,7 @@ jobs:
             e2e263_timing.log
             e2e263_deco.log
             farprobe263.log
+            e2e263_nobeard.log
             ab263_out/
             server/run.out
           retention-days: 14
