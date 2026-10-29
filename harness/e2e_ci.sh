@@ -180,7 +180,7 @@ t0=$(date +%s.%N)
 $RCON "forceload add $((RX * 16)) $((RZ * 16)) $(((RX + N) * 16 + 15)) $(((RZ + N) * 16 + 15))" >/dev/null
 done=0
 for i in $(seq 1 6000); do
-  c=$($RCON wincount 2>/dev/null | grep -o "window_inside=[0-9]*" | cut -d= -f2)
+  c=$($RCON crusgenstats wincount 2>/dev/null | grep -o "window_inside=[0-9]*" | cut -d= -f2)
   c=${c:-0}
   if [ "$c" -ge "$target" ]; then done=1; break; fi
   if (( i % 600 == 0 )); then echo "  [window progress] inside=$c / $target"; fi
