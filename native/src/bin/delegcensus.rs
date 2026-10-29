@@ -206,7 +206,9 @@ fn main() {
             | FeatureCfg::MultifaceGrowth { .. }
             | FeatureCfg::Vines
             | FeatureCfg::FallenTree { .. }
-            | FeatureCfg::Speleothem { .. } => None,
+            | FeatureCfg::Speleothem { .. }
+            | FeatureCfg::LargeDripstone { .. }
+            | FeatureCfg::SpeleothemCluster { .. } => None,
             FeatureCfg::BlockColumn { layers, allowed, .. } => {
                 if matches!(allowed, BlockPredicate::Unsupported(_)) {
                     return Some("bc-allowed".into());

@@ -3,7 +3,7 @@
 //! server's registry loader too — parity by construction). Coverage stats in tests.
 
 use crate::features_deco::*;
-use crate::features_placement::{Anchor, HeightProvider as HP, IntProvider as IP, Modifier as PM};
+use crate::features_placement::{Anchor, FloatProv, HeightProvider as HP, IntProvider as IP, Modifier as PM};
 use crate::json::{self, Json};
 use std::collections::HashMap;
 
@@ -142,6 +142,37 @@ pub enum FeatureCfg {
         chance_dir_spread: f32,
         chance_r2: f32,
         chance_r3: f32,
+    },
+    /// minecraft:large_dripstone — big column with wind offset + shrink-on-
+    /// embed base search.
+    LargeDripstone {
+        replaceable_tag: String,
+        search_range: i32,
+        column_radius: IP,
+        height_scale: FloatProv,
+        max_radius_ratio: f32,
+        stalactite_bluntness: FloatProv,
+        stalagmite_bluntness: FloatProv,
+        wind_speed: FloatProv,
+        min_radius_for_wind: i32,
+        min_bluntness_for_wind: f32,
+    },
+    /// minecraft:speleothem_cluster (26.3 renamed dripstone_cluster).
+    SpeleothemCluster {
+        base_block: String,
+        pointed_block: String,
+        replaceable_tag: String,
+        search_range: i32,
+        height: IP,
+        radius: IP,
+        max_diff: i32,
+        height_deviation: i32,
+        layer_thickness: IP,
+        density: FloatProv,
+        wetness: FloatProv,
+        chance_at_max: f32,
+        max_edge: i32,
+        max_center_bias: i32,
     },
     /// minecraft:vegetation_patch / waterlogged_vegetation_patch
     VegetationPatch(VegetationPatchCfg),
@@ -1346,6 +1377,122 @@ pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry
                     .unwrap_or(0.5) as f32,
             }
         }
+        "minecraft:large_dripstone" => {
+            let Some(rt) = cfg.get("replaceable_blocks").and_then(|v| v.as_str()) else {
+                return FeatureCfg::Unsupported("ld-replaceable");
+            };
+            let Some(Some(column_radius)) = cfg.get("column_radius").map(decode_int_provider)
+            else {
+                return FeatureCfg::Unsupported("ld-radius");
+            };
+            let Some(Some(height_scale)) =
+                cfg.get("height_scale").map(decode_float_provider)
+            else {
+                return FeatureCfg::Unsupported("ld-height");
+            };
+            let Some(Some(stalactite_bluntness)) =
+                cfg.get("stalactite_bluntness").map(decode_float_provider)
+            else {
+                return FeatureCfg::Unsupported("ld-stalblunt");
+            };
+            let Some(Some(stalagmite_bluntness)) =
+                cfg.get("stalagmite_bluntness").map(decode_float_provider)
+            else {
+                return FeatureCfg::Unsupported("ld-stagblunt");
+            };
+            let Some(Some(wind_speed)) = cfg.get("wind_speed").map(decode_float_provider)
+            else {
+                return FeatureCfg::Unsupported("ld-wind");
+            };
+            FeatureCfg::LargeDripstone {
+                replaceable_tag: rt.trim_start_matches('#').to_string(),
+                search_range: cfg
+                    .get("floor_to_ceiling_search_range")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(30) as i32,
+                column_radius,
+                height_scale,
+                max_radius_ratio: cfg
+                    .get("max_column_radius_to_cave_height_ratio")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as f32,
+                stalactite_bluntness,
+                stalagmite_bluntness,
+                wind_speed,
+                min_radius_for_wind: cfg
+                    .get("min_radius_for_wind")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0) as i32,
+                min_bluntness_for_wind: cfg
+                    .get("min_bluntness_for_wind")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as f32,
+            }
+        }
+        "minecraft:speleothem_cluster" => {
+            // 26.3 renamed dripstone_cluster; exact codec fields per the
+            // SpeleothemClusterFeature decompile.
+            let Some(Some(base)) = cfg.get("base_block").map(state_string) else {
+                return FeatureCfg::Unsupported("sc-base");
+            };
+            let Some(Some(pointed)) = cfg.get("pointed_block").map(state_string) else {
+                return FeatureCfg::Unsupported("sc-pointed");
+            };
+            let Some(rt) = cfg.get("replaceable_blocks").and_then(|v| v.as_str()) else {
+                return FeatureCfg::Unsupported("sc-replaceable");
+            };
+            let Some(Some(height)) = cfg.get("height").map(decode_int_provider) else {
+                return FeatureCfg::Unsupported("sc-height");
+            };
+            let Some(Some(radius)) = cfg.get("radius").map(decode_int_provider) else {
+                return FeatureCfg::Unsupported("sc-radius");
+            };
+            let Some(Some(layer_thickness)) =
+                cfg.get("speleothem_block_layer_thickness").map(decode_int_provider)
+            else {
+                return FeatureCfg::Unsupported("sc-layer");
+            };
+            let Some(Some(density)) = cfg.get("density").map(decode_float_provider) else {
+                return FeatureCfg::Unsupported("sc-density");
+            };
+            let Some(Some(wetness)) = cfg.get("wetness").map(decode_float_provider) else {
+                return FeatureCfg::Unsupported("sc-wetness");
+            };
+            FeatureCfg::SpeleothemCluster {
+                base_block: crate::features_deco::state_block_name(&base).to_string(),
+                pointed_block: crate::features_deco::state_block_name(&pointed).to_string(),
+                replaceable_tag: rt.trim_start_matches('#').to_string(),
+                search_range: cfg
+                    .get("floor_to_ceiling_search_range")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(12) as i32,
+                height,
+                radius,
+                max_diff: cfg
+                    .get("max_stalagmite_stalactite_height_diff")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0) as i32,
+                height_deviation: cfg
+                    .get("height_deviation")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(1) as i32,
+                layer_thickness,
+                density,
+                wetness,
+                chance_at_max: cfg
+                    .get("chance_of_speleothem_at_max_distance_from_center")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as f32,
+                max_edge: cfg
+                    .get("max_distance_from_edge_affecting_chance_of_speleothem")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(1) as i32,
+                max_center_bias: cfg
+                    .get("max_distance_from_center_affecting_height_bias")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(1) as i32,
+            }
+        }
         "minecraft:vegetation_patch" | "minecraft:waterlogged_vegetation_patch" => {
             decode_vegetation_patch_cfg(&cfg, t.ends_with("waterlogged_vegetation_patch"))
         }
@@ -1553,6 +1700,27 @@ fn decode_fallen_tree_decos(v: Option<&Json>) -> Option<Vec<TreeDeco>> {
         }
     }
     Some(out)
+}
+
+fn decode_float_provider(j: &Json) -> Option<FloatProv> {
+    let t = j.get("type")?.as_str()?;
+    match t {
+        "minecraft:uniform" => Some(FloatProv::Uniform {
+            lo: j.get("min_inclusive")?.as_f64()? as f32,
+            hi: j.get("max_exclusive")?.as_f64()? as f32,
+        }),
+        "minecraft:clamped_normal" => Some(FloatProv::ClampedNormal {
+            mean: j.get("mean")?.as_f64()? as f32,
+            dev: j.get("deviation")?.as_f64()? as f32,
+            min: j.get("min")?.as_f64()? as f32,
+            max: j.get("max")?.as_f64()? as f32,
+        }),
+        "minecraft:constant" => {
+            let v = j.get("value")?.as_f64()? as f32;
+            Some(FloatProv::Uniform { lo: v, hi: v })
+        }
+        _ => None,
+    }
 }
 
 fn decode_tree_cfg(c: &Json) -> FeatureCfg {

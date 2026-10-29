@@ -263,6 +263,8 @@ fn cfg_fully_supported(reg: &FeatureRegistry, cfg_name: &str, depth: u32) -> boo
         // shelf_mushroom (fallen_poplar) falls back to Unsupported at decode.
         FeatureCfg::FallenTree { .. } => true,
         FeatureCfg::Speleothem { .. } => true,
+        FeatureCfg::LargeDripstone { .. } => true,
+        FeatureCfg::SpeleothemCluster { .. } => true,
         FeatureCfg::RandomSelector { entries, default } => {
             entries.iter().all(|(_, n)| placed_fully_supported(reg, n, depth + 1))
                 && placed_fully_supported(reg, default, depth + 1)
@@ -461,6 +463,68 @@ pub fn place_configured(
             *chance_dir_spread,
             *chance_r2,
             *chance_r3,
+            rng,
+            pos,
+            ops,
+        ),
+        FeatureCfg::LargeDripstone {
+            replaceable_tag,
+            search_range,
+            column_radius,
+            height_scale,
+            max_radius_ratio,
+            stalactite_bluntness,
+            stalagmite_bluntness,
+            wind_speed,
+            min_radius_for_wind,
+            min_bluntness_for_wind,
+        } => place_large_dripstone(
+            ctx,
+            replaceable_tag,
+            *search_range,
+            column_radius,
+            height_scale,
+            *max_radius_ratio,
+            stalactite_bluntness,
+            stalagmite_bluntness,
+            wind_speed,
+            *min_radius_for_wind,
+            *min_bluntness_for_wind,
+            rng,
+            pos,
+            ops,
+        ),
+        FeatureCfg::SpeleothemCluster {
+            base_block,
+            pointed_block,
+            replaceable_tag,
+            search_range,
+            height,
+            radius,
+            max_diff,
+            height_deviation,
+            layer_thickness,
+            density,
+            wetness,
+            chance_at_max,
+            max_edge,
+            max_center_bias,
+        } => place_speleothem_cluster(
+            ctx,
+            base_block,
+            pointed_block,
+            replaceable_tag,
+            *search_range,
+            height,
+            radius,
+            *max_diff,
+            *height_deviation,
+            layer_thickness,
+            density,
+            wetness,
+            *chance_at_max,
+            *max_edge,
+            *max_center_bias,
             rng,
             pos,
             ops,
@@ -899,6 +963,639 @@ fn place_speleothem(
         }
     }
     true
+}
+
+// ---------------------------------------------------------------------------
+// Speleothem family: Column.scan + height math shared by large_dripstone and
+// speleothem_cluster (26.3 decompiles; SpeleothemUtils helpers).
+// ---------------------------------------------------------------------------
+
+/// SpeleothemUtils.getSpeleothemHeight (exact f64 math; the 1.384 constants
+/// are vanilla's 0.384-based radius normalization).
+fn speleothem_height_f64(xz_in: f64, radius: f64, scale: f64, bluntness: f64) -> f64 {
+    let xz = if xz_in < bluntness { bluntness } else { xz_in };
+    let r = xz / radius * 0.384;
+    let part1 = 0.75 * r.powf(1.3333333333333333);
+    let part2 = r.powf(0.6666666666666666);
+    let part3 = 0.3333333333333333 * r.ln();
+    let h = scale * (part1 - part2 - part3);
+    let h = if h < 0.0 { 0.0 } else { h };
+    h / 0.384 * radius
+}
+
+/// Column.scan (26.3): insideColumn walk from pos in both directions, then a
+/// validEdge test at the stopped position. Returns (floor, ceiling).
+fn column_scan(
+    level: &dyn DecoLevelExt,
+    pos: BlockPos,
+    range: i32,
+    inside: &dyn Fn(BlockPos) -> bool,
+    edge: &dyn Fn(BlockPos) -> bool,
+) -> Option<(Option<i32>, Option<i32>)> {
+    if !inside(pos) {
+        return None;
+    }
+    let scan_dir = |dir: i32, y0: i32| -> Option<i32> {
+        let mut y = y0;
+        let mut i = 1;
+        while i < range && inside(BlockPos::new(pos.x, y, pos.z)) {
+            y += dir;
+            i += 1;
+        }
+        if edge(BlockPos::new(pos.x, y, pos.z)) {
+            Some(y)
+        } else {
+            None
+        }
+    };
+    let ceiling = scan_dir(1, pos.y);
+    let floor = scan_dir(-1, pos.y);
+    Some((floor, ceiling))
+}
+
+/// SpeleothemUtils.isCircleMostlyEmbeddedInStone: arc sample every
+/// 6/radius radians, (int) truncation on the offsets.
+fn circle_mostly_embedded(
+    level: &dyn DecoLevelExt,
+    center: BlockPos,
+    radius: i32,
+    empty_or_water_or_lava: &dyn Fn(BlockPos) -> bool,
+) -> bool {
+    if empty_or_water_or_lava(center) {
+        return false;
+    }
+    let radius_f = radius as f32;
+    let inc = 6.0f32 / radius_f;
+    let mut angle = 0.0f32;
+    while angle < std::f64::consts::PI as f32 * 2.0 {
+        let dx = (f64::from(angle).cos() * f64::from(radius_f)) as i32;
+        let dz = (f64::from(angle).sin() * f64::from(radius_f)) as i32;
+        if empty_or_water_or_lava(BlockPos::new(center.x + dx, center.y, center.z + dz)) {
+            return false;
+        }
+        angle += inc;
+    }
+    true
+}
+
+/// Mth.randomBetween(f32): nextFloat * (max - min) + min
+#[inline]
+fn random_between_f(rng: &mut WorldgenRandom, lo: f32, hi: f32) -> f32 {
+    rng.next_f32() * (hi - lo) + lo
+}
+
+/// minecraft:large_dripstone — big column with wind offset and embed-shrink
+/// base search (26.3 LargeDripstoneFeature decompile).
+#[allow(clippy::too_many_arguments)]
+fn place_large_dripstone(
+    ctx: &PlaceCtx,
+    replaceable_tag: &str,
+    search_range: i32,
+    column_radius: &IP,
+    height_scale: &crate::features_placement::FloatProv,
+    max_radius_ratio: f32,
+    stalactite_bluntness: &crate::features_placement::FloatProv,
+    stalagmite_bluntness: &crate::features_placement::FloatProv,
+    wind_speed: &crate::features_placement::FloatProv,
+    min_radius_for_wind: i32,
+    min_bluntness_for_wind: f32,
+    rng: &mut WorldgenRandom,
+    origin: BlockPos,
+    ops: &mut Vec<DecoOp>,
+) -> bool {
+    let empty_or_water = |p: BlockPos| -> bool {
+        ctx.level.is_air(p) || ctx.level.fluid_is(p, &["minecraft:water".to_string()])
+    };
+    let empty_or_water_or_lava = |p: BlockPos| -> bool {
+        empty_or_water(p) || ctx.level.state_name(p) == "minecraft:lava"
+    };
+    // isBaseOrLava vs DRIPSTONE_BLOCK (the feature hard-codes the base block)
+    let base_or_lava = |p: BlockPos| -> bool {
+        ctx.level.state_name(p) == "minecraft:dripstone_block"
+            || ctx.level.tag_is(p, replaceable_tag)
+            || ctx.level.state_name(p) == "minecraft:lava"
+    };
+    if !empty_or_water(origin) {
+        return false;
+    }
+    let Some((floor, ceiling)) =
+        column_scan(ctx.level, origin, search_range, &empty_or_water, &base_or_lava)
+    else {
+        return false;
+    };
+    let (Some(floor), Some(ceiling)) = (floor, ceiling) else {
+        return false;
+    };
+    let height = ceiling - floor - 1;
+    if height < 4 {
+        return false;
+    }
+    // radius: Mth.clamp(based, columnRadius.minInclusive(), maxInclusive),
+    // then randomBetweenInclusive(min, max) — the provider is used ONLY via
+    // its bounds (vanilla), never sampled.
+    let max_radius_based = (height as f32 * max_radius_ratio) as i32;
+    let (lo, hi) = (column_radius.min_value(), column_radius.max_value());
+    let max_column_radius = if max_radius_based < lo {
+        lo
+    } else if max_radius_based > hi {
+        hi
+    } else {
+        max_radius_based
+    };
+    let radius = rng.next_int_bound((max_column_radius - lo + 1).max(1)) + lo;
+
+    // LargeDripstone structs (stalactite root at ceiling-1 pointing down,
+    // stalagmite root at floor+1 pointing up)
+    let mut st = Drip {
+        root: BlockPos::new(origin.x, ceiling - 1, origin.z),
+        up: false,
+        radius,
+        bluntness: stalactite_bluntness.sample(rng) as f64,
+        scale: height_scale.sample(rng) as f64,
+    };
+    let mut sg = Drip {
+        root: BlockPos::new(origin.x, floor + 1, origin.z),
+        up: true,
+        radius,
+        bluntness: stalagmite_bluntness.sample(rng) as f64,
+        scale: height_scale.sample(rng) as f64,
+    };
+    // wind: both suitable -> WindOffsetter(originY, rng, windSpeed, 16-radius)
+    let wind = if st.radius >= min_radius_for_wind
+        && st.bluntness >= f64::from(min_bluntness_for_wind)
+        && sg.radius >= min_radius_for_wind
+        && sg.bluntness >= f64::from(min_bluntness_for_wind)
+    {
+        let speed = wind_speed.sample(rng) as f64;
+        let dir = random_between_f(rng, 0.0, std::f64::consts::PI as f32) as f64;
+        Some(Wind {
+            origin_y: origin.y,
+            vx: dir.cos() * speed,
+            vz: dir.sin() * speed,
+            max_off: 16 - radius,
+        })
+    } else {
+        None
+    };
+    let st_ok = move_back_embed(&mut st, ctx.level, &wind, &empty_or_water_or_lava);
+    let sg_ok = move_back_embed(&mut sg, ctx.level, &wind, &empty_or_water_or_lava);
+    if st_ok {
+        drip_place_blocks(&st, ctx, rng, &wind, ops);
+    }
+    if sg_ok {
+        drip_place_blocks(&sg, ctx, rng, &wind, ops);
+    }
+    return true;
+
+    struct Drip {
+        root: BlockPos,
+        up: bool,
+        radius: i32,
+        bluntness: f64,
+        scale: f64,
+    }
+    struct Wind {
+        origin_y: i32,
+        vx: f64,
+        vz: f64,
+        max_off: i32,
+    }
+    impl Wind {
+        fn offset(&self, p: BlockPos) -> BlockPos {
+            let dy = self.origin_y - p.y;
+            let ax = self.vx * dy as f64;
+            let az = self.vz * dy as f64;
+            let dx = clamp_floor(ax, self.max_off);
+            let dz = clamp_floor(az, self.max_off);
+            BlockPos::new(p.x + dx, p.y, p.z + dz)
+        }
+    }
+    #[inline]
+    fn clamp_floor(v: f64, max_off: i32) -> i32 {
+        let f = v.floor() as i64;
+        f.clamp(-(max_off as i64), max_off as i64) as i32
+    }
+    #[allow(clippy::needless_return)]
+    fn drip_height_at(d: &Drip, check_radius: f32) -> i32 {
+        speleothem_height_f64(f64::from(check_radius), d.radius as f64, d.scale, d.bluntness)
+            as i32
+    }
+    fn move_back_embed(
+        d: &mut Drip,
+        level: &dyn DecoLevelExt,
+        wind: &Option<Wind>,
+        empty_owl: &dyn Fn(BlockPos) -> bool,
+    ) -> bool {
+        while d.radius > 1 {
+            let mut ny = d.root.y;
+            let max_tries = 10.min(drip_height_at(d, 0.0));
+            let mut i = 0;
+            while i < max_tries {
+                let p = BlockPos::new(d.root.x, ny, d.root.z);
+                if level.state_name(p) == "minecraft:lava" {
+                    return false;
+                }
+                let wp = match wind {
+                    Some(w) => w.offset(p),
+                    None => p,
+                };
+                if circle_mostly_embedded(level, wp, d.radius, empty_owl) {
+                    d.root = p;
+                    return true;
+                }
+                ny += if d.up { -1 } else { 1 };
+                i += 1;
+            }
+            d.radius /= 2;
+        }
+        false
+    }
+    fn drip_place_blocks(
+        d: &Drip,
+        ctx: &PlaceCtx,
+        rng: &mut WorldgenRandom,
+        wind: &Option<Wind>,
+        ops: &mut Vec<DecoOp>,
+    ) {
+        let mut dx = -d.radius;
+        while dx <= d.radius {
+            let mut dz = -d.radius;
+            while dz <= d.radius {
+                let cur = ((dx * dx + dz * dz) as f32).sqrt();
+                if !(cur > d.radius as f32) {
+                    let mut height = drip_height_at(d, cur);
+                    if height > 0 {
+                        if rng.next_f32() < 0.2 {
+                            let f = height as f32 * random_between_f(rng, 0.8, 1.0);
+                            height = f as i32;
+                        }
+                        let step: i32 = if d.up { 1 } else { -1 };
+                        let mut py = d.root.y;
+                        let max_y = if d.up {
+                            ctx.level
+                                .height(HeightmapTy::WorldSurfaceWg, d.root.x + dx, d.root.z + dz)
+                        } else {
+                            i32::MAX
+                        };
+                        let mut i = 0;
+                        let mut out_of_stone = false;
+                        while i < height && py < max_y {
+                            let p = BlockPos::new(d.root.x + dx, py, d.root.z + dz);
+                            let wp = match wind {
+                                Some(w) => w.offset(p),
+                                None => p,
+                            };
+                            let name = ctx.level.state_name(wp);
+                            if ctx.level.is_air(wp)
+                                || ctx
+                                    .level
+                                    .fluid_is(wp, &["minecraft:water".to_string()])
+                                || name == "minecraft:lava"
+                            {
+                                out_of_stone = true;
+                                ctx.emit(ops, wp, "minecraft:dripstone_block", 0);
+                            } else if out_of_stone
+                                && ctx.level.tag_is(wp, "minecraft:base_stone_overworld")
+                            {
+                                break;
+                            }
+                            py += step;
+                            i += 1;
+                        }
+                    }
+                }
+                dz += 1;
+            }
+            dx += 1;
+        }
+    }
+}
+
+/// minecraft:speleothem_cluster (26.3 renamed dripstone_cluster): per-column
+/// stalactite/stalagmite pair with pool placement (SpeleothemClusterFeature
+/// decompile; clampedMap = clampedLerp(inverseLerp)).
+#[allow(clippy::too_many_arguments)]
+fn place_speleothem_cluster(
+    ctx: &PlaceCtx,
+    base_block: &str,
+    pointed_block: &str,
+    replaceable_tag: &str,
+    search_range: i32,
+    height_prov: &IP,
+    radius_prov: &IP,
+    max_diff: i32,
+    height_deviation: i32,
+    thickness_prov: &IP,
+    density: &crate::features_placement::FloatProv,
+    wetness: &crate::features_placement::FloatProv,
+    chance_at_max: f32,
+    max_edge: i32,
+    max_center_bias: i32,
+    rng: &mut WorldgenRandom,
+    origin: BlockPos,
+    ops: &mut Vec<DecoOp>,
+) -> bool {
+    let empty_or_water = |p: BlockPos| -> bool {
+        ctx.level.is_air(p) || ctx.level.fluid_is(p, &["minecraft:water".to_string()])
+    };
+    let neither_empty_nor_water = |p: BlockPos| -> bool {
+        !(ctx.level.is_air(p) || ctx.level.fluid_is(p, &["minecraft:water".to_string()]))
+    };
+    let is_lava = |p: BlockPos| -> bool { ctx.level.state_name(p) == "minecraft:lava" };
+    let wetness_v = wetness.sample(rng);
+    let density_v = density.sample(rng);
+    let x_radius = radius_prov.sample(rng);
+    let z_radius = radius_prov.sample(rng);
+    let clamped_map = |value: f64, from_min: f64, from_max: f64, to_min: f64, to_max: f64| -> f64 {
+        let inv = (value - from_min) / (from_max - from_min);
+        if inv < 0.0 {
+            to_min
+        } else if inv > 1.0 {
+            to_max
+        } else {
+            to_min + inv * (to_max - to_min)
+        }
+    };
+    let cluster_height = height_prov.sample(rng);
+    let mut dx = -x_radius;
+    while dx <= x_radius {
+        let mut dz = -z_radius;
+        while dz <= z_radius {
+            let x_edge = x_radius - dx.abs();
+            let z_edge = z_radius - dz.abs();
+            let d_edge = x_edge.min(z_edge);
+            let chance = clamped_map(
+                f64::from(d_edge),
+                0.0,
+                f64::from(max_edge),
+                f64::from(chance_at_max),
+                1.0,
+            );
+            let pos = BlockPos::new(origin.x + dx, origin.y, origin.z + dz);
+            // ---- placeColumn ----
+            if let Some((floor0, ceiling)) = column_scan(
+                ctx.level,
+                pos,
+                search_range,
+                &empty_or_water,
+                &neither_empty_nor_water,
+            ) {
+                if ceiling.is_some() || floor0.is_some() {
+                    let want_pool = rng.next_f32() < wetness_v;
+                    // (floor, ceiling) after the optional pool carve
+                    let mut floor = floor0;
+                    if want_pool && floor0.is_some() {
+                        let base_floor_y = floor0.unwrap();
+                        if can_place_pool(ctx, base_block, pointed_block, replaceable_tag,
+                            BlockPos::new(pos.x, base_floor_y, pos.z))
+                        {
+                            floor = Some(base_floor_y - 1);
+                            ctx.emit(
+                                ops,
+                                BlockPos::new(pos.x, base_floor_y, pos.z),
+                                "minecraft:water",
+                                0,
+                            );
+                        }
+                    }
+                    let want_stalactite = rng.next_f64() < chance;
+                    let mut stalactite_height = 0;
+                    if ceiling.is_some() && want_stalactite && !is_lava(BlockPos::new(pos.x, ceiling.unwrap(), pos.z)) {
+                        let ceiling_thickness = thickness_prov.sample(rng);
+                        replace_base_blocks(
+                            ctx, base_block, replaceable_tag,
+                            BlockPos::new(pos.x, ceiling.unwrap(), pos.z),
+                            ceiling_thickness, 1, ops,
+                        );
+                        let max_this = match floor {
+                            Some(f) => cluster_height.min(ceiling.unwrap() - f),
+                            None => cluster_height,
+                        };
+                        // getSpeleothemHeight: density float gate -> clampedMap bias
+                        if rng.next_f32() > density_v {
+                            stalactite_height = 0;
+                        } else {
+                            let distance = dx.abs() + dz.abs();
+                            let mean = clamped_map(
+                                f64::from(distance),
+                                0.0,
+                                f64::from(max_center_bias),
+                                f64::from(max_this) / 2.0,
+                                0.0,
+                            );
+                            stalactite_height = clamped_normal_int(
+                                rng, 0.0, f64::from(max_this), mean,
+                                f64::from(height_deviation),
+                            );
+                        }
+                    }
+                    let want_stalagmite = rng.next_f64() < chance;
+                    let mut stalagmite_height = 0;
+                    if floor.is_some() && want_stalagmite && !is_lava(BlockPos::new(pos.x, floor.unwrap(), pos.z)) {
+                        let floor_thickness = thickness_prov.sample(rng);
+                        replace_base_blocks(
+                            ctx, base_block, replaceable_tag,
+                            BlockPos::new(pos.x, floor.unwrap(), pos.z),
+                            floor_thickness, -1, ops,
+                        );
+                        if ceiling.is_some() {
+                            let delta = rng.next_int_bound(2 * max_diff + 1) - max_diff;
+                            stalagmite_height = (stalactite_height + delta).max(0);
+                        } else if rng.next_f32() > density_v {
+                            stalagmite_height = 0;
+                        } else {
+                            let distance = dx.abs() + dz.abs();
+                            let mean = clamped_map(
+                                f64::from(distance),
+                                0.0,
+                                f64::from(max_center_bias),
+                                f64::from(cluster_height) / 2.0,
+                                0.0,
+                            );
+                            stalagmite_height = clamped_normal_int(
+                                rng, 0.0, f64::from(cluster_height), mean,
+                                f64::from(height_deviation),
+                            );
+                        }
+                    }
+                    let mut act_stalactite = stalactite_height;
+                    let mut act_stalagmite = stalagmite_height;
+                    if ceiling.is_some()
+                        && floor.is_some()
+                        && ceiling.unwrap() - stalactite_height
+                            <= floor.unwrap() + stalagmite_height
+                    {
+                        let floor_y = floor.unwrap();
+                        let ceiling_y = ceiling.unwrap();
+                        let lowest_stalactite_bottom =
+                            (ceiling_y - stalactite_height).max(floor_y + 1);
+                        let highest_stalagmite_top =
+                            (floor_y + stalagmite_height).min(ceiling_y - 1);
+                        // randomBetweenInclusive(lowest, highest+1)
+                        let bottom = rng.next_int_bound(
+                            (highest_stalagmite_top + 1 - lowest_stalactite_bottom + 1).max(1),
+                        ) + lowest_stalactite_bottom;
+                        let top = bottom - 1;
+                        act_stalactite = ceiling_y - bottom;
+                        act_stalagmite = top - floor_y;
+                    }
+                    let merge_tips = rng.next_bits(1) != 0
+                        && act_stalactite > 0
+                        && act_stalagmite > 0
+                        && ceiling.is_some()
+                        && floor.is_some()
+                        && act_stalactite + act_stalagmite
+                            == ceiling.unwrap() - floor.unwrap() - 1;
+                    if let Some(cy) = ceiling {
+                        grow_speleothem(
+                            ctx, base_block, replaceable_tag, pointed_block,
+                            BlockPos::new(pos.x, cy - 1, pos.z), 0,
+                            act_stalactite, merge_tips, ops,
+                        );
+                    }
+                    if let Some(fy) = floor {
+                        grow_speleothem(
+                            ctx, base_block, replaceable_tag, pointed_block,
+                            BlockPos::new(pos.x, fy + 1, pos.z), 1,
+                            act_stalagmite, merge_tips, ops,
+                        );
+                    }
+                }
+            }
+            dz += 1;
+        }
+        dx += 1;
+    }
+    true
+}
+
+/// ClampedNormalFloat.sample + (int) cast — vanilla
+/// randomBetweenBiased -> (int) ClampedNormalFloat.sample(random, mean,
+/// deviation, min, maxExclusive).
+fn clamped_normal_int(rng: &mut WorldgenRandom, min: f64, max: f64, mean: f64, dev: f64) -> i32 {
+    let g = rng.next_gaussian();
+    let v = mean + g * dev;
+    let c = if v < min { min } else if v > max { max } else { v };
+    c as i32
+}
+
+/// canPlacePool: target block not water/base/pointed, no water above, all 4
+/// horizontal neighbors + below are base-stone-or-water.
+fn can_place_pool(
+    ctx: &PlaceCtx,
+    base_block: &str,
+    pointed_block: &str,
+    replaceable_tag: &str,
+    pos: BlockPos,
+) -> bool {
+    let water = &["minecraft:water".to_string()];
+    let name = ctx.level.state_name(pos);
+    if name == "minecraft:water" || name == base_block || name == pointed_block {
+        return false;
+    }
+    if ctx.level.fluid_is(
+        BlockPos::new(pos.x, pos.y + 1, pos.z),
+        water,
+    ) {
+        return false;
+    }
+    for (dx, _, dz) in [
+        (0, 0, -1),
+        (0, 0, 1),
+        (-1, 0, 0),
+        (1, 0, 0),
+    ] {
+        let np = BlockPos::new(pos.x + dx, pos.y, pos.z + dz);
+        let ok = ctx.level.tag_is(np, "minecraft:base_stone_overworld")
+            || ctx.level.fluid_is(np, water);
+        if !ok {
+            return false;
+        }
+    }
+    let bp = BlockPos::new(pos.x, pos.y - 1, pos.z);
+    ctx.level.tag_is(bp, "minecraft:base_stone_overworld")
+        || ctx.level.fluid_is(bp, water)
+}
+
+/// replaceBlocksWithBaseBlocks: walk `count` blocks in `dir`, write the base
+/// block while the replaceable tag matches, stop on the first miss.
+fn replace_base_blocks(
+    ctx: &PlaceCtx,
+    base_block: &str,
+    replaceable_tag: &str,
+    first: BlockPos,
+    count: i32,
+    dir: i32,
+    ops: &mut Vec<DecoOp>,
+) {
+    let mut y = first.y;
+    for _ in 0..count {
+        let p = BlockPos::new(first.x, y, first.z);
+        if !ctx.level.tag_is(p, replaceable_tag) {
+            return;
+        }
+        ctx.emit(ops, p, base_block, 0);
+        y += dir;
+    }
+}
+
+/// SpeleothemUtils.growSpeleothem: guard on the block opposite the tip, then
+/// the BASE/MIDDLE/FRUSTUM/TIP(_MERGE) column with waterlogged resolution.
+fn grow_speleothem(
+    ctx: &PlaceCtx,
+    base_block: &str,
+    replaceable_tag: &str,
+    pointed_block: &str,
+    start: BlockPos,
+    tip: u8,
+    height: i32,
+    merged_tip: bool,
+    ops: &mut Vec<DecoOp>,
+) {
+    let _ = base_block;
+    // guard: block at start.relative(tip.opposite()) must be base
+    let gy = match tip {
+        0 => start.y + 1, // tip DOWN -> opposite UP
+        _ => start.y - 1, // tip UP -> opposite DOWN
+    };
+    let guard = BlockPos::new(start.x, gy, start.z);
+    let is_base = ctx.level.state_name(guard) == base_block
+        || ctx.level.tag_is(guard, replaceable_tag);
+    if !is_base {
+        return;
+    }
+    let tip_name = if tip == 0 { "down" } else { "up" };
+    let mut states: Vec<&str> = Vec::with_capacity(height.max(0) as usize);
+    if height >= 3 {
+        states.push("base");
+        for _ in 0..(height - 3) {
+            states.push("middle");
+        }
+    }
+    if height >= 2 {
+        states.push("frustum");
+    }
+    if height >= 1 {
+        states.push(if merged_tip { "tip_merge" } else { "tip" });
+    }
+    let step: i32 = if tip == 0 { -1 } else { 1 };
+    let mut py = start.y;
+    for th in states {
+        let p = BlockPos::new(start.x, py, start.z);
+        let wl = if ctx
+            .level
+            .fluid_is(p, &["minecraft:water".to_string()])
+        {
+            "true"
+        } else {
+            "false"
+        };
+        let st = format!(
+            "{pointed_block}[thickness={th},tip_direction={tip_name},waterlogged={wl}]"
+        );
+        ctx.emit(ops, p, &st, 0);
+        py += step;
+    }
 }
 
 /// SeagrassFeature: dx/dz offsets (2 draws each), OCEAN_FLOOR height, water

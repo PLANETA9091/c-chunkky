@@ -104,6 +104,74 @@ impl IntProvider {
             }
         }
     }
+
+    /// IntProvider.getMinValue (vanilla accessor) — used by large_dripstone
+    /// which draws randomBetweenInclusive(min, clampedMax) against the
+    /// provider BOUNDS instead of sampling it.
+    pub fn min_value(&self) -> i32 {
+        match self {
+            IntProvider::Constant(v) => *v,
+            IntProvider::Uniform { lo, .. }
+            | IntProvider::BiasedToBottom { lo, .. }
+            | IntProvider::Clamped { lo, .. }
+            | IntProvider::ClampedNormal { lo, .. }
+            | IntProvider::Trapezoid { lo, .. }
+            | IntProvider::VeryBiasedToBottom { lo, .. } => *lo,
+            IntProvider::WeightedList { entries } => entries
+                .iter()
+                .map(|(p, _)| p.min_value())
+                .min()
+                .unwrap_or(0),
+        }
+    }
+
+    /// IntProvider.getMaxValue (vanilla accessor).
+    pub fn max_value(&self) -> i32 {
+        match self {
+            IntProvider::Constant(v) => *v,
+            IntProvider::Uniform { hi, .. }
+            | IntProvider::BiasedToBottom { hi, .. }
+            | IntProvider::Clamped { hi, .. }
+            | IntProvider::ClampedNormal { hi, .. }
+            | IntProvider::Trapezoid { hi, .. }
+            | IntProvider::VeryBiasedToBottom { hi, .. } => *hi,
+            IntProvider::WeightedList { entries } => entries
+                .iter()
+                .map(|(p, _)| p.max_value())
+                .max()
+                .unwrap_or(0),
+        }
+    }
+}
+
+/// FloatProvider (26.3 valueproviders/float): the speleothem family configs.
+/// Uniform.sample = Mth.randomBetween(lo, hi) = nextFloat * (hi - lo) + lo;
+/// ClampedNormalFloat.sample = (float) Mth.clamp(mean + nextGaussian * dev,
+/// min, max) — f64 gaussian math, f64 clamp, then a single f32 cast.
+#[derive(Clone, Copy, Debug)]
+pub enum FloatProv {
+    Uniform { lo: f32, hi: f32 },
+    ClampedNormal { mean: f32, dev: f32, min: f32, max: f32 },
+}
+
+impl FloatProv {
+    #[inline]
+    pub fn sample(&self, rng: &mut WorldgenRandom) -> f32 {
+        match *self {
+            FloatProv::Uniform { lo, hi } => rng.next_f32() * (hi - lo) + lo,
+            FloatProv::ClampedNormal { mean, dev, min, max } => {
+                let v = (mean as f64) + rng.next_gaussian() * (dev as f64);
+                let c = if v < min as f64 {
+                    min as f64
+                } else if v > max as f64 {
+                    max as f64
+                } else {
+                    v
+                };
+                c as f32
+            }
+        }
+    }
 }
 
 /// VerticalAnchor (26.3): resolved against the WorldGenerationContext at

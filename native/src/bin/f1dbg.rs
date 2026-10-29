@@ -236,6 +236,8 @@ fn main() {
                     crussty_chunkgen::features_json::FeatureCfg::RootSystem { .. } => "RootSystem".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::FallenTree { .. } => "FallenTree".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::Speleothem { .. } => "Speleothem".to_string(),
+                    crussty_chunkgen::features_json::FeatureCfg::LargeDripstone { .. } => "LargeDripstone".to_string(),
+                    crussty_chunkgen::features_json::FeatureCfg::SpeleothemCluster { .. } => "SpeleothemCluster".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::Unsupported(e) => format!("Unsupported({e})"),
                 };
                 println!("  cfg {n}: {k}");

@@ -154,6 +154,24 @@ fn index_states_cfg(
                 }
             }
         }
+        FC::SpeleothemCluster { base_block, pointed_block, .. } => {
+            note("minecraft:water", states, idx);
+            note(base_block, states, idx);
+            for th in ["base", "frustum", "middle", "tip", "tip_merge"] {
+                for td in ["down", "up"] {
+                    for wl in ["false", "true"] {
+                        note(
+                            &format!("{pointed_block}[thickness={th},tip_direction={td},waterlogged={wl}]"),
+                            states,
+                            idx,
+                        );
+                    }
+                }
+            }
+        }
+        FC::LargeDripstone { .. } => {
+            note("minecraft:dripstone_block", states, idx);
+        }
         _ => {}
     }
 }
