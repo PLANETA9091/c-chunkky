@@ -2039,7 +2039,14 @@ fn interpolated_volume(
                     && cell_output_z >= 0
                     && cell_output_x + 4 <= vol.size_x
                     && cell_output_y + 8 <= vol.size_y
-                    && cell_output_z + 4 <= vol.size_z;
+                    && cell_output_z + 4 <= vol.size_z
+                    // the +1 corner planes must EXIST (the scalar loop clamps
+                    // next_cell_* to size-1 on the last row; the kernels read
+                    // them unclamped — a clamped cell must take the scalar
+                    // path, both for parity and for the gather's bounds).
+                    && cell_x + 1 < cell_volume.size_x
+                    && cell_yy + 1 < cell_volume.size_y
+                    && cell_z + 1 < cell_volume.size_z;
                 if full && vec_w == 3 {
                     #[cfg(target_arch = "x86_64")]
                     unsafe {
