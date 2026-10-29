@@ -94,6 +94,68 @@ public final class GenStats {
     private GenStats() {
     }
 
+    // ---- region-bounded honest window -------------------------------------
+    // Counts ONLY chunks inside the timed rectangle — immune to spawn-backlog
+    // pollution (observed: fills=314 for a 144-chunk window, 2026-10-28: the
+    // spawn 13x13 throttles under forceload tickets and resumes INSIDE the
+    // timed window; gamerule + drain cannot cancel pending tasks).
+    // The span is server-side (first in-window fill start .. last in-window
+    // fill end): no rcon latency, no 0.5s poll granularity.
+    private static volatile int WIN_MIN_X, WIN_MIN_Z, WIN_N;
+    private static final AtomicLong WIN_INSIDE = new AtomicLong();
+    private static final AtomicLong WIN_TOTAL = new AtomicLong();
+    private static final AtomicLong WIN_NATIVE = new AtomicLong();
+    private static final AtomicLong WIN_LAYOUT = new AtomicLong();
+    private static final AtomicLong WIN_BEARD = new AtomicLong();
+    private static final AtomicLong WIN_MARKS = new AtomicLong();
+    private static volatile long WIN_T_FIRST, WIN_T_LAST;
+
+    /** Arm the window: only chunks with x in [rx..rx+n], z in [rz..rz+n] are
+     *  counted; zeroes the window counters. Global stats are untouched. */
+    static void window(int rx, int rz, int n) {
+        WIN_MIN_X = rx;
+        WIN_MIN_Z = rz;
+        WIN_N = n;
+        WIN_INSIDE.set(0);
+        WIN_TOTAL.set(0);
+        WIN_NATIVE.set(0);
+        WIN_LAYOUT.set(0);
+        WIN_BEARD.set(0);
+        WIN_MARKS.set(0);
+        WIN_T_FIRST = 0;
+        WIN_T_LAST = 0;
+    }
+
+    /** In-window fill count so far (fast poll for the harness). */
+    static long winInside() {
+        return WIN_INSIDE.get();
+    }
+
+    /** Server-side window snapshot: span + per-chunk component breakdown
+     *  restricted to EXACTLY the timed rectangle. */
+    static String windowSnapshot() {
+        if (WIN_N == 0) {
+            return "window: never armed";
+        }
+        long n = WIN_INSIDE.get();
+        if (n == 0) {
+            return String.format("window[%d..%d,%d..%d] inside=0", WIN_MIN_X,
+                    WIN_MIN_X + WIN_N, WIN_MIN_Z, WIN_MIN_Z + WIN_N);
+        }
+        double spanMs = (WIN_T_LAST - WIN_T_FIRST) / 1e6;
+        double cnt = n;
+        return String.format(
+                "window[%d..%d,%d..%d] inside=%d span=%.2fms e2e=%.2fms/chunk"
+                        + " gen=%.2f native=%.2f layout=%.2f beard=%.2f marks=%.2f",
+                WIN_MIN_X, WIN_MIN_X + WIN_N, WIN_MIN_Z, WIN_MIN_Z + WIN_N,
+                n, spanMs, spanMs / n,
+                WIN_TOTAL.get() / cnt / 1e6,
+                WIN_NATIVE.get() / cnt / 1e6,
+                WIN_LAYOUT.get() / cnt / 1e6,
+                WIN_BEARD.get() / cnt / 1e6,
+                WIN_MARKS.get() / cnt / 1e6);
+    }
+
     /** Zero the ring buffer + all counters: starts a fresh measurement window
      *  (used after the JIT-warmup pregen pass so the reported window is
      *  steady-state — the shared CI runner makes cold windows unreproducible). */
@@ -128,7 +190,8 @@ public final class GenStats {
         java.util.Arrays.fill(NATIVE_NANOS, 0L);
     }
 
-    static void record(long nanos, long nativeNs, long layoutNs, long beardNs, long marksNs) {
+    static void record(long nanos, long nativeNs, long layoutNs, long beardNs,
+                       long marksNs, int cx, int cz) {
         long i = COUNT.getAndIncrement();
         NANOS[(int) (i % RING)] = nanos;
         NATIVE_NANOS[(int) (i % RING)] = nativeNs;
@@ -137,6 +200,20 @@ public final class GenStats {
         LAYOUT_TOTAL.addAndGet(layoutNs);
         BEARD_TOTAL.addAndGet(beardNs);
         MARKS_TOTAL.addAndGet(marksNs);
+        if (WIN_N > 0 && cx >= WIN_MIN_X && cx <= WIN_MIN_X + WIN_N
+                && cz >= WIN_MIN_Z && cz <= WIN_MIN_Z + WIN_N) {
+            long tEnd = System.nanoTime();
+            if (WIN_T_FIRST == 0) {
+                WIN_T_FIRST = tEnd - nanos; // start of the first in-window fill
+            }
+            WIN_T_LAST = tEnd;
+            WIN_INSIDE.incrementAndGet();
+            WIN_TOTAL.addAndGet(nanos);
+            WIN_NATIVE.addAndGet(nativeNs);
+            WIN_LAYOUT.addAndGet(layoutNs);
+            WIN_BEARD.addAndGet(beardNs);
+            WIN_MARKS.addAndGet(marksNs);
+        }
     }
 
     /** Human-readable stats over the ring buffer. */

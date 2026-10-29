@@ -57,7 +57,7 @@ online-mode=false
 enable-rcon=true
 rcon.port=$PORT
 rcon.password=crussty
-sync-chunk-writes=true
+sync-chunk-writes=false
 view-distance=10
 simulation-distance=10
 spawn-protection=0
@@ -68,6 +68,22 @@ EOF
 
 stop_server
 rm -rf "$SRV/world" "$SRV/world_nether" "$SRV/world_the_end"
+# Kill the spawn backlog AT THE SOURCE: without a pre-set paper-world-defaults
+# the first boot generates ~169 spawn chunks (13x13) in the background; they
+# throttle under forceload tickets and resume INSIDE the timed window
+# (fills=314/320 for 144-chunk windows; gamerule spawnChunkRadius 0 does not
+# cancel already-scheduled tasks; force-drain fails the same way). With
+# keep-spawn-loaded:false the spawn area is never generated at boot.
+mkdir -p "$SRV/config/paper-world-defaults/worlds"
+# global defaults + per-world override (both paths, whichever Paper honours)
+cat > "$SRV/config/paper-world-defaults.yml" <<EOF2
+chunks:
+  keep-spawn-loaded: false
+EOF2
+cat > "$SRV/config/paper-world-defaults/worlds/world.yml" <<EOF2
+chunks:
+  keep-spawn-loaded: false
+EOF2
 cp "$PLUGIN_JAR" "$SRV/plugins/CrusstyGen.jar"
 cp "$PROBE_JAR" "$SRV/plugins/CrusstyProbe263.jar"
 # CRITICAL: wire the world generator or the noise stage stays VANILLA.
@@ -154,21 +170,25 @@ for i in $(seq 1 480); do
   last=$c; sleep 0.5
 done
 
-# ---- timed window: reset stats, forceload fresh NxN, poll to completion -----
-$RCON "crusgenstats reset" >/dev/null
+# ---- timed window: arm the REGION-BOUNDED window, forceload fresh NxN, poll
+# to completion via wincount (0.05s granularity). The honest e2e number is
+# the plugin-side span (first..last in-window fill) — immune to rcon latency
+# and poll granularity; harness wall is kept for the dispatch overhead view.
+$RCON "crusgenstats window $RX $RZ $N" >/dev/null
 target=$(( (N + 1) * (N + 1) ))
 t0=$(date +%s.%N)
 $RCON "forceload add $((RX * 16)) $((RZ * 16)) $(((RX + N) * 16 + 15)) $(((RZ + N) * 16 + 15))" >/dev/null
 done=0
-for i in $(seq 1 480); do
-  c=$(stats_chunks)
+for i in $(seq 1 6000); do
+  c=$($RCON wincount 2>/dev/null | grep -o "window_inside=[0-9]*" | cut -d= -f2)
+  c=${c:-0}
   if [ "$c" -ge "$target" ]; then done=1; break; fi
-  if (( i % 60 == 0 )); then echo "  [window progress] chunks=$c / $target"; fi
-  sleep 0.5
+  if (( i % 600 == 0 )); then echo "  [window progress] inside=$c / $target"; fi
+  sleep 0.05
 done
 t1=$(date +%s.%N)
 if [ "$done" != "1" ]; then
-  echo "E2E WINDOW TIMEOUT (chunks=$c / $target)"
+  echo "E2E WINDOW TIMEOUT (inside=$c / $target)"
 fi
 
 nchunks=$(( (N + 1) * (N + 1) ))
@@ -181,7 +201,7 @@ import sys
 t0, t1, n, deco = float(sys.argv[1]), float(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 w = t1 - t0
 print(f"=== e2e window ({n} chunks, fresh region, full-native, deco={deco}) ===")
-print(f"e2e_ms_per_chunk={w * 1000 / n:.1f}  wall={w:.2f}s  chunks={n}")
+print(f"harness_wall_ms_per_chunk={w * 1000 / n:.1f}  wall={w:.2f}s  chunks={n}")
 PYEOF
 
 echo "=== GenStats window breakdown (exactly the timed chunks) ==="

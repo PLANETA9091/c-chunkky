@@ -911,7 +911,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         long tMk0 = System.nanoTime();
         markFluidUpdates(chunkData, marks, nMarks);
         long tMarks = System.nanoTime() - tMk0;
-        GenStats.record(System.nanoTime() - t0, tNative, tLayout, tBeard, tMarks);
+        GenStats.record(System.nanoTime() - t0, tNative, tLayout, tBeard, tMarks, chunkX, chunkZ);
     }
 
     /** Dispatches to the bulk section path when available, else v1. */

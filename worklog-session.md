@@ -3207,3 +3207,38 @@ PROF (314 филлов, смесь): noise 12.5, shell 6.6, gradient 0.93, splin
 NEXT: (1) чистый замер после 6f42df8 — база для всех решений;
 (2) Batch A декод+рантайм; (3) fill в сервере ~16мс → бенч-уровень
 (память/кэш); (4) 1мс-цель fill и 4мс e2e — после чистой базы.
+
+---
+## cont-60: ЧЕСТНОЕ ОКНО — keep-spawn-loaded:false + РЕГИОН-ОГРАНИЧЕННЫЙ СЧЁТ
+
+Задача пользователя: «каждый чанк E2E 1мс, а не только часть!»
+
+ПОЧЕМУ 6f42df8 НЕ СРАБОТАЛ: чистый ран 856662e всё ещё shows chunks=314
+в 144-окне (ровно спавн 13x13=169 просачивается): «стабилен 8с» дренажа —
+фантом, Paper троттлит бэклог паузами >8с и возобновляет пачки ВНУТРИ
+окна. forceload remove не отменяет pending-таски — тот же механизм, что
+и у gamerule. Оба «фикса» гоняют метаигру с планировщиком.
+
+ФИКС-1 (источник): harness/e2e_ci.sh пишет config/paper-world-defaults.yml
+(+ worlds/world.yml) с chunks.keep-spawn-loaded: false ДО первой загрузки
+мира — спавн-регион вообще не генерится при буте. sync-chunk-writes=false
+(диск не является частью генерации).
+
+ФИКС-2 (атрибуция): регион-ограниченное окно в плагине.
+- GenStats: WIN_* счётчики, window(rx,rz,n)/winInside()/windowSnapshot();
+  record() принял (cx, cz) — в окно попадают ТОЛЬКО чанки прямоугольника.
+- span сервер-сайд: WIN_T_FIRST = t_end первого филла − его нанос,
+  WIN_T_LAST = t_end последнего — e2e = span/inside, иммунен к rcon-
+  латентности и гранулярности полла.
+- crusgenstats window RX RZ N | wincount (быстрый полл 0.05с) | полная
+  строка "honest window: window[..] inside=N span=..ms e2e=..ms/chunk
+  gen/native/layout/beard/marks".
+- Полл окна переведён с crusgenstats (тяжёлый sort ринга) на wincount.
+
+e2e_ci.sh теперь печатает harness_wall (диспетч-оверход) И честный span.
+Дренаж/тёпл-up оставлены (при keep-spawn-loaded:false они и правда
+завершаются). Все 5 окон ci.yml получают фиксы автоматически.
+
+NEXT: (1) CI-ран — верифицировать inside=144/144 и первые ЧЕСТНЫЕ числа;
+(2) fill-работа в сервере (interp_cell+noise) → SIMD-фронты; (3) deco
+Batch A; (4) свет+Paper-оверхед = span − gen — из честного окна.

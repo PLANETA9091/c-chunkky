@@ -64,11 +64,32 @@ public final class CrusstyGenPlugin extends JavaPlugin {
                 sender.sendMessage("[CrusstyGen] stats window reset");
                 return true;
             }
+            // Region-bounded honest window: arm the rectangle (chunk coords)
+            // and zero ONLY the window counters. Poll via "wincount", final
+            // numbers in the full snapshot's window line.
+            if (args.length >= 4 && args[0].equalsIgnoreCase("window")) {
+                try {
+                    int rx = Integer.parseInt(args[1]);
+                    int rz = Integer.parseInt(args[2]);
+                    int n = Integer.parseInt(args[3]);
+                    GenStats.window(rx, rz, n);
+                    sender.sendMessage("[CrusstyGen] window armed [" + rx + ".."
+                            + (rx + n) + "," + rz + ".." + (rz + n) + "]");
+                } catch (NumberFormatException e) {
+                    sender.sendMessage("[CrusstyGen] window: bad coords");
+                }
+                return true;
+            }
+            if (args.length >= 1 && args[0].equalsIgnoreCase("wincount")) {
+                sender.sendMessage("window_inside=" + GenStats.winInside());
+                return true;
+            }
             // Paper RCON delivers only ONE sendMessage per command — join the
             // three diagnostic lines into a single message or rcon consumers
             // lose [cpu] and jni_prof (observed 2026-10-15, prof sessions).
             StringBuilder sb = new StringBuilder(cpuLine())
-                    .append(" | [CrusstyGen] native noise stage: ").append(GenStats.snapshot());
+                    .append(" | [CrusstyGen] native noise stage: ").append(GenStats.snapshot())
+                    .append(" | [CrusstyGen] honest window: ").append(GenStats.windowSnapshot());
             try {
                 sb.append(" | [CrusstyGen] native deco stage: ").append(DecoStats.snapshot())
                         .append(DecoStats.delegateNames()).append(DecoStats.surviveHist()).append(DecoStats.hTyHist());
