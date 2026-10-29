@@ -3398,3 +3398,121 @@ mod col_kernel_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod trilinear_kernel_tests {
+    use super::*;
+
+    /// Bit-exactness of the vectorized trilinear cell fill vs the scalar
+    /// fill_cell over synthetic corner grids: varied magnitudes, signs, and
+    /// zeros (no NaN/inf — the contract covers finite densities). Runs every
+    /// cell of a full 4x8x4-tiled volume, all 128 outputs per cell compared
+    /// by bits.
+    #[test]
+    fn fill_cell_vector_bit_exact_vs_scalar() {
+        if !cfg!(target_arch = "x86_64") {
+            return;
+        }
+        let avx512 = std::arch::is_x86_feature_detected!("avx512f");
+        let avx2 = std::arch::is_x86_feature_detected!("avx2");
+        if !avx512 && !avx2 {
+            return;
+        }
+        // cell grid with +1 planes on every axis: 5 x (4*8+1) x 5 corners
+        let csx = 5i32;
+        let csy = 4 * 8 + 1;
+        let csz = 5i32;
+        let mut cell_buf = vec![0f32; (csx * csy * csz) as usize];
+        for (i, v) in cell_buf.iter_mut().enumerate() {
+            // Knuth LCG bit patterns -> varied magnitudes/signs (finite)
+            let b = (i as u32).wrapping_mul(2654435761).wrapping_add(0x1234_5678);
+            *v = f32::from_bits(b & 0x4F7F_FFFF);
+        }
+        let idx = |x: i32, y: i32, z: i32| {
+            (y + (x + z * csx) * csy) as usize
+        };
+        // out volume 16 x 32 x 16 at min 0 (four y-bands), cell grid covers it
+        let vol = DensityVolume {
+            size_x: 16,
+            size_y: 32,
+            size_z: 16,
+            min_x: 0,
+            min_y: 0,
+            min_z: 0,
+            step_x: 1,
+            step_y: 1,
+            step_z: 1,
+        };
+        let cell_volume = DensityVolume {
+            size_x: csx,
+            size_y: csy,
+            size_z: csz,
+            min_x: 0,
+            min_y: 0,
+            min_z: 0,
+            step_x: 4,
+            step_y: 8,
+            step_z: 4,
+        };
+        let inv_xz = 1.0f32 / 4.0;
+        let inv_y = 1.0f32 / 8.0;
+        let mut bad = 0usize;
+        for cz in 0..4i32 {
+            for cx in 0..4i32 {
+                for cy in 0..4i32 {
+                    let mut scalar_out = vec![0f32; (16 * 32 * 16) as usize];
+                    let mut vec_out = vec![0f32; (16 * 32 * 16) as usize];
+                    let nx = (cx + 1).min(csx - 1);
+                    // grid y-indices: band cy has corner PLANES cy and cy+1
+                    let ny = cy + 1;
+                    let c000 = cell_buf[idx(cx, cy, cz)];
+                    let c100 = cell_buf[idx(nx, cy, cz)];
+                    let c001 = cell_buf[idx(cx, cy, cz + 1)];
+                    let c101 = cell_buf[idx(nx, cy, cz + 1)];
+                    let c010 = cell_buf[idx(cx, ny, cz)];
+                    let c110 = cell_buf[idx(nx, ny, cz)];
+                    let c011 = cell_buf[idx(cx, ny, cz + 1)];
+                    let c111 = cell_buf[idx(nx, ny, cz + 1)];
+                    fill_cell(
+                        &mut scalar_out, &vol, &cell_volume, cx, cy, cz,
+                        c000, c100, c010, c110, c001, c101, c011, c111,
+                        4, 8, inv_xz, inv_y,
+                    );
+                    if avx512 {
+                        unsafe {
+                            fill_cell_v16(
+                                &mut vec_out, &vol, &cell_volume, &cell_buf,
+                                cx, cy, cz, cx * 4, cy * 8, cz * 4, inv_xz, inv_y,
+                            );
+                        }
+                    } else {
+                        unsafe {
+                            fill_cell_v8(
+                                &mut vec_out, &vol, &cell_volume, &cell_buf,
+                                cx, cy, cz, cx * 4, cy * 8, cz * 4, inv_xz, inv_y,
+                            );
+                        }
+                    }
+                    for i in 0..(16 * 32 * 16) as usize {
+                        if scalar_out[i].to_bits() != vec_out[i].to_bits() {
+                            if bad < 8 {
+                                let sy = 32usize;
+                                let sx = 16usize;
+                                let y = i % sy;
+                                let xz = i / sy;
+                                let x = xz % sx;
+                                let z = xz / sx;
+                                panic!(
+                                    "trilinear kernel diff cell({cx},{cy},{cz}) at (x={x},y={y},z={z}): scalar={:08x} vec={:08x}",
+                                    scalar_out[i].to_bits(), vec_out[i].to_bits()
+                                );
+                            }
+                            bad += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(bad, 0, "trilinear kernel bit-parity failures: {bad}");
+    }
+}
