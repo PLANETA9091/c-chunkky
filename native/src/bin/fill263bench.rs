@@ -18,6 +18,7 @@ fn main() {
     let rounds = 7;
 
     let mut t_fill = Vec::new();
+    let mut t_fill_cold = Vec::new();
     let mut t_aq = Vec::new();
     let mut t_vol = Vec::new();
     let mut t_sub = Vec::new();
@@ -31,12 +32,18 @@ fn main() {
         g.fill_chunk(cx, cz, &[0, 0], &mut out, &mut marks);
     }
 
-    for _ in 0..rounds {
+    for round in 0..rounds {
         for &(cx, cz) in &chunks {
             // full fill
             let t0 = std::time::Instant::now();
             g.fill_chunk(cx, cz, &[0, 0], &mut out, &mut marks);
-            t_fill.push(t0.elapsed().as_secs_f64() * 1e3);
+            let dt = t0.elapsed().as_secs_f64() * 1e3;
+            t_fill.push(dt);
+            // round 0 = first fill of each chunk (cold CPU caches, the state
+            // the SERVER actually pays: every chunk is generated exactly once)
+            if round == 0 {
+                t_fill_cold.push(dt);
+            }
 
             // stage replication (fresh ctx like fill_chunk)
             let volume =
@@ -126,6 +133,15 @@ fn main() {
         t_fill.iter().cloned().fold(f64::MAX, f64::min),
         t_fill.iter().cloned().fold(f64::MIN, f64::max),
     );
+    // cold median: what a never-before-generated chunk costs wall-clock
+    // (round 0 above) — the server-visible number, not the cache-warmed loop.
+    if !t_fill_cold.is_empty() {
+        println!(
+            "fill_chunk  COLD   median {:.2}ms  (round 0, {} chunks — honest single-touch)",
+            median(&mut t_fill_cold),
+            t_fill_cold.len(),
+        );
+    }
     println!(
         "aquifer ctor median {:.2}ms  (sum-of-parts check)",
         median(&mut t_aq)
