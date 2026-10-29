@@ -2133,7 +2133,7 @@ unsafe fn fill_cell_v16(
     );
     let cb = cell_buf.as_ptr();
     let g = |off: i32| {
-        _mm512_i32gather_ps(_mm512_add_epi32(cell_idx, _mm512_set1_epi32(off)), cb, 4)
+        _mm512_i32gather_ps(cb, _mm512_add_epi32(cell_idx, _mm512_set1_epi32(off)))
     };
     let a0 = g(0); // v000 (x,   y,   z)
     let a1 = g(csy); // v100 (x+1, y,   z)
@@ -2227,7 +2227,7 @@ unsafe fn fill_cell_v8(
             _mm256_add_epi32(cell_row, _mm256_set1_epi32(zr * csx * csy)),
         );
         let g = |off: i32| {
-            _mm256_i32gather_ps(_mm256_add_epi32(idx, _mm256_set1_epi32(off)), cb, 4)
+            _mm256_i32gather_ps(cb, _mm256_add_epi32(idx, _mm256_set1_epi32(off)))
         };
         let a0 = g(0);
         let a1 = g(csy);
