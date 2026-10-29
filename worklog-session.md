@@ -3377,3 +3377,38 @@ terrain interp_cell (5-7мс), Paper-сторона ~90мс span−gen (carvers/
 light/диспетч — не в GenStats, нужен свой таймер).
 БЕНЧ-ШУМ РАННЕРА: fill_chunk median 2.69->4.59 между ранами (±40-70%,
 соседние VM) — сравнивать с COLD на том же ране.
+
+---
+## cont-63: KEEP-GRID В ПРОДЕ — e2e 187 -> 56.5мс/чанк (3.3x), gen 100 -> 26мс (3.9x)
+
+CI a63165ac (run 40882014900, всё зелёное; два промежуточных фейла —
+синтаксис Option<( )> и тип beard Vec<i32> vs &[i64] — байтовая
+проверка скобок добавлена в процесс).
+
+HONEST WINDOW (timing, prof-on): e2e=56.48 gen=25.98 native=25.65
+carver=0.00 | stage[terrain=5.675 surface=8.045 hood=6.540
+hood_compute=6.511 ncomp=1174 park=0.046] при 942 филлах.
+deco=1 окно: e2e=67.47 carver=0.11. no-beard: e2e=56.75.
+
+БЕНЧ SERVER-PARITY (fill263bench, те же чанки): server_fill median
+4.59ms ≈ fill_chunk 4.68 — хвост (park+hood+surface) стоит ~0 после
+keep-grid; COLD 6.46 (+1.3 хвост). SIMD parity 0/25. (Числа ране
+шумят ±40% — соседние VM; сравнивать в пределах одного рана.)
+
+РАЗБОР ОСТАТКА e2e 56.5: gen 26 (terrain 5.7 + surface 8.0 + hood 6.5
++ JNI/misc) + ~30мс span−gen = light + Paper-диспетч + филлы соседей
+волны (carver=0.1 — нативные карверы копеечные). hood 6.5 = остаточные
+on-the-fly у фронта волны (соседний BIOMES ещё не runs; store-back
+закрывает последующие) — 1174 вычислений на сессию.
+
+СЛЕДУЮЩИЕ ФРОНТЫ (к 1мс):
+1. terrain interp_cell 5.7 -> y-векторизация (колоночные кернелы уже
+   есть; узкое место — trilinear-цепь per-cell); x/z-лайны независимы
+   -> f32x16 gather-кернел, бит-точность сохраняется (все лейны
+   повторяют ту же цепочку инкрементных adds, как vanilla).
+2. surface 8.0 -> слияние 3 aux-объёмов: toggle/mask cell-гриды уже
+   шэрутся кэшем ctx_ore; остальное — 3 trilinear-прохода -> один
+   SIMD-проход 4 слотов.
+3. hood 6.5 -> prefetch соседних гридов /计算 раньше фронта.
+4. Paper-side ~30мс: light+диспетч — вне нативного контроля, следить
+   по окнам.
