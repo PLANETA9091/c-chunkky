@@ -260,6 +260,9 @@ pub enum BlockPredicate {
     /// off = predicate offset (vanilla MatchingBlocksTest/MatchingFluidsTest)
     MatchingBlocks { ids: Vec<String>, off: (i32, i32, i32) },
     MatchingFluids { ids: Vec<String>, off: (i32, i32, i32) },
+    /// BlockState.is(TagKey) via the bridge (DecoLevelExt::tag_is); sugar_cane
+    /// block_column allowed-placement uses matching_block_tag(air).
+    MatchingTag { tag: String, off: (i32, i32, i32) },
     Replaceable,
     Solid,
     HasSturdyFace { offset: (i32, i32, i32), dir: u8 },
@@ -304,6 +307,10 @@ pub fn pred_matches(
         BlockPredicate::MatchingFluids { ids, off } => {
             let p = BlockPos::new(pos.x + off.0, pos.y + off.1, pos.z + off.2);
             Some(level.fluid_is(p, ids))
+        }
+        BlockPredicate::MatchingTag { tag, off } => {
+            let p = BlockPos::new(pos.x + off.0, pos.y + off.1, pos.z + off.2);
+            Some(level.tag_is(p, tag))
         }
         BlockPredicate::Replaceable => Some(level.is_replaceable(pos)),
         BlockPredicate::Solid => Some(level.is_solid(pos)),

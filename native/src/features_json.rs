@@ -763,6 +763,10 @@ fn decode_predicate(j: &Json) -> Option<BlockPredicate> {
             };
             BlockPredicate::HasSturdyFace { offset: (ox, oy, oz), dir }
         }
+        "minecraft:matching_block_tag" => {
+            let tag = j.get("tag").and_then(|v| v.as_str())?.to_string();
+            BlockPredicate::MatchingTag { tag, off: decode_offset(j) }
+        }
         "minecraft:would_survive" => {
             let s = state_string(j.get("state")?)?;
             BlockPredicate::WouldSurvive { state: s }
