@@ -125,11 +125,29 @@ fn main() {
             let mut vctx = SamplerCtx263::cached();
             let mut vbuf = vctx.scratch.acquire(volume.size());
             g.final_density.sample_volume(&mut vctx, &mut vbuf, &volume);
-            if sbuf
-                .iter()
-                .zip(vbuf.iter())
-                .any(|(a, b)| a.to_bits() != b.to_bits())
-            {
+            let mut diffs = 0usize;
+            for (i, (a, b)) in sbuf.iter().zip(vbuf.iter()).enumerate() {
+                if a.to_bits() != b.to_bits() {
+                    if diffs < 3 {
+                        // index -> (x, y, z) with y fastest:
+                        // i = y + (x + z*sx)*sy
+                        let sy = volume.size_y as usize;
+                        let sx = volume.size_x as usize;
+                        let y = i % sy;
+                        let xz = i / sy;
+                        let x = xz % sx;
+                        let z = xz / sx;
+                        println!(
+                            "  SIMD DIFF {} chunk({},{}) idx={} (x={},y={},z={}) scalar={:08x} ({}) vector={:08x} ({})",
+                            diffs, cx, cz, i, x, y, z,
+                            a.to_bits(), a, b.to_bits(), b
+                        );
+                    }
+                    diffs += 1;
+                }
+            }
+            if diffs > 0 {
+                println!("  SIMD DIFF total {} (chunk {},{})", diffs, cx, cz);
                 simd_bad += 1;
             }
             sctx.scratch.release(sbuf);
