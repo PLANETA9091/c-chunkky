@@ -204,7 +204,8 @@ fn main() {
             | FeatureCfg::Kelp
             | FeatureCfg::UnderwaterMagma { .. }
             | FeatureCfg::MultifaceGrowth { .. }
-            | FeatureCfg::Vines => None,
+            | FeatureCfg::Vines
+            | FeatureCfg::FallenTree { .. } => None,
             FeatureCfg::BlockColumn { layers, allowed, .. } => {
                 if matches!(allowed, BlockPredicate::Unsupported(_)) {
                     return Some("bc-allowed".into());
