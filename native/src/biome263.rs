@@ -50,23 +50,24 @@ pub(crate) fn quantize_f32(v: f32) -> i64 {
 /// vanilla fillBiomesFromNoise order:
 /// out[s * 64 + x * 16 + y * 4 + z], sections ascending.
 ///
-/// SEMANTICS (pinned by CI run 41116221438 evidence): the native POINT
-/// resolution is bit-equal to the vanilla Climate.Sampler sample for every
-/// probed quart (BIOME_DEBUG tp==nprobe on all six fields), and the vanilla
-/// live dump agrees with point semantics at 138/144 chunks. So the grid is
-/// filled PER POINT:
+/// SEMANTICS (pinned by CI runs 41116221438 + 41120705523 evidence): the
+/// native POINT resolution is bit-equal to the vanilla Climate.Sampler
+/// sample for every probed quart (BIOME_DEBUG tp==nprobe on all six
+/// fields). The grid is filled POINT-EXACT with a depth volume fast path:
 /// - the five y-invariant fields (t, v, c, e, r) evaluate once per (x, z)
 ///   column at by0 = min_y — the by0==own-y bit-equality is proven by the
 ///   (a)-check in fill263_grid_naive_parity_at_1024_1024;
-/// - depth evaluates PER QUART with the scalar walk. The former 4x96x4
-///   quart-volume fast path is REMOVED: its fill is shape-dependent (the
-///   4x96x4 column kernels diverge from per-point evaluation at whole
-///   columns — CI 41111275154: point 0.98004675 vs volume 1.0593824 at
-///   (1024,1024); CI 41116221438 DIAG: 1511/1536 quart indexes diverge) and
-///   it was the direct cause of the 6 divergent chunks. The 1x1x1-volume
-///   bisector proved every tree node point-equal, so the corruption lives
-///   in the multi-row column kernels — to be root-caused separately before
-///   any volume fast path returns.
+/// - depth evaluates through ONE 4x96x4 quart-volume fill. ROOT CAUSE of
+///   the whole 6-divergent-chunks saga (run 41120705523, full-shape
+///   per-node bisector): the volume machinery is BIT-EXACT — 0 divergent
+///   nodes at BOTH coordinate hypotheses — the old fast path simply
+///   computed the volume at min_x/min_z = cx*64/cz*64 (a 3-chunk shift
+///   right/down) instead of the chunk block origin cx*16/cz*16, and every
+///   earlier "point 0.98004675 vs volume 1.0593824" / 1511-of-1536 DIAG
+///   discrepancy compared that shifted buffer against the chunk's own
+///   points. The restored fast path uses cx*16/cz*16; the strict
+///   fast==naive parity test in fill263_grid_naive_parity_at_1024_1024
+///   stays armed and pins exactly this duality.
 pub fn fill_biomes263(
     st: &BiomeState263,
     min_y: i32,
@@ -96,9 +97,33 @@ pub fn fill_biomes263(
             col_vals[(x * 4 + z) as usize] = row;
         }
     }
+    // Depth quart-volume fast path: ONE 4x96x4 fill at the chunk's real
+    // block origin (cx*16/cz*16 — see the root-cause note in the doc
+    // comment) replaces sections*64 per-point depth tree walks. The
+    // structural duality gate re-verifies the tree shape per call; any
+    // structural surprise falls back to the scalar per-point walk.
+    let sections_i = sections as i32;
+    let use_depth_vol = volume_duality_safe(&st.climate[4]);
+    let depth_buf: Vec<f32> = if use_depth_vol {
+        let qvol = crate::df263::DensityVolume {
+            size_x: 4,
+            size_y: sections_i * 4,
+            size_z: 4,
+            min_x: cx * 16,
+            min_y,
+            min_z: cz * 16,
+            step_x: 4,
+            step_y: 4,
+            step_z: 4,
+        };
+        let mut b = vec![0f32; (4 * sections_i * 4 * 4) as usize];
+        st.climate[4].sample_volume(&mut ctx, &mut b, &qvol);
+        b
+    } else {
+        Vec::new()
+    };
     // Pass 2: the vanilla search walk (sections ascending, x, y, z within a
-    // section — the warm-start sequence). Depth re-evaluates per quart
-    // (point semantics — see the doc comment).
+    // section — the warm-start sequence). Depth reads the volume buffer.
     for sy in 0..sections {
         for x in 0..4i32 {
             for y in 0..4i32 {
@@ -107,7 +132,15 @@ pub fn fill_biomes263(
                     let bx = (cx * 4 + x) * 4;
                     let bz = (cz * 4 + z) * 4;
                     let cv = &col_vals[(x * 4 + z) as usize];
-                    let d = st.climate[4].sample_value(&mut ctx, bx, by, bz);
+                    let d = if use_depth_vol {
+                        // DensityVolume index: y + (x + z*size_x)*size_y
+                        // with size_x=4, size_y=sections*4; (x, sy*4+y, z).
+                        depth_buf[(sy as i32 * 4
+                            + y
+                            + (x + z * 4) * (sections_i * 4)) as usize]
+                    } else {
+                        st.climate[4].sample_value(&mut ctx, bx, by, bz)
+                    };
                     let values = [
                         quantize_f32(cv[0]),
                         quantize_f32(cv[1]),
@@ -231,13 +264,16 @@ mod depth_volume_tests {
         let mut ctx = crate::df263::SamplerCtx263::uncached();
 
         // (a) the volume fill exactly as the fill_biomes263 fast path does it
+        // (chunk block origin cx*16/cz*16 — the cx*64 hypothesis was the
+        // root cause of the 6-divergent-chunks saga; on (17,-5) the shifted
+        // lattice even wrapped bit-identically, hiding the bug)
         let qvol = crate::df263::DensityVolume {
             size_x: 4,
             size_y: sections * 4,
             size_z: 4,
-            min_x: cx * 64,
+            min_x: cx * 16,
             min_y,
-            min_z: cz * 64,
+            min_z: cz * 16,
             step_x: 4,
             step_y: 4,
             step_z: 4,
