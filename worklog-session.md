@@ -3961,3 +3961,15 @@ NativeBiomeSource (964fc6f5 + build-фикс a66aef3b): plugin-джоба ЗЕЛ
 createResolver/createResolverForChunk overrides, Registry.get -> Optional<Holder.Reference>).
 Следующий ран: A/B biome лана (biomedump точный гейт) + biome_fill n>0 в GenStats (JNI-филлы
 пойдут в рантайме впервые) + e2e-дельта от выпавшего Java createBiomes (~-1.5-2мс ожидание).
+
+ПРЕ-РЕГИСТРАЦИЯ A/B biome + e2e-эффекта NativeBiomeSource (ДО результатов рана a66aef3b, метод cont-70):
+- ab_biome гейт: BIOME PARITY OK (точный biomedump-диф 64x8 чанков). Если FAIL — первые
+  подозреваемые: (1) layout out[s*64+x*16+y*4+z] — инверсия x/y внутри секции; (2) minQuartY
+  сдвиг (=-64/4=-16 при min_y=-64); (3) double climate quantization на границе RTree-параметров.
+- e2e: RTree 30-37 сэмплов (2.2-2.6мс/чанк на медленном раннере) + NoiseStack-климат в
+  createResolverForChunk (7-10 сэмплов) = замещаемые ~2.5-3мс; добавляем JNI-филл+чтения
+  ~0.2-0.4мс -> НЕТ e2e -2..-2.7мс (медленный) / -1.3..-1.8 (быстрый). ВАЖНО: gen= НЕ меняется
+  (createBiomes живёт МЕЖДУ статусами, вне плагинского учёта) — сужается разрыв e2e-gen.
+- GenStats: biome_fill n>0 ВПЕРВЫЕ (JNI-филлы в рантайме), mean ~0.15-0.3мс/филл.
+- hood-кеши: compute_grid263 и fillBiomes теперь ходят в один store_biome_grid263 кэш —
+  hood_compute может чуть просесть (кэш-хиты от BIOMES-статуса), не вредит.
