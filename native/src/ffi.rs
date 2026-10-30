@@ -414,7 +414,9 @@ pub fn ctx_free(id: i64) {
 // latency: grids are pure functions of (cx, cz) — thread-safe and
 // bit-identical wherever they are computed, and the fill's own hood still
 // computes inline when the worker has not caught up (duplicate work is
-// harmless). CRUS_GRID_PF=0 disables the worker.
+// harmless). AUTO: the worker starts only when available_parallelism > 2 —
+// on 2-core runners it steals CPU from the serial fill (cont-66 A/B).
+// CRUS_GRID_PF=0/1 forces off/on.
 // ---------------------------------------------------------------------------
 type PrefetchReq = (std::sync::Arc<crate::biome263::BiomeState263>, i32, i32, i32, i32);
 static GRID_PF_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<PrefetchReq>>> =
@@ -432,10 +434,24 @@ fn grid_prefetch(
     // 0 = not probed, 1 = disabled, 2 = enabled
     let st = GRID_PF_STATE.load(std::sync::atomic::Ordering::Relaxed);
     let st = if st == 0 {
-        let s = if std::env::var("CRUS_GRID_PF").ok().as_deref() == Some("0") {
-            1
-        } else {
-            2
+        // CRUS_GRID_PF: 0 = off, 1 = force on, unset = auto. The worker only
+        // pays off when a spare core exists to hide the hood-compute latency;
+        // on 2-core runners it steals ~20% CPU from the serial fill
+        // (cont-66 same-runner A/B: e2e 44.28 PF=0 vs 47.65 PF=1,
+        // terrain 4.39 vs 5.51 while hood saves only 0.75).
+        let s = match std::env::var("CRUS_GRID_PF").ok().as_deref() {
+            Some("0") => 1u8,
+            Some("1") => 2u8,
+            _ => {
+                let cores = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1);
+                if cores > 2 {
+                    2
+                } else {
+                    1
+                }
+            }
         };
         GRID_PF_STATE.store(s, std::sync::atomic::Ordering::Relaxed);
         s
