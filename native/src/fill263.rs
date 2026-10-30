@@ -699,7 +699,7 @@ pub fn fill_threads() -> usize {
 }
 
 /// Split `total` rows into at most `parts` contiguous strips (balanced).
-fn split_strips(total: i32, parts: usize) -> Vec<(i32, i32)> {
+pub fn split_strips(total: i32, parts: usize) -> Vec<(i32, i32)> {
     let parts = parts.min(total.max(1) as usize);
     let base = total / parts as i32;
     let rem = total % parts as i32;

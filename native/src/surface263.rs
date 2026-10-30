@@ -468,13 +468,15 @@ struct Walk263<'a> {
     )>,
     zoom_seed: i64,
     heightmap: &'a [i32; 256],
-    // chunk volume + prefilled ore-vein buffers (density/richness)
+    // chunk volume + prefilled ore-vein buffers (density/richness). The
+    // buffers are shared read-only across strip walks (fill_chunk-style
+    // z-strip parallelism) — owned fresh ctx per strip.
     volume: DensityVolume,
     csl_slab_volume: DensityVolume,
-    csl_slab: Vec<f32>,
-    copper_buf: Vec<f32>,
-    iron_buf: Vec<f32>,
-    richness_buf: Vec<f32>,
+    csl_slab: &'a [f32],
+    copper_buf: &'a [f32],
+    iron_buf: &'a [f32],
+    richness_buf: &'a [f32],
     ctx_ore: SamplerCtx263,
     ctx_csl: SamplerCtx263,
     // per-column state
@@ -622,9 +624,9 @@ impl<'a> Walk263<'a> {
     #[inline]
     fn ore_buffer(&self, which: u32, x: i32, y: i32, z: i32) -> Option<f32> {
         let buf = match which {
-            0 => &self.copper_buf,
-            1 => &self.iron_buf,
-            _ => &self.richness_buf,
+            0 => self.copper_buf,
+            1 => self.iron_buf,
+            _ => self.richness_buf,
         };
         let i = self.volume.index_of_block(x, y, z);
         if i < 0 {
@@ -1031,12 +1033,6 @@ pub fn apply_surface263(
         return;
     }
     let sections = (height as usize) / 16;
-    let fluid_states: Vec<bool> = st
-        .cfg
-        .states
-        .iter()
-        .map(|s| s.starts_with("minecraft:water") || s.starts_with("minecraft:lava"))
-        .collect();
     // heightmap WORLD_SURFACE_WG: topmost non-air per column
     let mut hm = [0i32; 256];
     for lz in 0..16i32 {
@@ -1150,22 +1146,122 @@ pub fn apply_surface263(
         None
     };
 
+    // ---- per-column walk, strip-parallel over z (the fill_chunk pattern) --
+    // Every column is independent (own surface-depth/water/stone state, own
+    // ore-buf reads, disjoint out indices), so each strip walks its z-range
+    // over a PRIVATE copy of the filled buffer and the merge diffs it back —
+    // the result is bit-identical to the sequential walk; marks concatenate
+    // in strip (z) order, the same order the sequential walk produced.
+    let out_shared: &[u16; crate::nochunk::OUT_LEN] = out;
+    let threads = crate::fill263::fill_threads().min(4);
+    let strips = crate::fill263::split_strips(16, threads);
+    let mut results: Vec<(Vec<i64>, Box<[u16; crate::nochunk::OUT_LEN]>)> =
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(strips.len().saturating_sub(1));
+            for &(z0, z1) in strips.iter().skip(1) {
+                handles.push(scope.spawn(move || {
+                    let mut priv_out = Box::new(*out_shared);
+                    let mk = walk_columns(
+                        st, hood, zoom_seed, &hm, &volume, &csl_slab_volume, &csl_slab,
+                        &copper_buf, &iron_buf, &richness_buf, sea_level, cx, cz, min_y, z0, z1,
+                        &mut priv_out,
+                    );
+                    (mk, priv_out)
+                }));
+            }
+            let mut results = Vec::with_capacity(strips.len());
+            if let Some(&(z0, z1)) = strips.first() {
+                let mut priv_out = Box::new(*out_shared);
+                let mk = walk_columns(
+                    st, hood, zoom_seed, &hm, &volume, &csl_slab_volume, &csl_slab,
+                    &copper_buf, &iron_buf, &richness_buf, sea_level, cx, cz, min_y, z0, z1,
+                    &mut priv_out,
+                );
+                results.push((mk, priv_out));
+            }
+            // A panicked strip worker is a real bug elsewhere; recompute its
+            // range inline so the chunk never ships without surface rules.
+            let mut failed: Vec<(i32, i32)> = Vec::new();
+            for (h, &(z0, z1)) in handles.iter().zip(strips.iter().skip(1)) {
+                match h.join() {
+                    Ok(r) => results.push(r),
+                    Err(_) => failed.push((z0, z1)),
+                }
+            }
+            for &(z0, z1) in &failed {
+                let mut priv_out = Box::new(*out_shared);
+                let mk = walk_columns(
+                    st, hood, zoom_seed, &hm, &volume, &csl_slab_volume, &csl_slab,
+                    &copper_buf, &iron_buf, &richness_buf, sea_level, cx, cz, min_y, z0, z1,
+                    &mut priv_out,
+                );
+                results.push((mk, priv_out));
+            }
+            results
+        });
+    for (mk, buf) in results {
+        marks.extend(mk);
+        for i in 0..crate::nochunk::OUT_LEN {
+            if buf[i] != out[i] {
+                out[i] = buf[i];
+            }
+        }
+    }
+    if let Some(t) = t_walk {
+        crate::df263::PROF_STAGE_SURF_WALK.fetch_add(
+            t.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
+/// The per-column surface-rules walk over the z-strip [z0, z1) of a chunk,
+/// mutating a PRIVATE copy of the filled buffer; returns the strip's fluid
+/// marks. Column-local by construction (own depth/water/stone state per
+/// column, disjoint out indices) — strip results merge order-free except
+/// for the marks concat, which the caller keeps in strip (z) order.
+#[allow(clippy::too_many_arguments)]
+fn walk_columns(
+    st: &SurfaceState263,
+    hood: &Neighborhood263,
+    zoom_seed: i64,
+    hm: &[i32; 256],
+    volume: &DensityVolume,
+    csl_slab_volume: &DensityVolume,
+    csl_slab: &[f32],
+    copper_buf: &[f32],
+    iron_buf: &[f32],
+    richness_buf: &[f32],
+    sea_level: i32,
+    cx: i32,
+    cz: i32,
+    min_y: i32,
+    z0: i32,
+    z1: i32,
+    out: &mut [u16; crate::nochunk::OUT_LEN],
+) -> Vec<i64> {
     let cond_count = st.cfg.conds.len();
+    let fluid_states: Vec<bool> = st
+        .cfg
+        .states
+        .iter()
+        .map(|s| s.starts_with("minecraft:water") || s.starts_with("minecraft:lava"))
+        .collect();
     let mut walk = Walk263 {
         cfg: &st.cfg,
         st,
         hood: Some(hood),
         point_biomes: None,
         zoom_seed,
-        heightmap: &hm,
-        volume,
-        csl_slab_volume,
+        heightmap: hm,
+        volume: volume.clone(),
+        csl_slab_volume: csl_slab_volume.clone(),
         csl_slab,
         copper_buf,
         iron_buf,
         richness_buf,
-        ctx_ore,
-        ctx_csl,
+        ctx_ore: SamplerCtx263::cached(),
+        ctx_csl: SamplerCtx263::cached(),
         block_x: 0,
         block_z: 0,
         surface_depth: 0,
@@ -1185,8 +1281,8 @@ pub fn apply_surface263(
         sea_level,
         fluid_states,
     };
-
-    for lz in 0..16i32 {
+    let mut marks: Vec<i64> = Vec::new();
+    for lz in z0..z1 {
         for lx in 0..16i32 {
             let bx = cx * 16 + lx;
             let bz = cz * 16 + lz;
@@ -1256,12 +1352,7 @@ pub fn apply_surface263(
             }
         }
     }
-    if let Some(t) = t_walk {
-        crate::df263::PROF_STAGE_SURF_WALK.fetch_add(
-            t.elapsed().as_nanos() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-    }
+    marks
 }
 
 /// MaterialSystem.erodedBadlandsExtension (26.3 decompile, f64 noise path).
@@ -1555,10 +1646,10 @@ pub fn top_material263(
         heightmap: wg_hm,
         volume,
         csl_slab_volume,
-        csl_slab,
-        copper_buf,
-        iron_buf,
-        richness_buf,
+        csl_slab: &csl_slab,
+        copper_buf: &copper_buf,
+        iron_buf: &iron_buf,
+        richness_buf: &richness_buf,
         ctx_ore,
         ctx_csl,
         block_x: 0,
