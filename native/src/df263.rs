@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::n263::{
-    self, gradient_dot_f32, lerp3_f32, mth_floor, smoothstep, wrap, BlendedNoise263, Noise263,
-    NormalNoise263, NormalNoiseParameters,
+    self, gradient_dot_f32, gradient_dot_xz_f32, gradient_y, lerp3_f32, mth_floor, smoothstep,
+    wrap, BlendedNoise263, Noise263, NormalNoise263, NormalNoiseParameters,
 };
 use crate::rng::XoroshiroPositionalRandomFactory;
 
@@ -166,6 +166,14 @@ pub struct SamplerCtx263 {
     pub scratch: Scratch263,
     caches: Option<Vec<CacheCell263>>,
     pub beard: crate::beard263::Beardifier263,
+    /// Vanilla-`addToVolume` volume semantics (the reassociated gradient dot
+    /// `dotXz(g,rx,rz) + gradY(g)*ry` instead of the scalar get() chain).
+    /// The live 26.3 biome pipeline fills its climate buffers through
+    /// PerlinNoise.addToVolume, so the biome quart grid must reproduce THAT
+    /// arithmetic bit-exactly (near-tie biomes flip on 1-ULP differences;
+    /// CI 41105141065: 6/144 chunks jungle<->lush_caves). Terrain fills keep
+    /// the default false = scalar-get semantics (their parity gates pass).
+    pub vv: bool,
 }
 
 impl SamplerCtx263 {
@@ -174,6 +182,7 @@ impl SamplerCtx263 {
             scratch: Scratch263::default(),
             caches: None,
             beard: crate::beard263::Beardifier263::empty(),
+            vv: false,
         }
     }
 
@@ -182,6 +191,7 @@ impl SamplerCtx263 {
             scratch: Scratch263::default(),
             caches: Some(Vec::new()),
             beard: crate::beard263::Beardifier263::empty(),
+            vv: false,
         }
     }
 
@@ -980,14 +990,70 @@ impl DfSam263 {
                     // downstream comparison treats them equal). Evaluate
                     // once per (x,z) column, broadcast over y — vanilla's
                     // Cache2D turns 49 redundant perlin evals per column
-                    // into 1, the same way.
+                    // into 1, the same way. Under ctx.vv the per-point
+                    // evaluation must reproduce PerlinNoise.addToVolume's
+                    // split gradient dots (the live biome pipeline's
+                    // arithmetic), not the scalar get() chain.
                     let by0 = vol.block_y(0) as f64 * y_scale;
                     let mut index = 0usize;
                     for z in 0..vol.size_z {
                         let bz = vol.block_z(z);
                         for x in 0..vol.size_x {
                             let bx = vol.block_x(x);
-                            let v = noise.get(bx as f64 * xz_scale, by0, bz as f64 * xz_scale);
+                            let v = if ctx.vv {
+                                match &**noise {
+                                    N263::Normal(n) => {
+                                        let mut acc = 0.0f32;
+                                        let mut vv_ok = true;
+                                        for (layer, freq, amp) in &n.stack.layers {
+                                            match layer {
+                                                Noise263::Perlin(p) => {
+                                                    acc += amp * perlin263_get_vv(
+                                                        &p.p_adj,
+                                                        bx as f64 * xz_scale * freq,
+                                                        by0 * freq,
+                                                        bz as f64 * xz_scale * freq,
+                                                        p.base.offset_x,
+                                                        p.base.offset_y,
+                                                        p.base.offset_z,
+                                                        None,
+                                                    );
+                                                }
+                                                Noise263::Smeared(s) => {
+                                                    acc += amp * perlin263_get_vv(
+                                                        &s.perlin.p_adj,
+                                                        bx as f64 * xz_scale * freq,
+                                                        by0 * freq,
+                                                        bz as f64 * xz_scale * freq,
+                                                        s.perlin.base.offset_x,
+                                                        s.perlin.base.offset_y,
+                                                        s.perlin.base.offset_z,
+                                                        Some(s.fudge_y_scale),
+                                                    );
+                                                }
+                                                _ => {
+                                                    vv_ok = false;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if vv_ok { acc } else {
+                                            noise.get(
+                                                bx as f64 * xz_scale,
+                                                by0,
+                                                bz as f64 * xz_scale,
+                                            )
+                                        }
+                                    }
+                                    _ => noise.get(
+                                        bx as f64 * xz_scale,
+                                        by0,
+                                        bz as f64 * xz_scale,
+                                    ),
+                                }
+                            } else {
+                                noise.get(bx as f64 * xz_scale, by0, bz as f64 * xz_scale)
+                            };
                             for _y in 0..vol.size_y {
                                 out[index] = v;
                                 index += 1;
@@ -997,16 +1063,31 @@ impl DfSam263 {
                 } else {
                     // 3D: column kernels (per-column hoisted x/z prologue,
                     // bit-exact vs the plain loop); plain per-point fallback
-                    // for Smeared/nested-stack shapes.
+                    // for Smeared/nested-stack shapes. ctx.vv routes to the
+                    // vanilla-addToVolume kernels (the biome grid's target
+                    // semantics).
                     let filled = match &**noise {
-                        N263::Normal(n) => stack263_fill_col(
-                            &n.stack.layers,
-                            out,
-                            vol,
-                            &|b| b as f64 * xz_scale,
-                            &|b| b as f64 * y_scale,
-                            &|b| b as f64 * xz_scale,
-                        ),
+                        N263::Normal(n) => {
+                            if ctx.vv {
+                                stack263_fill_col_vv(
+                                    &n.stack.layers,
+                                    out,
+                                    vol,
+                                    &|b| b as f64 * xz_scale,
+                                    &|b| b as f64 * y_scale,
+                                    &|b| b as f64 * xz_scale,
+                                )
+                            } else {
+                                stack263_fill_col(
+                                    &n.stack.layers,
+                                    out,
+                                    vol,
+                                    &|b| b as f64 * xz_scale,
+                                    &|b| b as f64 * y_scale,
+                                    &|b| b as f64 * xz_scale,
+                                )
+                            }
+                        }
                         // N263::Plain is never constructed by the factory;
                         // anything but a Normal stack takes the plain path.
                         _ => false,
@@ -2684,6 +2765,225 @@ fn perlin263_fill_col(
             }
         }
     }
+}
+
+/// Vanilla `PerlinNoise.addToVolume` single-point evaluation: the scalar
+/// coordinate chain, but the gradient dots use the VOLUME kernel's split
+/// form `dotXz(g, rx, rz) + gradY(g) * ry` (a different f32 association
+/// than NoiseGradients.dot's `gx*rx + gy*ry + gz*rz`). Used for the
+/// y_scale=0 noise shortcut under ctx.vv and by the (a)-style tests.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn perlin263_get_vv(
+    p: &[u16; 256],
+    x: f64,
+    y: f64,
+    z: f64,
+    off_x: f64,
+    off_y: f64,
+    off_z: f64,
+    smear_fudge: Option<f64>,
+) -> f32 {
+    let wx = wrap(x) + off_x;
+    let fx = mth_floor(wx);
+    let rx = (wx - fx as f64) as f32;
+    let rx1 = rx - 1.0f32;
+    let sx = smoothstep(rx);
+    let wy = wrap(y) + off_y;
+    let fy = mth_floor(wy);
+    let rel_y_f64 = wy - fy as f64;
+    let (ry, sy) = match smear_fudge {
+        None => {
+            let ry = rel_y_f64 as f32;
+            (ry, smoothstep(ry))
+        }
+        Some(fudge_scale) => {
+            let fudge_limit = if y >= 0.0 && y < rel_y_f64 { y } else { rel_y_f64 };
+            let fudge =
+                (fudge_limit / fudge_scale + 1.0e-7f32 as f64).floor() * fudge_scale;
+            let ry = (rel_y_f64 - fudge) as f32;
+            (ry, smoothstep(rel_y_f64 as f32))
+        }
+    };
+    let ry1 = ry - 1.0f32;
+    let wz = wrap(z) + off_z;
+    let fz = mth_floor(wz);
+    let rz = (wz - fz as f64) as f32;
+    let rz1 = rz - 1.0f32;
+    let sz = smoothstep(rz);
+    let x0 = p[(fx & 0xFF) as usize] as usize;
+    let x1 = x0 >> 8;
+    let xy00 = p[(x0.wrapping_add(fy as usize)) & 0xFF] as usize;
+    let xy01 = xy00 >> 8;
+    let z000 = p[(xy00.wrapping_add(fz as usize)) & 0xFF] as usize;
+    let z001 = p[(xy01.wrapping_add(fz as usize)) & 0xFF] as usize;
+    let xy10 = p[(x1.wrapping_add(fy as usize)) & 0xFF] as usize;
+    let xy11 = xy10 >> 8;
+    let z100 = p[(xy10.wrapping_add(fz as usize)) & 0xFF] as usize;
+    let z101 = p[(xy11.wrapping_add(fz as usize)) & 0xFF] as usize;
+    let d000 = gradient_dot_xz_f32(z000 & 15, rx, rz) + gradient_y(z000 & 15) * ry;
+    let d001 = gradient_dot_xz_f32(z000 >> 8 & 15, rx, rz1) + gradient_y(z000 >> 8 & 15) * ry;
+    let d010 = gradient_dot_xz_f32(z001 & 15, rx, rz) + gradient_y(z001 & 15) * ry1;
+    let d011 = gradient_dot_xz_f32(z001 >> 8 & 15, rx, rz1) + gradient_y(z001 >> 8 & 15) * ry1;
+    let d100 = gradient_dot_xz_f32(z100 & 15, rx1, rz) + gradient_y(z100 & 15) * ry;
+    let d101 = gradient_dot_xz_f32(z100 >> 8 & 15, rx1, rz1) + gradient_y(z100 >> 8 & 15) * ry;
+    let d110 = gradient_dot_xz_f32(z101 & 15, rx1, rz) + gradient_y(z101 & 15) * ry1;
+    let d111 = gradient_dot_xz_f32(z101 >> 8 & 15, rx1, rz1) + gradient_y(z101 >> 8 & 15) * ry1;
+    lerp3_f32(sx, sy, sz, d000, d100, d010, d110, d001, d101, d011, d111)
+}
+
+/// Vanilla `PerlinNoise.addToVolume` column kernel: the scalar perlin263
+/// column prologue, but the eight corner dots use the VOLUME split form
+/// `dotXz(g, rx, rz) + gradY(g) * ry` (PerlinNoise.java addToVolume — the
+/// live biome pipeline's actual arithmetic; the scalar get() chain it
+/// replaces associates the f32 sum differently and drifts by 1 ULP, which
+/// flips near-tie biomes at the dump gate).
+#[allow(clippy::too_many_arguments)]
+fn perlin263_fill_col_vv(
+    p: &[u16; 256],
+    freq: f64,
+    off_x: f64,
+    off_y: f64,
+    off_z: f64,
+    amp: f32,
+    out: &mut [f32],
+    vol: &DensityVolume,
+    tx: &dyn Fn(i32) -> f64,
+    ty: &dyn Fn(i32) -> f64,
+    tz: &dyn Fn(i32) -> f64,
+    // SmearedPerlin fudge-y scale (None = plain Perlin).
+    smear_fudge: Option<f64>,
+) {
+    let mut index = 0usize;
+    for z in 0..vol.size_z {
+        let wz = wrap(tz(vol.block_z(z)) * freq) + off_z;
+        let fz = mth_floor(wz);
+        let rz = (wz - fz as f64) as f32;
+        let rz1 = rz - 1.0f32;
+        let sz = smoothstep(rz);
+        for x in 0..vol.size_x {
+            let wx = wrap(tx(vol.block_x(x)) * freq) + off_x;
+            let fx = mth_floor(wx);
+            let rx = (wx - fx as f64) as f32;
+            let rx1 = rx - 1.0f32;
+            let sx = smoothstep(rx);
+            let x0 = p[(fx & 0xFF) as usize] as usize;
+            let x1 = x0 >> 8;
+            for y in 0..vol.size_y {
+                let wy = wrap(ty(vol.block_y(y)) * freq) + off_y;
+                let fy = mth_floor(wy);
+                let rel_y_f64 = wy - fy as f64;
+                // same (ry, sy) split as the scalar kernel: the dots use the
+                // (fudged) f32 y, smoothstep the unfudged cast.
+                let (ry, sy) = match smear_fudge {
+                    None => {
+                        let ry = rel_y_f64 as f32;
+                        (ry, smoothstep(ry))
+                    }
+                    Some(fudge_scale) => {
+                        let original_y = ty(vol.block_y(y)) * freq;
+                        let fudge_limit = if original_y >= 0.0 && original_y < rel_y_f64 {
+                            original_y
+                        } else {
+                            rel_y_f64
+                        };
+                        let fudge = (fudge_limit / fudge_scale + 1.0e-7f32 as f64).floor()
+                            * fudge_scale;
+                        let ry = (rel_y_f64 - fudge) as f32;
+                        (ry, smoothstep(rel_y_f64 as f32))
+                    }
+                };
+                let ry1 = ry - 1.0f32;
+                let xy00 = p[(x0.wrapping_add(fy as usize)) & 0xFF] as usize;
+                let xy01 = xy00 >> 8;
+                let z000 = p[(xy00.wrapping_add(fz as usize)) & 0xFF] as usize;
+                let z001 = p[(xy01.wrapping_add(fz as usize)) & 0xFF] as usize;
+                let xy10 = p[(x1.wrapping_add(fy as usize)) & 0xFF] as usize;
+                let xy11 = xy10 >> 8;
+                let z100 = p[(xy10.wrapping_add(fz as usize)) & 0xFF] as usize;
+                let z101 = p[(xy11.wrapping_add(fz as usize)) & 0xFF] as usize;
+                // THE VV DIFFERENCE vs perlin263_fill_col: the split dots.
+                let d000 = gradient_dot_xz_f32(z000 & 15, rx, rz) + gradient_y(z000 & 15) * ry;
+                let d001 =
+                    gradient_dot_xz_f32(z000 >> 8 & 15, rx, rz1) + gradient_y(z000 >> 8 & 15) * ry;
+                let d010 = gradient_dot_xz_f32(z001 & 15, rx, rz) + gradient_y(z001 & 15) * ry1;
+                let d011 =
+                    gradient_dot_xz_f32(z001 >> 8 & 15, rx, rz1) + gradient_y(z001 >> 8 & 15) * ry1;
+                let d100 = gradient_dot_xz_f32(z100 & 15, rx1, rz) + gradient_y(z100 & 15) * ry;
+                let d101 =
+                    gradient_dot_xz_f32(z100 >> 8 & 15, rx1, rz1) + gradient_y(z100 >> 8 & 15) * ry;
+                let d110 = gradient_dot_xz_f32(z101 & 15, rx1, rz) + gradient_y(z101 & 15) * ry1;
+                let d111 =
+                    gradient_dot_xz_f32(z101 >> 8 & 15, rx1, rz1) + gradient_y(z101 >> 8 & 15) * ry1;
+                out[index] += amp * lerp3_f32(
+                    sx,
+                    sy,
+                    sz,
+                    d000,
+                    d100,
+                    d010,
+                    d110,
+                    d001,
+                    d101,
+                    d011,
+                    d111,
+                );
+                index += 1;
+            }
+        }
+    }
+}
+
+/// NoiseStack263 column fill — vanilla-addToVolume semantics (ctx.vv).
+/// Returns false when a layer needs the plain per-point path.
+fn stack263_fill_col_vv(
+    layers: &[(Noise263, f64, f32)],
+    out: &mut [f32],
+    vol: &DensityVolume,
+    tx: &dyn Fn(i32) -> f64,
+    ty: &dyn Fn(i32) -> f64,
+    tz: &dyn Fn(i32) -> f64,
+) -> bool {
+    for (noise, _, _) in layers {
+        match noise {
+            Noise263::Perlin(_) | Noise263::Smeared(_) => {}
+            _ => return false,
+        }
+    }
+    out.fill(0.0);
+    for (noise, freq, amp) in layers {
+        match noise {
+            Noise263::Perlin(p) => perlin263_fill_col_vv(
+                &p.p_adj,
+                *freq,
+                p.base.offset_x,
+                p.base.offset_y,
+                p.base.offset_z,
+                *amp,
+                out,
+                vol,
+                tx,
+                ty,
+                tz,
+                None,
+            ),
+            Noise263::Smeared(s) => perlin263_fill_col_vv(
+                &s.perlin.p_adj,
+                *freq,
+                s.perlin.base.offset_x,
+                s.perlin.base.offset_y,
+                s.perlin.base.offset_z,
+                *amp,
+                out,
+                vol,
+                tx,
+                ty,
+                tz,
+                Some(s.fudge_y_scale),
+            ),
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// NoiseStack263 column fill. Returns false when a layer needs the plain
