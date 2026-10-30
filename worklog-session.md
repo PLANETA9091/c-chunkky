@@ -4298,3 +4298,11 @@ JFR Java-CPU Worker#0 только ~9мс/чанк, остальное ожид�
 wall-статьи уже плотны (terrain 7.0 + surface 5.0 + hood 0.6 + layout 0.2 =
 12.6 ≈ native 12.63) — native на 2 ядрах близок к пределу; следующий большой
 фронт — paper-side ~16.5мс (при par4) и native deco master-loop.
+## cont-77 (4dbd32c7 → deco run-top): per-feature разбивка run-фазы deco
+DecoDriver теперь мерит decoRunFeature по placed-имени (DecoStats.RUN_BY_NAME,
+merge per run, лямбда-аккумуляция атомарна по ключу); DecoStats.snapshot
+печатает [run-top] топ-12 по wall. Цель: run=13.29ms/чанк (deco=1 probe)
+сегодня монолит — следующий ран покажет, какие фичи едят нативное расширение
+(подозреваемые: ore veins через per-position биом-запросы, trees).
+Deco-фронт остаётся неактивным в проде (CRUS_NATIVE_DECO=0); это диагностический
+слой для решения «чинить native deco или закрывать фронт».

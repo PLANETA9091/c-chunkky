@@ -48,6 +48,11 @@ public final class DecoStats {
     /** delegate placed-name -> count (dynamic delegate census; reset per dump) */
     static final java.util.concurrent.ConcurrentHashMap<String, Long> DELEGATE_NAMES
             = new java.util.concurrent.ConcurrentHashMap<>();
+    /** cont-77: run-phase per-placed-feature split (name -> [nanos, runs]) —
+     * the run=13.29ms/chunk mass is a monolith today; this names the
+     * features that eat it (top-12 in the snapshot). */
+    static final java.util.concurrent.ConcurrentHashMap<String, long[]> RUN_BY_NAME
+            = new java.util.concurrent.ConcurrentHashMap<>();
     /** plan-phase split: the regionBiomes Java wall (palette walk) */
     static final AtomicLong PLAN_BIOMES = new AtomicLong();
     /** struct-phase split: startsForStructure vs placeInChunk walls */
@@ -101,6 +106,7 @@ public final class DecoStats {
         DELEGATE_TOTAL.set(0);
         DELEGATE_COUNT.set(0);
         DELEGATE_NAMES.clear();
+        RUN_BY_NAME.clear();
         PLAN_BIOMES.set(0);
         UP_HEIGHT.set(0);
         for (AtomicLong a : UP_H_TY) {
@@ -175,7 +181,24 @@ public final class DecoStats {
                 STRUCT_STARTS_NS.get() / 1e6, STRUCT_PLACE_NS.get() / 1e6,
                 STRUCT_GATE_NS.get() / 1e6, STRUCT_SETUP_NS.get() / 1e6,
                 STRUCT_LOOP_NS.get() / 1e6, STRUCT_FUNC_NS.get() / 1e6,
-                STRUCT_ITER.get(), STRUCT_START_CALLS.get()));
+                STRUCT_ITER.get(), STRUCT_START_CALLS.get()))
+                .concat(runTop());
+    }
+
+    /** Top-12 placed features by accumulated decoRunFeature wall. */
+    private static String runTop() {
+        if (RUN_BY_NAME.isEmpty()) {
+            return "";
+        }
+        var list = new java.util.ArrayList<>(RUN_BY_NAME.entrySet());
+        list.sort((a, b) -> Long.compare(b.getValue()[0], a.getValue()[0]));
+        StringBuilder sb = new StringBuilder(" | [run-top]");
+        for (int i = 0; i < Math.min(12, list.size()); i++) {
+            var e = list.get(i);
+            sb.append(String.format(" %s=%.2fms(%d)",
+                    e.getKey(), e.getValue()[0] / 1e6, e.getValue()[1]));
+        }
+        return sb.toString();
     }
 
     /** top-24 delegate placed names (dynamic census tail). */

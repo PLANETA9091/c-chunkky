@@ -297,7 +297,15 @@ public final class DecoDriver extends BlockPopulator {
             long tr0 = System.nanoTime();
             int n = ChunkGenNative.decoRunFeature(ctx, l, -1L, ox, oy, oz, maxY,
                     step, gid, this, ops);
-            tr += System.nanoTime() - tr0;
+            long runNs = System.nanoTime() - tr0;
+            tr += runNs;
+            // cont-77: per-placed-feature run split (names the run= mass)
+            DecoStats.RUN_BY_NAME.merge(PLAN[step][gid], new long[]{runNs, 1L},
+                    (a, b) -> {
+                        a[0] += b[0];
+                        a[1] += b[1];
+                        return a;
+                    });
             if (n == -2) {
                 // hybrid delegate: the placed feature's configured graph has an
                 // unsupported node (tree, vegetation_patch, ...) — run it
