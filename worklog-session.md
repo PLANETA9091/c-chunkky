@@ -3851,3 +3851,45 @@ cancel-in-progress):
 - [ ] big 48x48: e2e/chunk=__ амортизированно (первый!)
 - [ ] farprobe: D=8192 чистый вердикт
 - [ ] hood_compute/fill: __ (ожидалось ~2-2.5 против 5.16)
+
+## cont-77: базлайн 7fe1e722 разобран — par4-гонка ПОБЕЖДЕНА (e2e=27.09 лучший в ране), big-лана: КОРНЕВАЯ ПРИЧИНА найдена — vanilla forceload add > 256 чанков падает МОЛЧА; фикс-тайлы (22b8c8cf); JFR-атрибуция Paper-side
+
+Зелёный ран 41062616497 (7fe1e722: par4-фикс + PF-flip + harness-reset, БЕЗ depth fast path):
+- timing (PF=OFF дефолт): e2e=32.78 gen=14.45 native=14.19, stage[terrain=4.333 surface=3.058 hood=4.370 hood_compute=5.416 ncomp=1208] surf_aux=0.647 surf_walk=2.374
+- pf1 (PF=ON): e2e=36.95 gen=16.03 terrain=5.738 ncomp=708 — ON снова в минусе на 4vCPU (same-run A/B: OFF выигрывает 4.2мс)
+- par4 (гонка layoutBulk починена): ЗЕЛЁНЫЙ, БЕЗ MissingPaletteEntryException: e2e=27.09 (лучший в ране) gen=41.35 native=40.96 — wall-выигрыш 5.7мс vs timing, но НЕ /4: 4 воркера на 4 vCPU уже насыщены стрипами; стейджи вздуы ~2.5-3x конкуренцией (terrain=10.85 hood=12.42 hood_compute=18.99 — суммы по воркерам, не wall)
+- deco 37.64 / nobeard 32.75 / jfr 33.89 (ramp=1087) / par 33.09 / jfr_par 39.29
+- big 48x48: СНОВА inside=0/2304 полный таймаут 34мин — УЖЕ БЕЗ утечки par4 → не воркеры!
+
+КОРНЕВАЯ ПРИЧИНА big: vanilla `/forceload add <from> <to>` ОТВЕРГАЕТ область > 256 чанков
+(48x48=2304 одной командой — command fail, stderr в /dev/null; окно armed, чанки не грузятся,
+607 внутрицикловых поллов × 0.34с = 34 мин в никуда; конт-72 приписал краш воркерам — там был
+ВТОРОЙ, независимый фейл от утечки pin). ФИКС 22b8c8cf: forceload окна режется на тайлы
+<=256 чанков (256x256 блоков), клампнутые к прямоугольнику окна; 12x12 ланы не тронуты
+(один клампнутый тайл = прежняя семантика); ошибки тайлов теперь ПЕЧАТАЮТСЯ.
+
+JFR-атрибуция Paper-side (окно jfr-ланы 144 чанков, span=4.88s, воркер 92.7% профильных
+сэмплов; 1 ExecutionSample ~ 10мс java-cpu, NativeMethodSample ~ 20мс):
+- fill native (JNI): ~2.0s окна (= GenStats native 2.02s) — 14.0мс/чанк
+- JAVA-фреймы воркера ~1.15-1.3s (8-9мс/чанк, НЕ входят в gen=):
+  1. Climate$RTree.findNearest0 + moonrise$findNearest: 20 сэмплов ~ 1.4мс/чанк — биом-запросы
+     (features' biome check + что-то ещё; native grid филла их не отменяет)
+  2. OreFeature.place/doPlace/canPlaceOre + FeaturePlacer.place: 7-9 ~ 0.6мс/чанк — VANILLA
+     руды всё ещё ставятся Явой во ВСЕХ тайминг-ланах (native deco только в deco-лане-пробе,
+     и она сейчас МЕДЛЕННЕЕ vanilla на ~5мс e2e: deco 37.64 vs timing 32.78 — overhead
+     DecoDriver, отдельный фронт)
+  3. NoiseStack$Perlin.get: 3 (jfr) / 10 (jfr_par) ~ 0.2-0.7мс/чанк — Java-шум: aquifer-поля
+     или surface-условия — атрибутировать стеком (jfr print --stack-depth 64 уже в артефакте)
+  4. Шедулинг: ChunkHolderManager.getChunkHolder + getCurrentGenStatus + ReferenceOpenHashSet +
+     Either.Right.map: ~8-10 ~ 0.6-0.7мс/чанк
+  5. Сериализация: LinearPalette.idFor + SimpleBitStorage.get/set: ~5
+  6. StaticCache2D.<init>: 4 (jfr_par) — аллокации кэшей surface/features
+- Server thread: 8-15 сэмплов (0.6-1.0мс/чанк): processTicketUpdates, recalculateNeighbourPriorities,
+  тик-пейcинг (park 884ms recordTaskExecutionTimeWhileWaiting — ждёт задач, это не latency)
+- parks chunk-системы: НЕТ (все крупные парки — инфра-idle: I/O epoll, Craft Async, Log4j2,
+  spark, DensityBuffer GC)
+
+Разбивка e2e jfr-ланы: 33.89 = ramp/144 7.5 + gen 14.25 + java-фреймы ~8 + сервер/шедулинг/джиттер ~4.
+СЛЕДУЮЩИЕ ФРОНТЫ по атрибуции: (1) big-лана вернётся с фикс-тайлами — первый амортизированный
+номер; (2) native deco дефолтом ПОСЛЕ разгона DecoDriver (снимет OreFeature+FeaturePlacer+
+часть RTree ~ 2-2.5мс); (3) aquifer-сплит по JFR-стекам; (4) RTree-запросы — кэш/пакетирование.
