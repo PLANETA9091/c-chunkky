@@ -111,6 +111,16 @@ if [ "${CRUS_GEN_PARALLEL:-0}" = "1" ]; then PGEN_FLAG=""; fi
 if [ -n "${CRUS_WORKER_THREADS:-}" ] && [ -f "$SRV/config/paper-global.yml" ]; then
   sed -i -E "s/^([[:space:]]*)worker-threads:.*$/\\1worker-threads: ${CRUS_WORKER_THREADS}/" "$SRV/config/paper-global.yml"
   echo "chunk-system.worker-threads=${CRUS_WORKER_THREADS} (patched $SRV/config/paper-global.yml)"
+elif [ -f "$SRV/config/paper-global.yml" ]; then
+  # No explicit pin: undo any pin a previous lane left in the shared
+  # workspace. cont-72: the par4 lane pinned worker-threads=4 and every
+  # later lane (big 48x48, farprobe) booted with it — Paper 26.3 then
+  # destabilized (MissingPaletteEntryException at save; big lane's server
+  # died right after boot, 0/2304 chunks). -1 = Paper auto heuristic.
+  if ! grep -qE '^[[:space:]]*worker-threads:[[:space:]]*-1[[:space:]]*$' "$SRV/config/paper-global.yml"; then
+    sed -i -E "s/^([[:space:]]*)worker-threads:.*$/\\1worker-threads: -1/" "$SRV/config/paper-global.yml"
+    echo "chunk-system.worker-threads=-1 (reset to auto — previous lane may have pinned)"
+  fi
 fi
 (
   cd "$SRV"

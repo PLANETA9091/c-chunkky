@@ -3692,3 +3692,47 @@ timing — ген насыщает ядра, и единственные фро�
 координация, НЕ server-thread CPU. par4 не сожмёт gen span (4 филла x
 ширина 1 = та же пропускная), но может сжать ramp (сателлиты на 4
 воркерах) — вердикт в eeef61e2. ramp-сплит придёт в dad357d7.
+
+
+## cont-72: c0e33eb9 зелёный — 7 honest windows; par4 дестабилизирует Paper 26.3 + утечка конфига травила big/farprobe; фикс: reset + лана LAST
+
+7 лан с honest windows (быстрый раннер, один ран — честные сравнения):
+timing 32.68 (ramp=331), deco 37.80, nobeard 31.19, pf0 28.69 (лучшая),
+jfr 32.48 (ramp=909), par 31.49 (ramp=331), jfr_par 34.22 (ramp=759).
+ramp-сплит (dad357d7) работает: ramp= 327..909мс — окно больше не несёт
+3.5s разгона в этой профильной конфигурации; e2e = ramp/144 + gen + jitter.
+
+СТЕЙДЖ (окно jfr_par): terrain=5.430 surface=3.175 hood=3.873
+hood_compute=4.919 ncomp=756 park=0.050; surf_aux=0.642 surf_walk=2.497 —
+fused ore sweep подтверждён in-server: surf_aux 2.64 -> 0.64 (-76%),
+surface целиком 6.6 -> 3.18. terr-сплит: terr_sample=9.991 (сумма тредов,
+2 стрипа) terr_walk=2.390 terr_setup=0.032 terr_prefill=0.420 — terrain
+wall 5.43 = sample-dominated (~92%): следующий фронт — splines/interp
+cells (fill263 prof: interp_cell=8.693 суммы).
+
+PAR4: сервер погиб — MissingPaletteEntryException (LinearPalette.valueFor(2)
+в PalettedContainer.pack при сохранении чанка (5,-2) на shutdown) при
+chunk-system.worker-threads=4. Гонка сериализации moonrise (Paper
+26.3-222), вскрывается 4 воркерами; те же чанки сохраняются чисто при
+auto=1 во всех 7 ланах. Оконных данных нет; вердикт по пропускной уже
+дан par-ланой: 31.49 ≈ timing 32.68 — предсказание cont-70 подтверждено,
+gen насыщает ядра.
+
+УТЕЧКА: par4 запатчил server/config/paper-global.yml (worker-threads=4),
+файл живёт в workspace между ланами -> big (N=47) бутнулся с 4 воркерами
+и умер сразу после boot-ok (CONN_FAIL, inside=0/2304, WINDOW TIMEOUT
+413.96s); farprobe — тоже: D=64 OK (225->325), D=1024 OK (325->425),
+D=8192 STALL (425->0) + CONN_FAIL. Чтение клиффа D=8192 ЗАГРЯЗНЕНО
+(4-воркерная нестабильность vs настоящий far-координатный клифф —
+неразличимо), нужен чистый перезапуск на фиксированном харнессе.
+
+ФИКС (этот пуш): (1) e2e_ci.sh — при unset CRUS_WORKER_THREADS сброс
+worker-threads в -1 (auto; bootstrap pre-seed = -1, на свежем раннере
+no-op); (2) ci.yml — par4 лана перенесена ПОСЛЕДНЕЙ (после farprobe),
+вердикт в комментарии. Ожидание следующего рана: big даст первый честный
+амортизированный 48x48 номер; farprobe — чистый клифф; par4 может снова
+упасть (нормально — LAST + continue-on-error).
+
+Замечание: pf0 28.69 < timing 32.68 (внутри рана, PF auto=ON при 4 vCPU)
+— на 4 ядрах префетч-пул снова в минусе; данных мало, adaptive порог
+(>2) пока не трогаем, большой ран big-ланы скажет точнее.

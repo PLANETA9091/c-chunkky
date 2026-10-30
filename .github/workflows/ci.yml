@@ -212,17 +212,6 @@ jobs:
           # is downstream (light/tickets/main-thread beat) — mspt + parks
           # decide which.
           CRUS_JFR=1 CRUS_GEN_PARALLEL=1 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_jfr_par.log
-      - name: E2E parallel-gen with 4 pinned worker threads (the real spread test)
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          # Paper auto worker-threads = 1 on <=3 physical cores (4-vCPU CI
-          # runner) — the par lane never had a gen pool to spread over.
-          # Pin 4 workers: 4 concurrent native fills (POOL_SIZE=4, self-
-          # balancing strip width narrows each to cores/active). If the
-          # window wall still does not drop, the gate is downstream of gen
-          # (status chain / main-thread beat) — ramp= + mspt + parks show it.
-          CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4.log
       - name: E2E large window 48x48 (amortized per-chunk at scale)
         continue-on-error: true
         run: |
@@ -239,6 +228,21 @@ jobs:
           set -o pipefail
           chmod +x harness/farprobe_ci.sh
           SRV_DIR=server RCON_PORT=25576 bash harness/farprobe_ci.sh 2>&1 | tee farprobe263.log
+      - name: E2E parallel-gen with 4 pinned worker threads (runs LAST — see below)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          # Paper auto worker-threads = 1 on <=3 physical cores (4-vCPU CI
+          # runner) — the par lane never had a gen pool to spread over.
+          # Pin 4 workers: 4 concurrent native fills (POOL_SIZE=4, self-
+          # balancing strip width narrows each to cores/active). If the
+          # window wall still does not drop, the gate is downstream of gen
+          # (status chain / main-thread beat) — ramp= + mspt + parks show it.
+          # VERDICT cont-72: with worker-threads=4 Paper 26.3 destabilizes
+          # (MissingPaletteEntryException at save, server death) AND the pin
+          # leaks to later lanes via the shared workspace config — so this
+          # lane runs LAST; e2e_ci.sh also resets the pin when unset.
+          CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4.log
       - name: Upload judge artifacts
         if: always()
         uses: actions/upload-artifact@v4
