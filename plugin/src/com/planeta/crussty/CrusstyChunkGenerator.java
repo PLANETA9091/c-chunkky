@@ -1299,6 +1299,16 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static void layoutBulk(ChunkData chunkData, int minY, int height, short[] out,
             Material[] mats) {
         long tLay = System.nanoTime();
+        // PER-CALL palette scratch. The original statics (valuesScratch /
+        // palIdxScratch) were shared across threads: two concurrent fills
+        // (par4 gen workers, populator threads) trampled each other's
+        // palette marks — a section could ship with storage indices its
+        // palette never held, surfacing later as MissingPaletteEntryException
+        // at serialization (observed on the par4 lane, cont-72). The statics
+        // below remain only as extendPalette's grow protocol; layoutBulk
+        // touches local copies from here on.
+        Object[] valuesLoc = new Object[valuesScratch.length];
+        int[] palIdxLoc = new int[sectionStatesById != null ? sectionStatesById.length : 1];
         try {
             Object handle = mGetHandle.invoke(chunkData);
             Object[] sections = (Object[]) mGetSectionsAcc.invoke(handle);
@@ -1364,15 +1374,15 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                         for (int k = 0; k < 4096 && !over; k++) {
                             short id = out[base + k];
                             if (id == 0 || sectionStatesById[id] == null
-                                    || palIdxScratch[id] != 0) {
+                                    || palIdxLoc[id] != 0) {
                                 continue;
                             }
                             if (vn >= 16) {
                                 over = true;
                                 break;
                             }
-                            valuesScratch[vn] = sectionStatesById[id];
-                            palIdxScratch[id] = vn;
+                            valuesLoc[vn] = sectionStatesById[id];
+                            palIdxLoc[id] = vn;
                             usedIds[usedN++] = id;
                             vn++;
                         }
@@ -1426,7 +1436,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                             // reset the per-section palette scratch — the
                             // next section builds its OWN palette
                             for (int u = 0; u < usedN; u++) {
-                                palIdxScratch[usedIds[u]] = 0;
+                                palIdxLoc[usedIds[u]] = 0;
                             }
                         } else {
                             Object storage = null;
@@ -1439,7 +1449,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                 // st0 null (unmapped material) -> per-block path
                                 if (st0 == null) {
                                     for (int u = 0; u < usedN; u++) {
-                                        palIdxScratch[usedIds[u]] = 0;
+                                        palIdxLoc[usedIds[u]] = 0;
                                     }
                                     swapped = false;
                                 } else {
@@ -1471,7 +1481,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                 java.util.List<Object> vals = new java.util.ArrayList<>(vn);
                                 vals.add(airState);
                                 for (int v = 1; v < vn; v++) {
-                                    vals.add(valuesScratch[v]);
+                                    vals.add(valuesLoc[v]);
                                 }
                                 palette = mPalCreate263
                                         ? mPalCreate.invoke(factoryLinear, linearBits, vals)
@@ -1481,7 +1491,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                 for (int k = 0; k < 4096; k++) {
                                     short id = out[base + k];
                                     int pi = (id == 0 || sectionStatesById[id] == null)
-                                            ? 0 : palIdxScratch[id];
+                                            ? 0 : palIdxLoc[id];
                                     if (pi != 0) {
                                         int word = k >> 4;
                                         int shift = (k & 15) << 2;
@@ -1504,7 +1514,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                 // reset the per-section palette scratch — the
                                 // next section builds its OWN palette
                                 for (int u = 0; u < usedN; u++) {
-                                    palIdxScratch[usedIds[u]] = 0;
+                                    palIdxLoc[usedIds[u]] = 0;
                                 }
                             }
                             if (swapped) {

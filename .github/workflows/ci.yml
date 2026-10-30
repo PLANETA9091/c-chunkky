@@ -240,10 +240,13 @@ jobs:
           # balancing strip width narrows each to cores/active). If the
           # window wall still does not drop, the gate is downstream of gen
           # (status chain / main-thread beat) — ramp= + mspt + parks show it.
-          # VERDICT cont-72: with worker-threads=4 Paper 26.3 destabilizes
-          # (MissingPaletteEntryException at save, server death) AND the pin
-          # leaks to later lanes via the shared workspace config — so this
-          # lane runs LAST; e2e_ci.sh also resets the pin when unset.
+          # VERDICT cont-72: with worker-threads=4 Paper 26.3 destabilized
+          # (MissingPaletteEntryException at save) AND the pin leaked to
+          # later lanes via the shared workspace config — so this lane runs
+          # LAST; e2e_ci.sh also resets the pin when unset. cont-74 found
+          # the root cause INSIDE the plugin: layoutBulk's static palette
+          # scratch raced across concurrent fills — fixed with per-call
+          # locals; par4 is now the fix's live verification.
           CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4.log
       - name: Upload judge artifacts
         if: always()
