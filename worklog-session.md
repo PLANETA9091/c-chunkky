@@ -4223,3 +4223,21 @@ CI 41120286232 (4133933b, все 3 джобы GREEN) — первый полны
 - Бенч-числа рана (PF=0): terrain 5.4-6.9 / surface 3.9-4.3 (surf_aux 0.8 +
   surf_walk 3.1 — fused ore sweep держит aux ~0.8мс, было 2.64) / hood 5.0-5.9
   hood_compute 6.5-7.4 ncomp 713-1247.
+
+## cont-73 (8aac51d2 GREEN): depth fast path восстановлен — hood_compute −63%, e2e 44.28 → 34.86 best
+
+CI 41124116166 (8aac51d2, все 3 джобы GREEN):
+- 80/80 тестов passed: fill263_grid_naive_parity_at_1024_1024 ok (fast==naive
+  с volume cx*16), depth_quart_volume_bit_exact_vs_points ok; SIMD parity 0/25;
+  fill_chunk median 3.51ms (COLD 3.62).
+- ГЕЙТЫ: BIOME PARITY OK (144 chunks identical), все материал-гейты PASS.
+- honest window serial (144): e2e 34.86-37.44 (median ~36.3) vs базлайн
+  39.82-50.12 (median ~42) — минус ~5-6мс/чанк; gen 18.02 → 14.26-16.05;
+  native 17.76 → 13.99-15.75.
+- stage[]: hood 5.6-5.9 → 2.25-2.29; hood_compute 7.1-7.4 → 2.69-2.73 (−63%,
+  соответствует истории cont-78: 5.416→2.922 при той же физике).
+- 48x48 (2304): e2e 30.21 → 26.36 (−3.85).
+- JFR: RTree.findNearest0 всё ещё топ (19 сэмплов) — CRUS_BIOME_GRID=1 ещё не
+  в этом ране; grid-эффект поедет в d39c3eca (fast path + grid).
+Root cause saga закрыта: «shape-баг» = координатная ошибка cx*64; механизм
+volume бит-точен; fast path обратно в продакшене с правильными координатами.
