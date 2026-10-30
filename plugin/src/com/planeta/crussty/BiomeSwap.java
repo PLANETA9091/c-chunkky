@@ -63,6 +63,24 @@ public final class BiomeSwap {
                         .orElseThrow(() -> new IllegalStateException(
                                 "overworld multi_noise parameter list not registered"));
         Object nbs = net.minecraft.world.level.biome.MultiNoiseBiomeSource.createFromPreset(preset);
+        // CRUS_BIOME_GRID=1: wrap the preset source with the grid-backed
+        // NativeBiomeSource — the BIOMES status answers from the native JNI
+        // quart grid (JFR cont-77: the vanilla createResolverForChunk climate
+        // splines + RTree cost ~1.5-2ms/chunk on the gen worker). Kill switch
+        // 0/unset keeps the plain preset source (cont-53/54 bit-equal anyway).
+        if ("1".equals(System.getenv("CRUS_BIOME_GRID")) && names != null && names.length > 0 && sections > 0) {
+            if (filler != null) {
+                Object nativeSrc = com.planeta.crussty.NativeBiomeSource.create(
+                        (net.minecraft.world.level.biome.MultiNoiseBiomeSource) nbs,
+                        filler, names, sections, minQuartY, nmsWorld);
+                if (nativeSrc != null) {
+                    nbs = nativeSrc;
+                    java.util.logging.Logger.getLogger("CrusstyGen").info(
+                            "world: grid-backed native biome source active ("
+                                    + names.length + " biomes, sections=" + sections + ")");
+                }
+            }
+        }
         bf.set(gen, nbs);
     }
 
