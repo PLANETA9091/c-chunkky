@@ -11,6 +11,7 @@ import net.minecraft.world.level.biome.Climate;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.stream.Stream;
 
@@ -26,9 +27,18 @@ import java.util.stream.Stream;
  * CONSTRUCTION (grid answers; vanilla RTree stays as the out-of-range
  * fallback).
  *
- * Serialization: codec() delegates to MultiNoiseBiomeSource.CODEC — a saved
- * level.dat round-trips as the vanilla preset source (bit-equal semantics);
- * onWorldLoad re-wraps on every boot, same as BiomeSwap today.
+ * Serialization: a PresetCodec registered as "crussty:grid" in
+ * BuiltInRegistries.BIOME_SOURCE. ENCODE delegates to the held vanilla
+ * MultiNoiseBiomeSource — the JSON written is exactly what the preset source
+ * writes (bit-equal level.dat). DECODE delegates to MultiNoiseBiomeSource.CODEC
+ * (a reload rebuilds the preset source; BiomeSwap re-wraps at world load).
+ *
+ * WHY not return MultiNoiseBiomeSource.CODEC from codec() directly: its
+ * RecordCodecBuilder getters are typed to MultiNoiseBiomeSource, so encoding a
+ * NativeBiomeSource instance throws ClassCastException inside the
+ * WorldGenSettings save (CI 41075573643: server died at boot,
+ * initServer -> saveEverything -> KeyDispatchCodec -> CCE). Registration makes
+ * the dispatch write OUR type tag and route the value encode through us.
  *
  * Subclassing note: MultiNoiseBiomeSource has only a private ctor, so we
  * extend BiomeSource directly and compose the preset source (its protected
@@ -82,6 +92,11 @@ public final class NativeBiomeSource extends BiomeSource {
                                            CrusstyChunkGenerator.CrusstyFiller filler,
                                            String[] names, int sections, int minQuartY,
                                            Object nmsWorld) {
+        if (codecRegistered() == null) {
+            java.util.logging.Logger.getLogger("CrusstyGen").warning(
+                    "NativeBiomeSource: codec not registered — vanilla biome source stays");
+            return null;
+        }
         try {
             Object regAccess = nmsWorld.getClass().getMethod("registryAccess").invoke(nmsWorld);
             Object biomeRegistry = regAccess.getClass()
@@ -99,9 +114,131 @@ public final class NativeBiomeSource extends BiomeSource {
 
     /** Saved level.dat round-trips as the vanilla preset source (bit-equal). */
     @Override
-    @SuppressWarnings({"rawtypes", "unchecked"})
     protected com.mojang.serialization.MapCodec<? extends BiomeSource> codec() {
-        return (com.mojang.serialization.MapCodec) MultiNoiseBiomeSource.CODEC;
+        return codecRegistered();
+    }
+
+    /** Registered codec (null until tryRegisterCodec succeeds once). */
+    private static volatile MapCodec<BiomeSource> REGISTERED;
+    private static volatile boolean TRIED;
+
+    private static MapCodec<BiomeSource> codecRegistered() {
+        if (TRIED) {
+            return REGISTERED;
+        }
+        synchronized (NativeBiomeSource.class) {
+            if (!TRIED) {
+                REGISTERED = tryRegisterCodec();
+                TRIED = true;
+            }
+            return REGISTERED;
+        }
+    }
+
+    /**
+     * Register PresetCodec in BuiltInRegistries.BIOME_SOURCE so the
+     * BiomeSource dispatch (a) writes our type tag and (b) routes the value
+     * encode through us. Reflective with fallback chains — names are
+     * cross-checked by the CI javap lane (nms-biome-signatures.txt); any
+     * failure returns null and create() keeps the vanilla source.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static MapCodec<BiomeSource> tryRegisterCodec() {
+        try {
+            Object reg = Class.forName("net.minecraft.core.registries.BuiltInRegistries")
+                    .getField("BIOME_SOURCE").get(null);
+            Object unfreeze = null;
+            Object freeze = null;
+            Field frozenField = null;
+            try {
+                unfreeze = reg.getClass().getMethod("unfreeze");
+                freeze = reg.getClass().getMethod("freeze");
+            } catch (Throwable ignored) {
+                // fall through to the boolean-field path
+            }
+            if (unfreeze == null) {
+                for (Class<?> k = reg.getClass(); k != null && frozenField == null; k = k.getSuperclass()) {
+                    for (Field f : k.getDeclaredFields()) {
+                        if (f.getType() == boolean.class && f.getName().equals("frozen")) {
+                            f.setAccessible(true);
+                            frozenField = f;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (unfreeze != null) {
+                unfreeze.invoke(reg);
+            } else if (frozenField != null) {
+                frozenField.set(reg, false);
+            } else {
+                throw new IllegalStateException("no unfreeze/frozen on " + reg.getClass().getName());
+            }
+            Object id;
+            try {
+                id = Identifier.class.getMethod("fromNamespaceAndPath", String.class, String.class)
+                        .invoke(null, "crussty", "grid");
+            } catch (Throwable e1) {
+                id = Identifier.parse("crussty:grid");
+            }
+            Method register = null;
+            for (Method m : Class.forName("net.minecraft.core.Registry").getMethods()) {
+                if (!m.getName().equals("register") || !java.lang.reflect.Modifier.isStatic(m.getModifiers())) {
+                    continue;
+                }
+                Class<?>[] p = m.getParameterTypes();
+                if (p.length == 3 && p[0].isInstance(reg) && p[1] == Identifier.class) {
+                    register = m;
+                    break;
+                }
+            }
+            if (register == null) {
+                throw new IllegalStateException("no Registry.register(Registry, Identifier, T)");
+            }
+            Object registered = register.invoke(null, reg, id, PresetCodec.INSTANCE);
+            if (freeze != null) {
+                freeze.invoke(reg);
+            } else if (frozenField != null) {
+                frozenField.set(reg, true);
+            }
+            java.util.logging.Logger.getLogger("CrusstyGen").info(
+                    "NativeBiomeSource: codec registered as crussty:grid -> " + registered);
+            return PresetCodec.INSTANCE;
+        } catch (Throwable t) {
+            java.util.logging.Logger.getLogger("CrusstyGen").warning(
+                    "NativeBiomeSource codec registration failed (vanilla source stays): " + t);
+            return null;
+        }
+    }
+
+    /**
+     * Encode = the vanilla preset source's own JSON; decode = the vanilla
+     * preset codec (reload rebuilds the preset source; BiomeSwap re-wraps).
+     */
+    private static final class PresetCodec extends com.mojang.serialization.MapCodec<BiomeSource> {
+        static final PresetCodec INSTANCE = new PresetCodec();
+
+        @Override
+        public <T> com.mojang.serialization.RecordBuilder<T> encode(BiomeSource input,
+                com.mojang.serialization.DynamicOps<T> ops,
+                com.mojang.serialization.RecordBuilder<T> prefix) {
+            MultiNoiseBiomeSource v = input instanceof NativeBiomeSource n ? n.vanilla : null;
+            if (v == null) {
+                throw new IllegalStateException("PresetCodec.encode: not a NativeBiomeSource: " + input);
+            }
+            return MultiNoiseBiomeSource.CODEC.encode(v, ops, prefix);
+        }
+
+        @Override
+        public <T> com.mojang.serialization.DataResult<BiomeSource> decode(
+                com.mojang.serialization.DynamicOps<T> ops, com.mojang.serialization.MapLike<T> input) {
+            return MultiNoiseBiomeSource.CODEC.decode(ops, input).map(m -> (BiomeSource) m);
+        }
+
+        @Override
+        public <T> java.util.stream.Stream<T> keys(com.mojang.serialization.DynamicOps<T> ops) {
+            return MultiNoiseBiomeSource.CODEC.keys(ops);
+        }
     }
 
     /** The native name table IS the parameter list's biome set. */

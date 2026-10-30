@@ -95,6 +95,9 @@ jobs:
             net.minecraft.world.level.levelgen.densityfunction.DensityVolume \
             net.minecraft.world.level.levelgen.densityfunction.DensityBuffer \
             net.minecraft.world.level.chunk.ChunkGenerator \
+            net.minecraft.core.MappedRegistry \
+            net.minecraft.core.registries.BuiltInRegistries \
+            net.minecraft.core.Registry \
             > nms-biome-signatures.txt 2>&1 || true
           wc -l nms-biome-signatures.txt
       - name: Upload artifacts

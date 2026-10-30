@@ -83,6 +83,8 @@ boot_run() { # $1 = dump tag, $2 = extra env
     sleep 5
   done
   if [ "$up" != "1" ]; then
+    echo "BOOT FAILED ($1) — first fatal exception:" >&2
+    grep -n -m 2 -A 24 -E "Encountered an unexpected exception|java\.(lang|io|util|nio)\.[A-Za-z.]*Exception|Failed to" "$SRV/run.out" >&2 || true
     echo "BOOT FAILED ($1) — last log lines:" >&2
     tail -30 "$SRV/run.out" >&2 || true
     stop_server
