@@ -223,6 +223,16 @@ jobs:
           # window wall still does not drop, the gate is downstream of gen
           # (status chain / main-thread beat) — ramp= + mspt + parks show it.
           CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4.log
+      - name: E2E large window 48x48 (amortized per-chunk at scale)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          # The 12x12 honest window carries ~3.5s of ramp (satellites +
+          # status chain) on 144 chunks. A 48x48 window (2304 chunks) spreads
+          # the same ramp over 16x more chunks — the e2e/chunk trend line
+          # toward the streaming asymptote (fills back-to-back ~21ms today).
+          # Same code path, WN stays 3 for the warmup pregen; N=47 = 48x48.
+          N=47 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_big.log
       - name: Far-coords native-gen probe (stall cliff bisect)
         continue-on-error: true
         run: |
@@ -246,6 +256,7 @@ jobs:
             e2e263_par.log
             e2e263_jfr_par.log
             e2e263_par4.log
+            e2e263_big.log
             e2e263_window.jfr
             e2e263_window_par.jfr
             ab263_out/
