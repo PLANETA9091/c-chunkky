@@ -40,6 +40,19 @@ fi
 # --- eula -------------------------------------------------------------------
 grep -q "eula=true" "$SRV/eula.txt" 2>/dev/null || echo "eula=true" > "$SRV/eula.txt"
 
+# --- paper-global.yml (Paper writes defaults on first boot; pre-seed the
+#     chunk-system section so harness env pins (CRUS_WORKER_THREADS) have a
+#     file to patch deterministically on a fresh runner) ---------------------
+if [ ! -f "$SRV/config/paper-global.yml" ]; then
+  mkdir -p "$SRV/config"
+  cat > "$SRV/config/paper-global.yml" <<'YML'
+chunk-system:
+  gen-parallelism: 'true'
+  io-threads: -1
+  worker-threads: -1
+YML
+fi
+
 # --- server.properties (deterministic judge config) -------------------------
 PROPS="$SRV/server.properties"
 cat > "$PROPS" <<EOF
