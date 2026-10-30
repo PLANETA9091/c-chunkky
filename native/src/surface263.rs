@@ -1153,17 +1153,26 @@ pub fn apply_surface263(
     // the result is bit-identical to the sequential walk; marks concatenate
     // in strip (z) order, the same order the sequential walk produced.
     let out_shared: &[u16; crate::nochunk::OUT_LEN] = out;
+    // move closures capture by VALUE — bind the shared borrows first so the
+    // closures move COPIES of the references, not the buffers themselves.
+    let hm_ref: &[i32; 256] = &hm;
+    let volume_ref: &DensityVolume = &volume;
+    let csl_vol_ref: &DensityVolume = &csl_slab_volume;
+    let csl_ref: &[f32] = &csl_slab;
+    let cu_ref: &[f32] = &copper_buf;
+    let ir_ref: &[f32] = &iron_buf;
+    let ri_ref: &[f32] = &richness_buf;
     let threads = crate::fill263::fill_threads().min(4);
     let strips = crate::fill263::split_strips(16, threads);
-    let mut results: Vec<(Vec<i64>, Box<[u16; crate::nochunk::OUT_LEN]>)> =
+    let results: Vec<(Vec<i64>, Box<[u16; crate::nochunk::OUT_LEN]>)> =
         std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(strips.len().saturating_sub(1));
             for &(z0, z1) in strips.iter().skip(1) {
                 handles.push(scope.spawn(move || {
                     let mut priv_out = Box::new(*out_shared);
                     let mk = walk_columns(
-                        st, hood, zoom_seed, &hm, &volume, &csl_slab_volume, &csl_slab,
-                        &copper_buf, &iron_buf, &richness_buf, sea_level, cx, cz, min_y, z0, z1,
+                        st, hood, zoom_seed, hm_ref, volume_ref, csl_vol_ref, csl_ref,
+                        cu_ref, ir_ref, ri_ref, sea_level, cx, cz, min_y, z0, z1,
                         &mut priv_out,
                     );
                     (mk, priv_out)
@@ -1173,8 +1182,8 @@ pub fn apply_surface263(
             if let Some(&(z0, z1)) = strips.first() {
                 let mut priv_out = Box::new(*out_shared);
                 let mk = walk_columns(
-                    st, hood, zoom_seed, &hm, &volume, &csl_slab_volume, &csl_slab,
-                    &copper_buf, &iron_buf, &richness_buf, sea_level, cx, cz, min_y, z0, z1,
+                    st, hood, zoom_seed, hm_ref, volume_ref, csl_vol_ref, csl_ref,
+                    cu_ref, ir_ref, ri_ref, sea_level, cx, cz, min_y, z0, z1,
                     &mut priv_out,
                 );
                 results.push((mk, priv_out));
@@ -1182,7 +1191,7 @@ pub fn apply_surface263(
             // A panicked strip worker is a real bug elsewhere; recompute its
             // range inline so the chunk never ships without surface rules.
             let mut failed: Vec<(i32, i32)> = Vec::new();
-            for (h, &(z0, z1)) in handles.iter().zip(strips.iter().skip(1)) {
+            for (h, &(z0, z1)) in handles.into_iter().zip(strips.iter().skip(1)) {
                 match h.join() {
                     Ok(r) => results.push(r),
                     Err(_) => failed.push((z0, z1)),
@@ -1191,8 +1200,8 @@ pub fn apply_surface263(
             for &(z0, z1) in &failed {
                 let mut priv_out = Box::new(*out_shared);
                 let mk = walk_columns(
-                    st, hood, zoom_seed, &hm, &volume, &csl_slab_volume, &csl_slab,
-                    &copper_buf, &iron_buf, &richness_buf, sea_level, cx, cz, min_y, z0, z1,
+                    st, hood, zoom_seed, hm_ref, volume_ref, csl_vol_ref, csl_ref,
+                    cu_ref, ir_ref, ri_ref, sea_level, cx, cz, min_y, z0, z1,
                     &mut priv_out,
                 );
                 results.push((mk, priv_out));
