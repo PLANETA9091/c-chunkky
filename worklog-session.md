@@ -3572,3 +3572,37 @@ ReentrantLock+RR, BEARD_LOCK, BULK_LOCK). Пуш ea9a85df: CRUS_GEN_PARALLEL=1
 на 4 ядрах. Плюс bench WAVE-фаза (100 свежих фронтир-чанков,
 center parked до wall, параллельные hood-вычисления на wall) —
 раннер-стабильный стенд-ин для окна.
+
+## cont-68: STRIP WALK ЗЕЛЁНЫЙ (walk 5.0->4.1, surface -29%), WAVE bench 5.10, ждём parallel-gen
+
+cf4bca97 (strip-parallel surface walk, borrowck fix) — ВСЁ ЗЕЛЁНОЕ:
+A/B surface gate PASS, carver gate PASS, SIMD parity 0/25, WAVE bench
+в бенче работает.
+
+TIMING-ОКНО: e2e=61.67 gen=28.40 | stage[terrain=9.679
+surface=5.407 hood=6.644 hood_compute=8.894 ncomp=697 park=0.063]
+surf_aux=1.118 surf_walk=4.240. PF0-окно: e2e=54.03 gen=24.79
+surf_walk=4.085. Против pre-strip (7b3094fd, сопоставимо медленный
+раннер): surf_walk 5.04-6.45 -> 4.08-4.24, surface 7.65 -> 5.4
+(-29%). Стрипы по z (fill_threads ширина), приватная копия буфера на
+стрип, diff-merge после join (дизъюнктные колонки = бит-идентично),
+marks конкатенация в strip-порядке, упавший стрип пересчитывается
+инлайн. Walk263 ore/csl буферы стали shared borrows.
+
+Урок borrowck: move-замыкания в std::thread::scope захватывают &local
+ПО ЗНАЧЕНИЮ (двигают сам local) — ссылки на некопируемые локалы
+биндинг-ать в отдельные let ДО замыканий.
+
+БЕНЧ WAVE (новый раннер-стабильный метрик): server_fill WAVE median
+5.10ms — 100 свежих фронтир-чанков, center parked до wall, параллельные
+hood-вычисления на wall. Против warm 3.57 — фронтир-надбавка ~1.5мс.
+
+ПУШ 7e14d80b: self-balancing width — ACTIVE_FILLS счётчик, при
+параллельной генерации каждый филл сужает стрипы до cores/active
+(без оверсабскрипции), одиночный филл держит полную ширину.
+
+В ПОЛЁТЕ: ea9a85df/1a0747cf/7e14d80b — parallel-gen лана
+(CRUS_GEN_PARALLEL=1: Paper default chunk-system parallelism в
+timing-окне; judge ланы остаются serial). JFR-лана теперь с
+per-thread атрибуцией (jfr_top.py, WatchdogThread отфильтрован).
+ЖДЁМ ВЕРДИКТ: e2e /2-4x на 4-ядерном раннере?
