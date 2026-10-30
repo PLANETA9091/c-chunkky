@@ -219,7 +219,20 @@ if [ "${CRUS_JFR:-0}" = "1" ]; then
     && echo "JFR started (profile, window slice)" || echo "JFR.start FAILED"
 fi
 t0=$(date +%s.%N)
-$RCON "forceload add $((RX * 16)) $((RZ * 16)) $(((RX + N) * 16 + 15)) $(((RZ + N) * 16 + 15))" >/dev/null
+# vanilla /forceload add rejects areas over 256 chunks — a 48x48 window
+# (2304 chunks) failed SILENTLY (stderr to /dev/null) and the lane burned
+# its whole timeout at inside=0/2304 (runs 7fe1e722 / c0e33eb9). Split into
+# <=256-chunk tiles (256x256 blocks each), clamped to the window rect.
+fminx=$((RX * 16)); fmaxx=$(((RX + N) * 16 + 15))
+fminz=$((RZ * 16)); fmaxz=$(((RZ + N) * 16 + 15))
+for bx in $(seq "$fminx" 256 "$fmaxx"); do
+  for bz in $(seq "$fminz" 256 "$fmaxz"); do
+    ex=$((bx + 255)); [ "$ex" -gt "$fmaxx" ] && ex=$fmaxx
+    ez=$((bz + 255)); [ "$ez" -gt "$fmaxz" ] && ez=$fmaxz
+    $RCON "forceload add $bx $bz $ex $ez" >/dev/null \
+      || echo "  [forceload tile FAILED] $bx $bz -> $ex $ez"
+  done
+done
 done=0
 for i in $(seq 1 6000); do
   c=$($RCON "crusgenstats wincount" 2>/dev/null | grep -o "window_inside=[0-9]*" | cut -d= -f2)
