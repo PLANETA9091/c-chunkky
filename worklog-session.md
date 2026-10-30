@@ -3973,3 +3973,8 @@ createResolver/createResolverForChunk overrides, Registry.get -> Optional<Holder
 - GenStats: biome_fill n>0 ВПЕРВЫЕ (JNI-филлы в рантайме), mean ~0.15-0.3мс/филл.
 - hood-кеши: compute_grid263 и fillBiomes теперь ходят в один store_biome_grid263 кэш —
   hood_compute может чуть просесть (кэш-хиты от BIOMES-статуса), не вредит.
+
+ПИКАП следующей сессии (ран a66aef3b 41074814781 + дубли): grep 'BIOME PARITY' в integration-логе —
+гейт NativeBiomeSource; honest window timing-ланы -> e2e-дельта vs 22b8c8cf (36.41, ожидание -2..-2.7
+на медленном раннере); GenStats biome_fill n>0. Дальше по фронтам: par4-дефолт флип (3 зелёных
+подряд уже есть), DecoDriver разгон (+12мс на медленном), jfr+par4 комбинация для spread-картины.
