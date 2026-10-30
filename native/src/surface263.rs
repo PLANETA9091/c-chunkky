@@ -940,6 +940,12 @@ pub fn apply_surface263(
     let volume = DensityVolume::block_step((16, height, 16), (cx * 16, min_y, cz * 16));
     let mut ctx_ore = SamplerCtx263::cached();
     let mut ctx_csl = SamplerCtx263::cached();
+    let prof_on = crate::df263::PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed);
+    let t_aux = if prof_on {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
     let mut copper_buf = ctx_ore.scratch.acquire(volume.size());
     let mut iron_buf = ctx_ore.scratch.acquire(volume.size());
     let mut richness_buf = ctx_ore.scratch.acquire(volume.size());
@@ -952,6 +958,17 @@ pub fn apply_surface263(
     let mut csl_slab = ctx_csl.scratch.acquire(256);
     st.chunk_surface_level
         .sample_volume(&mut ctx_csl, &mut csl_slab, &csl_slab_volume);
+    if let Some(t) = t_aux {
+        crate::df263::PROF_STAGE_SURF_AUX.fetch_add(
+            t.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    let t_walk = if prof_on {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
 
     let cond_count = st.cfg.conds.len();
     let mut walk = Walk263 {
@@ -1058,6 +1075,12 @@ pub fn apply_surface263(
                 frozen_ocean_extension(&mut walk, out, min_y, top, min_surface);
             }
         }
+    }
+    if let Some(t) = t_walk {
+        crate::df263::PROF_STAGE_SURF_WALK.fetch_add(
+            t.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 }
 

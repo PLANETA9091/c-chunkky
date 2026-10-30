@@ -214,8 +214,12 @@ impl SamplerCtx263 {
             cell.volume = Some(vol.clone());
             cell.buffer = Some(buf);
         }
+        // Copy straight out of the cached cell buffer — the old path cloned
+        // the whole volume buffer (393KB at full height) just to copy it into
+        // `out` immediately after; every cache read paid an extra alloc+memcpy.
         let len = out.len();
-        let buffer = self.cell(id).unwrap().buffer.as_ref().unwrap().clone();
+        let cell = self.cell(id).unwrap();
+        let buffer = cell.buffer.as_ref().unwrap();
         out.copy_from_slice(&buffer[..len]);
     }
 
@@ -319,6 +323,8 @@ pub fn prof263_reset() {
     PROF_STAGE_HOOD_COMPUTE.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_STAGE_HOOD_COMPUTED.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_STAGE_PARK.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_STAGE_SURF_AUX.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_STAGE_SURF_WALK.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Per-fill mean snapshot in the fill263bench format (ms/chunk).
@@ -351,6 +357,11 @@ pub fn prof263_snapshot() -> String {
         ms(&PROF_STAGE_HOOD_COMPUTE),
         PROF_STAGE_HOOD_COMPUTED.load(std::sync::atomic::Ordering::Relaxed),
         ms(&PROF_STAGE_PARK)
+    ));
+    s.push_str(&format!(
+        " surf_aux={:.3} surf_walk={:.3}",
+        ms(&PROF_STAGE_SURF_AUX),
+        ms(&PROF_STAGE_SURF_WALK)
     ));
     s
 }
@@ -394,6 +405,13 @@ pub static PROF_STAGE_HOOD_COMPUTE: std::sync::atomic::AtomicU64 =
 pub static PROF_STAGE_HOOD_COMPUTED: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub static PROF_STAGE_PARK: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+/// Surface-stage internals (surface263.rs apply_surface263): AUX = the 3
+/// ore-vein sample_volume fills (copper/iron/richness) + the chunk_surface_
+/// level slab; WALK = the per-column surface-rules loop (buildSurface).
+pub static PROF_STAGE_SURF_AUX: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_STAGE_SURF_WALK: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 thread_local! { static PROF_CHILD_T: std::cell::Cell<u64> = std::cell::Cell::new(0); }
 
