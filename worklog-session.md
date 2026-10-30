@@ -3796,3 +3796,23 @@ world-load). Дешево: int[~2000] + Object[17] на чанк. par4 лана 
 Попутно преппедо: depth column kernel в fill_biomes263 (quart-объём
 4x96x4 step 4 через stack263_fill_col, бит-точно; depth 3D-шум ~2-3мс
 из 4.4мс/грид — теперь топ-3 стоимость через hood).
+
+
+## cont-75 ( prep): depth quart-volume fast path в fill_biomes263
+
+Depth (climate[4], y-зависимый) считался 1536 per-point sample_value
+на грид — каждый полный обход дерева. Новый путь: ОДИН sample_volume
+по quart-объёму (4 x sections*4 x 4, step 4) — generic volume-машина
+сама хойстит per-column прологи шумов (stack263_fill_col) и
+броадкастит y-инвариантные дети (пять ShiftedXz климait-полей) ->
+~16 column-кернелов вместо 1536 обходов. Guard volume_duality_safe
+(исчерпывающий обход 36 вариантов DfSam263 + SplineRef рекурсия):
+Interpolated/FindTopSurface/BlendDensity -> скалярный fallback (их
+volume-семантика не поинт-дуальна); модульный инвариант biome263
+(«none of the climate six is Interpolated») гарантирует, что реальный
+depth проходит guard. Юнит-тест depth_quart_volume_bit_exact_vs_points:
+реальное дерево, полный чанк, to_bits-сравнение volume vs per-point.
+Тёплый старт: поиск RTree (find_value, warm-start) не тронут — порядок
+обхода сохранён, изменился только источник d.
+Ожидание CI: fill_biomes263 4.4мс -> ~1.5-2мс/грид; hood wall 4.17 ->
+~2-3; e2e -1..-2мс. terr/hood стейджи следующего рана покажут.
