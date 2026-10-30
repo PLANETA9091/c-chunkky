@@ -3456,3 +3456,45 @@ cell-гриды + 3 trilinear (теперь векторные) + pointwise-ко
 слить в один проход 4 слотов), terrain interp_cell (corner-сэмпл
 1225 точек — сквозной кеш плоскостей соседних чанков), Paper-сторона
 (span−gen ~30мс: light/диспетч/филлы соседей).
+
+## cont-65: ПЕСОЧНИЦА ОТКАТИЛАСЬ К cont-41 — ресинк; pollution kinds; surf split + PF A/B
+
+Сессия стартовала с откаченным снапшотом песочницы: локальный HEAD был
+cont-41 (848b2b6), вся работа cont-61..64 жила только на remote. Ресинк:
+git stash + reset --hard origin/main до cd9cbc70.
+
+CI cd9cbc70 (run 40901275596) зелёный: honest window deco=0
+e2e=80.41 gen=36.00 native=35.67 | stage[terrain=8.925 surface=11.341
+hood=7.194 hood_compute=7.157 ncomp=687 park=0.102]; deco=1
+e2e=93.60; no-beard e2e=79.29. ПРОТИВ cont-63 (56.5/26.0) всё +35-40%
+РАВНОМЕРНО по стадиям — раннерный шум/контенция, не регрессия:
+контролируемый бенч того же рана server_fill median 3.58ms ≈ fill_chunk
+3.57, SIMD parity 0/25 (жёсткий гейт). Фейл e7cfafaf (prefetch pool) был
+тем же v8-багом ядра (z=3 колонка на non-AVX512 раннере) — починен в
+cd9cbc70, сам пул жив (CRUS_GRID_PF=0 kill-switch).
+
+РАЗГАДКА POLLUTION KINDS: per-kind профиль (fills=951
+shell=6.5 noise=14.0 interp_cell=16.1 ...) даёт сумму ~40мс/филл против
+чистого terrain=8.9 — счётчики kind (thread-local child-учёт) собирают
+ещё и fill_biomes263 c prefetch-воркера и из inline-компьютов
+(ncomp=687), а PROF_FILLS делит только по серверным филлам. Wall-таймеры
+stage[] (terrain/hood/surface) чистые — только серверный тред. KINDS
+больше не путеводитель, пока не разделим по тредам.
+
+ПУШ 4a990054: (1) split поверхности: surf_aux (3 ore sample_volume + csl
+slab) vs surf_walk (per-column rules loop) — новые wall-таймеры
+PROF_STAGE_SURF_AUX/WALK в снапшоте; (2) sample_volume_cached отдаёт
+кэш-хит копией напрямую из cell.buffer — раньше клонировал весь буфер
+(393КБ) ради copy_from_slice, каждый cache-read платил alloc+memcpy
+(mask читают copper+iron, toggle — 4 дерева: 6 клонов/филл); (3) CI
+A/B-лane CRUS_GRID_PF=0 (CRUS_FILL263_PROF=1) — то же окно, тот же
+раннер: stage[terrain= hood= hood_compute= ncomp=] против дефолтной
+ланы честно измерит, ворует ли prefetch-тред CPU у serial fill на
+2-ядрах (гипотеза: terrain 5.7->8.9 из-за контенции, у пула нет ядер на
+этой VM).
+
+Следующее: по surf_aux/surf_walk — если aux (гипотеза: 2 block-step
+noise-филла vein_a/vein_b в mask, xz_scale=4 -> без решётчатого
+шаринга) — то fusion 3 pointwise-проходов мало даст, копать в noise;
+если walk — правила поверхности. Paper-side (e2e-gen = 44.4 в этом
+ране) остаётся крупнейшим блоком, вне натива.
