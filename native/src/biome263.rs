@@ -522,7 +522,7 @@ fn bisect_walk(
         );
     }
     let kids: Vec<crate::df263::SamRef> = match a.as_ref() {
-        D::Constant(_) | D::Gradient { .. } | D::ShiftB { .. } => Vec::new(),
+        D::Constant(_) | D::Gradient { .. } | D::ShiftB { .. } | D::Beard => Vec::new(),
         D::Noise { .. } | D::RangeChoiceConst { .. } => Vec::new(),
         D::ShiftedXz { shift_x, shift_z, .. } => vec![shift_x.clone(), shift_z.clone()],
         D::Binary { l, r, .. } | D::Pow { a: l, b: r } => vec![l.clone(), r.clone()],
