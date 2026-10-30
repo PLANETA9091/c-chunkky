@@ -167,6 +167,10 @@ jobs:
         run: |
           set -o pipefail
           SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh carvers 2>&1 | tee ab263_carvers.log
+      - name: A/B biome (grid-backed native biome source vs vanilla preset, exact gate)
+        run: |
+          set -o pipefail
+          SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh biome 2>&1 | tee ab263_biome.log
       - name: E2E per-chunk timing (fresh 12x12, GenStats window)
         run: |
           set -o pipefail
@@ -270,6 +274,7 @@ jobs:
           path: |
             ab263_surface.log
             ab263_carvers.log
+            ab263_biome.log
             e2e263_timing.log
             e2e263_deco.log
             farprobe263.log

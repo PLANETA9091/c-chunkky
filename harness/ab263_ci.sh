@@ -93,9 +93,10 @@ boot_run() { # $1 = dump tag, $2 = extra env
   sleep 45
   $RCON "statdump $1_stat.txt" >/dev/null
   $RCON "blockdump $1_block.txt" >/dev/null
+  $RCON "biomedump $1_biome.txt" >/dev/null
   sleep 2
   stop_server
-  [ -f "$SRV/$1_stat.txt" ] && echo "$1: stat $(wc -l < "$SRV/$1_stat.txt") chunks, block $(wc -l < "$SRV/$1_block.txt" 2>/dev/null || echo 0)"
+  [ -f "$SRV/$1_stat.txt" ] && echo "$1: stat $(wc -l < "$SRV/$1_stat.txt") chunks, block $(wc -l < "$SRV/$1_block.txt" 2>/dev/null || echo 0), biome $(wc -l < "$SRV/$1_biome.txt" 2>/dev/null || echo 0)"
   return 0
 }
 
@@ -109,10 +110,30 @@ case "$PAIR" in
     boot_run "ab_on"  "CRUS_NATIVE_CARVERS=1" || exit 1
     boot_run "ab_off" "CRUS_NATIVE_CARVERS=0" || exit 1
     ;;
-  *) echo "unknown pair: $PAIR (surface|carvers)" >&2; exit 1;;
+  biome)
+    # grid-backed native biome source (CRUS_BIOME_GRID=1) vs the vanilla
+    # preset MultiNoise pipeline. Biome fills are pure functions of (cx,cz)
+    # — no deco-style cross-chunk nondeterminism — so the gate is EXACT
+    # hash equality over every chunk, not a tolerant count.
+    boot_run "ab_on"  "CRUS_NATIVE_CARVERS=0 CRUS_BIOME_GRID=1" || exit 1
+    boot_run "ab_off" "CRUS_NATIVE_CARVERS=0"                  || exit 1
+    ;;
+  *) echo "unknown pair: $PAIR (surface|carvers|biome)" >&2; exit 1;;
 esac
 
-cp "$SRV"/ab_on_stat.txt "$SRV"/ab_off_stat.txt "$SRV"/ab_on_block.txt "$SRV"/ab_off_block.txt "$DUMPS"/ 2>/dev/null || true
+cp "$SRV"/ab_on_stat.txt "$SRV"/ab_off_stat.txt "$SRV"/ab_on_block.txt "$SRV"/ab_off_block.txt \
+   "$SRV"/ab_on_biome.txt "$SRV"/ab_off_biome.txt "$DUMPS"/ 2>/dev/null || true
+
+if [ "$PAIR" = "biome" ]; then
+  echo "=== biome exact-parity gate (grid-backed vs vanilla preset) ==="
+  if diff -q "$DUMPS/ab_on_biome.txt" "$DUMPS/ab_off_biome.txt" >/dev/null 2>&1; then
+    echo "BIOME PARITY OK ($(wc -l < "$DUMPS/ab_on_biome.txt") chunks identical)"
+  else
+    echo "BIOME PARITY FAILED — divergent chunks:"
+    diff "$DUMPS/ab_on_biome.txt" "$DUMPS/ab_off_biome.txt" | head -12
+    exit 1
+  fi
+fi
 
 echo "=== material-count gate ($PAIR) ==="
 python3 - "$DUMPS/ab_on_stat.txt" "$DUMPS/ab_off_stat.txt" <<'PYEOF'
