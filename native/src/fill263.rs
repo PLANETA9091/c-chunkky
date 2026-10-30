@@ -143,6 +143,20 @@ impl Gen263 {
     /// in fill_chunk, hand &pre to every fill_strip — removes the
     /// per-strip maxSurfaceLevel walk (was 0.37ms x strips).
     pub fn aquifer_prefill(&self, volume: &DensityVolume) -> AquiferPrefill263 {
+        let t = crate::df263::PROF_ON_263
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .then(std::time::Instant::now);
+        let r = self.aquifer_prefill_inner(volume);
+        if let Some(t0) = t {
+            crate::df263::PROF_STAGE_TERRAIN_PREFILL.fetch_add(
+                t0.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        r
+    }
+
+    fn aquifer_prefill_inner(&self, volume: &DensityVolume) -> AquiferPrefill263 {
         let mut ctx = SamplerCtx263::cached();
         let cfg = crate::aquifer263::AquiferConfig263 {
             barrier: self.aquifer_cfg.barrier.clone(),
@@ -385,11 +399,27 @@ impl Gen263 {
         ctx.beard = crate::beard263::Beardifier263::decode(beard_list);
         // aquifer from the SHARED prefill (the full-volume grid walk ran
         // once in fill_chunk — the strip grid converges to identical values)
+        let prof_on = crate::df263::PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed);
+        let t_setup = prof_on.then(std::time::Instant::now);
         let mut aquifer = self.aquifer_with_prefill(volume, pre);
         let mut buf = ctx.scratch.acquire(strip_vol.size());
         let mut strip_out: Box<[u16; OUT_LEN]> = vec![0u16; OUT_LEN].into_boxed_slice().try_into().unwrap();
         let mut marks: Vec<i64> = Vec::new();
+        if let Some(t0) = t_setup {
+            crate::df263::PROF_STAGE_TERRAIN_SETUP.fetch_add(
+                t0.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        let t_sample = prof_on.then(std::time::Instant::now);
         self.sample_final_density(&mut ctx, &mut buf, &strip_vol);
+        if let Some(t0) = t_sample {
+            crate::df263::PROF_STAGE_TERRAIN_SAMPLE.fetch_add(
+                t0.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        let t_walk = prof_on.then(std::time::Instant::now);
         for z in 0..strip_vol.size_z {
             let z_global = z0 + z;
             for x in 0..strip_vol.size_x {
@@ -431,6 +461,12 @@ impl Gen263 {
                     }
                 }
             }
+        }
+        if let Some(t0) = t_walk {
+            crate::df263::PROF_STAGE_TERRAIN_WALK.fetch_add(
+                t0.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
         }
         ctx.scratch.release(buf);
         (marks, strip_out)

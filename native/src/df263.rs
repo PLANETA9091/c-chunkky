@@ -357,6 +357,10 @@ pub fn prof263_reset() {
     PROF_STAGE_PARK.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_STAGE_SURF_AUX.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_STAGE_SURF_WALK.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_STAGE_TERRAIN_SETUP.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_STAGE_TERRAIN_SAMPLE.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_STAGE_TERRAIN_WALK.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_STAGE_TERRAIN_PREFILL.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Per-fill mean snapshot in the fill263bench format (ms/chunk).
@@ -394,6 +398,13 @@ pub fn prof263_snapshot() -> String {
         " surf_aux={:.3} surf_walk={:.3}",
         ms(&PROF_STAGE_SURF_AUX),
         ms(&PROF_STAGE_SURF_WALK)
+    ));
+    s.push_str(&format!(
+        " terr_sample={:.3} terr_walk={:.3} terr_setup={:.3} terr_prefill={:.3}",
+        ms(&PROF_STAGE_TERRAIN_SAMPLE),
+        ms(&PROF_STAGE_TERRAIN_WALK),
+        ms(&PROF_STAGE_TERRAIN_SETUP),
+        ms(&PROF_STAGE_TERRAIN_PREFILL)
     ));
     s
 }
@@ -444,6 +455,21 @@ pub static PROF_STAGE_PARK: std::sync::atomic::AtomicU64 =
 pub static PROF_STAGE_SURF_AUX: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub static PROF_STAGE_SURF_WALK: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+/// Terrain-stage internals (fill263): THREAD SUMS across the calling thread
+/// and the strip scope threads — compare against the terrain wall exactly
+/// like hood_compute (sum < wall = the strips overlap). SETUP = per-strip
+/// SamplerCtx + beardifier decode + aquifer ctor + scratch acquire; SAMPLE
+/// = sample_final_density (splines + interpolated cells + noise family);
+/// WALK = the aquifer substance triple loop; PREFILL = the shared aquifer
+/// maxSurfaceLevel prefill walk (calling thread, once per fill).
+pub static PROF_STAGE_TERRAIN_SETUP: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_STAGE_TERRAIN_SAMPLE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_STAGE_TERRAIN_WALK: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_STAGE_TERRAIN_PREFILL: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 thread_local! { static PROF_CHILD_T: std::cell::Cell<u64> = std::cell::Cell::new(0); }
 
