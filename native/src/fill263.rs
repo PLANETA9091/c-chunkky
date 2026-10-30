@@ -686,7 +686,7 @@ impl Gen263 {
 
 /// Strip-parallel worker count: CRUS_FILL_THREADS_263 overrides, else
 /// available_parallelism (min 1). 1 disables the strip path entirely.
-fn fill_threads() -> usize {
+pub fn fill_threads() -> usize {
     if let Ok(v) = std::env::var("CRUS_FILL_THREADS_263") {
         if let Ok(n) = v.parse::<usize>() {
             return n.max(1);

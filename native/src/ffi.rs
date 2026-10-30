@@ -1290,25 +1290,17 @@ fn take_biome_grid263(cx: i32, cz: i32) -> Option<Box<[i32]>> {
         .cloned()
 }
 
-/// Clone a grid WITHOUT consuming it (neighbors keep theirs for their own
-/// fill tail). Computes on the fly when the map entry is gone (eviction /
-/// concurrent consumption): fill_biomes263 is deterministic, so the result
-/// is identical either way.
-fn clone_or_compute_grid263(
+/// Compute a wave-front biome grid on the fly: fill_biomes263 + prof +
+/// store-back. Deterministic per (cx, cz) — safe from any thread (the
+/// prefetch worker already relies on that); the result is identical whether
+/// the entry was evicted or never built.
+fn compute_grid263(
     b263: &std::sync::Arc<crate::biome263::BiomeState263>,
     min_y: i32,
     height: i32,
     cx: i32,
     cz: i32,
-) -> Option<Box<[i32]>> {
-    {
-        let guard = V263_GRIDS.lock().unwrap();
-        if let Some(c) = guard.as_ref() {
-            if let Some(g) = c.map.get(&(cx, cz)) {
-                return Some(g.clone());
-            }
-        }
-    }
+) -> Box<[i32]> {
     let n = (height as usize) / 16 * 64;
     let mut buf = vec![0i32; n].into_boxed_slice();
     let prof_on = crate::df263::PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed);
@@ -1324,7 +1316,7 @@ fn clone_or_compute_grid263(
     // store-back: deterministic per (cx, cz) — later fills clone instead of
     // recompute (bounded by GRID_CAP eviction, pending grids never dropped).
     store_biome_grid263(cx, cz, &buf);
-    Some(buf)
+    buf
 }
 
 /// Build the 3x3 biome-grid neighborhood for the 26.3 surface pass (fiddle
@@ -1347,13 +1339,71 @@ fn hood263(
     let sections = (height as usize) / 16;
     let mut grids: [Option<Box<[i32]>>; 9] = std::array::from_fn(|_| None);
     grids[4] = Some(center);
-    for dz in -1i32..=1 {
-        for dx in -1i32..=1 {
-            if dx == 0 && dz == 0 {
-                continue;
+    if let Some(b) = b263 {
+        // Phase 1: clone everything already cached, collect the wave-front
+        // misses (the fill frontier's neighbors have no BIOMES grid yet).
+        let mut missing: Vec<(usize, i32, i32)> = Vec::new();
+        for dz in -1i32..=1 {
+            for dx in -1i32..=1 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let slot = ((dx + 1) * 3 + (dz + 1)) as usize;
+                let nx = cx + dx;
+                let nz = cz + dz;
+                match take_biome_grid263(nx, nz) {
+                    Some(g) => grids[slot] = Some(g),
+                    None => missing.push((slot, nx, nz)),
+                }
             }
-            grids[((dx + 1) * 3 + (dz + 1)) as usize] = b263
-                .and_then(|b| clone_or_compute_grid263(b, min_y, height, cx + dx, cz + dz));
+        }
+        // Phase 2: compute the misses — in parallel when more than one.
+        // The hood wait is on the critical path either way; unlike the
+        // terrain-time prefetch pool (cont-66: -7% e2e on 2 cores) this
+        // steals no CPU from the serial fill — the strip threads are done
+        // by the time the hood builds. Grids are pure functions of (cx, cz).
+        let width = crate::fill263::fill_threads().min(4).min(missing.len());
+        let per = if width > 0 {
+            missing.len().div_ceil(width)
+        } else {
+            1
+        };
+        let groups: Vec<Vec<(usize, i32, i32)>> = missing
+            .chunks(per.max(1))
+            .map(|c| c.to_vec())
+            .collect();
+        if groups.len() > 1 {
+            let results: Vec<(usize, Box<[i32]>)> = std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(groups.len() - 1);
+                for grp in &groups[1..] {
+                    handles.push(scope.spawn(move || {
+                        grp.iter()
+                            .map(|&(slot, nx, nz)| {
+                                (slot, compute_grid263(b, min_y, height, nx, nz))
+                            })
+                            .collect::<Vec<_>>()
+                    }));
+                }
+                let mut out = groups[0]
+                    .iter()
+                    .map(|&(slot, nx, nz)| {
+                        (slot, compute_grid263(b, min_y, height, nx, nz))
+                    })
+                    .collect::<Vec<_>>();
+                for h in handles {
+                    if let Ok(r) = h.join() {
+                        out.extend(r);
+                    }
+                }
+                out
+            });
+            for (slot, buf) in results {
+                grids[slot] = Some(buf);
+            }
+        } else {
+            for &(slot, nx, nz) in missing.iter() {
+                grids[slot] = Some(compute_grid263(b, min_y, height, nx, nz));
+            }
         }
     }
     Some(crate::surface263::Neighborhood263 {
