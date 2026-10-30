@@ -276,3 +276,10 @@ PYEOF
 
 echo "=== GenStats window breakdown (exactly the timed chunks) ==="
 echo "$STATS" | tr '|' '\n' | sed 's/\[CrusstyGen\]//g; s/^ *//' | grep -v '^$'
+
+# native run-phase profiler lives in run.out (log_warn = stderr): surface the
+# last 16-chunk windows — decoRunFeature wall split + ore internals + top-10.
+if [ -f "$SRV/run.out" ]; then
+  echo "=== native run-prof (run.out tail; deco lanes only) ==="
+  grep -h "run-prof\|ore-prof" "$SRV/run.out" 2>/dev/null | tail -14 || true
+fi

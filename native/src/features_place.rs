@@ -2462,6 +2462,50 @@ fn magma_is_water_or_air(ctx: &PlaceCtx, p: BlockPos) -> bool {
     ctx.level.state_name(p) == "minecraft:water" || ctx.level.is_air(p)
 }
 
+/// ore-internal run profile (sampled 1/8 of candidate cells): where the
+/// place_ore wall goes — the per-cell target (tag) test, the vein node
+/// cloud build (RNG draws + lerp + sphere elimination), the ocean-floor
+/// height gate, the 6-neighbor air scan. Printed via prof_chunk_tick as
+/// [ore-prof]; the e2e_ci.sh run.out grep surfaces it in CI logs.
+pub mod ore_prof {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    pub const S_TAG: usize = 0;
+    pub const S_NODES: usize = 1;
+    pub const S_HM: usize = 2;
+    pub const S_AIR: usize = 3;
+    static NS: [AtomicU64; 4] = [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+    ];
+    static SAMPLES: AtomicU64 = AtomicU64::new(0);
+
+    /// Run `f` under the sampler: every 8th call is timed (Instant::now on
+    /// every cell would itself cost; the x8 multiplier restores the est).
+    #[inline]
+    pub fn measure<R>(slot: usize, f: impl FnOnce() -> R) -> R {
+        let i = SAMPLES.fetch_add(1, Ordering::Relaxed);
+        if i & 7 != 0 {
+            return f();
+        }
+        let t = std::time::Instant::now();
+        let r = f();
+        NS[slot].fetch_add(t.elapsed().as_nanos() as u64 * 8, Ordering::Relaxed);
+        r
+    }
+
+    /// (tag, nodes, height-gate, air) ns estimates; resets the window.
+    pub fn drain() -> [u64; 4] {
+        [
+            NS[0].swap(0, Ordering::Relaxed),
+            NS[1].swap(0, Ordering::Relaxed),
+            NS[2].swap(0, Ordering::Relaxed),
+            NS[3].swap(0, Ordering::Relaxed),
+        ]
+    }
+}
+
 fn magma_valid(ctx: &PlaceCtx, p: BlockPos) -> bool {
     if magma_is_water_or_air(ctx, p) {
         return false;
@@ -2582,18 +2626,20 @@ fn place_ore(
     // early gate: any column in the box with ocean-floor height >= y0
     let mut ok = false;
     let mut gate_h: i32 = i32::MIN;
-    'outer: for ix in x0..=x0 + width {
-        for iz in z0..=z0 + width {
-            let h = ctx.level.height(crate::features_deco::HeightmapTy::OceanFloorWg, ix, iz);
-            if h > gate_h {
-                gate_h = h;
-            }
-            if y0 <= h {
-                ok = true;
-                break 'outer;
+    ore_prof::measure(ore_prof::S_HM, || {
+        'outer: for ix in x0..=x0 + width {
+            for iz in z0..=z0 + width {
+                let h = ctx.level.height(crate::features_deco::HeightmapTy::OceanFloorWg, ix, iz);
+                if h > gate_h {
+                    gate_h = h;
+                }
+                if y0 <= h {
+                    ok = true;
+                    break 'outer;
+                }
             }
         }
-    }
+    });
     if vein_trace {
         eprintln!(
             "[vein@{}] o=({},{},{}) f={f:.9} box=({x0},{y0},{z0}) w={width} h={height} size={size} discard={discard} gate={ok} maxh={gate_h}",
@@ -2608,41 +2654,44 @@ fn place_ore(
     }
 
     // vein node cloud (Mth.sin/cos = the 65536-entry f32 table)
-    let mut pts: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(size as usize);
-    for i2 in 0..size {
-        let fr = i2 as f32 / size_f;
-        let d = mth_lerp(fr as f64, min_x, max_x);
-        let d1 = mth_lerp(fr as f64, min_y, max_y);
-        let d2 = mth_lerp(fr as f64, min_z, max_z);
-        let d3 = rng.next_f64() * size_f as f64 / 16.0;
-        let s = mth_sin(std::f32::consts::PI * fr);
-        let d4 = ((s + 1.0f32) as f64 * d3 + 1.0) / 2.0;
-        pts.push((d, d1, d2, d4));
-        if crate::features_place::draw_trace_on() {
-            eprintln!("[node {i2}] d={d:.17} y={d1:.17} z={d2:.17} r={d4:.17}");
+    let pts: Vec<(f64, f64, f64, f64)> = ore_prof::measure(ore_prof::S_NODES, || {
+        let mut pts: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(size as usize);
+        for i2 in 0..size {
+            let fr = i2 as f32 / size_f;
+            let d = mth_lerp(fr as f64, min_x, max_x);
+            let d1 = mth_lerp(fr as f64, min_y, max_y);
+            let d2 = mth_lerp(fr as f64, min_z, max_z);
+            let d3 = rng.next_f64() * size_f as f64 / 16.0;
+            let s = mth_sin(std::f32::consts::PI * fr);
+            let d4 = ((s + 1.0f32) as f64 * d3 + 1.0) / 2.0;
+            pts.push((d, d1, d2, d4));
+            if crate::features_place::draw_trace_on() {
+                eprintln!("[node {i2}] d={d:.17} y={d1:.17} z={d2:.17} r={d4:.17}");
+            }
         }
-    }
-    // sphere elimination
-    for i2 in 0..size - 1 {
-        if pts[i2 as usize].3 <= 0.0 {
-            continue;
-        }
-        for i3 in i2 + 1..size {
-            if pts[i3 as usize].3 <= 0.0 {
+        // sphere elimination
+        for i2 in 0..size - 1 {
+            if pts[i2 as usize].3 <= 0.0 {
                 continue;
             }
-            let a = pts[i2 as usize];
-            let b = pts[i3 as usize];
-            let dd = a.3 - b.3;
-            if dd * dd > (a.0 - b.0) * (a.0 - b.0) + (a.1 - b.1) * (a.1 - b.1) + (a.2 - b.2) * (a.2 - b.2) {
-                if dd > 0.0 {
-                    pts[i3 as usize].3 = -1.0;
-                } else {
-                    pts[i2 as usize].3 = -1.0;
+            for i3 in i2 + 1..size {
+                if pts[i3 as usize].3 <= 0.0 {
+                    continue;
+                }
+                let a = pts[i2 as usize];
+                let b = pts[i3 as usize];
+                let dd = a.3 - b.3;
+                if dd * dd > (a.0 - b.0) * (a.0 - b.0) + (a.1 - b.1) * (a.1 - b.1) + (a.2 - b.2) * (a.2 - b.2) {
+                    if dd > 0.0 {
+                        pts[i3 as usize].3 = -1.0;
+                    } else {
+                        pts[i2 as usize].3 = -1.0;
+                    }
                 }
             }
         }
-    }
+        pts
+    });
 
     let mut seen: std::collections::HashSet<(i32, i32, i32)> = std::collections::HashSet::new();
     for (px, py, pz, rad) in &pts {
@@ -2686,7 +2735,8 @@ fn place_ore(
                         continue;
                     }
                     for (rt, st) in targets {
-                        let tag_hit = rule_test_matches(rt, ctx.level, pos, rng);
+                        let tag_hit =
+                            ore_prof::measure(ore_prof::S_TAG, || rule_test_matches(rt, ctx.level, pos, rng));
                         // vanilla short-circuit: the discard draw happens ONLY
                         // when the target test matched, and isAdjacentToAir is
                         // evaluated ONLY when the discard draw says "check"
@@ -2696,7 +2746,9 @@ fn place_ore(
                         let hit = tag_hit && {
                             let skip = should_skip_air_check(rng, discard);
                             let w = skip || {
-                                let air = is_adjacent_to_air(ctx.level, pos);
+                                let air = ore_prof::measure(ore_prof::S_AIR, || {
+                                    is_adjacent_to_air(ctx.level, pos)
+                                });
                                 !air
                             };
                             if vein_trace {
