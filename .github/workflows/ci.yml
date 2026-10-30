@@ -91,6 +91,9 @@ jobs:
             net.minecraft.world.level.biome.MultiNoiseBiomeSource \
             'net.minecraft.world.level.biome.Climate$Sampler' \
             'net.minecraft.world.level.biome.Climate$TargetPoint' \
+            net.minecraft.world.level.biome.BiomeResolver \
+            net.minecraft.world.level.levelgen.densityfunction.DensityVolume \
+            net.minecraft.world.level.levelgen.densityfunction.DensityBuffer \
             net.minecraft.world.level.chunk.ChunkGenerator \
             > nms-biome-signatures.txt 2>&1 || true
           wc -l nms-biome-signatures.txt
