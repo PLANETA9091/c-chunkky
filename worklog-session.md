@@ -4288,3 +4288,13 @@ JFR Java-CPU Worker#0 только ~9мс/чанк, остальное ожид�
 (2) terr_sample 16.2 (сумма по тредам) внутри terrain 7.0 wall;
 (3) surf_walk 3.8-4.2; (4) native deco master-loop (deco=1 probe 46.12 —
 3.2M ops через JNI-границу).
+## cont-76 (3c3b76ef → 838557ef): par4 в timing-лане; JFR-окно 16x16
+Пуш 3c3b76ef: timing-лана (главная серийная метрика e2e) переведена на par4
+(CRUS_GEN_PARALLEL=1 + CRUS_WORKER_THREADS=4) — ожидание e2e ~29.4-30.6
+вместо 34.5-37.2. Пин лана-локален (reset -1 на следующих boot).
+Пуш 838557ef: JFR-лана расширена до N=15 (16x16=256 чанков, ~230 профильных
+сэмплов) — вдвое точнее разбивка post-gen paper-side (deco/light/convert/save).
+Фон: terr_sample=16.2 и surf_walk=3.9 — АККУМ-суммы по тредам (fetch_add),
+wall-статьи уже плотны (terrain 7.0 + surface 5.0 + hood 0.6 + layout 0.2 =
+12.6 ≈ native 12.63) — native на 2 ядрах близок к пределу; следующий большой
+фронт — paper-side ~16.5мс (при par4) и native deco master-loop.
