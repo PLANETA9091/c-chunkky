@@ -3606,3 +3606,47 @@ hood-вычисления на wall. Против warm 3.57 — фронтир-�
 timing-окне; judge ланы остаются serial). JFR-лана теперь с
 per-thread атрибуцией (jfr_top.py, WatchdogThread отфильтрован).
 ЖДЁМ ВЕРДИКТ: e2e /2-4x на 4-ядерном раннере?
+
+
+## cont-69: АТРИБУЦИЯ ОКНА — метроном, не CPU; Paper gen-пул = 1 тред (auto <=3 phys); par4
+
+CI-вердикты прошедших лан: par (CRUS_GEN_PARALLEL=1) = 0% выигрыша —
+e2e263_par 58.35 vs timing 58.46 (7e14d80b) и 45.70 vs 48.47 (ea9a85df,
+медленный→быстрый раннер — внутри шума). Причина найдена в доках Paper:
+chunk-system.worker-threads auto = 1 тред при <=3 ФИЗИЧЕСКИХ ядрах;
+4-vCPU EPYC-раннер детектится как <=3 phys -> gen-пул = ОДИН воркер.
+CRUS_GEN_PARALLEL раскладывать было некому.
+
+JFR-окно (реальная запись e2e263_window.jfr, разобрана локально через
+jdk.jfr consumer): суммарный Java-CPU окна ~1.4s из 9.1s wall (~4% из 4
+ядер) — окно ЛАТЕНТНОСТЬ, не CPU. Worker #0: 1.22s java + 1.44s native
+(JNI-филлы) — fills идут back-to-back, gen span 3.04s. Workеры #1-3 НЕ
+сэмплированы НИ РАЗУ = простаивают всё окно. Server thread: 0.12s java,
+0.36s native, парковки 815ms/29 событий (p50=25.6мс, p90=48.2мс, сайт
+MinecraftServer.recordTaskExecutionTimeWhileWaiting — ждёт ВНУТРИ тика).
+Watchdog 2.46s CPU (спиннер, жжёт ~9% четырёх ядер).
+
+СТРУКТУРА ОКНА (6.58s span): ramp ~3.5s ДО первого филла окна (сателлиты
+16x16, тикет-пропагация, статусная цепочка по тик-биту) + gen span 3.04s
+(144 филла back-to-back по ~21мс). Добавлен ramp= в windowSnapshot
+(WIN_T_ARMED при "crusgenstats window" -> первый in-window fill) — e2e
+разложится на ramp + fill span + poll jitter.
+
+УРОКИ jfr print: (а) default --stack-depth 5 молча обрезает стеки —
+считали 5-й кадр, не лист; (б) кадры печатаются LEAF FIRST (проверено
+consumer API: frame[0]=leaf, frame[last]=root); (в) имя треда "Paper
+Watchdog Thread" — точное сравнение с "WatchdogThread" не срабатывало.
+jfr_top.py переписан: substring-исключение инфры, --stack-depth 64,
+per-thread pipeline stage (первый бизнес-кадр вверх по стеку) + истинные
+листья. НОВЫЙ jfr_wait.py: NativeMethodSample (кто в нативе: чанк-треды =
+JNI compute, selector/netty/console = idle epoll) + ThreadPark/
+JavaMonitorWait с длительностями, чанк-системные треды первыми. mspt
+дайджест сразу после окна (последние 100 тиков) — проверка тик-пейса.
+
+ПУШИ: 30f5d174 (native+park атрибуция + stackdepth + mspt), 701659b9
+(JFR лана параллельного окна — появятся ли Workers #1-N), dad357d7
+(ramp split в GenStats), eeef61e2 (par4 лана: CRUS_WORKER_THREADS=4 —
+фикс worker-threads через patch paper-global.yml перед бутом; POOL_SIZE=4
+конекстов, self-balancing strip width сужает каждый филл до cores/active).
+ОЖИДАНИЕ CI: jfr_par покажет разброс филлов по воркерам; par4 покажет
+эффект 4 воркеров на wall; ramp+/mspt+/parks+ объяснят остаток.
