@@ -225,6 +225,51 @@ fn main() {
                 t_srv_cold.len(),
             );
         }
+        // WAVE (frontier) phase: fresh chunks every fill — the center grid is
+        // parked before the wall (the BIOMES-status equivalent) and the hood
+        // computes the MISSING neighbor grids on the wall through the parallel
+        // compute path. This is the controllable stand-in for the honest
+        // window's generation frontier (hood/surface effects land here without
+        // the server window's +-40% runner noise).
+        {
+            let mut t_wave = Vec::new();
+            let bx0 = 2000i32;
+            let per_row = 20i32;
+            for i in 0..100 {
+                let cx = bx0 + i % per_row;
+                let cz = bx0 + i / per_row;
+                let n = (gs.height as usize) / 16 * 64;
+                let mut grid = vec![0i32; n];
+                if let Some(b) = biomes.as_ref() {
+                    crussty_chunkgen::biome263::fill_biomes263(
+                        b,
+                        gs.min_y,
+                        gs.height,
+                        cx,
+                        cz,
+                        &mut grid,
+                    );
+                    crussty_chunkgen::ffi::store_biome_grid263(cx, cz, &grid);
+                }
+                let t0 = std::time::Instant::now();
+                crussty_chunkgen::ffi::v263_fill_tail(
+                    &mut gs,
+                    biomes.as_ref(),
+                    surface.as_ref(),
+                    cx,
+                    cz,
+                    &[0, 0],
+                    &mut out,
+                    &mut marks,
+                );
+                t_wave.push(t0.elapsed().as_secs_f64() * 1e3);
+            }
+            println!(
+                "server_fill WAVE   median {:.2}ms  ({} fresh frontier chunks, parallel hood computes on the wall)",
+                median(&mut t_wave),
+                t_wave.len(),
+            );
+        }
     }
 
     // ---- prof report (exclusive per-kind + interp internals) ----
