@@ -1352,14 +1352,19 @@ impl RouterBuilder263 {
             iron_density: iron,
             richness,
             gap,
+            toggle,
+            mask,
         }
     }
 }
 
-/// The four 26.3 ore-vein material-rule DFs (registry refs resolved).
+/// The four 26.3 ore-vein material-rule DFs (registry refs resolved) + the
+/// shared cache-wrapped toggle/mask subtrees the trio reads.
 pub struct OreVeinDfs263 {
     pub copper_density: SamRef,
     pub iron_density: SamRef,
     pub richness: SamRef,
     pub gap: SamRef,
+    pub toggle: SamRef,
+    pub mask: SamRef,
 }

@@ -223,6 +223,38 @@ impl SamplerCtx263 {
         out.copy_from_slice(&buffer[..len]);
     }
 
+    /// Warm the cache cell `id` if cold (no output copy) — exactly the
+    /// recompute branch of sample_volume_cached. The fused ore sweep uses
+    /// this to materialize the shared toggle/mask volume buffers once, then
+    /// reads them via cache_volume_buffer without the per-walk 393KB copies.
+    pub fn warm_volume_cache(&mut self, id: u32, input: &DfSam263, vol: &DensityVolume) {
+        if self.caches.is_none() {
+            return;
+        }
+        let need_recompute = {
+            let cell = self.cell(id).unwrap();
+            match (&cell.buffer, &cell.volume) {
+                (Some(_), Some(v)) => v != vol,
+                _ => true,
+            }
+        };
+        if need_recompute {
+            let mut buf = self.scratch.acquire(vol.size());
+            input.sample_volume(self, &mut buf, vol);
+            let cell = self.cell(id).unwrap();
+            cell.volume = Some(vol.clone());
+            cell.buffer = Some(buf);
+        }
+    }
+
+    /// Read-only view of a warm cache cell's volume buffer (None when caches
+    /// are disabled / the cell is cold).
+    pub fn cache_volume_buffer(&self, id: u32) -> Option<&[f32]> {
+        let caches = self.caches.as_ref()?;
+        let cell = caches.get(id as usize)?;
+        cell.buffer.as_deref()
+    }
+
     /// CachingDensitySampler.sampleValue (26.3): volume buffer hit -> point memo -> compute.
     fn sample_value_cached(&mut self, id: u32, input: &DfSam263, x: i32, y: i32, z: i32) -> f32 {
         if self.caches.is_none() {

@@ -47,6 +47,9 @@ pub struct SurfaceState263 {
     pub ore_iron: u32,
     pub ore_richness: u32,
     pub ore_gap: u32,
+    /// cache-wrapped toggle/mask subtree slots (the fused sweep's inputs).
+    pub ore_toggle: u32,
+    pub ore_mask: u32,
     pub temps: Vec<f32>,
     pub frozen: Vec<bool>,
     pub temps_noises: std::sync::Arc<TempNoises>,
@@ -188,7 +191,10 @@ pub fn build_surface263(
     dfs.push(ore_dfs.iron_density.clone());
     dfs.push(ore_dfs.richness.clone());
     dfs.push(ore_dfs.gap.clone());
+    dfs.push(ore_dfs.toggle.clone());
+    dfs.push(ore_dfs.mask.clone());
     let (copper_slot, iron_slot, richness_slot, gap_slot) = (0u32, 1u32, 2u32, 3u32);
+    let (toggle_slot, mask_slot) = (4u32, 5u32);
     let dfc = |key: &str| -> Option<u32> {
         match key.strip_prefix("material:")? {
             "minecraft:overworld/ore_vein/copper_density" => Some(copper_slot),
@@ -268,6 +274,8 @@ pub fn build_surface263(
         ore_iron: iron_slot,
         ore_richness: richness_slot,
         ore_gap: gap_slot,
+        ore_toggle: toggle_slot,
+        ore_mask: mask_slot,
         temps: Vec::new(),
         frozen: Vec::new(),
         temps_noises,
@@ -886,6 +894,121 @@ impl<'a> Walk263<'a> {
 
 /// Apply the 26.3 surface rules to a filled chunk buffer (in place).
 /// `grid` = the fillBiomes263 quart indexes for this chunk (sections*64).
+// ---------------------------------------------------------------------------
+// Fused ore-vein aux sweep: one pass over the fill volume computes copper,
+// iron and richness from the shared cache-wrapped toggle/mask buffers,
+// replacing the three tree walks (each re-read the shared caches through
+// full-volume copies and re-evaluated the y gradient per point).
+//
+// Bit-exact by construction against the walks:
+// - y: YClampedGradient(-4064, 4062, -4064.0, 4062.0) via the walk's own
+//   compute_gradient (ClampToEdge): from_value + (clamped - from)*factor,
+//   factor = 8126.0/8126.0 = 1.0 exactly in f32;
+// - RangeChoice select: !(v >= min && v < max) -> out branch (f32 compares);
+// - edge_term(top, bottom) = (clamp(min(top - y, y - bottom), 0, 20) * 0.01)
+//   + (-0.2) — same op order as the router-built tree;
+// - ConstAdd t - 0.4 / Negate-Sub -t - 0.4 in walk order, no re-association;
+// - mth_clamp if-chain semantics for the richness clamp.
+// Pinned by the A/B unit test ore_fused_bit_exact_vs_walks (real builder,
+// real CI seed) — a router tree change fails CI instead of drifting.
+// Kill-switch: CRUS_ORE_FUSE=0.
+// ---------------------------------------------------------------------------
+fn ore_fuse_enabled() -> bool {
+    static ORE_FUSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ORE_FUSE.get_or_init(|| std::env::var("CRUS_ORE_FUSE").ok().as_deref() != Some("0"))
+}
+
+#[inline]
+fn ore_y_gradient(by: i32) -> f32 {
+    let factor = (4062.0f32 - (-4064.0f32)) / (4062 - (-4064)) as f32;
+    let clamped = by.clamp(-4064, 4062);
+    -4064.0f32 + (clamped - (-4064)) as f32 * factor
+}
+
+#[inline]
+fn ore_edge_term(top: f32, bottom: f32, yv: f32) -> f32 {
+    let a = top - yv;
+    let b = yv - bottom;
+    let v = if a < b { a } else { b };
+    // mth_clamp(v, 0, 20)
+    let v = if v < 0.0 {
+        0.0
+    } else if v > 20.0 {
+        20.0
+    } else {
+        v
+    };
+    (v * 0.01) + (-0.2)
+}
+
+fn ore_fused_sweep(
+    vol: &DensityVolume,
+    t: &[f32],
+    m: &[f32],
+    copper: &mut [f32],
+    iron: &mut [f32],
+    richness: &mut [f32],
+) {
+    // index = y + (x + z*size_x)*size_y — y is the fastest axis, so each
+    // (x,z) column is a contiguous size_y run.
+    let sx = vol.size_x as usize;
+    let sy = vol.size_y as usize;
+    let sz = vol.size_z as usize;
+    for cz in 0..sz {
+        for cx in 0..sx {
+            let base = (cx + cz * sx) * sy;
+            for yy in 0..sy {
+                let i = base + yy;
+                let yv = ore_y_gradient(vol.block_y(yy as i32));
+                let tv = t[i];
+                let mv = m[i];
+                let ec = ore_edge_term(50.0, 0.0, yv);
+                let ei = ore_edge_term(-8.0, -60.0, yv);
+                // copper: rc(y, 0, 50, rc(m, 0, 1e6, rc((t-0.4)+ec, 0, 1e6, 0.7, -1), -1), -1)
+                copper[i] = if yv >= 0.0 && yv < 50.0 {
+                    if mv >= 0.0 && mv < 1_000_000.0 {
+                        let v = (tv - 0.4) + ec;
+                        if v >= 0.0 && v < 1_000_000.0 {
+                            0.7
+                        } else {
+                            -1.0
+                        }
+                    } else {
+                        -1.0
+                    }
+                } else {
+                    -1.0
+                };
+                // iron: rc(y, -60, -8, rc(m, 0, 1e6, rc((-t-0.4)+ei, 0, 1e6, 0.7, -1), -1), -1)
+                iron[i] = if yv >= -60.0 && yv < -8.0 {
+                    if mv >= 0.0 && mv < 1_000_000.0 {
+                        let v = (-tv - 0.4) + ei;
+                        if v >= 0.0 && v < 1_000_000.0 {
+                            0.7
+                        } else {
+                            -1.0
+                        }
+                    } else {
+                        -1.0
+                    }
+                } else {
+                    -1.0
+                };
+                // richness = clamp(abs(t), 0.4, 0.6) * 1.0 + (-0.3)
+                let a = tv.abs();
+                let a = if a < 0.4 {
+                    0.4
+                } else if a > 0.6 {
+                    0.6
+                } else {
+                    a
+                };
+                richness[i] = (a * 1.0) + (-0.3);
+            }
+        }
+    }
+}
+
 pub fn apply_surface263(
     st: &SurfaceState263,
     min_y: i32,
@@ -949,9 +1072,66 @@ pub fn apply_surface263(
     let mut copper_buf = ctx_ore.scratch.acquire(volume.size());
     let mut iron_buf = ctx_ore.scratch.acquire(volume.size());
     let mut richness_buf = ctx_ore.scratch.acquire(volume.size());
-    st.dfs[st.ore_copper as usize].sample_volume(&mut ctx_ore, &mut copper_buf, &volume);
-    st.dfs[st.ore_iron as usize].sample_volume(&mut ctx_ore, &mut iron_buf, &volume);
-    st.dfs[st.ore_richness as usize].sample_volume(&mut ctx_ore, &mut richness_buf, &volume);
+    // Fused path (CRUS_ORE_FUSE=0 kills it): warm the shared toggle/mask
+    // cache cells once, then sweep all three outputs from them in one pass.
+    // Falls back to the three tree walks on any structural drift.
+    let mut fused = ore_fuse_enabled();
+    if fused {
+        if let crate::df263::DfSam263::Cache { id, a } = &*st.dfs[st.ore_toggle as usize] {
+            ctx_ore.warm_volume_cache(*id, a, &volume);
+        } else {
+            fused = false;
+        }
+    }
+    if fused {
+        if let crate::df263::DfSam263::Cache { id, a } = &*st.dfs[st.ore_mask as usize] {
+            ctx_ore.warm_volume_cache(*id, a, &volume);
+        } else {
+            fused = false;
+        }
+    }
+    if fused {
+        let (tid, mid) = match (
+            &*st.dfs[st.ore_toggle as usize],
+            &*st.dfs[st.ore_mask as usize],
+        ) {
+            (
+                crate::df263::DfSam263::Cache { id, .. },
+                crate::df263::DfSam263::Cache { id: id2, .. },
+            ) => (*id, *id2),
+            _ => {
+                fused = false;
+                (0, 0)
+            }
+        };
+        if fused {
+            match (
+                ctx_ore.cache_volume_buffer(tid),
+                ctx_ore.cache_volume_buffer(mid),
+            ) {
+                (Some(tbuf), Some(mbuf))
+                    if tbuf.len() >= volume.size() && mbuf.len() >= volume.size() =>
+                {
+                    ore_fused_sweep(
+                        &volume,
+                        tbuf,
+                        mbuf,
+                        &mut copper_buf,
+                        &mut iron_buf,
+                        &mut richness_buf,
+                    );
+                }
+                _ => {
+                    fused = false;
+                }
+            }
+        }
+    }
+    if !fused {
+        st.dfs[st.ore_copper as usize].sample_volume(&mut ctx_ore, &mut copper_buf, &volume);
+        st.dfs[st.ore_iron as usize].sample_volume(&mut ctx_ore, &mut iron_buf, &volume);
+        st.dfs[st.ore_richness as usize].sample_volume(&mut ctx_ore, &mut richness_buf, &volume);
+    }
     // vanilla getMinSurfaceLevel: chunk_surface_level prefilled over the
     // 16x1x16 slab at world y=0 (expectedVolume xz extent, y=0), VOLUME path.
     let csl_slab_volume = DensityVolume::block_step((16, 1, 16), (cx * 16, 0, cz * 16));
@@ -1409,6 +1589,79 @@ pub fn top_material263(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ore_fused_bit_exact_vs_walks() {
+        // Real builder + the CI bench seed: the fused sweep must be
+        // bit-identical to the three tree walks on every point of real
+        // volumes (covering the copper [0,50) / iron [-60,-8) bands and
+        // the y=0/y=50 boundaries).
+        let seed = 3257840388504953787i64;
+        let ore = crate::df263_router::RouterBuilder263::new(seed).build_ore_vein_dfs();
+        let dfs = [
+            ore.copper_density.clone(),
+            ore.iron_density.clone(),
+            ore.richness.clone(),
+        ];
+        let (t_node, m_node) = (ore.toggle, ore.mask);
+        let (tid, t_in) = match &*t_node {
+            crate::df263::DfSam263::Cache { id, a } => (*id, a.clone()),
+            _ => panic!("toggle subtree not cache-wrapped"),
+        };
+        let (mid, m_in) = match &*m_node {
+            crate::df263::DfSam263::Cache { id, a } => (*id, a.clone()),
+            _ => panic!("mask subtree not cache-wrapped"),
+        };
+        for &(cx, cz, height) in &[(3i32, -2i32, 64i32), (-11i32, 7i32, 128i32), (0i32, 0i32, 384i32)]
+        {
+            let vol = DensityVolume::block_step((16, height, 16), (cx * 16, -64, cz * 16));
+            // fused path (scratch bufs first — acquire needs &mut, and the
+            // cache views below borrow the ctx immutably)
+            let mut ca = SamplerCtx263::cached();
+            let mut fc = ca.scratch.acquire(vol.size());
+            let mut fi = ca.scratch.acquire(vol.size());
+            let mut fr = ca.scratch.acquire(vol.size());
+            ca.warm_volume_cache(tid, &t_in, &vol);
+            ca.warm_volume_cache(mid, &m_in, &vol);
+            let (tb, mb) = match (
+                ca.cache_volume_buffer(tid),
+                ca.cache_volume_buffer(mid),
+            ) {
+                (Some(tb), Some(mb)) => (tb, mb),
+                _ => panic!("caches not warm"),
+            };
+            assert_eq!(tb.len(), vol.size());
+            assert_eq!(mb.len(), vol.size());
+            ore_fused_sweep(&vol, tb, mb, &mut fc, &mut fi, &mut fr);
+            drop(tb);
+            drop(mb);
+            // tree-walk path (fresh ctx — caches are pure memoization)
+            let mut cb = SamplerCtx263::cached();
+            let mut wc = cb.scratch.acquire(vol.size());
+            let mut wi = cb.scratch.acquire(vol.size());
+            let mut wr = cb.scratch.acquire(vol.size());
+            dfs[0].sample_volume(&mut cb, &mut wc, &vol);
+            dfs[1].sample_volume(&mut cb, &mut wi, &vol);
+            dfs[2].sample_volume(&mut cb, &mut wr, &vol);
+            for i in 0..vol.size() {
+                assert_eq!(
+                    fc[i].to_bits(),
+                    wc[i].to_bits(),
+                    "copper drift cx={cx} cz={cz} h={height} i={i}"
+                );
+                assert_eq!(
+                    fi[i].to_bits(),
+                    wi[i].to_bits(),
+                    "iron drift cx={cx} cz={cz} h={height} i={i}"
+                );
+                assert_eq!(
+                    fr[i].to_bits(),
+                    wr[i].to_bits(),
+                    "richness drift cx={cx} cz={cz} h={height} i={i}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn fiddle_distance_java_reference() {
