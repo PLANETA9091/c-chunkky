@@ -4020,3 +4020,15 @@ native/integration — в полёте, сюда вписать: [CI-RESULTS]
 4. aquifer-сплит по JFR-стекам (NoiseStack$Perlin 0.2-0.7мс) — атрибутировать и забирать.
 5. surf_walk (3.94мс на медленном раннере): rules loop с xz/y-кэшами уже есть; следующий
    шаг — inline горячих правил и column-major порядок для кэш-локальности.
+
+CI 41098724590 (bd6ae8ae) — КОДЕК-ФИКС РАБОТАЕТ: ab_on биом-ноги бутится и генерит
+(144/144), CCE исчез. Но точный гейт поймал ЧАСТИЧНУЮ дивергенцию биом-хешей
+(несколько чанков из 64, не систематический сдвиг): layout/minQuartY доказаны
+бит-уровнем => граничный эффект (квантизация / RTree tie-break / live slice-vs-point).
+7fda9a8f: CRUS_BIOME_DEBUG=1 — GridResolver сравнивает grid-ответ с vanilla POINT
+путём (vanilla.getNoiseBiome(fallback.sample)) на каждом запросе, первые 30
+мисматчей с chunk/quart координатами и обоими биомами в run.out:
+- мисматчи есть -> нативная сторона (climate/RTree), координаты пинпоинтят;
+- ноль мисматчей + гейт падает -> vanilla live SLICE (createResolverForChunk
+  DensityVolume-буферы) отвечает иначе, чем точечное разрешение — зеркалить слайс.
+Гейт временно non-fatal (diagnosis mode) чтобы e2e-тайминг-ланы этого рана отработали.
