@@ -470,6 +470,156 @@ mod depth_volume_tests {
         );
         eprintln!("bisector control (17,-5) bottom quart: divergent nodes = {diverged3}");
     }
+
+    /// The 4x96x4 SHAPE bisector: per node, the FULL-QUART-VOLUME fill vs
+    /// per-point values at every index. Localizes the shape-dependent bug
+    /// (CI 41116221438 DIAG: 1511/1536 quart indexes diverge between the
+    /// 4x96x4 fill and per-quart 1x1x1 fills) to the first node whose
+    /// multi-row/multi-column fill stops matching its own point values.
+    /// Runs the volume at BOTH coordinate hypotheses: the correct chunk
+    /// block origin (cx*16) and the old fill's cx*64 (the coordinate
+    /// question the (17,-5) pass left open). Diagnostic-only.
+    #[test]
+    fn depth_tree_fullshape_volume_bisector_1024_1024() {
+        let src = crate::biomes::BiomeSourceData::from_params263(include_str!(
+            "params263_overworld.json"
+        ))
+        .expect("preset parse");
+        let g = crate::fill263::Gen263::new(3257840388504953787, -64, 384, 63);
+        let st = BiomeState263 {
+            src,
+            climate: g.climate.clone(),
+            y_invariant: [true, true, true, true, false, true],
+        };
+        for (label, mx, mz) in [
+            ("correct-cx16", 16384i32, 16384i32),
+            ("old-fill-cx64", 65536i32, 65536i32),
+        ] {
+            let vol = crate::df263::DensityVolume {
+                size_x: 4,
+                size_y: 96,
+                size_z: 4,
+                min_x: mx,
+                min_y: -64,
+                min_z: mz,
+                step_x: 4,
+                step_y: 4,
+                step_z: 4,
+            };
+            let mut ctx = crate::df263::SamplerCtx263::uncached();
+            let mut diverged = 0usize;
+            bisect_shape(
+                &st.climate[4],
+                &mut ctx,
+                &vol,
+                label,
+                0,
+                &mut diverged,
+            );
+            eprintln!("full-shape bisector [{label}]: divergent nodes = {diverged}");
+        }
+    }
+}
+
+/// Per-node FULL-SHAPE volume fill vs per-point values at every index; the
+/// first divergent (x,y,z) of each node is reported with its values.
+#[cfg(test)]
+fn bisect_shape(
+    a: &crate::df263::SamRef,
+    ctx: &mut crate::df263::SamplerCtx263,
+    vol: &crate::df263::DensityVolume,
+    path: &str,
+    depth: usize,
+    diverged: &mut usize,
+) {
+    use crate::df263::DfSam263 as D;
+    let mut b = vec![0f32; vol.size()];
+    a.sample_volume(ctx, &mut b, vol);
+    let mut first_bad: Option<(i32, i32, i32, f32, f32)> = None;
+    'outer: for z in 0..vol.size_z {
+        for x in 0..vol.size_x {
+            for y in 0..vol.size_y {
+                let bx = vol.block_x(x);
+                let by = vol.block_y(y);
+                let bz = vol.block_z(z);
+                let pt = a.sample_value(ctx, bx, by, bz);
+                let vb = b[vol.index_unchecked(x, y, z)];
+                if pt.to_bits() != vb.to_bits() {
+                    first_bad = Some((bx, by, bz, pt, vb));
+                    break 'outer;
+                }
+            }
+        }
+    }
+    if let Some((bx, by, bz, pt, vb)) = first_bad {
+        *diverged += 1;
+        eprintln!(
+            "SHAPE DIVERGE {path} (depth {depth}): first at block ({bx},{by},{bz}): \
+             point {pt} vs vol4x96x4 {vb}"
+        );
+    }
+    let kids: Vec<crate::df263::SamRef> = match a.as_ref() {
+        D::Constant(_) | D::Gradient { .. } | D::ShiftB { .. } | D::Beard => Vec::new(),
+        D::Noise { .. } | D::RangeChoiceConst { .. } => Vec::new(),
+        D::ShiftedXz { shift_x, shift_z, .. } => vec![shift_x.clone(), shift_z.clone()],
+        D::Binary { l, r, .. } | D::Pow { a: l, b: r } => vec![l.clone(), r.clone()],
+        D::ConstAdd { a, .. }
+        | D::ConstSub { a, .. }
+        | D::ConstMul { a, .. }
+        | D::ConstDiv { a, .. }
+        | D::ConstMin { a, .. }
+        | D::ConstMax { a, .. }
+        | D::Unary { a, .. }
+        | D::Clamp { a, .. }
+        | D::PowConstBase { exp: a, .. }
+        | D::PowConstExp { a, .. }
+        | D::RoundInt { a, .. }
+        | D::Cache { a, .. }
+        | D::SliceX { a, .. }
+        | D::SliceY { a, .. }
+        | D::SliceZ { a, .. }
+        | D::SliceXz { a, .. }
+        | D::Interpolated { a, .. }
+        | D::BlendDensity { a, .. } => vec![a.clone()],
+        D::Lerp {
+            alpha,
+            first,
+            second,
+        } => vec![alpha.clone(), first.clone(), second.clone()],
+        D::LerpConstFirst { alpha, second, .. } => vec![alpha.clone(), second.clone()],
+        D::LerpConstSecond { alpha, first, .. } => vec![alpha.clone(), first.clone()],
+        D::Round { a, mul, .. } => vec![a.clone(), mul.clone()],
+        D::RangeChoice {
+            a,
+            in_range,
+            out_of_range,
+            ..
+        } => vec![a.clone(), in_range.clone(), out_of_range.clone()],
+        D::IntervalSelect { a, branches, .. } => {
+            let mut v = vec![a.clone()];
+            v.extend(branches.iter().cloned());
+            v
+        }
+        D::Spline { coord, values, .. } => {
+            let mut v = vec![coord.clone()];
+            spline_kids(values, &mut v);
+            v
+        }
+        D::FindTopSurface { density, upper_bound, .. } => {
+            vec![density.clone(), upper_bound.clone()]
+        }
+        D::Blended { .. } => Vec::new(),
+    };
+    for (i, c) in kids.into_iter().enumerate() {
+        bisect_shape(
+            &c,
+            ctx,
+            vol,
+            &format!("{path}.{i}"),
+            depth + 1,
+            diverged,
+        );
+    }
 }
 
 /// Pre-order walk of the depth tree: per node, point vs 1x1x1 volume under
