@@ -3816,3 +3816,7 @@ depth проходит guard. Юнит-тест depth_quart_volume_bit_exact_vs_
 обхода сохранён, изменился только источник d.
 Ожидание CI: fill_biomes263 4.4мс -> ~1.5-2мс/грид; hood wall 4.17 ->
 ~2-3; e2e -1..-2мс. terr/hood стейджи следующего рана покажут.
+
+Аудит остальных ленивых инициализаций плагина: initBulk — synchronized
+(BULK_LOCK + double-check) ✓; GenStats — атомики ✓; sectionStatesById и
+др. — read-only после init, безопасная публикация ✓. Второй гонки нет.
