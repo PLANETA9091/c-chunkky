@@ -171,15 +171,17 @@ jobs:
         run: |
           set -o pipefail
           CRUS_NO_BEARD=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_nobeard.log
-      - name: E2E grid-prefetch A/B (CRUS_GRID_PF=0 — pool vs inline compute on 2 cores)
+      - name: E2E grid-prefetch A/B (CRUS_GRID_PF=1 — the pool vs the OFF default)
         continue-on-error: true
         run: |
           set -o pipefail
-          # Same runner, same window as the timing lane: stage[terrain= hood=
-          # hood_compute= ncomp=] here vs the CRUS_GRID_PF=1 default run
-          # measures whether the background grid prefill helps or steals
-          # CPU from the serial fill on 2-core runners.
-          CRUS_GRID_PF=0 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_pf0.log
+          # cont-72 flipped the auto default to OFF. Same-run evidence on the
+          # 4-vCPU runner: pf0 (OFF) e2e=28.69 gen=13.11 terrain=4.10 vs
+          # timing (auto=ON) 32.68/14.70/5.11; on 2 cores cont-66 measured
+          # 44.28 vs 47.65. The inline parallel hood compute absorbs the
+          # misses (+0.6 hood wall, ncomp 720->1215) for -3ms e2e. This lane
+          # keeps the ON side of the A/B alive every run.
+          CRUS_GRID_PF=1 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_pf1.log
       - name: E2E JFR hot-methods of the window (Paper-side split probe)
         continue-on-error: true
         run: |
@@ -255,7 +257,7 @@ jobs:
             e2e263_deco.log
             farprobe263.log
             e2e263_nobeard.log
-            e2e263_pf0.log
+            e2e263_pf1.log
             e2e263_jfr.log
             e2e263_par.log
             e2e263_jfr_par.log

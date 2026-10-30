@@ -3736,3 +3736,37 @@ no-op); (2) ci.yml — par4 лана перенесена ПОСЛЕДНЕЙ (п
 Замечание: pf0 28.69 < timing 32.68 (внутри рана, PF auto=ON при 4 vCPU)
 — на 4 ядрах префетч-пул снова в минусе; данных мало, adaptive порог
 (>2) пока не трогаем, большой ран big-ланы скажет точнее.
+
+
+## cont-73: фикс утечки par4 запушен (2eacb2f9); PF-калибровка одного рана -> auto=OFF; flip + A/B-разворот pf-ланы
+
+Разбор зелёного c0e33eb9 (7 honest windows: timing 32.68 / deco 37.80 /
+nobeard 31.19 / pf0 28.69 / jfr 32.48 / par 31.49 / jfr_par 34.22):
+(1) par4 (worker-threads=4) — сервер погиб: MissingPaletteEntryException
+в pack() при shutdown-сохранении (5,-2) — гонка сериализации moonrise на
+4 воркерах; (2) УТЕЧКА: патч worker-threads=4 остался в workspace
+paper-global.yml и травил следующие ланы — big 48x48 умерла после boot-ok
+(CONN_FAIL, inside=0/2304), farprobe тоже (D=8192 STALL чтение
+ЗАГРЯЗНЕНО). ФИКС: e2e_ci.sh сбрасывает pin в -1 при unset (bootstrap
+seeds -1, fresh no-op) + par4 лана ПЕРЕМЕЩЕНА последней (2eacb2f9).
+
+PF-КАЛИБРОВКА (один ран, один раннер — честно):
+  timing auto=ON: e2e=32.68 gen=14.70 terrain=5.11 hood=3.59 ncomp=720
+  pf0     OFF:    e2e=28.69 gen=13.11 terrain=4.10 hood=4.17 ncomp=1215
+  jfr/par ON:     e2e=31.5-34.2 terrain=5.1-5.4 hood=3.6-3.9
+PF=off выигрывает ~3мс e2e: префетч-воркер крадёт ~1мс/филл у strip-тредов
+(terrain -1.0 без него), inline parallel hood compute поглощает +66%
+computes за +0.6 hood wall. Это повторяет 2-ядерный вердикт cont-66.
+
+FLIP (этот пуш): ffi.rs auto->OFF всегда (CRUS_GRID_PF=1 возвращает пул),
+ci.yml — pf-лана перевёрнута в CRUS_GRID_PF=1 (ON-сторона A/B каждый ран,
+лог e2e263_pf1.log). Новая тиmинг-лана = новый дефолт (OFF).
+
+Снята гипотеза «2.8мс неатрибутированного натива»: артефакт знаменателя
+(stage-средние по 1028 филлам против native=14.52 по 144 оконным; свежий
+регион тяжелее среднего). Фронты дальше: noise-family ~3.9 wall (уже
+column-кернелы; get_batch8 был 2x медленнее), surf_walk 2.2-2.5
+(интерпретатор правил, strip-parallel уже есть), hood = fill_biomes263
+~6.6мс/грид (перекрыт). Ожидание верификационного рана: timing ≈ pf0
+(~28-29), big 48x48 первый честный амортизированный номер (~15
+ожидается), farprobe чистый клифф.

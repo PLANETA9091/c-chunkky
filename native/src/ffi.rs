@@ -443,14 +443,16 @@ fn grid_prefetch(
             Some("0") => 1u8,
             Some("1") => 2u8,
             _ => {
-                let cores = std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(1);
-                if cores > 2 {
-                    2
-                } else {
-                    1
-                }
+                // Auto = OFF everywhere (cont-72 verdict). The pool steals
+                // CPU from the strip-parallel fill on 2 cores (cont-66
+                // same-runner A/B: e2e 44.28 PF=0 vs 47.65 PF=1, terrain
+                // 4.39 vs 5.51) AND on 4 (cont-72 same-run calibration:
+                // pf0 e2e=28.69 gen=13.11 terrain=4.10 vs timing with
+                // auto=ON 32.68/14.70/5.11). The inline parallel hood
+                // compute absorbs the misses for +0.6 hood wall (ncomp
+                // 720->1215) while e2e drops ~3ms. CRUS_GRID_PF=1
+                // re-enables the pool explicitly (the A/B lane).
+                1
             }
         };
         GRID_PF_STATE.store(s, std::sync::atomic::Ordering::Relaxed);
