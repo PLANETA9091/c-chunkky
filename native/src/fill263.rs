@@ -236,6 +236,8 @@ impl Gen263 {
         if crate::df263::PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed) {
             crate::df263::PROF_FILLS_263.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        ACTIVE_FILLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _active_fill_guard = ActiveFillGuard;
         // The pool may hand us a reused array — vanilla semantics: AIR cells
         // are NOT written, so the destination must start zeroed.
         out.fill(0);
@@ -686,16 +688,36 @@ impl Gen263 {
 
 /// Strip-parallel worker count: CRUS_FILL_THREADS_263 overrides, else
 /// available_parallelism (min 1). 1 disables the strip path entirely.
+static ACTIVE_FILLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Drop guard for ACTIVE_FILLS (fill_chunk has early-return paths).
+pub struct ActiveFillGuard;
+impl Drop for ActiveFillGuard {
+    fn drop(&mut self) {
+        ACTIVE_FILLS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Strip/hood width for THIS fill. CRUS_FILL_THREADS_263 pins it; otherwise
+/// the width self-balances: when several fills run concurrently (Paper's
+/// parallel chunk generation), each fill narrows to cores/active so the
+/// machine is saturated without oversubscribing; a lone fill takes the full
+/// (capped) width.
 pub fn fill_threads() -> usize {
     if let Ok(v) = std::env::var("CRUS_FILL_THREADS_263") {
         if let Ok(n) = v.parse::<usize>() {
             return n.max(1);
         }
     }
-    std::thread::available_parallelism()
+    let cores = std::thread::available_parallelism()
         .map(|n| n.get())
-        .unwrap_or(1)
-        .min(4)
+        .unwrap_or(1);
+    let active = ACTIVE_FILLS.load(std::sync::atomic::Ordering::Relaxed);
+    if active > 1 {
+        (cores / active).max(1)
+    } else {
+        cores.min(4).max(1)
+    }
 }
 
 /// Split `total` rows into at most `parts` contiguous strips (balanced).
