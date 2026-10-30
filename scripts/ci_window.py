@@ -23,7 +23,7 @@ for path in sys.argv[1:]:
             show_until_blank = 3  # also show the next lines (deco/fill263 prof)
             continue
         if "stage[terrain" in line:
-            print(f"[{lane}]   {line.strip()[:170]}")
+            print(f"[{lane}]   {line.strip()[:280]}")
             show_until_blank = 0
             continue
         if show_until_blank > 0 and line.strip():
