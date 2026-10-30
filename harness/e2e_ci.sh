@@ -103,6 +103,15 @@ mkfifo "$SRV/run.in"
 # streams; the plugin pool is per-ctx ReentrantLock + RR, thread-safe).
 PGEN_FLAG="-Dpaper.chunk-system.gen-parallelism=false"
 if [ "${CRUS_GEN_PARALLEL:-0}" = "1" ]; then PGEN_FLAG=""; fi
+# CRUS_WORKER_THREADS=N pins chunk-system.worker-threads: the auto value is
+# ONE thread for <=3 physical cores (paper docs), and the 4-vCPU CI runner
+# detects <=3 physical — Paper's gen pool is a single worker, which is why
+# CRUS_GEN_PARALLEL alone changed nothing (verified by the JFR window:
+# only Paper Common Worker #0 ever fills). POOL_SIZE in the plugin is 4.
+if [ -n "${CRUS_WORKER_THREADS:-}" ] && [ -f "$SRV/config/paper-global.yml" ]; then
+  sed -i -E "s/^([[:space:]]*)worker-threads:.*$/\\1worker-threads: ${CRUS_WORKER_THREADS}/" "$SRV/config/paper-global.yml"
+  echo "chunk-system.worker-threads=${CRUS_WORKER_THREADS} (patched $SRV/config/paper-global.yml)"
+fi
 (
   cd "$SRV"
   env CRUS_NATIVE_CARVERS=1 CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" \

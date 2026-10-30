@@ -212,6 +212,17 @@ jobs:
           # is downstream (light/tickets/main-thread beat) — mspt + parks
           # decide which.
           CRUS_JFR=1 CRUS_GEN_PARALLEL=1 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_jfr_par.log
+      - name: E2E parallel-gen with 4 pinned worker threads (the real spread test)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          # Paper auto worker-threads = 1 on <=3 physical cores (4-vCPU CI
+          # runner) — the par lane never had a gen pool to spread over.
+          # Pin 4 workers: 4 concurrent native fills (POOL_SIZE=4, self-
+          # balancing strip width narrows each to cores/active). If the
+          # window wall still does not drop, the gate is downstream of gen
+          # (status chain / main-thread beat) — ramp= + mspt + parks show it.
+          CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4.log
       - name: Far-coords native-gen probe (stall cliff bisect)
         continue-on-error: true
         run: |
@@ -234,6 +245,7 @@ jobs:
             e2e263_jfr.log
             e2e263_par.log
             e2e263_jfr_par.log
+            e2e263_par4.log
             e2e263_window.jfr
             e2e263_window_par.jfr
             ab263_out/
