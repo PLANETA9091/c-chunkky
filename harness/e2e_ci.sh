@@ -205,14 +205,19 @@ for i in $(seq 1 6000); do
   sleep 0.05
 done
 t1=$(date +%s.%N)
+echo "=== mspt (tick pacing right after window; last-100-ticks digest) ==="
+$RCON "mspt" 2>/dev/null | head -6 || echo "mspt unavailable"
 if [ "${CRUS_JFR:-0}" = "1" ] && [ -n "$JC" ] && [ -n "$JPID" ]; then
   "$JC" "$JPID" JFR.stop name=win >/dev/null 2>&1 || true
   JFR_BIN="$(dirname "$JAVA_BIN")/jfr"; [ -x "$JFR_BIN" ] || JFR_BIN=jfr
   echo "=== JFR hot methods (exactly the timed window) ==="
   "$JFR_BIN" view hot-methods "$JFR_FILE" 2>/dev/null | head -40 || echo "jfr view failed"
   echo "=== JFR per-thread attribution (infra spinners excluded) ==="
-  "$JFR_BIN" print --events jdk.ExecutionSample "$JFR_FILE" 2>/dev/null \
-    | python3 "$ROOT/harness/jfr_top.py" | head -60 || echo "jfr print failed"
+  "$JFR_BIN" print --events jdk.ExecutionSample --stack-depth 64 "$JFR_FILE" 2>/dev/null \
+    | python3 "$ROOT/harness/jfr_top.py" | head -80 || echo "jfr print failed"
+  echo "=== JFR native + park attribution (the non-Java wall: JNI fills + waiting) ==="
+  "$JFR_BIN" print --events jdk.NativeMethodSample,jdk.ThreadPark,jdk.JavaMonitorWait --stack-depth 64 "$JFR_FILE" 2>/dev/null \
+    | python3 "$ROOT/harness/jfr_wait.py" | head -60 || echo "jfr wait print failed"
 fi
 if [ "$done" != "1" ]; then
   echo "E2E WINDOW TIMEOUT (inside=$c / $target)"
