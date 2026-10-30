@@ -3650,3 +3650,23 @@ JavaMonitorWait с длительностями, чанк-системные т�
 конекстов, self-balancing strip width сужает каждый филл до cores/active).
 ОЖИДАНИЕ CI: jfr_par покажет разброс филлов по воркерам; par4 покажет
 эффект 4 воркеров на wall; ramp+/mspt+/parks+ объяснят остаток.
+
+
+## cont-70: terrain-сплит запушен; предсказания par4 (до результатов)
+
+ПУШ 54e0489a: terrain-подтаймеры (thread sums, PROF_ON_263-gated,
+читать против terrain wall как hood_compute): terr_sample =
+sample_final_density (splines+interp cells+noise family), terr_walk =
+аквифер-triple loop, terr_setup = per-strip ctx+beard decode+aquifer
+ctor+scratch, terr_prefill = shared maxSurfaceLevel walk (вызывающий
+тред). Первый чистый сплит 7.3мс in-window terrain (kinds мертвы).
+
+АРИФМЕТИКА par4 (предсказание ДО результата): fill = 21мс wall x
+4 стрипа ≈ 84 core-ms (холодный регион). 4 параллельных филла x
+ширина 1 (self-balancing: cores/active) = 84 core-ms на те же 4 ядра
+= ПРОПУСКНАЯ СПОСОБНОСТЬ НЕ МЕНЯЕТСЯ -> gen span ~3s останется.
+par4 может помочь ТОЛЬКО если узкое место — не CPU филлов, а
+статусная цепочка/подача задач (ramp). Ожидание: par4 ≈ par при
+сохранном gen span; выигрыш возможен только в ramp. Если par4 ≈
+timing — ген насыщает ядра, и единственные фронты: (1) общий CPU
+чанка (натив), (2) ramp (Paper-внутреннее), (3) метрика окна.
