@@ -50,19 +50,23 @@ pub(crate) fn quantize_f32(v: f32) -> i64 {
 /// vanilla fillBiomesFromNoise order:
 /// out[s * 64 + x * 16 + y * 4 + z], sections ascending.
 ///
-/// The fill mirrors the LIVE 26.3 pipeline exactly
-/// (ChunkGenerator.doCreateBiomes -> MultiNoiseBiomeSource.createResolverForChunk):
-/// all six climate fields are filled as DENSITY VOLUMES over the chunk's
-/// quart bounds (4 x sections*4 x 4, steps 4) with ctx.vv = true — the
-/// PerlinNoise.addToVolume split-gradient arithmetic — and every quart reads
-/// Climate.target(quantize(buffer[idx])). The vanilla VOLUME kernels
-/// associate the f32 gradient sum differently from the scalar get() chain
-/// (dotXz + gradY*ry vs gx*rx + gy*ry + gz*rz), so a point-semantics fill
-/// drifts by 1 ULP and flips near-tie biomes at the dump gate (CI
-/// 41105141065: 6/144 chunks jungle<->lush_caves). Volume fills whose tree
-/// carries volume-unsafe nodes (Interpolated/FindTopSurface/BlendDensity —
-/// none in the 26.3 climate six, gate-checked) fall back to per-point
-/// scalar evaluation for that field.
+/// SEMANTICS (pinned by CI run 41116221438 evidence): the native POINT
+/// resolution is bit-equal to the vanilla Climate.Sampler sample for every
+/// probed quart (BIOME_DEBUG tp==nprobe on all six fields), and the vanilla
+/// live dump agrees with point semantics at 138/144 chunks. So the grid is
+/// filled PER POINT:
+/// - the five y-invariant fields (t, v, c, e, r) evaluate once per (x, z)
+///   column at by0 = min_y — the by0==own-y bit-equality is proven by the
+///   (a)-check in fill263_grid_naive_parity_at_1024_1024;
+/// - depth evaluates PER QUART with the scalar walk. The former 4x96x4
+///   quart-volume fast path is REMOVED: its fill is shape-dependent (the
+///   4x96x4 column kernels diverge from per-point evaluation at whole
+///   columns — CI 41111275154: point 0.98004675 vs volume 1.0593824 at
+///   (1024,1024); CI 41116221438 DIAG: 1511/1536 quart indexes diverge) and
+///   it was the direct cause of the 6 divergent chunks. The 1x1x1-volume
+///   bisector proved every tree node point-equal, so the corruption lives
+///   in the multi-row column kernels — to be root-caused separately before
+///   any volume fast path returns.
 pub fn fill_biomes263(
     st: &BiomeState263,
     min_y: i32,
@@ -75,34 +79,26 @@ pub fn fill_biomes263(
     debug_assert!(out.len() >= sections * 64);
     let quart_y0 = min_y / 4;
     debug_assert_eq!(min_y % 4, 0, "quart grid requires a 4-aligned min_y");
-    let sections_i = sections as i32;
     let mut ctx = crate::df263::SamplerCtx263::uncached();
-    // THE live-pipeline arithmetic (see the doc comment).
-    ctx.vv = true;
-    let qvol = crate::df263::DensityVolume {
-        size_x: 4,
-        size_y: sections_i * 4,
-        size_z: 4,
-        min_x: cx * 64,
-        min_y,
-        min_z: cz * 64,
-        step_x: 4,
-        step_y: 4,
-        step_z: 4,
-    };
-    let n = (4 * sections_i * 4 * 4) as usize;
-    // Six climate buffers, exactly createResolverForChunk's DensityBuffers.
-    let mut bufs: [Vec<f32>; 6] = [vec![], vec![], vec![], vec![], vec![], vec![]];
-    for (fi, buf) in bufs.iter_mut().enumerate() {
-        if volume_duality_safe(&st.climate[fi]) {
-            buf.resize(n, 0.0);
-            st.climate[fi].sample_volume(&mut ctx, buf, &qvol);
-        } else {
-            // Volume-unsafe tree (not the 26.3 climate six): per-point scalar
-            // evaluation — the pre-vv fallback semantics.
-            buf.clear();
+    // Pass 1: the y-invariant fields (t, v, c, e, r) per (x, z) quart column
+    // — 80 evaluations for the whole chunk.
+    let mut col_vals = [[0f32; 5]; 16];
+    let by0 = quart_y0 * 4;
+    for x in 0..4i32 {
+        for z in 0..4i32 {
+            let bx = (cx * 4 + x) * 4;
+            let bz = (cz * 4 + z) * 4;
+            let mut row = [0f32; 5];
+            for (fi, slot) in row.iter_mut().enumerate() {
+                let node = &[0usize, 1, 2, 3, 5][fi];
+                *slot = st.climate[*node].sample_value(&mut ctx, bx, by0, bz);
+            }
+            col_vals[(x * 4 + z) as usize] = row;
         }
     }
+    // Pass 2: the vanilla search walk (sections ascending, x, y, z within a
+    // section — the warm-start sequence). Depth re-evaluates per quart
+    // (point semantics — see the doc comment).
     for sy in 0..sections {
         for x in 0..4i32 {
             for y in 0..4i32 {
@@ -110,23 +106,17 @@ pub fn fill_biomes263(
                     let by = (quart_y0 + (sy as i32) * 4 + y) * 4;
                     let bx = (cx * 4 + x) * 4;
                     let bz = (cz * 4 + z) * 4;
-                    // DensityVolume index: y + (x + z*size_x)*size_y.
-                    let idx = ((sy as i32) * 4
-                        + y
-                        + (x + z * 4) * (sections_i * 4)) as usize;
-                    let mut values = [0i64; 7];
-                    for (fi, slot) in values.iter_mut().take(6).enumerate() {
-                        *slot = if bufs[fi].is_empty() {
-                            quantize_f32(st.climate[fi].sample_value(
-                                &mut crate::df263::SamplerCtx263::uncached(),
-                                bx,
-                                by,
-                                bz,
-                            ))
-                        } else {
-                            quantize_f32(bufs[fi][idx])
-                        };
-                    }
+                    let cv = &col_vals[(x * 4 + z) as usize];
+                    let d = st.climate[4].sample_value(&mut ctx, bx, by, bz);
+                    let values = [
+                        quantize_f32(cv[0]),
+                        quantize_f32(cv[1]),
+                        quantize_f32(cv[2]),
+                        quantize_f32(cv[3]),
+                        quantize_f32(d),
+                        quantize_f32(cv[4]),
+                        0, // offset: all vanilla preset entries carry 0
+                    ];
                     let leaf = st.src.find_value(&values);
                     out[(sy * 64 + (x as usize) * 16 + (y as usize) * 4 + (z as usize)) as usize] =
                         st.src.entries[leaf].biome_idx as i32;
@@ -339,12 +329,12 @@ mod depth_volume_tests {
         }
 
         // (c) naive walk: every quart through a 1x1x1 VOLUME fill under the
-        // SAME ctx.vv semantics (the per-point degenerate case of the
-        // addToVolume kernels) — the 4x96x4 fast fill must be bit-identical
-        // (both are the vanilla live-pipeline arithmetic).
+        // SCALAR semantics (the 1x1x1 shape is point-equal per the bisector)
+        // — the production fill (per-point, no volume fast path) must be
+        // bit-identical. STRICT again: this pins the fill against the
+        // shape-dependent volume bug ever returning.
         let mut naive = vec![0i32; sections * 64];
         let mut nctx = crate::df263::SamplerCtx263::uncached();
-        nctx.vv = true;
         for sy in 0..sections {
             for x in 0..4usize {
                 for y in 0..4usize {
@@ -376,23 +366,9 @@ mod depth_volume_tests {
                 }
             }
         }
-        // DIAGNOSTIC (non-fatal while the structural volume/point bug is
-        // live — CI 41111275154): report mismatches, do not fail the lane.
-        let bad: Vec<usize> = fast
-            .iter()
-            .zip(naive.iter())
-            .enumerate()
-            .filter(|(_, (f, n))| f != n)
-            .map(|(i, _)| i)
-            .collect();
-        eprintln!(
-            "DIAG fast-vs-1x1x1vv at ({cx},{cz}): {}/{} quart indexes diverge (first 5: {:?} \
-             fast={:?} naive={:?})",
-            bad.len(),
-            fast.len(),
-            &bad[..bad.len().min(5)],
-            bad.iter().take(5).map(|i| fast[*i]).collect::<Vec<_>>(),
-            bad.iter().take(5).map(|i| naive[*i]).collect::<Vec<_>>(),
+        assert_eq!(
+            fast, naive,
+            "fill_biomes263 (per-point) vs per-quart 1x1x1 fills at chunk ({cx},{cz})"
         );
     }
 
