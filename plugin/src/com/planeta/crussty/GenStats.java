@@ -110,6 +110,11 @@ public final class GenStats {
     private static final AtomicLong WIN_MARKS = new AtomicLong();
     private static final AtomicLong WIN_CARVER = new AtomicLong();
     private static volatile long WIN_T_FIRST, WIN_T_LAST;
+    // nanoTime when "crusgenstats window" armed the rect — precedes the
+    // forceload command by one rcon round-trip; ramp = first in-window fill
+    // start minus this = the scheduling/status-chain latency BEFORE the
+    // first fill (satellites, ticket propagation, main-thread beat).
+    private static volatile long WIN_T_ARMED;
 
     /** Arm the window: only chunks with x in [rx..rx+n], z in [rz..rz+n] are
      *  counted; zeroes the window counters. Global stats are untouched. */
@@ -126,6 +131,7 @@ public final class GenStats {
         WIN_CARVER.set(0);
         WIN_T_FIRST = 0;
         WIN_T_LAST = 0;
+        WIN_T_ARMED = System.nanoTime();
     }
 
     /** In-window fill count so far (fast poll for the harness). */
@@ -145,12 +151,14 @@ public final class GenStats {
                     WIN_MIN_X + WIN_N, WIN_MIN_Z, WIN_MIN_Z + WIN_N);
         }
         double spanMs = (WIN_T_LAST - WIN_T_FIRST) / 1e6;
+        double rampMs = (WIN_T_FIRST > 0 && WIN_T_ARMED > 0)
+                ? (WIN_T_FIRST - WIN_T_ARMED) / 1e6 : 0.0;
         double cnt = n;
         return String.format(
-                "window[%d..%d,%d..%d] inside=%d span=%.2fms e2e=%.2fms/chunk"
+                "window[%d..%d,%d..%d] inside=%d span=%.2fms ramp=%.0fms e2e=%.2fms/chunk"
                         + " gen=%.2f native=%.2f layout=%.2f beard=%.2f marks=%.2f carver=%.2f",
                 WIN_MIN_X, WIN_MIN_X + WIN_N, WIN_MIN_Z, WIN_MIN_Z + WIN_N,
-                n, spanMs, spanMs / n,
+                n, spanMs, rampMs, spanMs / n,
                 WIN_TOTAL.get() / cnt / 1e6,
                 WIN_NATIVE.get() / cnt / 1e6,
                 WIN_LAYOUT.get() / cnt / 1e6,
