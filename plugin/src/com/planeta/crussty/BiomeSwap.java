@@ -19,7 +19,7 @@ import java.lang.reflect.Method;
 public final class BiomeSwap {
 
     public static void apply(World world, CrusstyChunkGenerator.CrusstyFiller filler, String[] names,
-                             int sections, int minQuartY) throws Exception {
+                             int sections, int minQuartY, long ctxId) throws Exception {
         Object nmsWorld = world.getClass().getMethod("getHandle").invoke(world);
         Object chunkSource = nmsWorld.getClass().getMethod("getChunkSource").invoke(nmsWorld);
         Object gen = chunkSource.getClass().getMethod("getGenerator").invoke(chunkSource);
@@ -72,7 +72,7 @@ public final class BiomeSwap {
             if (filler != null) {
                 Object nativeSrc = com.planeta.crussty.NativeBiomeSource.create(
                         (net.minecraft.world.level.biome.MultiNoiseBiomeSource) nbs,
-                        filler, names, sections, minQuartY, nmsWorld);
+                        filler, names, sections, minQuartY, ctxId, nmsWorld);
                 if (nativeSrc != null) {
                     nbs = nativeSrc;
                     java.util.logging.Logger.getLogger("CrusstyGen").info(

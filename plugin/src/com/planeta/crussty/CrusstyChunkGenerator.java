@@ -745,8 +745,8 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             };
             Class<?> swap = Class.forName("com.planeta.crussty.BiomeSwap");
             swap.getMethod("apply", org.bukkit.World.class, CrusstyFiller.class,
-                            String[].class, int.class, int.class)
-                    .invoke(null, w, filler, names, sections, minQuartY);
+                            String[].class, int.class, int.class, long.class)
+                    .invoke(null, w, filler, names, sections, minQuartY, pool.firstCtx());
             Logger.getLogger("CrusstyGen").info(
                     "world '" + w.getName() + "': native biome source active ("
                     + names.length + " biomes)");

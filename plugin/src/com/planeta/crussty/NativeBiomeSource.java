@@ -56,6 +56,8 @@ public final class NativeBiomeSource extends BiomeSource {
     private final Holder<Biome>[] byIndex;
     private final int minQuartY;
     private final int sections;
+    /** Pool ctx id for the CRUS_BIOME_DEBUG point probe (diagnostic only). */
+    private final long ctxId;
 
     // --- CRUS_BIOME_DEBUG=1 diagnostics: grid answer vs vanilla POINT
     // resolution on the same quart. Zero mismatches + a failing parity gate
@@ -72,10 +74,12 @@ public final class NativeBiomeSource extends BiomeSource {
     private NativeBiomeSource(MultiNoiseBiomeSource vanilla,
                               CrusstyChunkGenerator.CrusstyFiller filler,
                               String[] names, int sections, int minQuartY,
+                              long ctxId,
                               Registry<Biome> biomeReg) {
         super();
         this.vanilla = vanilla;
         this.filler = filler;
+        this.ctxId = ctxId;
         this.sections = sections;
         this.minQuartY = minQuartY;
         this.byIndex = new Holder[names.length];
@@ -123,6 +127,7 @@ public final class NativeBiomeSource extends BiomeSource {
     public static NativeBiomeSource create(MultiNoiseBiomeSource vanilla,
                                            CrusstyChunkGenerator.CrusstyFiller filler,
                                            String[] names, int sections, int minQuartY,
+                                           long ctxId,
                                            Object nmsWorld) {
         if (codecRegistered() == null) {
             java.util.logging.Logger.getLogger("CrusstyGen").warning(
@@ -136,7 +141,7 @@ public final class NativeBiomeSource extends BiomeSource {
                     .invoke(regAccess, Registries.BIOME);
             @SuppressWarnings("unchecked")
             Registry<Biome> biomeReg = (Registry<Biome>) biomeRegistry;
-            return new NativeBiomeSource(vanilla, filler, names, sections, minQuartY, biomeReg);
+            return new NativeBiomeSource(vanilla, filler, names, sections, minQuartY, ctxId, biomeReg);
         } catch (Throwable t) {
             java.util.logging.Logger.getLogger("CrusstyGen").warning(
                     "NativeBiomeSource create failed: " + t);
@@ -332,14 +337,25 @@ public final class NativeBiomeSource extends BiomeSource {
                     : vanilla.getNoiseBiome(fallback.sample(qx, qy, qz));
             if (DBG) {
                 DBG_QUERIES.incrementAndGet();
-                Holder<Biome> pt = vanilla.getNoiseBiome(fallback.sample(qx, qy, qz));
+                Climate.TargetPoint tp = fallback.sample(qx, qy, qz);
+                Holder<Biome> pt = vanilla.getNoiseBiome(tp);
                 if (pt != ans) {
                     long m = DBG_MISMATCH.incrementAndGet();
                     if (m <= 30) {
+                        long[] nprobe = new long[7];
+                        int pr = Integer.MIN_VALUE;
+                        try {
+                            pr = ChunkGenNative.biome263Probe(ctxId, qx, qy, qz, nprobe);
+                        } catch (Throwable t) {
+                            nprobe[0] = Long.MIN_VALUE;
+                        }
                         java.util.logging.Logger.getLogger("CrusstyGen").warning(
                                 "BIOME_DEBUG mismatch #" + m + " chunk(" + cx + "," + cz
                                         + ") quart(" + qx + "," + qy + "," + qz + ") grid="
-                                        + nameOf(ans) + " point=" + nameOf(pt));
+                                        + nameOf(ans) + " point=" + nameOf(pt)
+                                        + " tp=" + targetPointLongs(tp)
+                                        + " nprobe=" + (pr == 0 ? java.util.Arrays.toString(nprobe)
+                                                : "err" + pr));
                         if (m == 30) {
                             java.util.logging.Logger.getLogger("CrusstyGen").warning(
                                     "BIOME_DEBUG further mismatches silenced (count continues)");
@@ -348,6 +364,24 @@ public final class NativeBiomeSource extends BiomeSource {
                 }
             }
             return ans;
+        }
+    }
+
+    /** Record-component dump of a Climate.TargetPoint ([t,v,c,e,d,r,offset]). */
+    private static String targetPointLongs(Climate.TargetPoint tp) {
+        try {
+            var comps = tp.getClass().getRecordComponents();
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < comps.length; i++) {
+                if (i > 0) {
+                    sb.append(',');
+                }
+                Object v = comps[i].getAccessor().invoke(tp);
+                sb.append(v);
+            }
+            return sb.append(']').toString();
+        } catch (Throwable t) {
+            return "unavailable(" + t.getClass().getSimpleName() + ")";
         }
     }
 }

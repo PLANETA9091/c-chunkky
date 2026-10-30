@@ -1440,6 +1440,91 @@ pub fn bench_fill_biomes263(id: i64, cx: i32, cz: i32, out: &mut [i32]) -> i32 {
     n as i32
 }
 
+/// Diagnostic point probe (26.3): the six climate fields + the preset leaf
+/// for ONE world quart, evaluated with the NAIVE per-point walk (all six at
+/// the quart's own block coords, no by0 hoisting, no depth volume). The CI
+/// biome-parity diagnosis compares these against the vanilla
+/// Climate.TargetPoint at the same quart to bisect base-semantics vs the
+/// fill fast path. out: [t, v, c, e, d, r] quantized i64 + preset leaf idx.
+pub fn biome263_point_probe(b: &crate::biome263::BiomeState263, qx: i32, qy: i32, qz: i32) -> [i64; 7] {
+    let bx = qx * 4;
+    let by = qy * 4;
+    let bz = qz * 4;
+    let mut ctx = crate::df263::SamplerCtx263::uncached();
+    let mut t = [0f32; 6];
+    for (i, node) in t.iter_mut().enumerate() {
+        *node = b.climate[i].sample_value(&mut ctx, bx, by, bz);
+    }
+    let values = [
+        crate::biome263::quantize_f32(t[0]),
+        crate::biome263::quantize_f32(t[1]),
+        crate::biome263::quantize_f32(t[2]),
+        crate::biome263::quantize_f32(t[3]),
+        crate::biome263::quantize_f32(t[4]),
+        crate::biome263::quantize_f32(t[5]),
+        0,
+    ];
+    let leaf = b.src.find_value(&values);
+    [
+        values[0],
+        values[1],
+        values[2],
+        values[3],
+        values[4],
+        values[5],
+        b.src.entries[leaf].biome_idx as i64,
+    ]
+}
+
+/// biome263Probe(long ctx, int qx, int qy, int qz, long[] out) -> int.
+/// Writes 7 longs: [t, v, c, e, d, r] (vanilla Climate.TargetPoint quantized
+/// space) + the native preset biome index. Returns 0 on success, -1 when the
+/// ctx has no 26.3 native biome state. Diagnostic-only (CRUS_BIOME_DEBUG).
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_biome263Probe(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jni_sys::jlong,
+    qx: jni_sys::jint,
+    qy: jni_sys::jint,
+    qz: jni_sys::jint,
+    out: jni_sys::jlongArray,
+) -> jni_sys::jint {
+    let tbl = *env;
+    let state_guard = SESSIONS.lock().unwrap();
+    let Some(c) = state_guard.as_ref().and_then(|m| m.get(&(ctx as i64))) else {
+        return -1;
+    };
+    let b263 = c
+        .v263
+        .as_ref()
+        .and_then(|v| v.biomes.clone().map(|b| (b, v.g.min_y, v.g.height)));
+    let Some((b, min_y, height)) = b263 else {
+        return -1;
+    };
+    drop(state_guard);
+    // The plugin passes vanilla WORLD quart coords; the native grid is
+    // min_y-relative. Reject quarts outside the world's quart range.
+    if qy < (min_y / 4) || qy >= (min_y + height) / 4 {
+        return -2;
+    }
+    let len = ((*tbl).v1_1.GetArrayLength)(env, out as jni_sys::jarray) as usize;
+    if len < 7 {
+        return -1;
+    }
+    let ptr = ((*tbl).v1_1.GetLongArrayElements)(env, out, std::ptr::null_mut());
+    if ptr.is_null() {
+        return -1;
+    }
+    let vals = biome263_point_probe(&b, qx as i32, qy as i32, qz as i32);
+    let slice = std::slice::from_raw_parts_mut(ptr, 7);
+    for (i, v) in vals.iter().enumerate() {
+        slice[i] = *v;
+    }
+    ((*tbl).v1_1.ReleaseLongArrayElements)(env, out, ptr, 0);
+    0
+}
+
 /// Bench/plugin-test helper: compute + store the biome grid for one chunk
 /// (the native half of the plugin's fillBiomes, without JNI).
 pub fn bench_fill_biomes(id: i64, cx: i32, cz: i32, out: &mut [i32]) -> i32 {

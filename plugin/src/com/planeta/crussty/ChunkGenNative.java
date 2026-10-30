@@ -99,6 +99,16 @@ public final class ChunkGenNative {
      */
     public static native int fillBiomes(long ctx, int cx, int cz, int[] out);
 
+    /**
+     * biome263Probe(ctx, qx, qy, qz, out) -> 0 on success — writes 7 longs:
+     * the six climate fields (vanilla Climate.TargetPoint quantized space)
+     * + the native preset biome index, for ONE world quart, evaluated with
+     * the naive per-point walk. Diagnostic-only (CRUS_BIOME_DEBUG); returns
+     * -1 when the ctx has no 26.3 native biome state, -2 when the quart is
+     * outside the world's quart range.
+     */
+    public static native int biome263Probe(long ctx, int qx, int qy, int qz, long[] out);
+
     /** surfaceStates(ctx) -> String[] — block state strings of the parsed
      *  surface rule tree (first-appearance order), or null when the ctx has
      *  no native surface engine. */

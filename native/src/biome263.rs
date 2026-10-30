@@ -291,4 +291,121 @@ mod depth_volume_tests {
             }
         }
     }
+
+    /// The live CI parity gate (eb0afaec run 41105141065) found the grid
+    /// diverging from vanilla point resolution at chunk (1024,1024): whole
+    /// quart rows swap jungle <-> lush_caves. This test re-runs the EXACT
+    /// failing chunk and bisects the fast path:
+    /// (a) the five pass-1 fields at by0 vs the quart's own y (the
+    ///     y-invariant assumption),
+    /// (b) depth quart-volume vs per-point (ULP-level localization),
+    /// (c) the full fill_biomes263 output vs a naive scalar walk.
+    #[test]
+    fn fill263_grid_naive_parity_at_1024_1024() {
+        let src = crate::biomes::BiomeSourceData::from_params263(include_str!(
+            "params263_overworld.json"
+        ))
+        .expect("preset parse");
+        let g = crate::fill263::Gen263::new(3257840388504953787, -64, 384, 63);
+        let st = BiomeState263 {
+            src,
+            climate: g.climate.clone(),
+            y_invariant: [true, true, true, true, false, true],
+        };
+
+        let (min_y, height) = (-64i32, 384i32);
+        let (cx, cz) = (1024i32, 1024i32);
+        let sections = (height / 16) as usize;
+        let sections_i = sections as i32;
+        let quart_y0 = min_y / 4;
+
+        // production fill, exactly as the JNI fillBiomes runs it
+        let mut fast = vec![0i32; sections * 64];
+        fill_biomes263(&st, min_y, height, cx, cz, &mut fast);
+
+        // (b) depth: volume fill (as the fast path does) vs per-point
+        let mut ctx = crate::df263::SamplerCtx263::uncached();
+        let qvol = crate::df263::DensityVolume {
+            size_x: 4,
+            size_y: sections_i * 4,
+            size_z: 4,
+            min_x: cx * 64,
+            min_y,
+            min_z: cz * 64,
+            step_x: 4,
+            step_y: 4,
+            step_z: 4,
+        };
+        let mut dvol = vec![0f32; (4 * sections_i * 4 * 4) as usize];
+        st.climate[4].sample_volume(&mut ctx, &mut dvol, &qvol);
+
+        // (a) the five pass-1 fields: by0 (what the fill evaluates) vs the
+        // quart's own y — the y-invariant assumption at this exact chunk.
+        let by0 = quart_y0 * 4;
+        for x in 0..4i32 {
+            for z in 0..4i32 {
+                let bx = (cx * 4 + x) * 4;
+                let bz = (cz * 4 + z) * 4;
+                for y in 0..sections_i * 4 {
+                    let by = (quart_y0 + y) * 4;
+                    for (fi, node) in [0usize, 1, 2, 3, 5].into_iter().enumerate() {
+                        let at_by0 = st.climate[node].sample_value(&mut ctx, bx, by0, bz);
+                        let at_by = st.climate[node].sample_value(&mut ctx, bx, by, bz);
+                        assert_eq!(
+                            at_by0.to_bits(),
+                            at_by.to_bits(),
+                            "y-invariance field {fi} chunk ({cx},{cz}) column ({x},{z}) \
+                             quart row {y}: by0 {at_by0} vs own-y {at_by}"
+                        );
+                    }
+                }
+            }
+        }
+
+        // (c) naive scalar walk (all six fields per point) vs the fast fill
+        let mut naive = vec![0i32; sections * 64];
+        for sy in 0..sections {
+            for x in 0..4usize {
+                for y in 0..4usize {
+                    for z in 0..4usize {
+                        let by = (quart_y0 + (sy as i32) * 4 + y as i32) * 4;
+                        let bx = (cx * 4 + x as i32) * 4;
+                        let bz = (cz * 4 + z as i32) * 4;
+                        let d_pt = st.climate[4].sample_value(&mut ctx, bx, by, bz);
+                        let d_vol = dvol[(sy as i32 * 4
+                            + y as i32
+                            + (x as i32 + z as i32 * 4) * (sections_i * 4))
+                            as usize];
+                        assert_eq!(
+                            d_pt.to_bits(),
+                            d_vol.to_bits(),
+                            "depth point-vs-volume chunk ({cx},{cz}) section {sy} \
+                             quart ({x},{},{z}): point {d_pt} vs volume {d_vol}",
+                            sy * 4 + y
+                        );
+                        let mut row = [0f32; 5];
+                        for (fi, node) in [0usize, 1, 2, 3, 5].into_iter().enumerate() {
+                            row[fi] = st.climate[node].sample_value(&mut ctx, bx, by, bz);
+                        }
+                        let values = [
+                            quantize_f32(row[0]),
+                            quantize_f32(row[1]),
+                            quantize_f32(row[2]),
+                            quantize_f32(row[3]),
+                            quantize_f32(d_pt),
+                            quantize_f32(row[4]),
+                            0,
+                        ];
+                        let leaf = st.src.find_value(&values);
+                        naive[sy * 64 + x * 16 + y * 4 + z] =
+                            st.src.entries[leaf].biome_idx as i32;
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            fast, naive,
+            "fill_biomes263 fast path vs naive scalar walk at chunk ({cx},{cz})"
+        );
+    }
 }
