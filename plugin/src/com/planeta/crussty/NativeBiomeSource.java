@@ -10,6 +10,8 @@ import net.minecraft.world.level.biome.BiomeSource;
 import net.minecraft.world.level.biome.Climate;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
 
+import com.mojang.serialization.MapCodec;
+
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Arrays;
@@ -147,8 +149,8 @@ public final class NativeBiomeSource extends BiomeSource {
         try {
             Object reg = Class.forName("net.minecraft.core.registries.BuiltInRegistries")
                     .getField("BIOME_SOURCE").get(null);
-            Object unfreeze = null;
-            Object freeze = null;
+            Method unfreeze = null;
+            Method freeze = null;
             Field frozenField = null;
             try {
                 unfreeze = reg.getClass().getMethod("unfreeze");
