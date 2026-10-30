@@ -98,11 +98,16 @@ EOF
 rm -f "$SRV/run.in"
 mkfifo "$SRV/run.in"
 ( sleep 1800 > "$SRV/run.in" ) >/dev/null 2>&1 &
+# CRUS_GEN_PARALLEL=1 boots with Paper's default parallel chunk generation
+# (the timing lane only — judge lanes keep serial semantics for the RNG
+# streams; the plugin pool is per-ctx ReentrantLock + RR, thread-safe).
+PGEN_FLAG="-Dpaper.chunk-system.gen-parallelism=false"
+if [ "${CRUS_GEN_PARALLEL:-0}" = "1" ]; then PGEN_FLAG=""; fi
 (
   cd "$SRV"
   env CRUS_NATIVE_CARVERS=1 CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" \
     CRUS_FILL263_PROF="${CRUS_FILL263_PROF:-0}" \
-    setsid "$JAVA_BIN" -Xms2G -Xmx3G -Dpaper.chunk-system.gen-parallelism=false \
+    setsid "$JAVA_BIN" -Xms2G -Xmx3G $PGEN_FLAG \
     -Djava.library.path="$ROOT/native/target/release" \
     -jar paper.jar nogui < run.in > run.out 2>&1 &
   echo $! > server.pid
@@ -205,6 +210,9 @@ if [ "${CRUS_JFR:-0}" = "1" ] && [ -n "$JC" ] && [ -n "$JPID" ]; then
   JFR_BIN="$(dirname "$JAVA_BIN")/jfr"; [ -x "$JFR_BIN" ] || JFR_BIN=jfr
   echo "=== JFR hot methods (exactly the timed window) ==="
   "$JFR_BIN" view hot-methods "$JFR_FILE" 2>/dev/null | head -40 || echo "jfr view failed"
+  echo "=== JFR per-thread attribution (infra spinners excluded) ==="
+  "$JFR_BIN" print --events jdk.ExecutionSample "$JFR_FILE" 2>/dev/null \
+    | python3 "$ROOT/harness/jfr_top.py" | head -60 || echo "jfr print failed"
 fi
 if [ "$done" != "1" ]; then
   echo "E2E WINDOW TIMEOUT (inside=$c / $target)"
