@@ -284,7 +284,7 @@ mod depth_volume_tests {
                             point.to_bits(),
                             fast.to_bits(),
                             "quart ({x},{},{z}) section {sy}: point {point} vs volume {fast}",
-                            sy * 4 + y as usize
+                            sy * 4 + y
                         );
                     }
                 }

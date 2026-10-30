@@ -3820,3 +3820,34 @@ depth проходит guard. Юнит-тест depth_quart_volume_bit_exact_vs_
 Аудит остальных ленивых инициализаций плагина: initBulk — synchronized
 (BULK_LOCK + double-check) ✓; GenStats — атомики ✓; sectionStatesById и
 др. — read-only после init, безопасная публикация ✓. Второй гонки нет.
+
+ПРЕД-РЕГИСТРАЦИЯ ожиданий рана 805fe7d4 (ДО результатов, метод cont-70):
+- timing (новый дефолт PF=OFF): e2e 28-30, terrain ~4.1, hood ~4.2,
+  ncomp ~1200 (калибровка pf0 того же рана);
+- pf1 (PF=ON сторона A/B): e2e 31-34, terrain ~5.1 — прежний тайминг;
+- depth fast path: hood_compute/fill 5.16 -> ~2-2.5 (fill_biomes263
+  4.4 -> ~1.5-2 на грид), hood wall пропорционально; терраин не меняется;
+- par4 (гонка в layoutBulk починена): ЗЕЛЁНЫЙ бут + окно; gen span
+  /4 (4 serial fills параллельно, self-balance width=1) -> e2e_par4
+  консервативно 20-28 (тик-бит ограничивает снизу);
+- big 48x48 (PF=off, serial gen): e2e ~13-15 амортизированно (ramp
+  330мс размазывается в 0.14/чанк);
+- farprobe: чистый вердикт клиффа D=8192 без утечки worker-threads.
+
+## cont-76 (черновик, добить числами из рана 805fe7d4)
+
+ЧЕТЫРЕ изменения в одном ране (все 4 консолидированы из-за concurrency
+cancel-in-progress):
+1. 2eacb2f9 harness: reset worker-threads при unset + par4 LAST
+2. cbc52699 PF flip: adaptive auto -> OFF; pf-лана -> CRUS_GRID_PF=1
+3. 7fe1e722 фикс гонки layoutBulk (статик scratch -> пер-вызовные локалы)
+4. 14b1b853 depth quart-volume fast path (guard + юнит-тест)
+
+ВЕРДИКТЫ (заполнить по логам):
+- [ ] native: cargo test зелёный (вкл. depth_quart_volume_bit_exact_vs_points)
+- [ ] timing (PF=OFF дефолт): e2e=__ gen=__ terrain=__ hood=__ ncomp=__
+- [ ] pf1 (PF=ON): e2e=__ — A/B сохранён
+- [ ] par4: ЗЕЛЁНЫЙ/КРАШ — вердикт гонки-фикса
+- [ ] big 48x48: e2e/chunk=__ амортизированно (первый!)
+- [ ] farprobe: D=8192 чистый вердикт
+- [ ] hood_compute/fill: __ (ожидалось ~2-2.5 против 5.16)
