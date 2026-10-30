@@ -3942,3 +3942,22 @@ JFR-атрибуция Paper-side (cont-77, окна jfr/jfr_par, полные �
 против реального 26.3 jar (первая проверка API-догадок: BiomeSource protected ctor, codec()
 raw-cast, collectPossibleBiomes из byIndex); ab_biome лана — BIOME PARITY OK или точный диф;
 big-лана — первый амортизированный 48x48 номер (~13-15 e2e/chunk ожидание).
+
+## cont-79: BIG-ЛАНА ОЖИЛА (22b8c8cf) — первый честный 48x48: e2e=27.11/чанк (2304/2304, тайлы сработали); NativeBiomeSource КОМПИЛИРУЕТСЯ против 26.3 jar
+
+Ран 41071408139 (22b8c8cf — forceload-тайлы):
+- big 48x48: window[1100..1147] inside=2304/2304 span=62.45s ramp=348ms e2e=27.11мс/чанк
+  амортизированно (gen=15.31 native=15.03 layout=0.20). Ноль "[forceload tile FAILED]".
+  Амортизация против 12x36.41 той же ланы: -26% (12x12 окно несёт шедулинг-хвост и тик-пейcинг).
+  big-серийный 27.11 ≈ par4-12x12 27.72 — масштабная амортизация эквивалентна параллельности.
+- timing 36.41 / deco 47.91 / nobeard 36.02 / pf1 34.93 (ON снова выиграл 1.5мс) / jfr 37.82
+  (ramp=1128) / par 35.84 / jfr_par 35.93 / par4 27.72 (третий зелёный подряд, стабильно лучший).
+- farprobe: D=64..61440 ВСЕ OK — второй чистый рана подряд, вердикт закрыт.
+- pf-вердикт стабилизируется: два рана подряд ON чуть впереди на медленном раннере (1.5-1.9мс),
+  базлайн давал OFF +4.0 на быстром. Гонка за дефолт продолжается, pf-лана держит обе стороны.
+
+NativeBiomeSource (964fc6f5 + build-фикс a66aef3b): plugin-джоба ЗЕЛЁНАЯ — все API-догадки
+по javap подтвердились (BiomeSource protected ctor, codec() raw-cast в MultiNoiseBiomeSource.CODEC,
+createResolver/createResolverForChunk overrides, Registry.get -> Optional<Holder.Reference>).
+Следующий ран: A/B biome лана (biomedump точный гейт) + biome_fill n>0 в GenStats (JNI-филлы
+пойдут в рантайме впервые) + e2e-дельта от выпавшего Java createBiomes (~-1.5-2мс ожидание).
