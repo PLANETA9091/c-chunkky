@@ -4197,3 +4197,29 @@ CI 41120705523 (aa70c811, все 3 джобы GREEN):
    дuality на (1024,1024).
 Ожидание от рана: все 80 тестов GREEN; dump-гейт 0/144 дивергентных чанков;
 материал-гейты PASS. vv-машина остаётся мёртвой веткой (vv=false).
+
+## cont-72 (8aac51d2 → e2e CRUS_BIOME_GRID=1): JFR-атрибуция окна; grid-backed биом-источник включён в основной E2E
+
+CI 41120286232 (4133933b, все 3 джобы GREEN) — первый полный JFR-профиль окна:
+- ГЕЙТЫ: BIOME PARITY OK (144 chunks identical) — 0 дивергентных чанков после
+  per-point реверта; surface/carvers/biome материал-гейты все PASS; gate verdict
+  PASS. blockdump divergent 78-92 строк — deco order noise (expected).
+- JFR (serial, профильные 149 сэмплов ~1.4s Java CPU на Worker #0): топ-1
+  бизнес-статья — Climate$RTree.findNearest0 (18) + moonrise$findNearest (8)
+  = 26 сэмплов (~19% профильного CPU); далее OreFeature place+doPlace (9),
+  NoiseStack$Perlin.get (5), StaticCache2D.<init> (3), LinearPalette.idFor (3).
+  Native wall Worker #0 ~1.32s (JNI compute). Parallel-окно подтверждает
+  (findNearest0 16 + moonrise 4 — снова топ-1).
+- ПОЧЕМУ RTree жив: CRUS_BIOME_GRID=1 (grid-backed NativeBiomeSource) был
+  включён ТОЛЬКО в ab263_ci.sh; основной e2e_ci.sh бутит vanilla preset
+  source → каждый point-запрос биома (surface topMaterial, carvers, deco)
+  идёт через vanilla RTree-поиск. ab_on гейты в этом же ране: 3 бута PASS,
+  BIOME PARITY OK 144/144, DBG mismatch 0 → grid-ответ корректен.
+- ФИКС: e2e_ci.sh boot добавляет CRUS_BIOME_GRID=${CRUS_BIOME_GRID:-1} —
+  основной E2E теперь отвечает на point-запросы биома из нативного грида
+  (JNI fillBiomes per-quart кэш), RTree остаётся только out-of-range
+  fallback. Ожидание: минус ~1.5-2мс/чанк Paper-side (оценка JFR cont-77),
+  e2e 44.28 → ~42-43мс; гейты должны остаться PASS.
+- Бенч-числа рана (PF=0): terrain 5.4-6.9 / surface 3.9-4.3 (surf_aux 0.8 +
+  surf_walk 3.1 — fused ore sweep держит aux ~0.8мс, было 2.64) / hood 5.0-5.9
+  hood_compute 6.5-7.4 ncomp 713-1247.
