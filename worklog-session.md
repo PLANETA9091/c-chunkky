@@ -4032,3 +4032,53 @@ CI 41098724590 (bd6ae8ae) — КОДЕК-ФИКС РАБОТАЕТ: ab_on био
 - ноль мисматчей + гейт падает -> vanilla live SLICE (createResolverForChunk
   DensityVolume-буферы) отвечает иначе, чем точечное разрешение — зеркалить слайс.
 Гейт временно non-fatal (diagnosis mode) чтобы e2e-тайминг-ланы этого рана отработали.
+
+CI 41102396199 (7fda9a8f): гейт non-fatal сработал, но падение уехало в material-гейт
+биом-пары (13 материалов — даунстрим той же дивергенции), а BIOME_DEBUG-лог ab_on-ноги
+ПОГИБ: run.out затирается следующим бутом (артефакт всегда несёт последнюю ногу).
+ВАЖНО: дивергенция ДЕТЕРМИНИРОВАНА — два рана дают идентичные хеши обеих сторон
+(ab_on grid -9172624211507561755 vs ab_off vanilla -1687907788776818907 на 1024,1022 и т.д.)
+— стабильный баг, не шум. run.out прошлого рана был ab_off-ногой (нет 'grid-backed' в логе
+— норма для ab_off).
+eb0afaec: (1) boot_run копирует per-leg run.out в ab263_out/run_<leg>.out (попадает в
+артефакт); (2) material-гейт biome-пары non-fatal в diagnosis mode — тайминг-ланы рана
+теперь доживают до конца.
+
+## cont-68 (35f62517): зелёный ран 41105141065 разобран — первые BIOME_DEBUG-улики + пуш диагностик
+
+Зелёный eb0afaec (41105141065, все 3 джобы success) дал ВЕСЬ артефакт: per-leg run.out,
+гейты, тайминги, JFR.
+
+BIOME_DEBUG (ab_on-нога, run_ab_on.out) — впервые пойманные мисматчи grid vs vanilla point:
+- chunk(1024,1024): quart y=-1 и y=0 (секции s=3yq3, s=4yq0) — grid=jungle, point=lush_caves;
+  quart y=2 (s=4yq2) — grid=lush_caves, point=jungle. Все 4x4 колонки чанка.
+- Паттерн = ВЕРТИКАЛЬНЫЙ СДВИГ биом-полос: grid(y) == point(y-2) (yq=2→point(0)=lush ✓;
+  yq=0/-1→point(-2/-3)=jungle согласуется с полосой lush_caves на yq 0..1).
+- В ворклоге eb0afaec гипотеза «ноль мисматчей» оказалась артефактом потерянного лога:
+  мисматчи ЕСТЬ (>30, лог молчит после #30). Бисекция «grid vs point» продолжается.
+- Гейт: 6 расходящихся чанков из 144 (1024,1022/1025/1031, 1027,1031 + соседи);
+  13 material-pair drift (азалии/дриплифы/мох — даунстрим lush_caves); 14 STRICT
+  материалов (DEEPSLATE/STONE/TUFF/CINNABAR/SULFUR/CLAY/MOSS_BLOCK/CAVE_AIR...).
+  Обе стороны детерминированы (два рана — идентичные хеши).
+
+Тайминги зелёного рана (PF auto=off на 2 ядрах):
+- honest e2e = 30.08ms/chunk (было 44.28) — gen=13.25 (native=13.01, layout=0.19,
+  beard=0.01) → Paper-side разрыв ~17мс = следующий фронт.
+- stage[terrain=6.012 surface=4.281 hood=1.747 hood_compute=2.065 ncomp=1212 park=0.070]
+  surf_aux=0.894 surf_walk=3.329 terr_sample=13.899 terr_walk=2.862.
+- PF=1 контроль: hood=0.136 ncomp=53 (prefetch-пул работает), но terrain 7.091 (+1.1)
+  → e2e примерно паритет, adaptive default остаётся.
+- JFR (deco=0!): Climate$RTree.findNearest0 12.0% + moonrise$findNearest 2.7% (par-ран)
+  — RTree всё ещё греется: это ГРИД-ФОЛБЭК на out-of-range квартах (features спрашивают
+  биом при qy>=80: s>=sections → vanilla RTree) — кандидат на дешёвый фикс (клампить s);
+  OreFeature.doPlace 7.3-8.6% при deco=0 — vanilla-хвост пайплайна Paper-side.
+
+Диагностический пуш 35f62517 (два инструмента, один CI-прогон):
+1. Юнит-тест fill263_grid_naive_parity_at_1024_1024: ТОЧНО падающий чанк; (a) пять
+   полей by0 vs собственный y чанка (проверка y-инвариантности pass-1), (b) depth
+   quart-volume vs per-point (ULP-локализация), (c) полный fill_biomes263 vs наивный
+   скалярный проход.
+2. FFI biome263Probe(ctx,qx,qy,qz,long[7]) — наивный point-проход всех шести полей +
+   preset leaf; Java-нога: на каждом мисматче TargetPoint (record-компоненты) +
+   nprobe в логе. ctxId протянут BiomeSwap.apply -> NativeBiomeSource (pool.firstCtx()).
+CI: run 41111275154 — читать cargo test + BIOME_DEBUG tp=/nprobe= строки.
