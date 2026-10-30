@@ -4241,3 +4241,30 @@ CI 41124116166 (8aac51d2, все 3 джобы GREEN):
   в этом ране; grid-эффект поедет в d39c3eca (fast path + grid).
 Root cause saga закрыта: «shape-баг» = координатная ошибка cx*64; механизм
 volume бит-точен; fast path обратно в продакшене с правильными координатами.
+
+## cont-74 (d39c3eca GREEN): CRUS_BIOME_GRID=1 в основном E2E — RTree ушёл из JFR-топа; gen 15.49 -> 12.91; e2e best 34.50, 48x48 25.05
+
+CI 41124519481 (d39c3eca, все 3 джобы GREEN; fast path + grid в основном E2E):
+- ГЕЙТЫ: все PASS + BIOME PARITY OK (144 chunks identical).
+- honest window serial (144): e2e 34.50-37.20 (best 34.50) vs 8aac51d2
+  34.86-37.44 (median 36.3) — Java-side RTree-экономика в шумах серий, но
+  честно видна в gen: 15.49 → 12.91 (−2.6мс) и native 15.19 → 12.63.
+- stage[]: hood 2.25-2.29 → 0.57-0.60; hood_compute 2.69-2.73 → 0.63-0.67;
+  ncomp 1179-1256 → 289 (−76%!). МЕХАНИЗМ: NativeBiomeSource.getNoiseBiome
+  заполняет грид на BIOMES-стадии (per-chunk JNI fill ~0.15мс), после чего
+  hood-филлы (compute_grid263) почти не нужны — grid-кэш отвечает.
+- 48x48 (2304): 26.36 → 25.05.
+- JFR: Climate$RTree.findNearest0 + moonrise$findNearest ИСЧЕЗЛИ из топа
+  (было 30 сэмплов). Новый Java-топ: OreFeature.doPlace (8), layoutBulk (6),
+  FeaturePlacer.place (5), GeodeFeature.place (4), NoiseStack$Perlin.get (4).
+- native-deco probe (CRUS_NATIVE_DECO=1): e2e=46.12 — DecoDriver с 3.2M ops
+  через JNI-границу медленнее vanilla deco; до включения нужен нативный
+  мастер-цикл (без per-op upcalls). deco остаётся 0 в проде.
+
+ИТОГ СЕССИИ (от старта биом-саги): e2e 44.28 → 34.50 best (−22%), 48x48
+30.21 → 25.05 (−17%), gen 18.02 → 12.91 (−28%), hood_compute 7.4 → 0.63
+(−91%), ncomp −76%, RTree-поиск биома устранён. Байтовая верификация и
+CI-only соблюдены; 3 пуша контента + 2 docs.
+СЛЕДУЮЩИЕ ФРОНТЫ: (1) Paper-side вне gen ~22мс (lighting/save/heightmap/
+palette/deco-vanilla); (2) terr_sample 16.2 внутри terrain; (3) surf_walk
+3.8-4.2; (4) native deco master-loop.
