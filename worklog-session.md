@@ -3534,3 +3534,41 @@ surface 6.7 + hood 5.0 + хвост) | Paper-side 24.5 = 55% e2e. Даже
 видит переходы статусов). hood_compute 5.0 на фронте волны —
 собственные вычисления гридов соседей, инhерентно для frontier; пул
 скрывает их только при свободных ядрах.
+
+## cont-67: FUSED ORE -70% (aux 2.64->0.80), parallel hood + strip walk, ГЛАВНОЕ: gen-parallelism=false в harness + 16% CPU
+
+CI 56ec6403 (fused ore sweep) ЗЕЛЁНЫЙ: surf_aux 2.643 -> 0.802
+(-70%, -1.84мс/филл) — warm toggle/mask 1 раз + один pointwise свип
+вместо 3 walks с 8 ходовыми 393КБ копиями. surface 6.62 -> 5.88.
+Юнит-тест ore_fused_bit_exact_vs_walks ok в CI, SIMD parity 0/25,
+server_fill 3.57 ≈ fill_chunk 4.02.
+
+7b3094fd (+parallel hood compute, adaptive PF) ЗЕЛЁНЫЙ: медленный
+раннер (всё x1.6), но hood_compute=8.13 > hood=6.28 — сумма потоков
+превысила wall = параллельные вычисления гридов РЕАЛЬНО перекрываются
+(2 треда). Недостающие волны-гриды считаются в hood-стадии (не во
+время terrain как prefetch-пул!) — скоуп-треды ширины fill_threads,
+вызывающий тред считает первую группу.
+
+634a3f7c (strip-parallel surface walk) ФЕЙЛ компиляции: move-замыкания
+в scope.spawn захватывают &local ПО ЗНАЧЕНИЮ (двигают сам local!) —
+фикс cf4bca97: pre-bound reference-биндинги (hm_ref/volume_ref/...);
+плюс JoinHandle::join(self) требует into_iter. Урок: в scope-замыканиях
+ссылки на некопируемые локалы binding-ать ЯВНО до замыкания.
+
+JFR-лана (ca82ac33, первый hot-methods окна): WatchdogThread 66%
+сэмплов (инфраструктурный спиннер — добавлен jfr_top.py с фильтром
+по тредам). РЕАЛЬНОЕ ОТКРЫТИЕ: на 4-ядерном раннере окно использует
+~16% CPU — e2e это ЛАТЕНТНОСТЬ, не CPU! В окне видна vanilla deco
+(OreFeature.doPlace, TreeFeature, Climate$RTree.findNearest ~6.4%) —
+декорации НЕ нативные в deco=0 окне.
+
+ГЛАВНОЕ: harness всю дорогу грузился с -Dpaper.chunk-system
+.gen-parallelism=false (однопоточная генерация!) — ради
+ДЕТЕРМИНИЗМА judge (RNG-потоки carver/deco, 0.556% vs 0.009%).
+Timing-лане детерминизм не нужен. Плагин потокобезопасен (per-ctx
+ReentrantLock+RR, BEARD_LOCK, BULK_LOCK). Пуш ea9a85df: CRUS_GEN_PARALLEL=1
+лane — Paper default parallel gen в timing-окне; ожидание e2e /2-4x
+на 4 ядрах. Плюс bench WAVE-фаза (100 свежих фронтир-чанков,
+center parked до wall, параллельные hood-вычисления на wall) —
+раннер-стабильный стенд-ин для окна.
