@@ -3498,3 +3498,39 @@ noise-филла vein_a/vein_b в mask, xz_scale=4 -> без решётчато�
 шаринга) — то fusion 3 pointwise-проходов мало даст, копать в noise;
 если walk — правила поверхности. Paper-side (e2e-gen = 44.4 в этом
 ране) остаётся крупнейшим блоком, вне натива.
+
+## cont-66: SPLIT ОТВЕТИЛ (aux=2.6 walk=3.9), PF A/B — пул проигрывает на 2 ядрах, adaptive; fused ore sweep в CI
+
+CI 4a990054 (зелёный). TIMING-ОКНО: e2e=47.65 gen=21.33 native=21.14
+| stage[terrain=5.510 surface=6.621 hood=4.278 hood_compute=4.259
+ncomp=684 park=0.051] surf_aux=2.643 surf_walk=3.943. Клон-фикс
+дал surface 8.0->6.6. Бенч: server_fill 4.49, fill_chunk 4.86,
+SIMD parity 0/25.
+
+SURFACE SPLIT: aux (3 ore sample_volume + csl) = 2.64, walk (rules
+цикл) = 3.94 — walk теперь главный в surface. Fused ore sweep (пуш
+56ec6403, CI в полёте): warm toggle/mask кэшей 1 раз + ОДИН pointwise
+свип на 3 выхода — 8 ходовых 393КБ cache-копий и 3 прохода заменены
+одним; бит-точность pinована юнит-тестом ore_fused_bit_exact_vs_walks
+(реальный билдер, CI-сид 3257840388504953787, объёмы 16x64/128/384,
+границы y=0/y=50 и железная полоса [-60,-8)); kill-switch
+CRUS_ORE_FUSE=0. Семантика скопирована 1:1: RangeChoice select
+!(v>=min && v<max) f32, edge_term порядок операций, ConstAdd/Neg-Sub,
+mth_clamp if-цепочка, y-градиент через ту же compute-формулу
+(factor=8126/8126=1.0 точно).
+
+PF A/B (один раннер, минуты между окнами): PF=1 e2e=47.65
+gen=21.33 terrain=5.510 hood=4.278 ncomp=684 || PF=0 e2e=44.28
+gen=19.79 terrain=4.392 hood=5.031 ncomp=1187. ВЫВОД: на 2-ядрах
+воркер крадёт ~20% CPU у serial fill (terrain +1.12) ради экономии
+0.75 в hood — чистый убыток ~7.7% e2e. ПУШ 34460936: adaptive
+default — available_parallelism > 2 (CRUS_GRID_PF=0/1 force). На
+реальном железе пул остаётся выигрышем.
+
+СТРАТЕГИЧЕСКАЯ КАРТИНА (PF=0 окно): native 19.5 (terrain 4.4 +
+surface 6.7 + hood 5.0 + хвост) | Paper-side 24.5 = 55% e2e. Даже
+нулевой натив не даёт 1мс — Paper-side (light/диспетч/serialization)
+становится главным фронтом; нужен status-level проф окна (NMS bridge
+видит переходы статусов). hood_compute 5.0 на фронте волны —
+собственные вычисления гридов соседей, инhерентно для frontier; пул
+скрывает их только при свободных ядрах.
