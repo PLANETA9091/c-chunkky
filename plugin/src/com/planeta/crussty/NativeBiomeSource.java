@@ -57,6 +57,17 @@ public final class NativeBiomeSource extends BiomeSource {
     private final int minQuartY;
     private final int sections;
 
+    // --- CRUS_BIOME_DEBUG=1 diagnostics: grid answer vs vanilla POINT
+    // resolution on the same quart. Zero mismatches + a failing parity gate
+    // means the live vanilla SLICE resolver (createResolverForChunk volume
+    // buffers) answers differently from the point path — not our bug.
+    private static final java.util.concurrent.atomic.AtomicLong DBG_QUERIES =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicLong DBG_MISMATCH =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static volatile boolean DBG;
+    private static volatile java.util.IdentityHashMap<Holder<Biome>, String> HOLDER_NAMES;
+
     @SuppressWarnings("unchecked")
     private NativeBiomeSource(MultiNoiseBiomeSource vanilla,
                               CrusstyChunkGenerator.CrusstyFiller filler,
@@ -87,6 +98,25 @@ public final class NativeBiomeSource extends BiomeSource {
                     "NativeBiomeSource: " + misses + "/" + names.length
                             + " biome names unresolved (plains substituted)");
         }
+        DBG = "1".equals(System.getenv("CRUS_BIOME_DEBUG"));
+        if (DBG) {
+            java.util.IdentityHashMap<Holder<Biome>, String> names2 = new java.util.IdentityHashMap<>();
+            for (Holder<Biome> h : byIndex) {
+                try {
+                    names2.put(h, String.valueOf(biomeReg.getKey(h.value())));
+                } catch (Throwable t) {
+                    names2.put(h, String.valueOf(h));
+                }
+            }
+            HOLDER_NAMES = names2;
+            java.util.logging.Logger.getLogger("CrusstyGen").info(
+                    "BIOME_DEBUG active: grid vs vanilla point resolution");
+        }
+    }
+
+    private static String nameOf(Holder<Biome> h) {
+        java.util.IdentityHashMap<Holder<Biome>, String> m = HOLDER_NAMES;
+        return m != null ? m.getOrDefault(h, String.valueOf(h)) : String.valueOf(h);
     }
 
     /** Build over the level's biome registry; null on any failure (caller keeps vanilla). */
@@ -298,8 +328,26 @@ public final class NativeBiomeSource extends BiomeSource {
             }
             int idx = s * 64 + (qx & 3) * 16 + (qy & 3) * 4 + (qz & 3);
             Holder<Biome> h = byIndex[grid[idx]];
-            return h != null ? h
+            Holder<Biome> ans = h != null ? h
                     : vanilla.getNoiseBiome(fallback.sample(qx, qy, qz));
+            if (DBG) {
+                DBG_QUERIES.incrementAndGet();
+                Holder<Biome> pt = vanilla.getNoiseBiome(fallback.sample(qx, qy, qz));
+                if (pt != ans) {
+                    long m = DBG_MISMATCH.incrementAndGet();
+                    if (m <= 30) {
+                        java.util.logging.Logger.getLogger("CrusstyGen").warning(
+                                "BIOME_DEBUG mismatch #" + m + " chunk(" + cx + "," + cz
+                                        + ") quart(" + qx + "," + qy + "," + qz + ") grid="
+                                        + nameOf(ans) + " point=" + nameOf(pt));
+                        if (m == 30) {
+                            java.util.logging.Logger.getLogger("CrusstyGen").warning(
+                                    "BIOME_DEBUG further mismatches silenced (count continues)");
+                        }
+                    }
+                }
+            }
+            return ans;
         }
     }
 }

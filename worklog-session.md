@@ -3978,3 +3978,45 @@ createResolver/createResolverForChunk overrides, Registry.get -> Optional<Holder
 гейт NativeBiomeSource; honest window timing-ланы -> e2e-дельта vs 22b8c8cf (36.41, ожидание -2..-2.7
 на медленном раннере); GenStats biome_fill n>0. Дальше по фронтам: par4-дефолт флип (3 зелёных
 подряд уже есть), DecoDriver разгон (+12мс на медленном), jfr+par4 комбинация для spread-картины.
+
+## cont-80 (в процессе): CCE-диагноз ab_biome — NativeBiomeSource.codec() убивал бут; фикс = собственный кодек crussty:grid
+
+Ран 41074814781/41075573643 (a66aef3b..84e802a3): ВСЕ integration упали на биом-лане:
+ab_on (CRUS_BIOME_GRID=1) не увидел "Done (" за 300с. Полный run.out (в артефакте!) показал
+точную картину: swap ОК ("grid-backed native biome source active (56 biomes, sections=24)"),
+затем 15:01:49 "Encountered an unexpected exception":
+java.lang.ClassCastException: NativeBiomeSource cannot be cast to MultiNoiseBiomeSource
+  at initServer(370) -> saveEverything -> ServerLevel.save -> saveLevelData ->
+  SavedDataStorage.encodeUnchecked -> KeyDispatchCodec.encode(71) -> MapEncoder$1.encode(26)
+Механика: свежий мир -> стартовый сейв WorldGenSettings (в 26.3 это SavedData) -> dispatch
+биом-сорса -> codec() вернул raw MultiNoiseBiomeSource.CODEC -> RecordCodecBuilder-геттеры
+typed под MultiNoiseBiomeSource -> CCE на первом level.dat. Сервер умирал на буте; tail-30
+харнесса показывал только shutdown-трейс (хвост), реальная ошибка была выше окна.
+
+ФИКС (fb757535 + bd6ae8ae):
+- NativeBiomeSource.PresetCodec extends MapCodec<BiomeSource>: encode -> делегация на held
+  vanilla-инстанс (JSON бит-равен зелёным ногам), decode -> MultiNoiseBiomeSource.CODEC
+  (reload строит preset-сорс; BiomeSwap пере-wraps на world load). Сигнатуры DFU сверены
+  по байткоду локального DFU 8.0.16: decode(DynamicOps,MapLike)->DataResult, RecordBuilder-encode.
+- Регистрация в BuiltInRegistries.BIOME_SOURCE под "crussty:grid" рефлексией:
+  unfreeze() -> Registry.register(reg, Identifier, codec) -> freeze(), fallback-цепочки
+  (Method unfreeze/freeze -> boolean frozen field; Identifier.fromNamespaceAndPath -> parse),
+  полное логирование. Любой фейл -> create() возвращает null -> vanilla-сорс (не краш).
+- compile-фикс bd6ae8ae: import MapCodec + Method-typed unfreeze/freeze.
+- ci: javap-лан += MappedRegistry/BuiltInRegistries/Registry (грунтовка рефлексии).
+- harness: BOOT FAILED теперь печатает ПЕРВОЕ фатальное исключение (grep -m2 -A24).
+
+CI (41098724590, bd6ae8ae): plugin ЗЕЛЁНАЯ (компаньон-проход против 26.3 jar принял PresetCodec).
+native/integration — в полёте, сюда вписать: [CI-RESULTS]
+
+ПЛАН ФРОНТОВ ПОСЛЕ ПАРИТЕТА (приоритет по вкладу в e2e):
+1. CRUS_BIOME_GRID=1 в honest-window (A/B лана biome-grid vs off) — ожидание -2..-2.7мс e2e
+   (RTree 1.4 + NoiseStack-климат 0.7-1 замещаются JNI-филлом ~0.15-0.3мс; gen= не меняется,
+   сужается разрыв e2e-gen). После зелёного — флип дефолта.
+2. par4-дефолт флип: 4-й зелёный в этом ране -> workers=4 + gen-parallelism дефолтом
+   ТОЛЬКО для e2e-лан (judge остаются serial); harness уже сбрасывает pin после ланы (cont-72).
+3. DecoDriver: +12мс vs vanilla deco — op-by-op setBlock + per-feature JNI; разгон =
+   батч-запись опов нативно (нужен blockstate-пул и heightmap-updates), это stage F2.
+4. aquifer-сплит по JFR-стекам (NoiseStack$Perlin 0.2-0.7мс) — атрибутировать и забирать.
+5. surf_walk (3.94мс на медленном раннере): rules loop с xz/y-кэшами уже есть; следующий
+   шаг — inline горячих правил и column-major порядок для кэш-локальности.
