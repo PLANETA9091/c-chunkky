@@ -4268,3 +4268,23 @@ CI-only соблюдены; 3 пуша контента + 2 docs.
 СЛЕДУЮЩИЕ ФРОНТЫ: (1) Paper-side вне gen ~22мс (lighting/save/heightmap/
 palette/deco-vanilla); (2) terr_sample 16.2 внутри terrain; (3) surf_walk
 3.8-4.2; (4) native deco master-loop.
+
+## cont-75 (b2d1676e → par4 default in the timing lane): Paper-side параллелится; серийный e2e уходит к 29.4
+
+Данные двух ранов (8aac51d2 30.61 / d39c3eca 29.44, обе par4-ланы зелёные):
+par4 (CRUS_GEN_PARALLEL=1 + CRUS_WORKER_THREADS=4) даёт лучший серийный
+12x12 e2e 29.4-30.6 против серийных 34.50-37.20 — статусы paper
+(deco/light/save) параллелятся на 4 pinned воркерах, при том что native
+fill деградирует до gen~40 под CPU-конкуренцией 2 физических ядер.
+48x48 остаётся серийным (25.05 — амортизированная метрика, ramp/статусы
+уже размазаны). Пин лана-локален: e2e_ci.sh сбрасывает worker-threads=-1
+при boot без явного CRUS_WORKER_THREADS.
+Правка: ci.yml шаг «E2E per-chunk timing» получает CRUS_GEN_PARALLEL=1
+CRUS_WORKER_THREADS=4 (переименован в par4). Ожидание от рана: timing-лана
+e2e ~29.4-30.6, остальные ланы без изменений.
+СЛЕДУЮЩИЕ ФРОНТЫ: (1) paper-side вне gen при par4: e2e 29.44 - gen_base
+12.91 = ~16.5мс (deco vanilla ~2-4, lighting starlight, convert, save —
+JFR Java-CPU Worker#0 только ~9мс/чанк, остальное ожидание/I-O);
+(2) terr_sample 16.2 (сумма по тредам) внутри terrain 7.0 wall;
+(3) surf_walk 3.8-4.2; (4) native deco master-loop (deco=1 probe 46.12 —
+3.2M ops через JNI-границу).

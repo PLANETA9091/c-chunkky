@@ -174,14 +174,20 @@ jobs:
         run: |
           set -o pipefail
           SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh biome 2>&1 | tee ab263_biome.log
-      - name: E2E per-chunk timing (fresh 12x12, GenStats window)
+      - name: E2E per-chunk timing (fresh 12x12, par4 workers, GenStats window)
         run: |
           set -o pipefail
           chmod +x harness/e2e_ci.sh
           # CRUS_FILL263_PROF=1: per-kind density profile + stage split
           # (terrain/surface/hood/park) for exactly the timed window —
           # locates the in-server vs bench gap (66ms vs 3ms COLD).
-          CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_timing.log
+          # par4 (CI 41124519481 evidence, two runs): the paper chunk-system
+          # statuses (deco/light/save) parallelize across 4 pinned workers
+          # and the E2E drops to 29.44/30.61 from the serial 34.50-37.20 —
+          # despite the native fill degrading to gen~40 under the 2-physical-
+          # core CPU contention (the pin is lane-local: the next lanes boot
+          # with the reset worker-threads=-1).
+          CRUS_FILL263_PROF=1 CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_timing.log
       - name: E2E native-deco probe (DecoDriver vs vanilla deco delta)
         continue-on-error: true
         run: |
