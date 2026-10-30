@@ -4082,3 +4082,47 @@ BIOME_DEBUG (ab_on-нога, run_ab_on.out) — впервые пойманны�
    preset leaf; Java-нога: на каждом мисматче TargetPoint (record-компоненты) +
    nprobe в логе. ctxId протянут BiomeSwap.apply -> NativeBiomeSource (pool.firstCtx()).
 CI: run 41111275154 — читать cargo test + BIOME_DEBUG tp=/nprobe= строки.
+
+## cont-69 (35f62517 → af9a142a): декомпил вскрыл семантику live-пайплайна; найден структурный баг volume-филла
+
+Декомпил reference/dec263 (реальный 26.3):
+- Climate.Sampler.sample: blockX/Y/Z = QuartPos.toBlock(quart) — все шесть полей на
+  блочных координатах кварта; TargetPoint = 6 полей + toParameterArray добавляет 0L ✓.
+- ChunkAccess.fillBiomesFromNoise: секции по sectionY, внутри x→y→z (startZ=1 после
+  первого) — порядок walk совпадает с нативным; координаты АБСОЛЮТНЫЕ кварты ✓.
+- ГЛАВНОЕ: ChunkGenerator.doCreateBiomes создаёт Climate.Sampler с
+  SamplerContext.enableCaches().useBufferArena(pool) и зовёт
+  MultiNoiseBiomeSource.createResolverForChunk(sampler, minQuartX/Y/Z, 4, 96, 4):
+  ШЕСТЬ DensityBuffer'ов заполняются через sampler.X().sampleVolume(buffer, volume) —
+  VOLUME-путь! Ответ кварта = Climate.target(temperature.get(index), ...) из буферов.
+  Т.е. vanilla-live биомы = ЗНАЧЕНИЯ VOLUME-ЯДЕР, не point.
+- PerlinNoise.addToVolume (26.3): разложенный градиент dotXz(g,rx,rz) + gradY(g)*ry —
+  ДРУГАЯ ассоциация f32-суммы, чем скалярный NoiseGradients.dot (gx*rx+gy*ry+gz*rz).
+  Это не 1-ULP шум уровня "где-то", это системная разница volume-vs-point семантики.
+  ShiftedXzSampler.sampleVolume: shift-дети через addToVolume, внешний noise.get —
+  скалярный в обоих путях ✓ нативный ShiftedXz-каркас верный, скалярный внешний get.
+- SamplerContext.sampleValueCached: point-запросы читают cell.buffer, если volume
+  тёплый — гибрид; в нашей замене createResolverForChunk ванильные volume-филлы не
+  бегут, поэтому fallback.sample = чистый point ✓ BIOME_DEBUG-референс корректен.
+
+CI 41111275154 (35f62517, native FAILED — именно диагностика сработала):
+- fill263_grid_naive_parity_at_1024_1024: depth point-vs-volume chunk (1024,1024)
+  section 0 quart (0,0,0): point 0.98004675 vs volume 1.0593824 — РАЗНИЦА ~0.08,
+  НЕ 1 ULP! Структурный баг volume-филла depth-дерева на этом чанке ((17,-5) бит-равен).
+  y-инвариантность пяти полей (by0 vs own-y) — подтверждена.
+- Никаких tp=/nprobe= строк: нативная джоба умерла на cargo test до ab-ланей.
+
+af9a142a:
+1. ctx.vv (SamplerCtx263) + perlin263_fill_col_vv / stack263_fill_col_vv /
+   perlin263_get_vv — точное зеркало PerlinNoise.addToVolume (dotXz+gradY*ry, те же
+   ry/sy-семантики smеar, тот же p_adj-каркас); диспетчеризация в sample_volume_inner
+   (2D-шорткат и 3D-колонки) по ctx.vv; terrain не тронут (vv=false).
+2. fill_biomes263 переписан как зеркало createResolverForChunk: шесть volume-филлов
+   4x96x4 с ctx.vv=true (duality-safe fallback = per-point scalar), walk-порядок и
+   quantize/find_value без изменений.
+3. (1024,1024) naive-паритет переведён в non-fatal диагностик (счёт + eprintln),
+   добавлен depth_tree_volume_point_bisector_1024_1024: обход дерева depth, на каждом
+   узле point vs 1x1x1 volume (vv=off — изолирует СТРУКТУРУ), отчёт BISECT DIVERGE
+   path/point/vol1x1; контроль (17,-5) должен быть 0.
+Ожидание от рана: bisector назовёт узел-виновник; dump-гейт покажет, чинит ли vv
+6/144 чанков; probe tp-vs-nprobe подтвердит/опровергнет point-паритет.
