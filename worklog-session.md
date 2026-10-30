@@ -3670,3 +3670,25 @@ par4 может помочь ТОЛЬКО если узкое место — н�
 сохранном gen span; выигрыш возможен только в ramp. Если par4 ≈
 timing — ген насыщает ядра, и единственные фронты: (1) общий CPU
 чанка (натив), (2) ramp (Paper-внутреннее), (3) метрика окна.
+
+
+## cont-71: 701659b9 ЗЕЛЁНЫЙ — атрибуция чистая; mspt avg=355ms/тик; gen = ОДИН воркер в ОБЕИХ ланах
+
+Новая JFR-атрибуция (быстрый раннер, окно 4.9s e2e=33.9):
+- execution: Worker #0 91.5% java-CPU (deco OreFeature/RTree + layoutBulk
+  + PalettedContainer), Server thread 7.7% (ChunkFullTask.run! UpgradeData,
+  NaturalSpawner.createState, callEntitiesLoadEvent — full-status
+  завершения на ГЛАВНОМ треде, но дёшево ~0.1s/окно).
+- native: Worker #0 0.96-1.04s (все JNI-филлы), #1-3 ОТСУТСТВУЮТ в ОБЕИХ
+  ланах (serial И gen-parallelism=true) — gen-пул = 1 тред (auto<=3phys).
+- parks: Server thread 1009ms/37 (avg 27ms — тиковый бит,
+  recordTaskExecutionTimeWhileWaiting); IO worker 6.8s idle.
+- МSPT (последние 5s = окно): avg=355ms/тик min=1.7 max=6305 — главный
+  тред блокируется внутри тиков на чанк-таски; 4.9s span ≈ 14 тиков.
+- stage (быстрый раннер): terrain=5.37 surface=3.12 (walk 2.45) hood=3.83
+  ncomp=767; par e2e=32.51 ≈ timing 33.86 — параллельный gen снова 0%.
+
+ВЫВОД: e2e-gen gap (~19ms/чанк) = ramp (сателлиты, тик-бит) +
+координация, НЕ server-thread CPU. par4 не сожмёт gen span (4 филла x
+ширина 1 = та же пропускная), но может сжать ramp (сателлиты на 4
+воркерах) — вердикт в eeef61e2. ramp-сплит придёт в dad357d7.
