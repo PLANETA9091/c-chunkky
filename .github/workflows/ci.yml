@@ -216,8 +216,10 @@ jobs:
           # CRUS_JFR=1 wraps EXACTLY the timed window in a JFR profile
           # recording and prints jfr view hot-methods — the first method-level
           # attribution of the Paper-side span (scheduling/light/serialization) that
-          # the honest e2e number lumps together.
-          CRUS_JFR=1 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_jfr.log
+          # the honest e2e number lumps together. N=15 -> 16x16 = 256 chunks:
+          # ~230 profile samples (vs ~130 at 144 chunks) for a stable
+          # deco/light/convert/save split of the post-gen span.
+          N=15 CRUS_JFR=1 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_jfr.log
       - name: E2E parallel-gen probe (Paper default chunk-system parallelism)
         continue-on-error: true
         run: |
