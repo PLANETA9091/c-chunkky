@@ -4306,3 +4306,26 @@ merge per run, лямбда-аккумуляция атомарна по клю�
 (подозреваемые: ore veins через per-position биом-запросы, trees).
 Deco-фронт остаётся неактивным в проде (CRUS_NATIVE_DECO=0); это диагностический
 слой для решения «чинить native deco или закрывать фронт».
+
+## cont-78 (3c3b76ef GREEN): par4 timing-дефолт подтверждён — e2e 27.65 (−38% от базлайна сессии), 48x48 23.81
+
+CI 41128509377 (3c3b76ef, все 3 джобы GREEN):
+- ГЕЙТЫ: все PASS + BIOME PARITY OK (144 chunks identical).
+- TIMING-ЛАНА (par4, главная серийная метрика): e2e = 27.65мс/чанк
+  (gen=35.84 — ожидаемая деградация нативного филла под CPU-конкуренцией
+  4 воркеров на 2 физ. ядрах; paper-side статусы параллелятся и экономят
+  больше). vs серийные 34.50-37.20 d39c3eca и базлайн 44.28.
+- 48x48 (2304, серийный): e2e = 23.81 (gen=12.33) — лучший амортизированный
+  результат (было 30.21 базлайн, 25.05 d39c3eca).
+- Остальные ланы (serial boots): deco=1 41.19 / no-beard 33.44 / PF=1 32.39 /
+  par-gen 32.48 / JFR 32.75-32.70 — согласованы с d39c3eca в пределах шума.
+- JFR: RTree отсутствует ✓; новый топ-1 OreFeature.doPlace (14, 10.85%) —
+  vanilla deco; layoutBulk 7; FeaturePlacer 6; palette (PalettedContainer+
+  LinearPalette) 9; BiomeManager.getFiddledDistance 4.
+ИТОГ ОТ СТАРТА БИОМ-САГИ: серийная главная метрика 44.28 → 27.65 (−38%);
+48x48 30.21 → 23.81 (−21%); gen-серийный 18.02 → 12.91 (−28%);
+hood_compute 7.4 → 0.63 (−91%); RTree устранён.
+СЛЕДУЮЩИЕ ФРОНТЫ: (1) vanilla deco (OreFeature 14 сэмплов) — native deco
+master-loop или OTel-breakdown (run-top уже в коде); (2) paper-side остаток
+~16мс при par4 (lighting/convert/save — 16x16 JFR в очереди); (3) native
+terr_sample/surf_walk wall — плотны на 2 ядрах.
