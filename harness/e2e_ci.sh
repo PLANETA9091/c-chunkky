@@ -188,7 +188,12 @@ JC=""; JPID=""; JFR_FILE=""
 if [ "${CRUS_JFR:-0}" = "1" ]; then
   JC="$(dirname "$JAVA_BIN")/jcmd"; [ -x "$JC" ] || JC=jcmd
   JPID="$(cat "$SRV/server.pid")"
-  JFR_FILE="$ROOT/e2e263_window.jfr"
+  # distinct recording name per lane so parallel-run artifacts don't overwrite
+  if [ "${CRUS_GEN_PARALLEL:-0}" = "1" ]; then
+    JFR_FILE="$ROOT/e2e263_window_par.jfr"
+  else
+    JFR_FILE="$ROOT/e2e263_window.jfr"
+  fi
   rm -f "$JFR_FILE"
   "$JC" "$JPID" JFR.configure stackdepth=128 >/dev/null 2>&1 || true
   "$JC" "$JPID" JFR.start name=win settings=profile filename="$JFR_FILE" >/dev/null 2>&1 \
