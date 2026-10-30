@@ -3844,13 +3844,13 @@ cancel-in-progress):
 4. 14b1b853 depth quart-volume fast path (guard + юнит-тест)
 
 ВЕРДИКТЫ (заполнить по логам):
-- [ ] native: cargo test зелёный (вкл. depth_quart_volume_bit_exact_vs_points)
-- [ ] timing (PF=OFF дефолт): e2e=__ gen=__ terrain=__ hood=__ ncomp=__
-- [ ] pf1 (PF=ON): e2e=__ — A/B сохранён
-- [ ] par4: ЗЕЛЁНЫЙ/КРАШ — вердикт гонки-фикса
-- [ ] big 48x48: e2e/chunk=__ амортизированно (первый!)
-- [ ] farprobe: D=8192 чистый вердикт
-- [ ] hood_compute/fill: __ (ожидалось ~2-2.5 против 5.16)
+- [x] native: cargo test зелёный — 77 passed, 0 failed (depth_quart_volume_bit_exact_vs_points + ore_fused_bit_exact_vs_walks)
+- [x] timing (PF=OFF дефолт): e2e=36.80 gen=16.22 terrain=7.365 hood=2.456 hood_compute=2.922 ncomp=1194 (медленный раннер ~1.7x vs c0e33eb9 — честны только отношения)
+- [x] pf1 (PF=ON): e2e=34.92 terrain=8.208 hood=0.255 ncomp=81 — пул убрал ВСЕ hood-computes (1194->81), но terrain +0.84; ON выиграл 1.9мс в ЭТОМ ране (базлайн: OFF выигрывал 4.0) — вердикт зависит от загрузки ранта, дефолт OFF, лана смотрит обе стороны
+- [x] par4: ЗЕЛЁНЫЙ второй ран подряд — e2e=31.07 лучший в ране (отношение к timing 0.844 vs 0.827 в базлайне — стабильные ~16%), гонка layoutBulk побеждена
+- [x] big 48x48: снова timeout inside=0/2304 — КОРНЕВАЯ ПРИЧИНА найдена уже после: vanilla forceload add > 256 чанков падает молча (22b8c8cf режет окно на тайлы; вердикт — следующий ран с фиксом)
+- [x] farprobe: ВСЕ ДИСТАНЦИИ OK (D=64..1024..8192..16384..32768..61440) — клифф D=8192 был шумом утечки par4 (гипотеза cont-72 подтверждена)
+- [x] hood_compute: 2.922 (ожидалось ~2-2.5 против 5.16 — ПОПАДАНИЕ; отношение к gen 0.180 vs 0.375 базлайна = -52%); hood wall 2.456 vs 4.370
 
 ## cont-77: базлайн 7fe1e722 разобран — par4-гонка ПОБЕЖДЕНА (e2e=27.09 лучший в ране), big-лана: КОРНЕВАЯ ПРИЧИНА найдена — vanilla forceload add > 256 чанков падает МОЛЧА; фикс-тайлы (22b8c8cf); JFR-атрибуция Paper-side
 
@@ -3893,3 +3893,52 @@ JFR-атрибуция Paper-side (окно jfr-ланы 144 чанков, span=
 СЛЕДУЮЩИЕ ФРОНТЫ по атрибуции: (1) big-лана вернётся с фикс-тайлами — первый амортизированный
 номер; (2) native deco дефолтом ПОСЛЕ разгона DecoDriver (снимет OreFeature+FeaturePlacer+
 часть RTree ~ 2-2.5мс); (3) aquifer-сплит по JFR-стекам; (4) RTree-запросы — кэш/пакетирование.
+
+## cont-78: ран 7eb51d9b зелёный — все 4 консолидированных изменения подтверждены; depth fast path hood_compute -52%; farprobe чист; далее: big-фикс тайлы, NativeBiomeSource (CRUS_BIOME_GRID), A/B biome лана
+
+ВЕРДИКТЫ 41064885616 (медленный раннер ~1.7x vs c0e33eb9 — честны только внутри-рановые отношения):
+- depth quart-volume fast path (14b1b853): hood_compute 5.416 -> 2.922 (отношение к gen 0.375 -> 0.180,
+  -52%); hood wall 4.370 -> 2.456; ncomp не падает (1194) — каждый compute просто дешевле. Тест
+  depth_quart_volume_bit_exact_vs_points зелёный. Преп-регистрация cont-75 ПОПАЛА (ожидалось 2-2.5).
+- PF A/B разворот: timing(OFF) 36.80 vs pf1(ON) 34.92 — ON выиграл 1.9мс в этом ране; пул убирает
+  ВСЕ hood-computes (ncomp 1194 -> 81, hood wall 0.255) ценой terrain +0.84 (8.21 vs 7.37). После
+  depth fast path пул стал дешевле по делу (hoist почти нечего), но и красть у стрипов стал меньше.
+  Вердикт зависит от загрузки рана — дефолт OFF остаётся, pf-лана смотрит ON-сторону каждый ран.
+- par4: 31.07 (лучший в ране, отношение к timing 0.844; базлайн 0.827) — второй зелёный ран подряд,
+  гонка layoutBulk закрыта. ГОТОВО К ФЛИПУ: workers=4 + gen-parallelism дефолтом для E2E-лан
+  (judge/parity ланы остаются serial) — следующим шагом, если третий ран тоже зелёный.
+- big 48x48: timeout inside=0/2304 — причина НЕ воркеры: vanilla /forceload add > 256 чанков
+  молча отклоняет 2304-чанковую команду (окно armed, чанки не форсируются). ФИКС 22b8c8cf:
+  forceload окна на тайлы <=256 чанков, клампнутые к прямоугольнику; 12x12 ланы не тронуты.
+- farprobe: D=64/1024/8192/16384/32768/61440 ВСЕ OK — «клифф D=8192» был чистым шумом
+  4-воркерной утечки cont-72; far-координатной деградации нативной генерации НЕТ.
+- deco-лана: 49.15 vs timing 36.80 (+12.4) — DecoDriver на медленном раннере хуже vanilla
+  на ~1/3 e2e; нативный deco остаётся пробой, не дефолтом (фронт: разгон DecoDriver).
+
+JFR-атрибуция Paper-side (cont-77, окна jfr/jfr_par, полные стеки из e2e263_window*.jfr):
+- ~60% Java-CPU воркера в окне = vanilla ДЕКОРАЦИИ: OreFeature 23 + FeaturePlacer 22 + биом-чеки
+  placeWithBiomeCheck + GeodeFeature (полные стеки: всё из addVanillaDecorations/applyBiomeDecoration)
+- RTree.findNearest0/moonrise$findNearest 20 сэмплов: ЧАСТЬ из createResolverForChunk —
+  vanilla createBiomes (ChunkStatusTasks.generateBiomes) всё ещё считает климат-сплайны+шум
+  (NoiseStack$Perlin через SliceFunction/SamplerContext.sampleVolumeCached) в Яве, ПОТОМ
+  результат живёт в секциях; JNI fillBiomes в рантайме НЕ вызывается (biome_fill n=0)
+- LinearPalette.idFor 3 из OreFeature.doPlace setBlockState — vanilla руды пишут блоки Явой
+
+НОВОЕ ЭТОЙ СЕССИИ (пуши):
+- 22b8c8cf fix(harness): big-лана — forceload тайлы <=256 чанков
+- cf2fae9e docs: cont-77 (базлайн 7fe1e722 + JFR-атрибуция)
+- 2b1ea931/1287b161 ci: javap-дамп NMS-сигнатур BiomeSource/MultiNoiseBiomeSource/Climate$Sampler/
+  BiomeResolver/DensityVolume — 26.3 API объёмный: createResolverForChunk(Sampler,6xint)->BiomeResolver,
+  BiomeResolver = {getNoiseBiome(int,int,int), default getBiomesWithin}
+- 964fc6f5 perf(biomes): NativeBiomeSource (CRUS_BIOME_GRID=1 opt-in) — BIOMES-статус отвечает из
+  JNI-кварт-сетки fillBiomes (layout out[s*64+x*16+y*4+z]); vanilla preset остаётся fallback
+  (out-of-range -> getNoiseBiome(TargetPoint)) + codec() (level.dat round-trip = vanilla);
+  пер-чанковая сетка в резолвере (volatile публикация), первый запрос чанка = 1 JNI-филл ~0.15мс,
+  остальные 1535 запросов = чтения массива. Ожидание: -1.5..-2мс/чанк Paper-side.
+- 7127c808 ci: A/B biome лана — grid-backed vs vanilla preset, ТОЧНЫЙ biomedump-гейт (биом-филлы
+  чистые f(cx,cz) — без deco-недетерминизма); biomedump добавлен в обе ноги всех ab-пар.
+
+ОЖИДАНИЯ СЛЕДУЮЩИХ РАНОВ (964fc6f5/7127c808): native/plugin джобы компилируют NativeBiomeSource
+против реального 26.3 jar (первая проверка API-догадок: BiomeSource protected ctor, codec()
+raw-cast, collectPossibleBiomes из byIndex); ab_biome лана — BIOME PARITY OK или точный диф;
+big-лана — первый амортизированный 48x48 номер (~13-15 e2e/chunk ожидание).
