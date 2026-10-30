@@ -176,6 +176,19 @@ done
 # and poll granularity; harness wall is kept for the dispatch overhead view.
 $RCON "crusgenstats window $RX $RZ $N" >/dev/null
 target=$(( (N + 1) * (N + 1) ))
+# Optional JFR around EXACTLY the window (CRUS_JFR=1): ExecutionSample 10ms
+# profile — hot-methods of the window = the Paper-side split (scheduling,
+# light, serialization, JNI) the honest e2e number lumps together.
+JC=""; JPID=""; JFR_FILE=""
+if [ "${CRUS_JFR:-0}" = "1" ]; then
+  JC="$(dirname "$JAVA_BIN")/jcmd"; [ -x "$JC" ] || JC=jcmd
+  JPID="$(cat "$SRV/server.pid")"
+  JFR_FILE="$ROOT/e2e263_window.jfr"
+  rm -f "$JFR_FILE"
+  "$JC" "$JPID" JFR.configure stackdepth=128 >/dev/null 2>&1 || true
+  "$JC" "$JPID" JFR.start name=win settings=profile filename="$JFR_FILE" >/dev/null 2>&1 \
+    && echo "JFR started (profile, window slice)" || echo "JFR.start FAILED"
+fi
 t0=$(date +%s.%N)
 $RCON "forceload add $((RX * 16)) $((RZ * 16)) $(((RX + N) * 16 + 15)) $(((RZ + N) * 16 + 15))" >/dev/null
 done=0
@@ -187,6 +200,12 @@ for i in $(seq 1 6000); do
   sleep 0.05
 done
 t1=$(date +%s.%N)
+if [ "${CRUS_JFR:-0}" = "1" ] && [ -n "$JC" ] && [ -n "$JPID" ]; then
+  "$JC" "$JPID" JFR.stop name=win >/dev/null 2>&1 || true
+  JFR_BIN="$(dirname "$JAVA_BIN")/jfr"; [ -x "$JFR_BIN" ] || JFR_BIN=jfr
+  echo "=== JFR hot methods (exactly the timed window) ==="
+  "$JFR_BIN" view hot-methods "$JFR_FILE" 2>/dev/null | head -40 || echo "jfr view failed"
+fi
 if [ "$done" != "1" ]; then
   echo "E2E WINDOW TIMEOUT (inside=$c / $target)"
 fi

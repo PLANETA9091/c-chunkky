@@ -180,6 +180,15 @@ jobs:
           # measures whether the background grid prefill helps or steals
           # CPU from the serial fill on 2-core runners.
           CRUS_GRID_PF=0 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_pf0.log
+      - name: E2E JFR hot-methods of the window (Paper-side split probe)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          # CRUS_JFR=1 wraps EXACTLY the timed window in a JFR profile
+          # recording and prints jfr view hot-methods — the first method-level
+          # attribution of the Paper-side span (scheduling/light/serialization) that
+          # the honest e2e number lumps together.
+          CRUS_JFR=1 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_jfr.log
       - name: Far-coords native-gen probe (stall cliff bisect)
         continue-on-error: true
         run: |
@@ -199,6 +208,8 @@ jobs:
             farprobe263.log
             e2e263_nobeard.log
             e2e263_pf0.log
+            e2e263_jfr.log
+            e2e263_window.jfr
             ab263_out/
             server/run.out
           retention-days: 14
