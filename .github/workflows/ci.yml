@@ -84,12 +84,23 @@ jobs:
         run: |
           chmod +x plugin/build.sh
           SRV_DIR="$GITHUB_WORKSPACE/server" ./plugin/build.sh
+      - name: Dump NMS biome-source signatures (grounding for the grid-backed resolver)
+        run: |
+          javap -classpath server/versions/26.3/paper-26.3.jar -p \
+            net.minecraft.world.level.biome.BiomeSource \
+            net.minecraft.world.level.biome.MultiNoiseBiomeSource \
+            'net.minecraft.world.level.biome.Climate$Sampler' \
+            'net.minecraft.world.level.biome.Climate$TargetPoint' \
+            net.minecraft.world.level.chunk.ChunkGenerator \
+            > nms-biome-signatures.txt 2>&1 || true
+          wc -l nms-biome-signatures.txt
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: crussty-artifacts
           path: |
             plugin/CrusstyGen.jar
+            nms-biome-signatures.txt
           retention-days: 7
 
   # 26.3 E2E: two A/B pairs on a real Paper 26.3 server with the native
