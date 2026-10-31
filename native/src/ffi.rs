@@ -334,10 +334,19 @@ pub fn ctx_new(seed: i64, min_y: i32, height: i32, sea_level: i32) -> i64 {
         .and_then(|s| s.biomes.as_ref())
         .and_then(|b| {
             let src = std::sync::Arc::clone(b);
-            std::panic::catch_unwind(move || {
+            match std::panic::catch_unwind(move || {
                 crate::features_master::build_deco_ctx_src(&embedded263_assets(), &src.src)
-            })
-            .unwrap_or(None)
+            }) {
+                Ok(Some(d)) => Some(d),
+                Ok(None) => {
+                    log_warn("deco: embedded-vanilla deco ctx build returned None (no v263 biomes state is a separate branch — this one had biomes)");
+                    None
+                }
+                Err(_) => {
+                    log_warn("deco: embedded-vanilla deco ctx build panicked (vanilla decorations stay)");
+                    None
+                }
+            }
         });
     let mut env: Box<DEnv> = Box::new(DEnv::new(seed));
     // The plugin resolves the datapack-aware sea level (NoiseGeneratorSettings

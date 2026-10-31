@@ -128,7 +128,13 @@ pub fn build_deco_ctx_src(
             (n.clone(), biome_features.get(n).unwrap_or(&empty).clone())
         })
         .collect();
-    let plan = build_plan(&ordered).ok()?;
+    let plan = match build_plan(&ordered) {
+        Ok(p) => p,
+        Err(e) => {
+            crate::ffi::log_warn(&format!("deco: build_plan failed ({} biomes): {}", ordered.len(), e));
+            return None;
+        }
+    };
     let uid_names: Vec<String> = plan.steps.iter().flatten().cloned().collect();
 
     // feature registry from assets
@@ -170,6 +176,15 @@ pub fn build_deco_ctx_src(
         configured.into_iter(),
         placed.into_iter(),
     );
+    if reg.placed.is_empty() || reg.configured.is_empty() {
+        crate::ffi::log_warn(&format!(
+            "deco: decoded registry nearly empty (configured={} placed={} unsup_cfg={} unsup_pl={})",
+            reg.configured.len(),
+            reg.placed.len(),
+            reg.unsupported_configured,
+            reg.unsupported_placed
+        ));
+    }
     // extend the uid space: inner placed refs (vanilla trees behind pack
     // selectors, pale_moss_patch, vegetation inners) resolve their OWN
     // BiomeFilter uid — without a mapping the bridge would return false and

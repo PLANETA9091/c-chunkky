@@ -2306,8 +2306,15 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             String[] states = ChunkGenNative.decoStates(ctx0);
             String[][] plan = ChunkGenNative.decoPlan(ctx0);
             if (states == null || plan == null) {
-                Logger.getLogger("CrusstyGen").info(
-                        "native deco: ctx has no deco engine (vanilla decorations stay)");
+                // WARN on purpose: INFO does not reach run.out in CI (only
+                // WARN+ is kept), and this branch is the known
+                // "deco silently off" path (DecoStats empty, vanilla deco
+                // stays, all CRUS_NATIVE_DECO A/B lanes read identical).
+                Logger.getLogger("CrusstyGen").warning(
+                        "native deco: ctx has no deco engine (states="
+                                + (states == null ? "null" : "ok") + " plan="
+                                + (plan == null ? "null" : "ok")
+                                + ") — vanilla decorations stay");
                 return;
             }
             // biome -> placed feature refs union, from the pack biome JSONs
@@ -2370,11 +2377,11 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                             Object.class)
                     .invoke(null, w, states, plan, bf, possible, nmsGen);
             NATIVE_DECO = true;
-            Logger.getLogger("CrusstyGen").info("native deco engine active ("
+            Logger.getLogger("CrusstyGen").warning("native deco engine active ("
                     + plan.length + " steps, " + states.length + " states, "
                     + possible.size() + " possible biomes) — vanilla decorations off");
         } catch (ClassNotFoundException e) {
-            Logger.getLogger("CrusstyGen").info(
+            Logger.getLogger("CrusstyGen").warning(
                     "native deco: DecoDriver absent (vanilla decorations stay)");
         } catch (Throwable t) {
             Throwable c = t;
