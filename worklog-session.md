@@ -4754,3 +4754,38 @@ NEXT: (1) beardifier-потребление (фронт #1, ~4.6мс/филл); 
 под par4 (батчинг апколлов); (3) ramp: параллельная отправка forceload
 тайлов — СМЕНА СЕМАНТИКИ бенчмарка, только с явным решением; (4) Paper
 статус-цепочка для serial (простой 61-67%).
+
+## cont-84d: beardifier column-prune (фронт #1, первый выстрел)
+
+ДИАГНОЗ (CI 681905dc): nobeard-дискриминатор показал ~4.6мс/филл на
+beard-потребление в native fill (terrain 8.95 beard vs 4.34 no-beard,
+same region; surf_walk 10.2 vs 3.5 — beard-зависимый surface). Путь:
+fuse/дерево материализует beard через fill_volume -> per-cell цикл по
+affected-box (inflate24) с per-PIECE ветвлением + kernel-LUT (13KB) +
+fastInvSqrt (f64 sqrt) на КАЖДУЮ ячейку.
+
+ФИКС (11ab41eb): column-pruned fill_volume. Ключевое наблюдение: кусок
+с clamp-дистанцией dx/dz > support даёт 0.0 для ВСЕХ y колонки:
+- BURY: distance_sq >= 36 при dx > 5 (dx^2 >= 36)
+- BEARD_*/ENCAPSULATE: kernel xi/zi = d+12 вне [0..24) при d > 11
+- junctions: support АСИММЕТРИЧЕН (d+12 in [0..24) -> d in [-12..11]!)
+  — наивный симметричный [-11..11] дропнул бы d=-12 (kernel idx 0,
+  exp(-9) ~= 1.2e-4, НЕ ноль) — бит-точность бы умерла.
+Плюс per-piece y-prune (support по типу: BURY/THIN ground_y+-12, BOX
+[ground_y-12, max_y+12], ENCAP [min_y-12, max_y+12], junction j.y+-12)
+и hoist dx/dz из y-цикла. Скиpped entries добавляют ровно 0.0 в
+референсе -> порядок суммирования сохранённых не меняется; -0.0-грань
+невозможна (bounds возвращают +0.0, computed-нули только +0.0).
+Пиннинг: fill_volume_column_pruned_bit_exact — 64 seeded-кейса (все 4
+adjustment + NONE + вне-ординальные + junctions) vs
+sample_value_unchecked, to_bits на каждой ячейке.
+
+ОЖИДАНИЕ: structure-heavy филлы 8.95 -> ~4.5-6 (active-set 3-6x меньше
+per-cell piece-loop); пустой beard не платит ничего (early return).
+Смотреть в CI: terr/timing-ланы same-run, ncomp/hood без изменений,
+SIMD-parity + bench гейты native-джобы.
+
+NEXT: (1) CI 11ab41eb — unit-тест + parity; (2) если зелёный — снять
+terrain-числа с timing/deco/nobeard лан; (3) следующий под-фронт beard:
+per-column SUPORT-структуры предвычислять per fill (сейчас per-column
+enumerate), потом SIMD-across-cells для оставшегося piece-loop.
