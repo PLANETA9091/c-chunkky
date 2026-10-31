@@ -404,7 +404,7 @@ public final class DecoDriver extends BlockPopulator {
             WorldgenRandom rng = new WorldgenRandom(
                     new XoroshiroRandomSource(RandomSupport.generateUniqueSeed()));
             rng.setFeatureSeed(decoSeed, gid, step);
-            holder.value().place(reg, NMS_GEN, rng, new BlockPos(ox, oy, oz)); // 26.3: biome filter lives in placement modifiers
+            holder.value().place(reg(), NMS_GEN, rng, new BlockPos(ox, oy, oz)); // 26.3: biome filter lives in placement modifiers
         } catch (Throwable t) {
             LOG.warning("deco delegate failed for " + placedName + ": " + t);
         }
@@ -431,7 +431,7 @@ public final class DecoDriver extends BlockPopulator {
         long tg0 = System.nanoTime();
         for (int dz = -1; dz <= 1 && !anyRefs; dz++) {
             for (int dx = -1; dx <= 1; dx++) {
-                if (reg.getChunk(cx + dx, cz + dz).getAllReferences().size() > 0) { // 26.3: was hasAnyStructureReferences()
+                if (reg().getChunk(cx + dx, cz + dz).getAllReferences().size() > 0) { // 26.3: was hasAnyStructureReferences()
                     anyRefs = true;
                     break;
                 }
@@ -465,7 +465,7 @@ public final class DecoDriver extends BlockPopulator {
             // Paper: WorldGenRegion lacks structureManager(); build one over
             // the region exactly like StructureManager.forWorldGenRegion does.
             long tu0 = System.nanoTime();
-            StructureManager sm = reg().getLevel().structureManager().forWorldGenRegion(reg);
+            StructureManager sm = reg().getLevel().structureManager().forWorldGenRegion(reg());
             if (!sm.shouldGenerateStructures()) {
                 return;
             }
@@ -488,7 +488,7 @@ public final class DecoDriver extends BlockPopulator {
                     DecoStats.STRUCT_START_CALLS.incrementAndGet();
                     for (StructureStart ss : starts) {
                         long tp0 = System.nanoTime();
-                        ss.placeInChunk(reg, sm, NMS_GEN, srng, writable, new ChunkPos(cx, cz));
+                        ss.placeInChunk(reg(), sm, NMS_GEN, srng, writable, new ChunkPos(cx, cz));
                         DecoStats.STRUCT_PLACE_NS.addAndGet(System.nanoTime() - tp0);
                     }
                     i1++;
@@ -895,13 +895,13 @@ public final class DecoDriver extends BlockPopulator {
     public boolean hasSturdyFace(int x, int y, int z, int dir) {
         DecoStats.UP_OTHER.incrementAndGet();
         return reg().getBlockState(new BlockPos(x, y, z))
-                .isFaceSturdy(reg, new BlockPos(x, y, z), DIRS[dir]);
+                .isFaceSturdy(reg(), new BlockPos(x, y, z), DIRS[dir]);
     }
 
     public boolean wouldSurvive(String state, int x, int y, int z) {
         DecoStats.UP_CAN_SURVIVE.incrementAndGet();
         BlockState st = state(state);
-        boolean r = st != null && st.canSurvive(reg, new BlockPos(x, y, z));
+        boolean r = st != null && st.canSurvive(reg(), new BlockPos(x, y, z));
         if (SURVIVE_HIST_ON) {
             BlockState below = reg().getBlockState(new BlockPos(x, y - 1, z));
             DecoStats.surviveSample(state, r,
