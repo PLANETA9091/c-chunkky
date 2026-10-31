@@ -73,6 +73,13 @@ public final class CrusstyGenPlugin extends JavaPlugin {
                     int rz = Integer.parseInt(args[2]);
                     int n = Integer.parseInt(args[3]);
                     GenStats.window(rx, rz, n);
+                    // window-only native prof: pre-window server fills (spawn
+                    // forceload 13x13 + warmup) would otherwise pollute the
+                    // terr_* sub-stage means by (144+185)/144 ~= 2.28x
+                    try {
+                        ChunkGenNative.fill263ProfReset();
+                    } catch (Throwable ignored) {
+                    }
                     sender.sendMessage("[CrusstyGen] window armed [" + rx + ".."
                             + (rx + n) + "," + rz + ".." + (rz + n) + "]");
                 } catch (NumberFormatException e) {
