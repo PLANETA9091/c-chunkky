@@ -4585,3 +4585,45 @@ NEXT: (1) CI 64e1ce1a — verify plugin build + parity gates + hGet/hSet
 (2) переоценка CRUS_NATIVE_DECO=1 дефолта (vanilla deco ~12-13% worker);
 (3) нативный филл 26.2% worker-duty — surf_walk 3.97/terrain-внутренности;
 (4) StaticCache2D/WorldGenRegion 2.2% — возможно, переиспользование региона.
+
+## cont-83 (в процессе, CI 41214674243 = c4cadad3): JFR-атрибуция обоих окон; MethodHandle-диспатч; par4+native-deco лана; pipeline-coverage зонд
+
+JFR-СТЕКИ ПО ПОТОКАМ (артефакты 41194161059, агрегатор jdk.jfr.consumer;
+JDK25-запись читается JDK21, поток через getValue("sampledThread")):
+
+par-окно (626 сэмплов, e2e=37.15): Worker #0 229 (36.6%) = fillBeard 21.4%
++ fillBiomes 4.8% (натив 26.2%), ваниль deco ~12-13%, OUR Field.get в
+layoutBulk 3.5%, layoutBulk Java 1.7%, StarLight 3%; Server thread 37
+(48.6% yield0 <- waitForTasks — мейн-тред ЖДЁТ); idle-IO 46%.
+serial-окно (Worker #0 306): fillBeard 23.9% + fillBiomes 4.9% = 28.8%,
+ваниль deco ~11-12%, layoutBulk 4.2%, NoiseStack 3.9% (часть под
+GeodeFeature!), StarLight ~4%. Все остаточные 1-3% фреймы — ванильные
+deco-внутренности (heightmap reads, predicates, templates).
+
+ФИКСЫ (64e1ce1a + c4cadad3):
+1. unreflected MethodHandles на 9 горячих рефлексивных сайтах bulk-пути
+  (~120 вызовов/чанк) — Field.getFieldAccessor-диспатч был на каждом.
+  Null-хендл → точный Field-фолбэк; invoke-фейл → layoutV1 как раньше.
+  Урок: hGet бросает Throwable → rebuildHeightmaps throws Throwable
+  (compile E 41213837066 plugin job; после пуша plugin-джобы поллить
+  СРАЗУ — сборка ~30с, а не 20 мин integration).
+2. pipeline-coverage зонд (e879c7e3 → в c4cadad3): окно пишет per-fill
+  [start..end], windowSnapshot() свипает в busy=ms/chunk, cover=% спана
+  с >=1 филлом, maxconc=пик параллельных филлов. cover << 100% = латентность
+  статус-цепочки — рычаг пайплайн, не генератор. Sweep-line верифицирован
+  standalone (union/peak/disjoint/touching).
+
+LANA-РЕРУПОЗ (25293076): PF=1 A/B закрыт (3+ рана: OFF выигрывает/в шуме),
+лана pf1 → par4+CRUS_NATIVE_DECO=1 (e2e263_par4deco.log) — same-run
+компаратор к timing-лане решает дефолт нативной deco.
+
+ПОДТВЕРЖДЕНИЕ ЛАТЕНТНОСТИ (тот же ран 41194161059): 48x48 par4
+e2e=27.93 gen=14.08 (нет инфляции) vs 144-chunk par4 e2e=28.33 gen=38.58
+(3x инфляция) — E2E ИДЕНТИЧЕН при тройной разнице fill-CPU: пайплайн
+латентность-байндед. Зонд cover даст точное число по каждой лане.
+
+NEXT: (1) CI c4cadad3 — integration lanes + gates + par4deco A/B + cover
+числа; (2) дефолт CRUS_NATIVE_DECO по вердикту A/B (ваниль deco 11-13%
+worker-duty в обоих режимах); (3) при cover << 100% — фронт = Paper
+статус-цепочка (batching/handoff), при cover ~ 100% — terrain-внутренности
+(7.4мс native stage top-1).
