@@ -122,6 +122,15 @@ impl Beardifier263 {
     }
 
     /// Beardifier.sampleVolume — fill(0) then the affected-box ∩ volume range.
+    ///
+    /// Column-pruned: a piece whose clamped x/z distance to the column
+    /// exceeds its contribution support (kernel xi/zi bounds -> early return
+    /// 0 for EVERY y; bury distance_sq >= 36 -> 0) contributes exactly 0.0
+    /// to the whole column, so it is dropped from the per-column loop —
+    /// bit-exact by construction (the reference path adds 0.0 for it).
+    /// Same for the per-piece y-support prune. cont-84d: the unpruned loop
+    /// measured ~4.6ms/fill in structure-rich windows (nobeard discriminator,
+    /// CI 681905dc: terrain 8.95 vs 4.34 same region).
     pub fn fill_volume(&self, vol: &DensityVolume, out: &mut [f32]) {
         out.fill(0.0);
         let Some(b) = self.affected else { return };
@@ -141,14 +150,118 @@ impl Beardifier263 {
         let max_x = i32::min(vol.size_x - 1, floor_div(b.3 - vol.min_x, vol.step_x));
         let max_y = i32::min(vol.size_y - 1, floor_div(b.4 - vol.min_y, vol.step_y));
         let max_z = i32::min(vol.size_z - 1, floor_div(b.5 - vol.min_z, vol.step_z));
+        let vol_y_lo = vol.block_y(min_y);
+        let vol_y_hi = vol.block_y(max_y);
+        // active entries: index into pieces | junctions (pieces.len() offset),
+        // with the column-fixed dx/dz hoisted out of the y loop. Junction
+        // support is ASYMMETRIC: kernel index = d+12 in [0..24) ->
+        // d in [-12..11] (negative side reaches index 0, exp(-9) ~= 1.2e-4
+        // — NOT droppable).
+        let mut act: Vec<u32> = Vec::with_capacity(self.pieces.len() + self.junctions.len());
+        let mut dxs: Vec<i32> = Vec::with_capacity(self.pieces.len() + self.junctions.len());
+        let mut dzs: Vec<i32> = Vec::with_capacity(self.pieces.len() + self.junctions.len());
         for z in min_z..=max_z {
             let block_z = vol.block_z(z);
             for x in min_x..=max_x {
                 let block_x = vol.block_x(x);
+                // per-column active set: pieces + junctions whose x/z support
+                // covers this column. Skipped entries add 0.0 for every y of
+                // the column in the reference path (bounds above).
+                act.clear();
+                dxs.clear();
+                dzs.clear();
+                for (pi, piece) in self.pieces.iter().enumerate() {
+                    let dx = 0.max((piece.min_x - block_x).max(block_x - piece.max_x));
+                    let supp_x = if piece.adjustment == ADJ_BURY { 5 } else { 11 };
+                    if dx > supp_x {
+                        continue;
+                    }
+                    let dz = 0.max((piece.min_z - block_z).max(block_z - piece.max_z));
+                    if dz > supp_x {
+                        continue;
+                    }
+                    let ground_y = piece.min_y + piece.ground_delta;
+                    let y_lo = match piece.adjustment {
+                        ADJ_BEARD_BOX => ground_y - 12,
+                        ADJ_ENCAPSULATE => piece.min_y - 12,
+                        _ => ground_y - 12,
+                    };
+                    let y_hi = match piece.adjustment {
+                        ADJ_BEARD_BOX => piece.max_y + 12,
+                        ADJ_ENCAPSULATE => piece.max_y + 12,
+                        _ => ground_y + 12,
+                    };
+                    if y_lo > vol_y_hi || y_hi < vol_y_lo {
+                        continue;
+                    }
+                    act.push(pi as u32);
+                    dxs.push(dx);
+                    dzs.push(dz);
+                }
+                for (ji, j) in self.junctions.iter().enumerate() {
+                    let dx = block_x - j.x;
+                    if !(-12..=11).contains(&dx) {
+                        continue;
+                    }
+                    let dz = block_z - j.z;
+                    if !(-12..=11).contains(&dz) {
+                        continue;
+                    }
+                    if j.y + 12 < vol_y_lo || j.y - 12 > vol_y_hi {
+                        continue;
+                    }
+                    act.push((self.pieces.len() + ji) as u32);
+                    dxs.push(dx);
+                    dzs.push(dz);
+                }
+                if act.is_empty() {
+                    continue;
+                }
                 for y in min_y..=max_y {
                     let block_y = vol.block_y(y);
                     let index = vol.index_unchecked(x, y, z);
-                    out[index] = self.sample_value_unchecked(block_x, block_y, block_z);
+                    let mut noise_value = 0.0f32;
+                    for (k, &a) in act.iter().enumerate() {
+                        let dz = dzs[k];
+                        if (a as usize) < self.pieces.len() {
+                            let piece = &self.pieces[a as usize];
+                            let dx = dxs[k];
+                            let ground_y = piece.min_y + piece.ground_delta;
+                            let dy_to_ground = block_y - ground_y;
+                            noise_value += match piece.adjustment {
+                                ADJ_BURY => get_bury_contribution(
+                                    dx as f32,
+                                    dy_to_ground as f32 / 2.0f32,
+                                    dz as f32,
+                                ),
+                                ADJ_BEARD_THIN => get_beard_contribution(
+                                    dx,
+                                    dy_to_ground,
+                                    dz,
+                                    dy_to_ground,
+                                ) * 0.8f32,
+                                ADJ_BEARD_BOX => {
+                                    let dy = 0.max((ground_y - block_y).max(block_y - piece.max_y));
+                                    get_beard_contribution(dx, dy, dz, dy_to_ground) * 0.8f32
+                                }
+                                ADJ_ENCAPSULATE => {
+                                    let dy = 0.max((piece.min_y - block_y).max(block_y - piece.max_y));
+                                    get_bury_contribution(
+                                        dx as f32 / 2.0f32,
+                                        dy as f32 / 2.0f32,
+                                        dz as f32 / 2.0f32,
+                                    ) * 0.8f32
+                                }
+                                _ => 0.0,
+                            };
+                        } else {
+                            let j = &self.junctions[a as usize - self.pieces.len()];
+                            let dx = dxs[k];
+                            let dy = block_y - j.y;
+                            noise_value += get_beard_contribution(dx, dy, dz, dy) * 0.4f32;
+                        }
+                    }
+                    out[index] = noise_value;
                 }
             }
         }
@@ -292,5 +405,111 @@ mod tests {
         assert!(below > 0.0, "below ground must solidify, got {below}");
         let v_out = b.sample_value(100, 100, 100);
         assert_eq!(v_out, 0.0, "outside affected box must be exactly 0");
+    }
+
+    #[test]
+    fn fill_volume_column_pruned_bit_exact() {
+        // Seeded random pieces (ALL adjustment types incl. NONE) + junctions;
+        // the pruned fill_volume must be bit-identical to the unpruned
+        // reference (sample_value_unchecked) on every cell.
+        let mut seed: u64 = 0xBe4dF11_263;
+        let mut rnd = move |m: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) as u64) % m
+        };
+        for case in 0..64u64 {
+            let npieces = 1 + rnd(12) as usize;
+            let njunc = rnd(8) as usize;
+            let mut pieces = Vec::new();
+            for _ in 0..npieces {
+                let cx = rnd(64) as i32 - 32;
+                let cz = rnd(64) as i32 - 32;
+                let sx = 1 + rnd(24) as i32;
+                let sy = 1 + rnd(40) as i32;
+                let sz = 1 + rnd(24) as i32;
+                let adj = match rnd(6) {
+                    0 => ADJ_NONE,
+                    1 => ADJ_BURY,
+                    2 => ADJ_BEARD_THIN,
+                    3 => ADJ_BEARD_BOX,
+                    4 => ADJ_ENCAPSULATE,
+                    _ => rnd(5) as i32, // includes out-of-ordinal values
+                };
+                pieces.push(Piece {
+                    min_x: cx - sx / 2,
+                    min_y: -40 + rnd(30) as i32,
+                    min_z: cz - sz / 2,
+                    max_x: cx + sx - sx / 2,
+                    max_y: 0,
+                    max_z: cz + sz - sz / 2,
+                    adjustment: adj,
+                    ground_delta: -(rnd(2) as i32),
+                });
+                let p = pieces.last_mut().unwrap();
+                p.max_y = p.min_y + sy;
+            }
+            let mut junctions = Vec::new();
+            for _ in 0..njunc {
+                junctions.push(Junction {
+                    x: rnd(96) as i32 - 48,
+                    y: -40 + rnd(40) as i32,
+                    z: rnd(96) as i32 - 48,
+                });
+            }
+            let b = Beardifier263 {
+                pieces: pieces.clone(),
+                junctions: junctions.clone(),
+                affected: {
+                    let mut aff: Option<(i32, i32, i32, i32, i32, i32)> = None;
+                    for p in &pieces {
+                        include_box(&mut aff, (p.min_x, p.min_y, p.min_z, p.max_x, p.max_y, p.max_z));
+                    }
+                    for j in &junctions {
+                        include_box(&mut aff, (j.x, j.y, j.z, j.x, j.y, j.z));
+                    }
+                    aff.map(inflate24)
+                },
+            };
+            // volume near the piece cloud, overlapping the affected box
+            let vol = DensityVolume::block_step(
+                (16, 64, 16),
+                (-8 + (rnd(16) as i32 - 8), -40, -8 + (rnd(16) as i32 - 8)),
+            );
+            let n = vol.size();
+            let mut a = vec![0f32; n];
+            let mut c = vec![0f32; n];
+            b.fill_volume(&vol, &mut a);
+            // reference: the OLD unpruned loop
+            if let Some((bx0, by0, bz0, bx1, by1, bz1)) = b.affected {
+                if vol.max_block_x() >= bx0 && vol.min_x <= bx1
+                    && vol.max_block_y() >= by0 && vol.min_y <= by1
+                    && vol.max_block_z() >= bz0 && vol.min_z <= bz1
+                {
+                    let min_x = i32::max(0, floor_div(bx0 - vol.min_x, vol.step_x));
+                    let min_y = i32::max(0, floor_div(by0 - vol.min_y, vol.step_y));
+                    let min_z = i32::max(0, floor_div(bz0 - vol.min_z, vol.step_z));
+                    let max_x = i32::min(vol.size_x - 1, floor_div(bx1 - vol.min_x, vol.step_x));
+                    let max_y = i32::min(vol.size_y - 1, floor_div(by1 - vol.min_y, vol.step_y));
+                    let max_z = i32::min(vol.size_z - 1, floor_div(bz1 - vol.min_z, vol.step_z));
+                    for z in min_z..=max_z {
+                        for x in min_x..=max_x {
+                            for y in min_y..=max_y {
+                                let idx = vol.index_unchecked(x, y, z);
+                                c[idx] = b.sample_value_unchecked(
+                                    vol.block_x(x), vol.block_y(y), vol.block_z(z),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            for i in 0..n {
+                assert_eq!(
+                    a[i].to_bits(), c[i].to_bits(),
+                    "case {case} cell {i} mismatch: {} vs {}",
+                    a[i], c[i]
+                );
+            }
+        }
     }
 }
