@@ -7,6 +7,8 @@ import org.bukkit.World;
 import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.generator.WorldInfo;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -964,6 +966,14 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static Method mTickingAdd; // Moonrise tickingBlocks.add(short)
     private static java.lang.reflect.Field fNonEmpty, fTickingBlock, fTickingFluid, fSpecial;
     private static java.lang.reflect.Field fTickingList, fIsOpaque, fChunkHeightmaps;
+    // JDK25 CI JFR (41194161059): Field.getFieldAccessor dispatch inside
+    // layoutBulk showed 3.5% of gen-worker samples — the reflective accessor
+    // lookup runs per Field.get/set/setShort on the hot section loop. These
+    // unreflected MethodHandles bind the accessor once; null = init failed,
+    // dispatch helpers below then use the raw Field calls (never kills bulk).
+    private static MethodHandle mhBulkStatesGet, mhPalDataSet;
+    private static MethodHandle mhNonEmptySet, mhTickingBlockSet, mhTickingFluidSet, mhSpecialSet;
+    private static MethodHandle mhTickingListGet, mhChunkHmapsGet, mhIsOpaqueGet;
     private static Constructor<?> ctorPal;
     /** true = 26.3 ctor (T, Strategy, T[] presetValues); false = legacy (IdMap, T, Strategy). */
     private static boolean ctorPalPreset;
@@ -1050,6 +1060,11 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 fTickingFluid.setAccessible(true);
                 fSpecial.setAccessible(true);
                 fTickingList.setAccessible(true);
+                mhNonEmptySet = unreflectSet(fNonEmpty);
+                mhTickingBlockSet = unreflectSet(fTickingBlock);
+                mhTickingFluidSet = unreflectSet(fTickingFluid);
+                mhSpecialSet = unreflectSet(fSpecial);
+                mhTickingListGet = unreflectGet(fTickingList);
                 Class<?> cCollisionUtil = Class.forName(
                         "ca.spottedleaf.moonrise.patches.collisions.CollisionUtil");
                 Class<?> cStateBase = Class.forName(
@@ -1059,12 +1074,14 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                         "net.minecraft.world.level.levelgen.Heightmap");
                 fIsOpaque = cHeightmap.getDeclaredField("isOpaque");
                 fIsOpaque.setAccessible(true);
+                mhIsOpaqueGet = unreflectGet(fIsOpaque);
                 mSetRawData = cHeightmap.getMethod("setRawData",
                         Class.forName("net.minecraft.world.level.chunk.ChunkAccess"),
                         Class.forName("net.minecraft.world.level.levelgen.Heightmap$Types"),
                         long[].class);
                 mGetRawData = cHeightmap.getMethod("getRawData");
                 fChunkHeightmaps = cChunkAccess.getField("heightmaps");
+                mhChunkHmapsGet = unreflectGet(fChunkHeightmaps);
                 Class<?> cBlock = Class.forName("net.minecraft.world.level.block.Block");
                 mDefaultBlockState = cBlock.getMethod("defaultBlockState");
                 Class<?> cCraftBlockType;
@@ -1095,8 +1112,10 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 }
                 sectionStatesById = states;
                 bulkFieldStates = fStates;
+                mhBulkStatesGet = unreflectGet(fStates);
                 // ---- v3 Data-swap init ----
                 fPalData = cPaletted.getField("data"); // public volatile
+                mhPalDataSet = unreflectSet(fPalData);
                 Class<?> cData = Class.forName(
                         "net.minecraft.world.level.chunk.PalettedContainer$Data");
                 Class<?> cCfg;
@@ -1347,7 +1366,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     // the resize-safe NMS path, then rebuild the section's cached
                     // counters and the Moonrise ticking list — the invariants the
                     // per-block ChunkAccess.setBlockState normally maintains.
-                    Object pal = bulkFieldStates.get(section);
+                    Object pal = hGet(mhBulkStatesGet, bulkFieldStates, section);
                     // ---- v3 Data-swap fast path ----
                     // A fresh section container is a singleton(air). Instead of
                     // ~4096 getAndSetUnchecked reflection calls, build the whole
@@ -1426,7 +1445,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                                     }
                                     Object storage = ctorSimpleBit.newInstance(gb, 4096, raw);
                                     Object nd = ctorData.newInstance(cfgGlobal, storage, globalPaletteObj);
-                                    fPalData.set(pal, nd);
+                                    hSet(mhPalDataSet, fPalData, pal, nd);
                                     swapped = true;
                                     path = 3;
                                 } catch (Throwable t5) {
@@ -1519,7 +1538,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                             }
                             if (swapped) {
                                 Object nd = ctorData.newInstance(cfg, storage, palette);
-                                fPalData.set(pal, nd);
+                                hSet(mhPalDataSet, fPalData, pal, nd);
                             }
                         }
                     } catch (Throwable t3) {
@@ -1571,12 +1590,12 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                         }
                     }
                     }
-                    fNonEmpty.setShort(section, (short) nonEmpty);
-                    fTickingBlock.setShort(section, (short) tickB);
-                    fTickingFluid.setShort(section, (short) tickF);
-                    fSpecial.setShort(section, (short) special);
+                    hSetShort(mhNonEmptySet, fNonEmpty, section, (short) nonEmpty);
+                    hSetShort(mhTickingBlockSet, fTickingBlock, section, (short) tickB);
+                    hSetShort(mhTickingFluidSet, fTickingFluid, section, (short) tickF);
+                    hSetShort(mhSpecialSet, fSpecial, section, (short) special);
                     if (tickB > 0) {
-                        Object list = fTickingList.get(section);
+                        Object list = hGet(mhTickingListGet, fTickingList, section);
                         for (int k = 0; k < 4096; k++) {
                             short id = out[base + k];
                             if (id != 0 && matTicking[id]) {
@@ -1662,6 +1681,54 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         return true;
     }
 
+    /** MethodHandle-first dispatch for the bulk-path hot sites (JFR 41194161059:
+     * Field.getFieldAccessor dispatch = 3.5% of gen-worker samples). Unreflected
+     * handles skip the per-call reflective accessor lookup. A null handle (init
+     * failure) falls back to the raw reflective call; an invoke failure at
+     * runtime propagates exactly like the reflective call would (the outer
+     * layoutBulk catch degrades the whole chunk to layoutV1 — same semantics
+     * as a reflective failure today). */
+    private static MethodHandle unreflectGet(Field f) {
+        try {
+            f.setAccessible(true);
+            return MethodHandles.lookup().unreflectGetter(f);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static MethodHandle unreflectSet(Field f) {
+        try {
+            f.setAccessible(true);
+            return MethodHandles.lookup().unreflectSetter(f);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static Object hGet(MethodHandle mh, Field f, Object o) throws Throwable {
+        if (mh != null) {
+            return mh.invoke(o);
+        }
+        return f.get(o);
+    }
+
+    private static void hSet(MethodHandle mh, Field f, Object o, Object v) throws Throwable {
+        if (mh != null) {
+            mh.invoke(o, v);
+            return;
+        }
+        f.set(o, v);
+    }
+
+    private static void hSetShort(MethodHandle mh, Field f, Object o, short v) throws Throwable {
+        if (mh != null) {
+            mh.invoke(o, v);
+            return;
+        }
+        f.setShort(o, v);
+    }
+
     /** Rebuild the chunk's generation heightmaps from out[] (the per-block
      * ChunkAccess.setBlockState path updates them incrementally; the bulk
      * write must reproduce them or the surface/carver stages misplace). */
@@ -1678,7 +1745,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
 
     private static void rebuildHeightmaps(Object handle, short[] out, int minY)
             throws Exception {
-        Object hmaps = fChunkHeightmaps.get(handle);
+        Object hmaps = hGet(mhChunkHmapsGet, fChunkHeightmaps, handle);
         // Fused single column pass for ALL heightmap types: one walk per
         // (x,z) column answers every type via a per-id opaque bitmask, so
         // the scan depth is the DEEPEST type instead of the SUM of depths
@@ -1693,7 +1760,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             Object type = ((java.util.Map.Entry<?, ?>) e).getKey();
             Object hm = ((java.util.Map.Entry<?, ?>) e).getValue();
             java.util.function.Predicate<Object> pred =
-                    (java.util.function.Predicate<Object>) fIsOpaque.get(hm);
+                    (java.util.function.Predicate<Object>) hGet(mhIsOpaqueGet, fIsOpaque, hm);
             boolean[] opq = opaqueCache.computeIfAbsent(type, t -> {
                 boolean[] a = new boolean[sectionStatesById.length];
                 for (int i2 = 0; i2 < a.length; i2++) {
