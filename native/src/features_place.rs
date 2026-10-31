@@ -2693,7 +2693,13 @@ fn place_ore(
         pts
     });
 
-    let mut seen: std::collections::HashSet<(i32, i32, i32)> = std::collections::HashSet::new();
+    // vanilla-tested BitSet over the linear index (26.3 decompile doPlace):
+    // index = dx + dy*sizeXZ + dz*sizeXZ*sizeY with dx/dy/dz clamped LOW
+    // only — out-of-box cells alias into neighbor rows/planes exactly like
+    // vanilla BitSet.get/set (get=false beyond size, set grows). The old
+    // HashSet keyed by absolute coords DEDUPED aliased cells as distinct —
+    // the last vanilla-divergent corner of the ore path (plus: no hashing).
+    let mut tested: Vec<u64> = vec![0u64; ((width * height * width) as usize + 63) / 64];
     for (px, py, pz, rad) in &pts {
         let rad = *rad;
         if rad < 0.0 {
@@ -2723,9 +2729,11 @@ fn place_ore(
                     if !(dx * dx + dy * dy + dz * dz < 1.0) || ctx.level.is_outside_build_height(iy) {
                         continue;
                     }
-                    if !seen.insert((ix, iy, iz)) {
+                    let bi = ((ix - x0) + (iy - y0) * width + (iz - z0) * width * height) as usize;
+                    if bitset_get(&tested, bi) {
                         continue;
                     }
+                    bitset_set(&mut tested, bi);
                     if crate::features_place::draw_trace_on() {
                         eprintln!("[cand] {ix} {iy} {iz}");
                     }
@@ -2781,6 +2789,26 @@ fn place_ore(
         }
     }
     true
+}
+
+
+/// vanilla BitSet.get: false beyond the current size (26.3 doPlace relies on
+/// this for out-of-box aliased indices; negative can't happen — mins are
+/// clamped to the box starts).
+#[inline]
+fn bitset_get(v: &[u64], i: usize) -> bool {
+    v.get(i / 64).is_some_and(|w| (w >> (i % 64)) & 1 != 0)
+}
+
+/// vanilla BitSet.set: grows transparently past the initial
+/// sizeXZ*sizeY*sizeXZ words (out-of-box aliased indices).
+#[inline]
+fn bitset_set(v: &mut Vec<u64>, i: usize) {
+    let w = i / 64;
+    if v.len() <= w {
+        v.resize(w + 1, 0);
+    }
+    v[w] |= 1u64 << (i % 64);
 }
 
 #[inline]
