@@ -367,6 +367,9 @@ pub fn prof263_reset() {
     PROF_STAGE_PARK.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_STAGE_SURF_AUX.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_STAGE_SURF_WALK.store(0, std::sync::atomic::Ordering::Relaxed);
+    for c in PROF_SURF_CALLS.iter() {
+        c.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
     PROF_STAGE_TERRAIN_SETUP.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_STAGE_TERRAIN_SAMPLE.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_STAGE_TERRAIN_WALK.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -416,6 +419,24 @@ pub fn prof263_snapshot() -> String {
         ms(&PROF_STAGE_TERRAIN_SETUP),
         ms(&PROF_STAGE_TERRAIN_PREFILL)
     ));
+    // Surface-rules per-cond-kind evaluation counts (raw window totals;
+    // divide by fills for the per-chunk demand — tells the next walk
+    // optimization which condition dominates).
+    let calls: Vec<String> = crate::surface263::SR_CALL_NAMES
+        .iter()
+        .zip(PROF_SURF_CALLS.iter())
+        .filter_map(|(name, v)| {
+            let v = v.load(std::sync::atomic::Ordering::Relaxed);
+            if v > 0 {
+                Some(format!("{name}={v}"))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if !calls.is_empty() {
+        s.push_str(&format!(" surf_calls[{}]", calls.join(" ")));
+    }
     s
 }
 
@@ -481,6 +502,35 @@ pub static PROF_STAGE_TERRAIN_WALK: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub static PROF_STAGE_TERRAIN_PREFILL: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+/// Surface-rules per-cond-kind evaluation counts (surface263.rs walk;
+/// summed across strips per fill under PROF, printed by prof263_snapshot
+/// as surf_calls[...] — the denominator is the same fills count as the
+/// stage lines). Raw window totals, not per-fill means.
+pub static PROF_SURF_CALLS: [std::sync::atomic::AtomicU64;
+    crate::surface263::SR_CALL_KINDS] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+const _SR_CALL_KINDS_MATCH: () =
+    assert!(crate::surface263::SR_CALL_KINDS == 12);
+
+pub fn prof_surf_calls_add(calls: &[u32; crate::surface263::SR_CALL_KINDS]) {
+    for (i, v) in calls.iter().enumerate() {
+        if *v != 0 {
+            PROF_SURF_CALLS[i].fetch_add(*v as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
 thread_local! { static PROF_CHILD_T: std::cell::Cell<u64> = std::cell::Cell::new(0); }
 
 #[inline]

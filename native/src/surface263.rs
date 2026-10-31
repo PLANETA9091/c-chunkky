@@ -25,6 +25,45 @@
 
 use crate::df263::{DensityVolume, SamplerCtx263};
 use crate::df263::N263;
+
+// -- per-cond-kind evaluation counters (diag; aggregated per fill under
+//    PROF, printed by prof263_snapshot as surf_calls[...]) --
+pub const SR_CALL_BIOME: usize = 0;
+pub const SR_CALL_TEMP: usize = 1;
+pub const SR_CALL_HOLE: usize = 2;
+pub const SR_CALL_STEEP: usize = 3;
+pub const SR_CALL_NOISE3D: usize = 4;
+pub const SR_CALL_NOISE2D: usize = 5;
+pub const SR_CALL_STONE_DEPTH: usize = 6;
+pub const SR_CALL_WATER: usize = 7;
+pub const SR_CALL_YABOVE: usize = 8;
+pub const SR_CALL_VGRAD: usize = 9;
+pub const SR_CALL_ABOVE_PRELIM: usize = 10;
+pub const SR_CALL_NOT: usize = 11;
+pub const SR_CALL_KINDS: usize = 12;
+pub const SR_CALL_NAMES: [&str; SR_CALL_KINDS] = [
+    "biome", "temp", "hole", "steep", "noise3d", "noise2d",
+    "stdepth", "water", "yabove", "vgrad", "aboveprelim", "not",
+];
+
+/// Diag class of a condition (SR_CALL_* index).
+fn cond_kind(c: &SrCond) -> usize {
+    match c {
+        SrCond::Not(_) => SR_CALL_NOT,
+        SrCond::Biome { .. } => SR_CALL_BIOME,
+        SrCond::Temperature => SR_CALL_TEMP,
+        SrCond::Hole => SR_CALL_HOLE,
+        SrCond::Steep => SR_CALL_STEEP,
+        SrCond::NoiseThreshold { is_3d, .. } => {
+            if *is_3d { SR_CALL_NOISE3D } else { SR_CALL_NOISE2D }
+        }
+        SrCond::StoneDepth { .. } => SR_CALL_STONE_DEPTH,
+        SrCond::Water { .. } => SR_CALL_WATER,
+        SrCond::YAbove { .. } => SR_CALL_YABOVE,
+        SrCond::VerticalGradient { .. } => SR_CALL_VGRAD,
+        SrCond::AbovePreliminary => SR_CALL_ABOVE_PRELIM,
+    }
+}
 use crate::n263::{NormalNoiseParameters, Normalization};
 use crate::rng::{XoroshiroPositionalRandomFactory, XoroshiroRandomSource};
 use crate::surface::{SrCond, SrRule, SurfaceConfig, TempNoises};
@@ -434,8 +473,11 @@ fn get_fiddle(rval: i64) -> f64 {
     (((rval >> 24) & 1023) - 512) as f64 * 8.7890625e-4
 }
 
-/// BiomeManager.getFiddledDistance 26.3 (f64 path, exact add order Z+Y+X).
-fn fiddled_distance(seed: i64, xr: i32, yr: i32, zr: i32, dx: f64, dy: f64, dz: f64) -> f64 {
+/// The fiddle triplet from the LCG chain — depends ONLY on (seed, corner
+/// xyz); the fract distances enter after. Split out so the walk can cache
+/// the triplets per (column, parent quart-y) — same ops, same order.
+#[inline]
+fn fiddle_xyz(seed: i64, xr: i32, yr: i32, zr: i32) -> (f64, f64, f64) {
     let mut rval = lcg_next(seed, xr as i64);
     rval = lcg_next(rval, yr as i64);
     rval = lcg_next(rval, zr as i64);
@@ -447,6 +489,12 @@ fn fiddled_distance(seed: i64, xr: i32, yr: i32, zr: i32, dx: f64, dy: f64, dz: 
     let fy = get_fiddle(rval);
     rval = lcg_next(rval, seed);
     let fz = get_fiddle(rval);
+    (fx, fy, fz)
+}
+
+/// BiomeManager.getFiddledDistance 26.3 (f64 path, exact add order Z+Y+X).
+fn fiddled_distance(seed: i64, xr: i32, yr: i32, zr: i32, dx: f64, dy: f64, dz: f64) -> f64 {
+    let (fx, fy, fz) = fiddle_xyz(seed, xr, yr, zr);
     let z2 = (dz + fz) * (dz + fz);
     let y2 = (dy + fy) * (dy + fy);
     let x2 = (dx + fx) * (dx + fx);
@@ -501,6 +549,26 @@ struct Walk263<'a> {
     sea_level: i32,
     /// state string is a fluid (water/lava) — for the postproc marks
     fluid_states: Vec<bool>,
+    // -- bit-exact hot-path caches (identical f64 ops/order, hoisted
+    //    recompute of value-identical subexpressions) --
+    /// fiddled_distance's LCG chain reads only (seed, corner xyz): for a
+    /// fixed column the 8 corner fiddle triplets are constant within one
+    /// parent quart-y, and x2=(dx+fx)^2 / z2=(dz+fz)^2 are constant for the
+    /// whole column (dx/dz fixed). Cache x2/z2/fy per corner; per block-y
+    /// only y2=(dy+fy)^2 is recomputed. Rebuild on column/parent_y change.
+    fiddle_xz: [f64; 16],
+    fiddle_fy: [f64; 8],
+    fiddle_key: (i32, i32, i32),
+    /// VerticalGradient's from_hash_of(name) -> fork_positional is a pure
+    /// function of the world factory seeds + the name (the fork consumes a
+    /// FRESH from_hash_of source both ways) — hoist the MD5 re-hash from
+    /// every in-band block-y to once per cond.
+    grad_factory: Vec<Option<XoroshiroPositionalRandomFactory>>,
+    /// get_temperature's four noise reads are XZ-only (y-independent) —
+    /// cache per column, keyed by xz_counter.
+    temp_cache: (u64, [f64; 4]),
+    /// per-cond-kind evaluation counts (diag, local; aggregated per fill)
+    calls: [u32; SR_CALL_KINDS],
 }
 
 impl<'a> Walk263<'a> {
@@ -563,7 +631,7 @@ impl<'a> Walk263<'a> {
     }
 
     #[inline]
-    fn biome_idx_at(&self, bx: i32, y: i32, bz: i32) -> usize {
+    fn biome_idx_at(&mut self, bx: i32, y: i32, bz: i32) -> usize {
         if let Some((b, rc)) = &self.point_biomes {
             // topMaterial biomeGetter: correctBiomeManager::getBiome =
             // withDifferentSource(createUncachedResolver) — the fiddle
@@ -573,7 +641,8 @@ impl<'a> Walk263<'a> {
             return point_biome263(b, &mut ctx, qx, qy, qz);
         }
         let hood = self.hood.expect("Walk263: hood or point_biomes required");
-        let (qx, qy, qz, bi) = fiddle_biome_pick(hood, self.zoom_seed, bx, y, bz);
+        let (qx, qy, qz) = self.pick_quart_cached(bx, y, bz);
+        let bi = hood.quart(qx, qy, qz);
         if let Some((tx, ty, tz)) = trace_target() {
             if tx == bx && tz == bz {
                 eprintln!(
@@ -584,40 +653,103 @@ impl<'a> Walk263<'a> {
         bi
     }
 
+    /// fiddle_pick_quart with the per-(column, parent quart-y) corner-fiddle
+    /// cache — see Walk263.fiddle_xz. The LCG chain inside
+    /// fiddled_distance depends only on (seed, corner_x, corner_y,
+    /// corner_z); for a fixed column those are fixed per parent_y, so the 8
+    /// fiddle triplets are hoisted out of the per-block-y loop. The
+    /// remaining per-point math is the identical f64 sequence (same add
+    /// order z2+y2+x2, strict > min) — bit-exact pick.
+    fn pick_quart_cached(&mut self, bx: i32, y: i32, bz: i32) -> (i32, i32, i32) {
+        let abs_x = bx - 2;
+        let abs_y = y - 2;
+        let abs_z = bz - 2;
+        let parent_x = abs_x >> 2;
+        let parent_y = abs_y >> 2;
+        let parent_z = abs_z >> 2;
+        if self.fiddle_key != (bx, bz, parent_y) {
+            let fract_x = (abs_x & 3) as f64 / 4.0;
+            let fract_y = (abs_y & 3) as f64 / 4.0;
+            let fract_z = (abs_z & 3) as f64 / 4.0;
+            let seed = self.zoom_seed;
+            for i in 0..8usize {
+                let x_even = (i & 4) == 0;
+                let y_even = (i & 2) == 0;
+                let z_even = (i & 1) == 0;
+                let corner_x = if x_even { parent_x } else { parent_x + 1 };
+                let corner_y = if y_even { parent_y } else { parent_y + 1 };
+                let corner_z = if z_even { parent_z } else { parent_z + 1 };
+                let dist_x = if x_even { fract_x } else { fract_x - 1.0 };
+                let dist_y = if y_even { fract_y } else { fract_y - 1.0 };
+                let dist_z = if z_even { fract_z } else { fract_z - 1.0 };
+                let (fx, fy, fz) = fiddle_xyz(seed, corner_x, corner_y, corner_z);
+                let z2 = (dist_z + fz) * (dist_z + fz);
+                let x2 = (dist_x + fx) * (dist_x + fx);
+                self.fiddle_xz[i * 2] = x2;
+                self.fiddle_xz[i * 2 + 1] = z2;
+                self.fiddle_fy[i] = fy;
+            }
+            self.fiddle_key = (bx, bz, parent_y);
+        }
+        let fract_y = (abs_y & 3) as f64 / 4.0;
+        let mut min_i = 0usize;
+        let mut min_d = f64::INFINITY;
+        for i in 0..8usize {
+            let y_even = (i & 2) == 0;
+            let dist_y = if y_even { fract_y } else { fract_y - 1.0 };
+            let y2 = (dist_y + self.fiddle_fy[i]) * (dist_y + self.fiddle_fy[i]);
+            let next = self.fiddle_xz[i * 2 + 1] + y2 + self.fiddle_xz[i * 2];
+            if min_d > next {
+                min_i = i;
+                min_d = next;
+            }
+        }
+        let biome_x = if (min_i & 4) == 0 { parent_x } else { parent_x + 1 };
+        let biome_y = if (min_i & 2) == 0 { parent_y } else { parent_y + 1 };
+        let biome_z = if (min_i & 1) == 0 { parent_z } else { parent_z + 1 };
+        (biome_x, biome_y, biome_z)
+    }
+
     /// Biome.getTemperature 26.3 (f32 path; legacy-verified formulas).
-    fn get_temperature(&self, bi: usize, y: i32) -> f32 {
+    fn get_temperature(&mut self, bi: usize, y: i32) -> f32 {
         let mut f = self.st.temps.get(bi).copied().unwrap_or(0.0);
         if self.st.frozen.get(bi).copied().unwrap_or(false) {
-            let fx = self.block_x as f64 * 0.05;
-            let fz = self.block_z as f64 * 0.05;
-            let d1 = self.st.temps_noises.frozen.value(fx, fz, false) * 7.0;
-            let d2 = self
-                .st
-                .temps_noises
-                .biome_info
-                .value(self.block_x as f64 * 0.2, self.block_z as f64 * 0.2, false);
-            if d1 + d2 < 0.3
-                && self
-                    .st
-                    .temps_noises
-                    .biome_info
-                    .value(self.block_x as f64 * 0.09, self.block_z as f64 * 0.09, false)
-                    < 0.8
-            {
+            let tn = self.temp_noises_col();
+            let d1 = tn[0] * 7.0;
+            let d2 = tn[1];
+            if d1 + d2 < 0.3 && tn[2] < 0.8 {
                 f = 0.2f32;
             }
         }
         let sea = self.sea_level;
         let i = sea + 17;
         if y > i {
-            let tx = (self.block_x as f32) / 8.0f32;
-            let tz = (self.block_z as f32) / 8.0f32;
-            let n = self.st.temps_noises.temperature.value(tx as f64, tz as f64, false);
+            let n = self.temp_noises_col()[3];
             let n8 = (n * 8.0f64) as f32;
             let adj = ((n8 + y as f32) - i as f32) * 0.05f32 / 40.0f32;
             f -= adj;
         }
         f
+    }
+
+    /// get_temperature's noise reads are XZ-only (y-independent) — one
+    /// cached read per column: [frozen(x*0.05), info(x*0.2), info(x*0.09),
+    /// temperature(x/8)]. All four are deterministic per (x, z); the same
+    /// value() calls with the same inputs happen exactly once per column
+    /// instead of once per block-y — no f64 result changes.
+    fn temp_noises_col(&mut self) -> &[f64; 4] {
+        if self.temp_cache.0 != self.xz_counter {
+            let bx = self.block_x as f64;
+            let bz = self.block_z as f64;
+            let frozen = self.st.temps_noises.frozen.value(bx * 0.05, bz * 0.05, false);
+            let info2 = self.st.temps_noises.biome_info.value(bx * 0.2, bz * 0.2, false);
+            let info9 = self.st.temps_noises.biome_info.value(bx * 0.09, bz * 0.09, false);
+            let tx = (self.block_x as f32) / 8.0f32;
+            let tz = (self.block_z as f32) / 8.0f32;
+            let n = self.st.temps_noises.temperature.value(tx as f64, tz as f64, false);
+            self.temp_cache = (self.xz_counter, [frozen, info2, info9, n]);
+        }
+        &self.temp_cache.1
     }
 
     /// OreVeinRule density/richness getters (volume-path prefilled buffers).
@@ -638,6 +770,10 @@ impl<'a> Walk263<'a> {
     // -- condition evaluation ------------------------------------------------
 
     fn test(&mut self, ci: usize) -> bool {
+        // diag: per-kind evaluation demand (before the memo check — counts
+        // every rule-tree visit so the cache-hit rate stays observable)
+        let k = cond_kind(&self.cfg.conds[ci]);
+        self.calls[k] = self.calls[k].wrapping_add(1);
         match &self.cfg.conds[ci] {
             SrCond::Not(inner) => {
                 let i = *inner;
@@ -791,7 +927,19 @@ impl<'a> Walk263<'a> {
                     return false;
                 }
                 let d = mth_map(y as f64, *true_y as f64, *false_y as f64, 1.0, 0.0);
-                let mut gf = self.st.factory.from_hash_of(name).fork_positional();
+                // from_hash_of -> fork_positional is deterministic per
+                // (factory seeds, name) — the fork consumes a FRESH
+                // from_hash_of source on every call today, so the cached
+                // fork is value-identical; the MD5 re-hash moves from every
+                // in-band block-y to once per cond.
+                let gf = match self.grad_factory[ci].clone() {
+                    Some(f) => f,
+                    None => {
+                        let f = self.st.factory.from_hash_of(name).fork_positional();
+                        self.grad_factory[ci] = Some(f.clone());
+                        f
+                    }
+                };
                 let mut r: XoroshiroRandomSource = gf.at(self.block_x, self.block_y, self.block_z);
                 (r.next_f32() as f64) < d
             }
@@ -1164,57 +1312,67 @@ pub fn apply_surface263(
     let ri_ref: &[f32] = &richness_buf;
     let threads = crate::fill263::fill_threads().min(4);
     let strips = crate::fill263::split_strips(16, threads);
-    let results: Vec<(Vec<i64>, Box<[u16; crate::nochunk::OUT_LEN]>)> =
-        std::thread::scope(|scope| {
-            let mut handles = Vec::with_capacity(strips.len().saturating_sub(1));
-            for &(z0, z1) in strips.iter().skip(1) {
-                handles.push(scope.spawn(move || {
-                    let mut priv_out = Box::new(*out_shared);
-                    let mk = walk_columns(
-                        st, hood, zoom_seed, hm_ref, volume_ref, csl_vol_ref, csl_ref,
-                        cu_ref, ir_ref, ri_ref, sea_level, cx, cz, min_y, z0, z1,
-                        &mut priv_out,
-                    );
-                    (mk, priv_out)
-                }));
-            }
-            let mut results = Vec::with_capacity(strips.len());
-            if let Some(&(z0, z1)) = strips.first() {
+    let results: Vec<(
+        Vec<i64>,
+        [u32; SR_CALL_KINDS],
+        Box<[u16; crate::nochunk::OUT_LEN]>,
+    )> = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(strips.len().saturating_sub(1));
+        for &(z0, z1) in strips.iter().skip(1) {
+            handles.push(scope.spawn(move || {
                 let mut priv_out = Box::new(*out_shared);
-                let mk = walk_columns(
+                let (mk, calls) = walk_columns(
                     st, hood, zoom_seed, hm_ref, volume_ref, csl_vol_ref, csl_ref,
                     cu_ref, ir_ref, ri_ref, sea_level, cx, cz, min_y, z0, z1,
                     &mut priv_out,
                 );
-                results.push((mk, priv_out));
+                (mk, calls, priv_out)
+            }));
+        }
+        let mut results = Vec::with_capacity(strips.len());
+        if let Some(&(z0, z1)) = strips.first() {
+            let mut priv_out = Box::new(*out_shared);
+            let (mk, calls) = walk_columns(
+                st, hood, zoom_seed, hm_ref, volume_ref, csl_vol_ref, csl_ref,
+                cu_ref, ir_ref, ri_ref, sea_level, cx, cz, min_y, z0, z1,
+                &mut priv_out,
+            );
+            results.push((mk, calls, priv_out));
+        }
+        // A panicked strip worker is a real bug elsewhere; recompute its
+        // range inline so the chunk never ships without surface rules.
+        let mut failed: Vec<(i32, i32)> = Vec::new();
+        for (h, &(z0, z1)) in handles.into_iter().zip(strips.iter().skip(1)) {
+            match h.join() {
+                Ok(r) => results.push(r),
+                Err(_) => failed.push((z0, z1)),
             }
-            // A panicked strip worker is a real bug elsewhere; recompute its
-            // range inline so the chunk never ships without surface rules.
-            let mut failed: Vec<(i32, i32)> = Vec::new();
-            for (h, &(z0, z1)) in handles.into_iter().zip(strips.iter().skip(1)) {
-                match h.join() {
-                    Ok(r) => results.push(r),
-                    Err(_) => failed.push((z0, z1)),
-                }
-            }
-            for &(z0, z1) in &failed {
-                let mut priv_out = Box::new(*out_shared);
-                let mk = walk_columns(
-                    st, hood, zoom_seed, hm_ref, volume_ref, csl_vol_ref, csl_ref,
-                    cu_ref, ir_ref, ri_ref, sea_level, cx, cz, min_y, z0, z1,
-                    &mut priv_out,
-                );
-                results.push((mk, priv_out));
-            }
-            results
-        });
-    for (mk, buf) in results {
+        }
+        for &(z0, z1) in &failed {
+            let mut priv_out = Box::new(*out_shared);
+            let (mk, calls) = walk_columns(
+                st, hood, zoom_seed, hm_ref, volume_ref, csl_vol_ref, csl_ref,
+                cu_ref, ir_ref, ri_ref, sea_level, cx, cz, min_y, z0, z1,
+                &mut priv_out,
+            );
+            results.push((mk, calls, priv_out));
+        }
+        results
+    });
+    let mut call_tot = [0u32; SR_CALL_KINDS];
+    for (mk, calls, buf) in results {
         marks.extend(mk);
+        for k in 0..SR_CALL_KINDS {
+            call_tot[k] = call_tot[k].wrapping_add(calls[k]);
+        }
         for i in 0..crate::nochunk::OUT_LEN {
             if buf[i] != out[i] {
                 out[i] = buf[i];
             }
         }
+    }
+    if prof_on {
+        crate::df263::prof_surf_calls_add(&call_tot);
     }
     if let Some(t) = t_walk {
         crate::df263::PROF_STAGE_SURF_WALK.fetch_add(
@@ -1248,7 +1406,7 @@ fn walk_columns(
     z0: i32,
     z1: i32,
     out: &mut [u16; crate::nochunk::OUT_LEN],
-) -> Vec<i64> {
+) -> (Vec<i64>, [u32; SR_CALL_KINDS]) {
     let cond_count = st.cfg.conds.len();
     let fluid_states: Vec<bool> = st
         .cfg
@@ -1289,6 +1447,12 @@ fn walk_columns(
         y_cache: vec![(0, false); cond_count],
         sea_level,
         fluid_states,
+        fiddle_xz: [0.0; 16],
+        fiddle_fy: [0.0; 8],
+        fiddle_key: (i32::MIN, i32::MIN, i32::MIN),
+        grad_factory: (0..cond_count).map(|_| None).collect(),
+        temp_cache: (0, [0.0; 4]),
+        calls: [0; SR_CALL_KINDS],
     };
     let mut marks: Vec<i64> = Vec::new();
     for lz in z0..z1 {
@@ -1361,7 +1525,7 @@ fn walk_columns(
             }
         }
     }
-    marks
+    (marks, walk.calls)
 }
 
 /// MaterialSystem.erodedBadlandsExtension (26.3 decompile, f64 noise path).
@@ -1679,6 +1843,12 @@ pub fn top_material263(
         y_cache: vec![(0, false); cond_count],
         sea_level,
         fluid_states,
+        fiddle_xz: [0.0; 16],
+        fiddle_fy: [0.0; 8],
+        fiddle_key: (i32::MIN, i32::MIN, i32::MIN),
+        grad_factory: (0..cond_count).map(|_| None).collect(),
+        temp_cache: (0, [0.0; 4]),
+        calls: [0; SR_CALL_KINDS],
     };
     walk.update_xz(px, pz);
     let water_height = if under_fluid { py + 1 } else { i32::MIN };
