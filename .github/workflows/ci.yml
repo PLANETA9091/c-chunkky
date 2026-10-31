@@ -276,7 +276,13 @@ jobs:
           # the root cause INSIDE the plugin: layoutBulk's static palette
           # scratch raced across concurrent fills — fixed with per-call
           # locals; par4 is now the fix's live verification.
-          CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4.log
+          # cont-80: this lane adds CRUS_FILL_THREADS_263=1 — the adaptive
+          # fill_threads() reads ACTIVE_FILLS at fill START, so 4 workers
+          # starting together each grab cores.min(4)=4 internal threads
+          # (16 runnable on 4 cores = the measured 3x fill inflation
+          # native 30.8 vs 10.1 serial). Forcing 1 internal thread per
+          # fill tests that race; main lane stays the par4 baseline.
+          CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL_THREADS_263=1 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4.log
       - name: Upload judge artifacts
         if: always()
         uses: actions/upload-artifact@v4
