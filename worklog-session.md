@@ -4627,3 +4627,43 @@ NEXT: (1) CI c4cadad3 — integration lanes + gates + par4deco A/B + cover
 worker-duty в обоих режимах); (3) при cover << 100% — фронт = Paper
 статус-цепочка (batching/handoff), при cover ~ 100% — terrain-внутренности
 (7.4мс native stage top-1).
+
+## cont-84 (CI 41214674243=c4cadad3 верификация; фиксы диагностики WRING+prof-reset; baseline-анализ)
+
+СТАТУС CI: 64e1ce1a / 25293076 / e879c7e3 — все три фейла = ОДИН compile-E
+("unreported exception Throwable", CrusstyChunkGenerator:1748/1763), починен
+c4cadad3 (rebuildHeightmaps throws Throwable). c4cadad3: plugin GREEN,
+native GREEN, integration в полёте. e879-фейл НЕ баг зонда — унаследованный E.
+
+ФИКСЫ ДИАГНОСТИКИ (74c907d7 + 62632772, plugin GREEN):
+1. WRING 1024->8192: fill-past-1024 молча дропался, cover занижался на
+   окнах >1024 филлов (48x48=2304, big N=47=2209); ланы <=256 филлов
+   (timing/par4deco/jfr) были точны.
+2. fill263ProfReset при арминге окна: pre-window серверные филлы (spawn
+   13x13=169 + warmup 16) загрязняли terr_* суб-стадии — (144+185)/144
+   ~= 2.28x инфляция, байт-в-байт совпадает с baseline (terr_sample 15.4
+   при родителе terrain 6.7; big-лана 3702 филлов -> x1.05). stage[]
+   родители (terrain/surface/hood) и так были server-window-only.
+
+BASELINE (f5380a57, зелёный, per-chunk): timing par4 e2e=25.72 gen=34.16
+(конкурентность ~1.3); serial deco e2e=34.40 gen=11.37; nobeard e2e=30.70
+gen=12.08; old par4 e2e=32.13 gen=12.67. Serial cover ~35-39% (gen/e2e) —
+пайплайн латентность-байндед подтверждён серией. Native stage[]: hood
+ТЕПЕРЬ почти свободен (0.08-0.49, ncomp=10-289, hood_compute=0.02-0.5) —
+parallel hood compute сработал; остался native = terrain ~6.7 + surface
+~5.0 (surf_walk ~3.7-4.4 главный в surface) ~= 96% gen.
+
+ARCH/ФАКТ: DecoDriver extends BlockPopulator — нативная deco идёт в
+populate-стадии ПОСЛЕ fillChunk, в gen/WIN_NATIVE НЕ входит, но
+interleaved между филлами попадает в span/cover. A/B вердикт = тройка
+honest gen + DecoStats.mean + cover. Baseline serial: deco-лана (платит
+beard+native deco) gen=11.37 < nobeard (без beard вообще) 12.08 ->
+vanilla deco дороже нативной минимум на ~0.7мс/чанк; но e2e deco хуже
+(34.4 vs 30.7) — латентность глушит разницу gen, разделит cover-зонд.
+
+NEXT: (1) c4cadad3 integration: gates + par4deco A/B вердикт + cover
+числа; (2) 62632772 = чистые prof-числа (WRING+reset) — terr_*
+суб-стадии без инфляции; (3) фронт по cover: <<100% -> Paper
+статус-цепочка (batching/handoff), ~100% -> terrain-внутренности
+(sample_final_density ~6.7 top-1, fused-program + interp cache);
+(4) дефолт CRUS_NATIVE_DECO по вердикту A/B.
