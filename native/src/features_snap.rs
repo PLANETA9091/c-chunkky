@@ -717,6 +717,42 @@ fn tag_matches_name(tag: &str, name: &str) -> Option<bool> {
     }
 }
 
+/// Process-wide tag-members registry: the first query of a tag fetches the
+/// full member set through the bridge (one crossing per tag per process)
+/// and every later rule-test cell answers from the cached set. The 26.3 ore
+/// rule tests evaluate TagMatch(height_specific_ore_replaceables) +
+/// Not(TagMatch(...)) on EVERY candidate cell — the per-cell bridge upcalls
+/// were the [ore-prof] top holder (tag=4.4ms/chunk, ~2 crossings x ~3K
+/// cells/chunk). None = the fetch failed (nothing cached — the caller keeps
+/// the per-cell bridge, the pre-registry semantics).
+pub fn tag_registry_is(
+    tag: &str,
+    name: &str,
+    fetch: impl FnOnce(&str) -> Option<Vec<String>>,
+) -> Option<bool> {
+    use std::collections::{HashMap, HashSet};
+    static REG: std::sync::LazyLock<
+        std::sync::Mutex<HashMap<String, HashSet<String>>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+    let short = name.strip_prefix("minecraft:").unwrap_or(name);
+    let mut reg = REG.lock().ok()?;
+    match reg.get(tag) {
+        Some(set) => Some(
+            set.iter()
+                .any(|m| m.strip_prefix("minecraft:").unwrap_or(m) == short),
+        ),
+        None => {
+            let members = fetch(tag)?;
+            let set: HashSet<String> = members.into_iter().collect();
+            let hit = set
+                .iter()
+                .any(|m| m.strip_prefix("minecraft:").unwrap_or(m) == short);
+            reg.insert(tag.to_string(), set);
+            Some(hit)
+        }
+    }
+}
+
 impl DecoLevel for ChunkLevel<'_> {
     fn min_y(&self) -> i32 {
         self.inner.min_y()
@@ -951,19 +987,33 @@ impl DecoLevelExt for ChunkLevel<'_> {
                     let name = crate::features_deco::state_block_name(st);
                     return match tag_matches_name(tag, name) {
                         Some(b) => b,
-                        None => self.inner.tag_is(pos, tag),
+                        None => self.tag_via_registry(pos, tag, Some(name)),
                     };
                 }
             }
         }
         self.ensure(pos.x, pos.y, pos.z);
-        // world blocks can match exotic tags — only the ore sets are native;
-        // exotic tags take the exact bridge path
+        // world blocks can match exotic tags — the known ore sets answer
+        // natively, everything else goes through the fetch-once tag registry
+        // (one bridge crossing per tag per process instead of per cell) and
+        // falls back to the exact bridge path when the registry can't answer
         if let Some(name) = self.snap.borrow().name_ref_at(pos.x, pos.y, pos.z) {
             return match tag_matches_name(tag, name) {
                 Some(b) => b,
-                None => self.inner.tag_is(pos, tag),
+                None => self.tag_via_registry(pos, tag, Some(name)),
             };
+        }
+        self.tag_via_registry(pos, tag, None)
+    }
+
+    /// Fetch-once tag registry over the known name, then the per-cell bridge
+    /// as the last resort (no snapshot/overlay name, or the bridge has no
+    /// tagMembers — the pre-registry semantics).
+    fn tag_via_registry(&self, pos: BlockPos, tag: &str, name: Option<&str>) -> bool {
+        if let Some(name) = name {
+            if let Some(b) = tag_registry_is(tag, name, |t| self.inner.tag_members(t)) {
+                return b;
+            }
         }
         self.inner.tag_is(pos, tag)
     }
@@ -1059,5 +1109,40 @@ mod tests {
         assert_eq!(reg.biome(3, 90, 4), Some("minecraft:plains"));
         // out of region
         assert!(reg.block(16, 80, 0).is_none());
+    }
+
+    /// tag_registry_is: fetch-once (the bridge is hit exactly once per tag),
+    /// membership answers match the fetched set, failed fetches stay
+    /// uncached (None every time) and the minecraft: prefix is stripped on
+    /// both sides.
+    #[test]
+    fn tag_registry_fetch_once_and_membership() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static CALLS: AtomicU32 = AtomicU32::new(0);
+        let fetch = |_tag: &str| -> Option<Vec<String>> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Some(vec![
+                "minecraft:stone".to_string(),
+                "minecraft:deepslate".to_string(),
+                "minecraft:granite".to_string(),
+            ])
+        };
+        let uniq = format!("test:tag_{}", std::process::id());
+        assert_eq!(tag_registry_is(&uniq, "minecraft:stone", fetch), Some(true));
+        assert_eq!(
+            tag_registry_is(&uniq, "minecraft:tuff", |t: &str| {
+                let _ = t;
+                unreachable!("cached tags must not re-fetch");
+            }),
+            Some(false)
+        );
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        // failed fetch: None, nothing cached — next call re-fetches
+        let uniq2 = format!("test:fail_{}", std::process::id());
+        assert_eq!(tag_registry_is(&uniq2, "minecraft:stone", |_| None), None);
+        assert_eq!(
+            tag_registry_is(&uniq2, "minecraft:stone", |_| Some(vec![])),
+            Some(false)
+        );
     }
 }

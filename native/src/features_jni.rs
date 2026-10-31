@@ -149,6 +149,10 @@ struct BridgeMids {
     deco_snap_section: jni_sys::jmethodID,
     deco_snap_section_range: jni_sys::jmethodID,
     deco_heightmaps: jni_sys::jmethodID,
+    /// SOFT resolve (not in the ok[] gate): an older plugin jar without
+    /// tagMembers only degrades to the per-cell tagIs bridge (None), the
+    /// hard-resolved mids above still gate JniLevel::new.
+    tag_members: jni_sys::jmethodID,
 }
 
 pub struct JniLevel<'a> {
@@ -216,6 +220,7 @@ impl<'a> JniLevel<'a> {
                 deco_snap_section: mid("decoSnapSection", "(III)[B"),
                 deco_snap_section_range: mid("decoSnapSectionRange", "(IIII)[B"),
                 deco_heightmaps: mid("decoHeightmaps", "(II)[I"),
+                tag_members: mid("tagMembers", "(Ljava/lang/String;)[Ljava/lang/String;"),
             };
             let ok = [
                 mids.is_air,
@@ -692,6 +697,54 @@ impl<'a> DecoLevelExt for JniLevel<'a> {
                 Self::val_l(arr),
             ],
         )
+    }
+    /// Full member set of a block tag — the feed for the process-wide tag
+    /// registry (features_snap::tag_registry_is): ONE crossing per tag
+    /// replaces the per-cell tagIs upcalls inside the 26.3 ore rule tests
+    /// ([ore-prof] top holder: tag=4.4ms/chunk, ~2 crossings x ~3K cells).
+    /// None = no tagMembers mid (older jar) / the call failed — the caller
+    /// keeps the per-cell bridge.
+    fn tag_members(&self, tag: &str) -> Option<Vec<String>> {
+        if self.noup() || self.mids.tag_members.is_null() {
+            return None;
+        }
+        let Some(js) = self.new_jstring(tag) else {
+            return None;
+        };
+        let tbl = unsafe { *self.env };
+        unsafe {
+            let ivals = [Self::val_l(js)];
+            let r = ((*tbl).v1_1.CallObjectMethodA)(
+                self.env,
+                self.obj,
+                self.mids.tag_members,
+                ivals.as_ptr(),
+            ) as jni_sys::jobjectArray;
+            ((*tbl).v1_1.DeleteLocalRef)(self.env, js as jni_sys::jobject);
+            if ((*tbl).v1_2.ExceptionCheck)(self.env) {
+                ((*tbl).v1_2.ExceptionClear)(self.env);
+                return None;
+            }
+            if r.is_null() {
+                return None;
+            }
+            let len = ((*tbl).v1_1.GetArrayLength)(self.env, r as jni_sys::jarray) as usize;
+            let mut out: Vec<String> = Vec::with_capacity(len);
+            for i in 0..len {
+                let el = ((*tbl).v1_1.GetObjectArrayElement)(self.env, r, i as jni_sys::jsize);
+                if el.is_null() {
+                    continue;
+                }
+                let c = ((*tbl).v1_1.GetStringUTFChars)(self.env, el as jni_sys::jstring, std::ptr::null_mut());
+                if !c.is_null() {
+                    out.push(std::ffi::CStr::from_ptr(c).to_string_lossy().into_owned());
+                    ((*tbl).v1_2.ReleaseStringUTFChars)(self.env, el as jni_sys::jstring, c);
+                }
+                ((*tbl).v1_1.DeleteLocalRef)(self.env, el);
+            }
+            ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+            Some(out)
+        }
     }
     fn fluid_is(&self, pos: BlockPos, ids: &[String]) -> bool {
         let Some(arr) = self.new_string_array(ids) else { return false };

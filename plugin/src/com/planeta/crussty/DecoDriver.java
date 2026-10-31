@@ -824,6 +824,24 @@ public final class DecoDriver extends BlockPopulator {
                 Identifier.parse(tag)));
     }
 
+    /** One-shot tag member dump — the feed for the native process-wide tag
+     *  registry (features_snap::tag_registry_is). The 26.3 ore rule tests
+     *  evaluate TagMatch(height_specific_ore_replaceables) + Not(TagMatch)
+     *  on EVERY candidate cell; the per-cell tagIs upcalls were the
+     *  [ore-prof] top holder (tag=4.4ms/chunk). One crossing per tag per
+     *  process replaces them all. */
+    public String[] tagMembers(String tag) {
+        var key = net.minecraft.tags.TagKey.create(net.minecraft.core.registries.Registries.BLOCK,
+                Identifier.parse(tag));
+        var out = new java.util.ArrayList<String>(48);
+        for (var b : BuiltInRegistries.BLOCK) {
+            if (b.defaultBlockState().is(key)) {
+                out.add(BuiltInRegistries.BLOCK.getKey(b).toString());
+            }
+        }
+        return out.toArray(new String[0]);
+    }
+
     /** Debug upcall: block registry key at pos (draw-trace diagnostics). */
     public String stateName(int x, int y, int z) {
         BlockState st = reg.getBlockState(new BlockPos(x, y, z));

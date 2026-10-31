@@ -331,6 +331,13 @@ pub trait DecoLevelExt: DecoLevel {
     fn fluid_is(&self, pos: BlockPos, ids: &[String]) -> bool;
     /// RuleTest.tag_match — state.is(TagKey.create(BLOCK, tag)) at pos
     fn tag_is(&self, pos: BlockPos, tag: &str) -> bool;
+    /// Full member set of a block tag (the fetch-once registry feed —
+    /// features_snap::tag_registry_is). Default None: mocks and raw levels
+    /// keep the per-cell bridge semantics.
+    fn tag_members(&self, tag: &str) -> Option<Vec<String>> {
+        let _ = tag;
+        None
+    }
     /// solidity of a block NAME (no position): used by OverlayLevel to answer
     /// is_solid for states written earlier in the same feature run (vanilla
     /// reads its own writes; our ops flush after the feature).
