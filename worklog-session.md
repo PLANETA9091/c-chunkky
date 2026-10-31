@@ -4396,3 +4396,67 @@ vanilla-exact BitSet seen (скрипт scripts/patch_ore_bitset.py готов,
 якоря сверены; декомпил 26.3 подтверждает формулу индекса
 dx + dy*W + dz*W*H с алиасингом BitSet.get/set) — затем переоценка
 перевода CRUS_NATIVE_DECO=1 в дефолт.
+
+## cont-80 РЕЗУЛЬТАТ (a468ad85 GREEN, CI 41188550711): BitSet seen −12% native deco wall; разбор режимов — честный deco-гэп 1.8мс, а par4-инфляция филла = гонка адаптивного тред-старта
+
+Все джобы GREEN: BIOME PARITY OK (144 identical), GATE PASS ×3
+(strict materials bit-equal), far-gen все дистанции OK, SIMD parity
+0/25 fails. Bench: server_fill median 4.59 (COLD 6.34, WAVE 6.19),
+fill_chunk 5.02 (COLD 5.09), volume FUSED 11.96 bit-parity 0/175.
+
+BitSet (a468ad85, vanilla-exact seen в place_ore — формула индекса
+dx + dy*W + dz*W*H с алиасингом BitSet.get/set):
+- deco-лана run-prof native: 4.25-4.68 → **3.670-3.995 мс/чанк** (−12%).
+- run-prof-top руды: granite 568→420-515µs, diorite 536→411-462,
+  andesite 586→408-498, tuff 492→361-438, gravel 343→250-337,
+  iron_upper →227-269, dirt →213-266, coal_lower →138-177,
+  coal_upper →112-128, dripstone →280-376.
+- deco probe e2e: 30.31 → **28.84** (−1.5мс).
+- [ore-prof] tag 14.2-15.9 → 13.43-15.61 (BitSet tag не трогает; шум).
+
+РАЗБОР РЕЖИМОВ (главное открытие рана): deco-лана в ci.yml SERIAL
+(нет CRUS_GEN_PARALLEL/CRUS_WORKER_THREADS — строка 195), главная и
+par4-ланы — par4. Конт-79 сравнивал 30.31 (par4) против 23.13 (par4)
+честно, но сегодняшние serial-ланы вскрывают вторую ось:
+- serial deco=0: 27.07 (no-beard) / 27.01 (PF=1) / 27.07+27.94
+  (serial-par JFR) — native fill 10.04-10.70.
+- serial deco=1: 28.84, native fill **9.23** — fill быстрее, а e2e
+  хуже: честный serial deco-гэп = **+1.8мс** (не 5.7).
+- par4 deco=0 (главная, 2 повтора): 23.10/23.00 — par4 экономит ~4мс
+  против serial.
+- Секции/marks идентичны deco=1 vs deco=0 (mixed=8380,
+  marks=37967) → гэп не в весе секций.
+- НО par4 deco=1 (конт-79) = 30.31 ≫ par4 deco=0 23.13 → при par4
+  нативный филл (теперь с deco) ПРОИГРЫВАЕТ: нативная deco-нагрузка
+  не скейлится.
+
+ПОЧЕМУ par4-филл надувается 3× (native 30.5-30.8 par4 vs 10.0-10.7
+serial): fill_threads() адаптивен (cores/ACTIVE_FILLS), но решение
+принимается НА СТАРТЕ филла; при одновременном старте 4 воркеров
+каждый видит active=0-1 и берёт cores.min(4)=4 внутренних треда →
+4×4=16 тредов на 4 ядра во время всего окна. Serial-ланы не видят
+этого (один филл за раз). Готовая ручка CRUS_FILL_THREADS_263=1.
+
+JFR 16x16 (deco=0, N=15): WatchdogThread 53.29% (инфра, исключён);
+бизнес-топ = vanilla OreFeature.doPlace 4.93% + place 1.88% +
+FeaturePlacer 1.41% + StaticCache2D 1.17% (ванильное deco — цель
+перевода дефолта), NoiseStack$Perlin 1.88% (Java-шум в deco-стадии —
+height-запросы ванильного deco через NoiseChunk). Per-thread:
+Worker #0 88.8% (~1.7с), Server thread 11.2% (~0.2с — ТОЛЬКО
+chunk-system шедулинг: addTicketAtLevel/ChunkTaskScheduler/
+setAllStarts). Parks: Paper I/O Worker 8.1с idle — жителя латентности
+нет. ВЫВОД: post-gen paper-side (lighting/convert/save) НЕ виден как
+CPU-житель — остаток e2e это JNI-филл + латентность статус-цепочки.
+
+CARVER WARN (известный, pre-existing): CarverDriver.java:102 делает
+limited.getHandle() → WorldGenRegion, затем отражение
+WorldGenRegion.getHandle() — в 26.3 метода нет; carvers:null в
+Tectonic preset → безвреден, спам-шум. Фикс когда-нибудь: unwrap как
+DecoDriver:182 (CraftLimitedRegion.getHandle() → getChunk).
+
+NEXT: (1) diag-лана par4 + CRUS_FILL_THREADS_263=1 (строка 279,
+последняя par4 — главная остаётся базлайном) → same-run A/B против
+23.10; подтверждение = native ~12-14 и e2e ~19-20. (2) Если подтвердится —
+JNI setNativeFillThreads(1) при CRUS_GEN_PARALLEL=1 на мосту (дефолт
+без ручки). (3) Затем переоценка перевода CRUS_NATIVE_DECO=1 в
+дефолт уже в par4-режиме.
