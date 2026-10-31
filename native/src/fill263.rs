@@ -739,6 +739,17 @@ impl Drop for ActiveFillGuard {
 /// parallel chunk generation), each fill narrows to cores/active so the
 /// machine is saturated without oversubscribing; a lone fill takes the full
 /// (capped) width.
+///
+/// cont-80: the cores/active split races the burst START — the first fill
+/// of a burst samples active==1 and takes the full width while later fills
+/// sample 2..N, so a 4-worker burst peaks at 8+ strip threads (+ the same
+/// multiplier on hood/surface widths) on 4 cores. Once ANY concurrency has
+/// been observed in this process (Paper parallel gen is the production
+/// default), stay at width 1: the fills themselves already occupy the
+/// cores. Serial mode never sets the flag and keeps the full width.
+static CONCURRENT_SEEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub fn fill_threads() -> usize {
     if let Ok(v) = std::env::var("CRUS_FILL_THREADS_263") {
         if let Ok(n) = v.parse::<usize>() {
@@ -750,7 +761,10 @@ pub fn fill_threads() -> usize {
         .unwrap_or(1);
     let active = ACTIVE_FILLS.load(std::sync::atomic::Ordering::Relaxed);
     if active > 1 {
+        CONCURRENT_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
         (cores / active).max(1)
+    } else if CONCURRENT_SEEN.load(std::sync::atomic::Ordering::Relaxed) {
+        1
     } else {
         cores.min(4).max(1)
     }
