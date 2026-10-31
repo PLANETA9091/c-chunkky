@@ -581,31 +581,44 @@ pub static PROF_CC_HIT: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 pub static PROF_CC_MISS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PROF_CC_BOX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-pub struct CornerCache263 {
-    shards: Box<[std::sync::Mutex<std::collections::HashMap<(u64, i64), f32>>]>,
-    len: std::sync::atomic::AtomicU64,
+/// Lock-free open-addressing corner table (cont-89 rev2). The Mutex+HashMap
+/// design measured 6-8ms/fill of machinery on the CFS-throttled CI runner
+/// (17K lock+hash ops per fill, ~600ns/op under contention) — eating the
+/// entire corner-eval saving. This table has a LOCK-FREE read path: a probe
+/// is 2-3 Acquire loads (clean shared cachelines, ~5-15ns); inserts CAS a
+/// reserve marker and publish. Entry layout (3 words):
+///   k0 = (generation << 48) | node pointer  — userland ptrs are < 2^48;
+///        u64::MAX = reserved-being-written, 0 = empty (gen >= 1 always)
+///   k1 = packed position (26+26+12 bits)
+///   v  = f32 to_bits zero-extended (validity comes from the k0/k1 match)
+/// Generations make recycled node pointers alias-proof (a dropped tree's
+/// addresses reused by a new tree carry a different gen in k0). Same-key
+/// double inserts are benign: both values are position-pure and identical.
+/// The table is never cleared — dead-generation entries become unreachable
+/// dead weight; when the table fills, inserts stop (correctness unaffected,
+/// the cache degrades to bypass).
+pub struct CornerTable263 {
+    /// k0,k1,v triplets; len = CORNER_TABLE_ENTRIES * 3.
+    slots: Box<[std::sync::atomic::AtomicU64]>,
 }
 
-static CORNER_CACHE: std::sync::OnceLock<CornerCache263> = std::sync::OnceLock::new();
+pub const CORNER_TABLE_ENTRIES: usize = 12_000_000;
+const CORNER_PROBE_LIMIT: usize = 8;
+const CORNER_RESERVED: u64 = u64::MAX;
 
-impl CornerCache263 {
+static CORNER_TABLE: std::sync::OnceLock<CornerTable263> = std::sync::OnceLock::new();
+
+impl CornerTable263 {
     fn new() -> Self {
-        CornerCache263 {
-            shards: (0..CORNER_SHARDS)
-                .map(|_| std::sync::Mutex::new(std::collections::HashMap::new()))
+        CornerTable263 {
+            slots: (0..CORNER_TABLE_ENTRIES * 3)
+                .map(|_| std::sync::atomic::AtomicU64::new(0))
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
-            len: std::sync::atomic::AtomicU64::new(0),
         }
     }
-    fn get() -> &'static CornerCache263 {
-        CORNER_CACHE.get_or_init(CornerCache263::new)
-    }
-    fn clear_all(&self) {
-        for s in self.shards.iter() {
-            s.lock().unwrap().clear();
-        }
-        self.len.store(0, std::sync::atomic::Ordering::Relaxed);
+    fn get() -> &'static CornerTable263 {
+        CORNER_TABLE.get_or_init(CornerTable263::new)
     }
 }
 
@@ -630,31 +643,74 @@ fn pack_corner_pos(x: i32, y: i32, z: i32) -> Option<i64> {
 }
 
 #[inline]
-fn corner_shard(ptr: u64, pos: i64) -> usize {
+fn corner_key0(gen: u64, ptr: u64) -> u64 {
+    debug_assert!(gen < (1 << 16));
+    debug_assert!(ptr < (1 << 48));
+    ((gen & 0xFFFF) << 48) | ptr
+}
+
+#[inline]
+fn corner_probe(gen: u64, ptr: u64, pos: i64) -> Option<f32> {
+    let t = CornerTable263::get();
+    let my_k0 = corner_key0(gen, ptr);
     let mut h = (pos as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ ptr.rotate_left(21);
     h ^= h >> 29;
     h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     h ^= h >> 32;
-    (h & (CORNER_SHARDS as u64 - 1)) as usize
+    let base = (h as usize) % CORNER_TABLE_ENTRIES;
+    for i in 0..CORNER_PROBE_LIMIT {
+        let s = (base + i) % CORNER_TABLE_ENTRIES;
+        let k0 = t.slots[s * 3].load(std::sync::atomic::Ordering::Acquire);
+        if k0 == my_k0 {
+            if t.slots[s * 3 + 1].load(std::sync::atomic::Ordering::Acquire) == pos as u64 {
+                return Some(f32::from_bits(
+                    t.slots[s * 3 + 2].load(std::sync::atomic::Ordering::Acquire) as u32,
+                ));
+            }
+        } else if k0 == 0 {
+            // empty slot ends the run — the key would be here if present
+            return None;
+        }
+    }
+    None
 }
 
 #[inline]
-fn corner_probe(ptr: u64, pos: i64) -> Option<f32> {
-    let cache = CornerCache263::get();
-    let shard = cache.shards[corner_shard(ptr, pos)].lock().unwrap();
-    shard.get(&(ptr, pos)).copied()
-}
-
-#[inline]
-fn corner_insert(ptr: u64, pos: i64, v: f32) {
-    let cache = CornerCache263::get();
-    if cache.len.load(std::sync::atomic::Ordering::Relaxed) >= CORNER_CAP {
-        cache.clear_all();
+fn corner_insert(gen: u64, ptr: u64, pos: i64, v: f32) {
+    use std::sync::atomic::Ordering;
+    let t = CornerTable263::get();
+    let my_k0 = corner_key0(gen, ptr);
+    let mut h = (pos as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ ptr.rotate_left(21);
+    h ^= h >> 29;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 32;
+    let base = (h as usize) % CORNER_TABLE_ENTRIES;
+    for i in 0..CORNER_PROBE_LIMIT {
+        let s = (base + i) % CORNER_TABLE_ENTRIES;
+        let k0 = t.slots[s * 3].load(Ordering::Acquire);
+        if k0 == my_k0 {
+            // already present (benign double insert) or reserved by a twin
+            return;
+        }
+        if k0 == 0 {
+            match t.slots[s * 3].compare_exchange(
+                0,
+                CORNER_RESERVED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    t.slots[s * 3 + 1].store(pos as u64, Ordering::Release);
+                    t.slots[s * 3 + 2].store(v.to_bits() as u64, Ordering::Release);
+                    t.slots[s * 3].store(my_k0, Ordering::Release);
+                    return;
+                }
+                Err(_) => continue, // lost the race — try the next slot
+            }
+        }
     }
-    let mut shard = cache.shards[corner_shard(ptr, pos)].lock().unwrap();
-    if shard.insert((ptr, pos), v).is_none() {
-        cache.len.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
+    // probe window exhausted — drop the insert (the table segment here is
+    // full; the value stays recomputable)
 }
 
 /// The stamp fills must put into SamplerCtx263::cc_gen to engage the cache.
@@ -690,6 +746,7 @@ pub fn bump_corner_live() {
 fn corner_grid_cached(
     a: &SamRef,
     ctx: &mut SamplerCtx263,
+    gen: u64,
     node_ptr: u64,
     cell_buf: &mut [f32],
     cv: &DensityVolume,
@@ -717,7 +774,7 @@ fn corner_grid_cached(
                         break;
                     }
                 };
-                match corner_probe(node_ptr, pos) {
+                match corner_probe(gen, node_ptr, pos) {
                     Some(v) => hit_buf[idx] = v,
                     None => {
                         miss_count += 1;
@@ -781,6 +838,7 @@ fn corner_grid_cached(
                     let v = box_buf[box_vol.index_unchecked(ix - lox, iy - loy, iz - loz)];
                     cell_buf[idx] = v;
                     corner_insert(
+                        gen,
                         node_ptr,
                         pack_corner_pos(cv.block_x(ix), cv.block_y(iy), cv.block_z(iz)).unwrap(),
                         v,
@@ -2474,6 +2532,7 @@ fn interpolated_volume(
         && corner_grid_cached(
             a_arc,
             ctx,
+            ctx.cc_gen,
             std::sync::Arc::as_ptr(a_arc) as u64,
             &mut cell_buf,
             &cell_volume,
@@ -2492,6 +2551,7 @@ fn interpolated_volume(
                             cell_volume.block_z(iz),
                         ) {
                             corner_insert(
+                                ctx.cc_gen,
                                 node_ptr,
                                 pos,
                                 cell_buf[cell_volume.index_unchecked(ix, iy, iz)],

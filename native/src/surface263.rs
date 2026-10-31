@@ -569,6 +569,12 @@ struct Walk263<'a> {
     temp_cache: (u64, [f64; 4]),
     /// per-cond-kind evaluation counts (diag, local; aggregated per fill)
     calls: [u32; SR_CALL_KINDS],
+    /// per-point biome memo (cont-89): biome_idx_at is pure per (bx, y, bz)
+    /// within one walk (zoom seed fixed, hood grids fixed per fill, point
+    /// ctx caches are memoization) — rules consult it ~2.6x per distinct
+    /// point; one memo slot kills the repeats. Miss = exactly the old path.
+    biome_memo_key: (i32, i32, i32),
+    biome_memo_val: usize,
 }
 
 impl<'a> Walk263<'a> {
@@ -632,6 +638,16 @@ impl<'a> Walk263<'a> {
 
     #[inline]
     fn biome_idx_at(&mut self, bx: i32, y: i32, bz: i32) -> usize {
+        if self.biome_memo_key == (bx, y, bz) {
+            return self.biome_memo_val;
+        }
+        let bi = self.biome_idx_at_uncached(bx, y, bz);
+        self.biome_memo_key = (bx, y, bz);
+        self.biome_memo_val = bi;
+        bi
+    }
+
+    fn biome_idx_at_uncached(&mut self, bx: i32, y: i32, bz: i32) -> usize {
         if let Some((b, rc)) = &self.point_biomes {
             // topMaterial biomeGetter: correctBiomeManager::getBiome =
             // withDifferentSource(createUncachedResolver) — the fiddle
@@ -1453,6 +1469,8 @@ fn walk_columns(
         grad_factory: (0..cond_count).map(|_| None).collect(),
         temp_cache: (0, [0.0; 4]),
         calls: [0; SR_CALL_KINDS],
+        biome_memo_key: (i32::MIN, i32::MIN, i32::MIN),
+        biome_memo_val: usize::MAX,
     };
     let mut marks: Vec<i64> = Vec::new();
     for lz in z0..z1 {
@@ -1849,6 +1867,8 @@ pub fn top_material263(
         grad_factory: (0..cond_count).map(|_| None).collect(),
         temp_cache: (0, [0.0; 4]),
         calls: [0; SR_CALL_KINDS],
+        biome_memo_key: (i32::MIN, i32::MIN, i32::MIN),
+        biome_memo_val: usize::MAX,
     };
     walk.update_xz(px, pz);
     let water_height = if under_fluid { py + 1 } else { i32::MIN };
