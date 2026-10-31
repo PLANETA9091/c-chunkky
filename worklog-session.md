@@ -4883,3 +4883,44 @@ NEXT: (1) pull_deco_diag.sh на 717ab7fc/f2c8b7c1 -> точная deco-ветк
 фикс активации DecoDriver; (2) unreflect privateLookupIn фикс; (3) если
 DecoDriver оживёт — JFR OreFeature должен уйти с Paper-side, deco-ланы
 становятся валидными A/B.
+
+## cont-85: diag 41223656202 разобран — DecoDriver ЖИВОЙ, но 7мс/чанк (stays off); carver-хоп починен; MH-мост на privateLookupIn
+
+READ-OUT CI 41223656202 (06cd6ec0, green) — deco-ланы:
+- deco=1 (CRUS_NATIVE_DECO=1): DecoStats chunks=582 mean=7109us
+  [plan=0.14 struct=0.01 run=6.21 apply=0.30 deleg=0.37] ops=3.2M
+  features=31221 delegate=5144; honest e2e=37.53 vs deco=0 29.77
+  (+7.8ms ~ = deco mean). Вторая deco-лана: chunks=655 mean=17905us
+  (run=14.09) — под par4-конкуренцией хуже вдвое.
+- run-top: ore_* фичи ~4.8ms/chunk из 6.21 (granite 363ms/582,
+  diorite 353, andesite 346, tuff 337, gravel 308, iron_upper 255...).
+- ВЫВОД: native deco работает end-to-end, но run-ер фич в 6-10x
+  медленнее vanilla deco (~0.6-1ms по JFR). КРИТЕРИЙ ВОЗВРАТА: runner
+  фич < 0.5ms/chunk (иначе deco=1 всегда e2e-минус). Пока default-off.
+- Загадка cont-84e снята: "never ran" был верен для СТАРЫХ ранов; в
+  diag-ране setupDeco дошёл до конца (никаких deco-off WARN) — активация
+  здоровая, вопрос был в конфиге lanes, не в коде.
+
+НАЙДЕН И ПОЧИНЕН (f0bb3ec8):
+1. CarverDriver: второй хоп handle.getClass().getMethod("getHandle") на
+   WorldGenRegion — метода НЕТ (WorldGenRegion и есть хэндл региона);
+   NoSuchMethodException на каждом чанке, populate целиком abort
+   (carver=0.00 во всех окнах, WARN в run.out). Фикс: ChunkAccess =
+   region.getChunk(cx, cz) — cx/cz из populate-аргументов = центр
+   региона (LevelReader.getChunk(int,int), рефлексией — build не трогаем).
+2. unreflectGet/Set: bare lookup().unreflect* делает СОБСТВЕННУЮ
+   access-check и отклоняет private NMS-поля даже при
+   setAccessible(true) (lookup-класс в com.planeta, поле в
+   net.minecraft.*) -> ВСЕ хэндлы моста были null, каждый hGet/hSet шёл
+   через Field.get/set (Field.checkAccess в JFR hot, ~0.4ms/chunk).
+   Фикс: tier-2 privateLookupIn(declaringClass, lookup()) — NMS в
+   unnamed module, opens не нужны; null только при двойном фейле
+   (Field-fallback сохранён). Сайты: mhTickingListGet/mhBulkStatesGet/
+   mhIsOpaqueGet (per section/chunk) + 4x hSetShort per section.
+
+ОЖИДАНИЯ от CI f0bb3ec8: JFR — Field.checkAccess уходит из hot-methods;
+honest e2e -0.3..-0.4 (внутри шума ±20-40%, честный компаратор —
+внутрирановый bench); carver-лан больше не WARN-ит, carver=0.00 -> >0
+(если CRUS_NATIVE_CARVERS=1 лана активна).
+
+## cont-86: CI f0bb3ec8 — запуск верификации
