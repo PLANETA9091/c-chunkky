@@ -128,8 +128,16 @@ public final class DecoDriver extends BlockPopulator {
             java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     private final World world;
-    /** per-populate region handle (upcalls run on the populate thread). */
-    private WorldGenRegion reg;
+    /** per-populate region handle — ThreadLocal: the driver is ONE world-level
+     *  instance and with parallel chunk gen (CRUS_WORKER_THREADS=4) populate
+     *  runs on up to 4 workers at once; a plain field raced (wrong-region
+     *  deco writes / NPE between set and remove). */
+    private final ThreadLocal<WorldGenRegion> REG = new ThreadLocal<>();
+
+    /** Thread-local populate region accessor (all upcall paths). */
+    private WorldGenRegion reg() {
+        return REG.get();
+    }
     /** NMS generator (hybrid delegate runs vanilla PlacedFeature with it). */
     private static volatile ChunkGenerator NMS_GEN;
 
@@ -185,7 +193,7 @@ public final class DecoDriver extends BlockPopulator {
             LOG.warning("deco: region unwrap failed, native deco disabled: " + t);
             return;
         }
-        this.reg = region;
+        REG.set(region);
         java.util.concurrent.locks.ReentrantLock[] lockBox =
                 new java.util.concurrent.locks.ReentrantLock[1];
         long ctx = CrusstyChunkGenerator.decoAcquire(lockBox);
@@ -200,7 +208,7 @@ public final class DecoDriver extends BlockPopulator {
             LOG.warning("deco: chunk " + cx + "," + cz + " failed: " + t);
         } finally {
             CrusstyChunkGenerator.decoRelease(lockBox);
-            this.reg = null;
+            REG.remove();
         }
     }
 
@@ -237,8 +245,8 @@ public final class DecoDriver extends BlockPopulator {
         FIRST_LOGGED = true;
         int ox = cx << 4;
         int oz = cz << 4;
-        int oy = reg.getMinY();
-        int maxY = reg.getMaxY();
+        int oy = reg().getMinY();
+        int maxY = reg().getMaxY();
         long seed = world.getSeed();
         long l = ChunkGenNative.decoDecoSeed(seed, ox, oz);
         // chunk-scoped overlay + snapshot reset (Rust side) — must precede
@@ -253,7 +261,7 @@ public final class DecoDriver extends BlockPopulator {
         } catch (Throwable t) {
             zoomSeed = 0;
         }
-        ChunkGenNative.decoChunkBegin(ctx, cx, cz, reg.getMinSectionY(), zoomSeed);
+        ChunkGenNative.decoChunkBegin(ctx, cx, cz, reg().getMinSectionY(), zoomSeed);
 
         long tp0 = System.nanoTime();
         long tb0 = System.nanoTime();
@@ -366,7 +374,7 @@ public final class DecoDriver extends BlockPopulator {
      */
     private void delegateVanilla(String placedName, int step, int gid, long decoSeed,
                                  int ox, int oy, int oz) {
-        if (NMS_GEN == null || reg == null) {
+        if (NMS_GEN == null || reg() == null) {
             return;
         }
         try {
@@ -378,7 +386,7 @@ public final class DecoDriver extends BlockPopulator {
                 if (DELEGATE_MISSING.contains(placedName)) {
                     return;
                 }
-                var holders = reg.registryAccess().lookupOrThrow(Registries.PLACED_FEATURE)
+                var holders = reg().registryAccess().lookupOrThrow(Registries.PLACED_FEATURE)
                         .get(Identifier.parse(placedName));
                 if (holders.isEmpty()) {
                     LOG.warning("deco delegate: placed feature missing in registry: " + placedName);
@@ -410,7 +418,7 @@ public final class DecoDriver extends BlockPopulator {
      * placeInChunk(level, sm, generator, rng, writableArea, pos).
      */
     private void runStructures(long decoSeed, int cx, int cz) {
-        if (NMS_GEN == null || reg == null) {
+        if (NMS_GEN == null || reg() == null) {
             return;
         }
         long tf0 = System.nanoTime();
@@ -440,7 +448,7 @@ public final class DecoDriver extends BlockPopulator {
             // runtime; compute once.
             Map<Integer, List<Structure>> map = STRUCT_BY_STEP;
             if (map == null) {
-                Registry<Structure> structReg = reg.registryAccess()
+                Registry<Structure> structReg = reg().registryAccess()
                         .lookupOrThrow(Registries.STRUCTURE);
                 map = structReg.stream()
                         .collect(Collectors.groupingBy(s -> s.step().ordinal()));
@@ -453,11 +461,11 @@ public final class DecoDriver extends BlockPopulator {
             }
             WorldgenRandom srng = new WorldgenRandom(
                     new XoroshiroRandomSource(RandomSupport.generateUniqueSeed()));
-            SectionPos sp = SectionPos.of(new ChunkPos(cx, cz), reg.getMinSectionY());
+            SectionPos sp = SectionPos.of(new ChunkPos(cx, cz), reg().getMinSectionY());
             // Paper: WorldGenRegion lacks structureManager(); build one over
             // the region exactly like StructureManager.forWorldGenRegion does.
             long tu0 = System.nanoTime();
-            StructureManager sm = reg.getLevel().structureManager().forWorldGenRegion(reg);
+            StructureManager sm = reg().getLevel().structureManager().forWorldGenRegion(reg);
             if (!sm.shouldGenerateStructures()) {
                 return;
             }
@@ -470,7 +478,7 @@ public final class DecoDriver extends BlockPopulator {
                 for (Structure structure : map.getOrDefault(i, List.of())) {
                     srng.setFeatureSeed(decoSeed, i1, i);
                     try {
-                        reg.setCurrentlyGenerating(() -> structName(structure));
+                        reg().setCurrentlyGenerating(() -> structName(structure));
                     } catch (Throwable ignored) {
                         // diagnostics only
                     }
@@ -507,11 +515,11 @@ public final class DecoDriver extends BlockPopulator {
 
     /** vanilla ChunkGenerator.getWritableArea: the 3x3 chunk region box. */
     private BoundingBox writableArea() {
-        ChunkPos pos = reg.getCenter();
+        ChunkPos pos = reg().getCenter();
         int x = pos.getMinBlockX();
         int z = pos.getMinBlockZ();
-        return new BoundingBox(x - 16, reg.getMinY(), z - 16,
-                x + 31, reg.getMinY() + reg.getHeight() - 1, z + 31);
+        return new BoundingBox(x - 16, reg().getMinY(), z - 16,
+                x + 31, reg().getMinY() + reg().getHeight() - 1, z + 31);
     }
 
     private int PLAN_TOTAL() {
@@ -538,7 +546,7 @@ public final class DecoDriver extends BlockPopulator {
         if ((flags & 32) != 0) {
             // FLAG_POSTPROC: vanilla markAboveForPostProcessing (DiskFeature)
             // — chunk-level postprocessing mark, no block write.
-            ChunkAccess ch = reg.getChunk((ox + rx) >> 4, (oz + rz) >> 4);
+            ChunkAccess ch = reg().getChunk((ox + rx) >> 4, (oz + rz) >> 4);
             ch.markPosForPostProcessing(new BlockPos(ox + rx, y, oz + rz)); // 26.3 name
             return false;
         }
@@ -580,8 +588,8 @@ public final class DecoDriver extends BlockPopulator {
             // FLAG_RAW: vanilla BulkSectionAccess write (OreFeature) — section-
             // level setBlockState(state, false): NO heightmap update, no
             // postprocessing marks, no block events.
-            ChunkAccess ch = reg.getChunk((ox + rx) >> 4, (oz + rz) >> 4);
-            int si = reg.getSectionIndex(y);
+            ChunkAccess ch = reg().getChunk((ox + rx) >> 4, (oz + rz) >> 4);
+            int si = reg().getSectionIndex(y);
             if (si < 0 || si >= ch.getSectionsCount()) {
                 return false;
             }
@@ -589,9 +597,9 @@ public final class DecoDriver extends BlockPopulator {
             sec.setBlockState((ox + rx) & 15, y & 15, (oz + rz) & 15, st, false);
             return true;
         }
-        reg.setBlock(pos, st, 2);
+        reg().setBlock(pos, st, 2);
         if ((flags & 1) != 0) { // FLAG_TICK
-            reg.scheduleTick(pos, st.getBlock(), 0);
+            reg().scheduleTick(pos, st.getBlock(), 0);
         }
         return true;
     }
@@ -671,7 +679,7 @@ public final class DecoDriver extends BlockPopulator {
         }
         Set<String> possible = POSSIBLE_BIOMES;
         c = new java.util.HashSet<>();
-        ChunkAccess ch = reg.getChunk(cx, cz);
+        ChunkAccess ch = reg().getChunk(cx, cz);
         List<Holder<Biome>> sink = new ArrayList<>(8);
         for (LevelChunkSection sec : ch.getSections()) {
             sink.clear();
@@ -728,7 +736,7 @@ public final class DecoDriver extends BlockPopulator {
         if (c != null) {
             return c;
         }
-        String k = reg.registryAccess().lookupOrThrow(Registries.BIOME).getKey(biome).toString();
+        String k = reg().registryAccess().lookupOrThrow(Registries.BIOME).getKey(biome).toString();
         BIOME_KEY_CACHE.put(biome, k);
         return k;
     }
@@ -750,7 +758,7 @@ public final class DecoDriver extends BlockPopulator {
         // r=true hit only the FINAL WORLD_SURFACE map). Read the chunk's
         // heightmap data instead of scanning the live blocks.
         if (ty == 0 || ty == 2) {
-            ChunkAccess ch = reg.getChunk(x >> 4, z >> 4);
+            ChunkAccess ch = reg().getChunk(x >> 4, z >> 4);
             return ch.getHeight(TYPES[ty], x & 15, z & 15) + 1;
         }
         // The non-WG types are FINAL maps (live): vanilla WorldGenRegion
@@ -762,10 +770,10 @@ public final class DecoDriver extends BlockPopulator {
     }
 
     private int scanHeight(Heightmap.Types t, int x, int z) {
-        int top = reg.getMaxY() - 1;
-        int bottom = reg.getMinY();
+        int top = reg().getMaxY() - 1;
+        int bottom = reg().getMinY();
         for (int y = top; y >= bottom; y--) {
-            BlockState st = reg.getBlockState(new BlockPos(x, y, z));
+            BlockState st = reg().getBlockState(new BlockPos(x, y, z));
             boolean hit = switch (t) {
                 case WORLD_SURFACE, WORLD_SURFACE_WG -> !st.isAir();
                 case OCEAN_FLOOR, MOTION_BLOCKING -> st.is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP) || !st.getFluidState().isEmpty();
@@ -782,7 +790,7 @@ public final class DecoDriver extends BlockPopulator {
 
     public boolean stateIs(int x, int y, int z, String[] names) {
         DecoStats.UP_STATE_IS.incrementAndGet();
-        BlockState st = reg.getBlockState(new BlockPos(x, y, z));
+        BlockState st = reg().getBlockState(new BlockPos(x, y, z));
         String key = BuiltInRegistries.BLOCK.getKey(st.getBlock()).toString();
         for (String n : names) {
             if (key.equals(n)) {
@@ -794,7 +802,7 @@ public final class DecoDriver extends BlockPopulator {
 
     public boolean fluidIs(int x, int y, int z, String[] names) {
         DecoStats.UP_FLUID_IS.incrementAndGet();
-        BlockState st = reg.getBlockState(new BlockPos(x, y, z));
+        BlockState st = reg().getBlockState(new BlockPos(x, y, z));
         String key = BuiltInRegistries.FLUID.getKey(st.getFluidState().getType()).toString();
         for (String n : names) {
             if (key.equals(n)) {
@@ -807,7 +815,7 @@ public final class DecoDriver extends BlockPopulator {
     /** OreFeature isAdjacentToAir: state.isAir() at pos. */
     public boolean isAir(int x, int y, int z) {
         DecoStats.UP_IS_AIR.incrementAndGet();
-        return reg.getBlockState(new BlockPos(x, y, z)).isAir();
+        return reg().getBlockState(new BlockPos(x, y, z)).isAir();
     }
 
     /** OverlayLevel: solidity of a block NAME (state string) written earlier
@@ -819,7 +827,7 @@ public final class DecoDriver extends BlockPopulator {
 
     /** RuleTest.tag_match: state.is(TagKey.create(BLOCK, tag)). */
     public boolean tagIs(int x, int y, int z, String tag) {
-        BlockState st = reg.getBlockState(new BlockPos(x, y, z));
+        BlockState st = reg().getBlockState(new BlockPos(x, y, z));
         return st.is(net.minecraft.tags.TagKey.create(net.minecraft.core.registries.Registries.BLOCK,
                 Identifier.parse(tag)));
     }
@@ -844,14 +852,14 @@ public final class DecoDriver extends BlockPopulator {
 
     /** Debug upcall: block registry key at pos (draw-trace diagnostics). */
     public String stateName(int x, int y, int z) {
-        BlockState st = reg.getBlockState(new BlockPos(x, y, z));
+        BlockState st = reg().getBlockState(new BlockPos(x, y, z));
         return BuiltInRegistries.BLOCK.getKey(st.getBlock()).toString();
     }
 
     /** Tree engine: FULL state string "block[k=v,...]" (props in definition
      *  order) — leaves distance/persistent reads, vine face recomputes. */
     public String stateFull(int x, int y, int z) {
-        BlockState st = reg.getBlockState(new BlockPos(x, y, z));
+        BlockState st = reg().getBlockState(new BlockPos(x, y, z));
         StringBuilder sb = new StringBuilder(
                 BuiltInRegistries.BLOCK.getKey(st.getBlock()).toString());
         var props = st.getProperties();
@@ -870,23 +878,23 @@ public final class DecoDriver extends BlockPopulator {
 
     /** Tree PlaceOnGround decorator: BlockStateBase.isSolidRender at pos. */
     public boolean isSolidRender(int x, int y, int z) {
-        BlockState st = reg.getBlockState(new BlockPos(x, y, z));
+        BlockState st = reg().getBlockState(new BlockPos(x, y, z));
         return st.isSolidRender();
     }
 
     public boolean isReplaceable(int x, int y, int z) {
         DecoStats.UP_OTHER.incrementAndGet();
-        return reg.getBlockState(new BlockPos(x, y, z)).is(BlockTags.REPLACEABLE);
+        return reg().getBlockState(new BlockPos(x, y, z)).is(BlockTags.REPLACEABLE);
     }
 
     public boolean isSolid(int x, int y, int z) {
         DecoStats.UP_OTHER.incrementAndGet();
-        return reg.getBlockState(new BlockPos(x, y, z)).isSolid();
+        return reg().getBlockState(new BlockPos(x, y, z)).isSolid();
     }
 
     public boolean hasSturdyFace(int x, int y, int z, int dir) {
         DecoStats.UP_OTHER.incrementAndGet();
-        return reg.getBlockState(new BlockPos(x, y, z))
+        return reg().getBlockState(new BlockPos(x, y, z))
                 .isFaceSturdy(reg, new BlockPos(x, y, z), DIRS[dir]);
     }
 
@@ -895,7 +903,7 @@ public final class DecoDriver extends BlockPopulator {
         BlockState st = state(state);
         boolean r = st != null && st.canSurvive(reg, new BlockPos(x, y, z));
         if (SURVIVE_HIST_ON) {
-            BlockState below = reg.getBlockState(new BlockPos(x, y - 1, z));
+            BlockState below = reg().getBlockState(new BlockPos(x, y - 1, z));
             DecoStats.surviveSample(state, r,
                     BuiltInRegistries.BLOCK.getKey(below.getBlock()).toString());
         }
@@ -907,14 +915,14 @@ public final class DecoDriver extends BlockPopulator {
 
     public boolean biomeHasFeature(int x, int y, int z, String placed) {
         DecoStats.UP_OTHER.incrementAndGet();
-        Holder<Biome> h = reg.getBiomeManager().getBiome(new BlockPos(x, y, z));
+        Holder<Biome> h = reg().getBiomeManager().getBiome(new BlockPos(x, y, z));
         String name = biomeKey(h.value());
         if (System.getenv("CRUS_BIOMECHK") != null
                 && DecoStats.UP_OTHER.get() < 200000
                 && (name.endsWith("test_a") || name.endsWith("test_b"))
                 && DecoStats.BIOMECHK_LOG.incrementAndGet() <= 8) {
             LOG.info("[biomechk-java] (" + x + "," + y + "," + z + ") biome=" + name
-                    + " minSecY=" + reg.getMinSectionY());
+                    + " minSecY=" + reg().getMinSectionY());
         }
         if ((x == 1615 && z == 1612) || (x == 1612 && z == 1665) || (x == 1612 && z == 1673)) {
             LOG.info("[f1trace] biomeHasFeature " + placed + " (" + x + "," + y + "," + z + ") biome=" + name);
@@ -928,7 +936,7 @@ public final class DecoDriver extends BlockPopulator {
     }
 
     public boolean outsideBuildHeight(int y) {
-        return y < reg.getMinY() || y >= reg.getMaxY();
+        return y < reg().getMinY() || y >= reg().getMaxY();
     }
 
     // ------------------------------------------------------------------
@@ -1048,7 +1056,7 @@ public final class DecoDriver extends BlockPopulator {
      *  per-column height upcalls (45/chunk -> <=9/chunk). */
     public int[] decoHeightmaps(int cx, int cz) {
         DecoStats.SNAP_HM.incrementAndGet();
-        ChunkAccess ch = reg.getChunk(cx, cz);
+        ChunkAccess ch = reg().getChunk(cx, cz);
         int[] out = new int[512];
         for (int t = 0; t <= 2; t += 2) {
             int off = t / 2 * 256;
@@ -1164,8 +1172,8 @@ public final class DecoDriver extends BlockPopulator {
     }
 
     private byte[] decoSnapSection0(int cx, int cz, int secY) {
-        ChunkAccess ch = reg.getChunk(cx, cz);
-        int si = secY - reg.getMinSectionY();
+        ChunkAccess ch = reg().getChunk(cx, cz);
+        int si = secY - reg().getMinSectionY();
         java.nio.ByteBuffer buf = snapBuf(16384);
         buf.putInt(secY);
         if (si < 0 || si >= ch.getSectionsCount()) {
