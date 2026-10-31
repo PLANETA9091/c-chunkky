@@ -4789,3 +4789,62 @@ NEXT: (1) CI 11ab41eb — unit-тест + parity; (2) если зелёный �
 terrain-числа с timing/deco/nobeard лан; (3) следующий под-фронт beard:
 per-column SUPORT-структуры предвычислять per fill (сейчас per-column
 enumerate), потом SIMD-across-cells для оставшегося piece-loop.
+
+## cont-84e: CI 11ab41eb верифицирован; beard-фронт пере-оценён; DecoDriver НЕ РАБОТАЛ
+
+CI 41220387171 (11ab41eb, column-prune) = SUCCESS:
+- native: 82 tests ok (fill_volume_column_pruned_bit_exact ok),
+  bench fill_chunk median 4.77ms (COLD 5.51), SIMD parity fails 0/25.
+- e2e-ланы (serial): 20 (12x12) e2e=27.32 native=10.08 terrain=4.989
+  surface=5.126; 22 (48x48) e2e=19.66 native=9.83 terrain=4.894
+  surface=4.878 surf_walk=3.812; 24 (par4 pinned) e2e=22.33.
+- JFR 19-лан (256-окно): e2e=25.73 gen=10.94 native=10.70; java cpu
+  ~191 samples ~1.9s (7.4ms/chunk), 92.1% Paper Common Worker #0.
+
+BEARD-ФРОНТ БЫЛ МИРАЖОМ (пере-оценка): внутрирановые serial-пары
+nobeard(17) vs beard(20/22) по nat_p50:
+- 41217357349 (pre):  7.20 vs 7.29/7.48 -> beard +0.09..+0.28ms
+- 41220387171 (post): 8.96 vs 9.06/9.17 -> beard +0.10..+0.21ms
+Вся межрановая разница (7.2->9.0, +24%) — runner-noise (nobeard-код не
+трогался). "terrain 8.95 beard vs 4.34 no-beard" (cont-84c/d) = par4
+контенция (par4-лан terrain 8.95 vs serial 4.0 того же пути на 4-ядерном
+runner [cpu] cores=4), НЕ beardifier. Column-prune остаётся (бит-точен,
+пиннед, бесплатный safety), но e2e не двигает. Под-фронты "per-column
+support precompute + SIMD" — ОТМЕНЕНЫ (фронт ~0.2ms).
+
+DECODRIVER НЕ ВЫЗЫВАЛСЯ НИ РАЗУ: DecoStats "no chunks decorated yet" на
+CRUS_NATIVE_DECO=1 ланах при том, что reset не входит в window-arming ->
+DecoDriver.populate ни разу за жизнь сервера. Значит:
+- все native-deco A/B сравнивали vanilla deco с самим собой;
+- deco=1 ланы фактически идентичны deco=0 (NATIVE_DECO не флипнулся ->
+  shouldGenerateDecorations=true -> vanilla deco работал; 16-лан
+  native=9.07 vs 20-лан 10.08 — шум);
+- JFR подтверждает: OreFeature.doPlace/place, FeaturePlacer.place,
+  GeodeFeature/LargeDripstone/Lake/Speleothem.place — vanilla deco на
+  Paper Common Worker #0 (~8% java cpu), плюс BiomeManager.getFiddledDistance
+  + ReferenceOpenHashSet.contains (vanilla biome-filter путь).
+Оценка vanilla deco в этом окне: ~0.6-1.0ms/chunk java cpu.
+
+СЛЕДСТВИЕ (потенциал native deco): убрать из Paper-side OreFeature et al.
+-> -0.6..-1.0ms e2e, если DecoDriver реально активируется. Причина
+"молчаливой выкл." неясна: WARN-фейлов setupDeco в run.out нет, INFO не
+пишется в run.out вообще (grep 'INFO': 0 во всём логе), значит setupDeco
+вернулся по ветке states==null||plan==null ("ctx has no deco engine"),
+т.е. native ctx.deco=None (embedded-vanilla build_deco_ctx_src вернул
+None или паникнул — catch_unwind глотал молча).
+
+ДИАГ-ПУШ 06cd6ec0: WARN на каждом deco-off выходе (ffi ctx_new None/
+panic; build_plan Err; registry empty; Java null states/plan, engine
+active, DecoDriver absent) — INFO не доходит, только WARN+. Следующий
+CI-ран назовёт точную ветку.
+
+JFR Paper-side остаток (19-лан, serial 256): java ~7.4ms/chunk
+(OreFeature ~0.6-0.8, hGet+Field.checkAccess ~0.4 [наш мост, часть
+полей на Field.get fallback], StaticCache2D.<init> ~0.4,
+NoiseStack.Perlin.get ~0.4, layoutBulk ~0.4, StarLight ~0.2), native
+10.7, остальное ~7.5ms — статус-цепочка/синхронизация.
+
+NEXT: (1) CI 06cd6ec0 -> точная ветка deco-off -> фикс активации
+DecoDriver; (2) если активация ok — A/B: OreFeature уходит с Paper-side
+(JFR + e2e deco-ланы станут валидными); (3) потом hGet fallback-поля
+(Field.checkAccess) — кэшировать/VarHandle.
