@@ -235,10 +235,28 @@ for bx in $(seq "$fminx" 256 "$fmaxx"); do
   done
 done
 done=0
+stall=0; lastc=-1; dumped=0
 for i in $(seq 1 6000); do
   c=$($RCON "crusgenstats wincount" 2>/dev/null | grep -o "window_inside=[0-9]*" | cut -d= -f2)
   c=${c:-0}
   if [ "$c" -ge "$target" ]; then done=1; break; fi
+  # wedge probe: if the inside count stops moving for ~30s of polls, take
+  # ONE jcmd thread dump (par4deco run 41214674243 wedged silently — the
+  # log showed nothing between lane start and server death).
+  if [ "$c" = "$lastc" ]; then
+    stall=$((stall + 1))
+  else
+    stall=0; lastc=$c
+  fi
+  if [ "$stall" -ge 600 ] && [ "$dumped" = "0" ]; then
+    dumped=1
+    echo "  [WEDGE] inside=$c stalled ~30s — thread dump:"
+    if [ -n "${JC:-}" ] && [ -n "${JPID:-}" ]; then
+      "$JC" "$JPID" Thread.print 2>/dev/null | head -120 || echo "  thread dump failed"
+    else
+      echo "  (no jcmd/jpid in this lane)"
+    fi
+  fi
   if (( i % 600 == 0 )); then echo "  [window progress] inside=$c / $target"; fi
   sleep 0.05
 done
