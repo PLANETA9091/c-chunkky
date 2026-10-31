@@ -4546,3 +4546,42 @@ MethodProfilingSample-стеки по потокам (исключить watchdo
 (2) переоценка CRUS_NATIVE_DECO=1 дефолта в par4-режиме;
 (3) fill-CPU фронты: surf_walk 3.97, terrain-внутренности (terr_sample
 16.8 на 2t-лане = 3x-инфляция той же природы).
+
+## cont-82: JFR-стеки по потокам — первая честная атрибуция окна; фикс рефлексии в layoutBulk
+
+Артефакт e2e263_window_par.jfr (CI 41194161059, CRUS_JFR=1 +
+CRUS_GEN_PARALLEL=1, 256-чанковое окно, 626 EXEC+Native сэмплов)
+разобран локально jdk.jfr.consumer-агрегатором (scripts/JfrAgg.java;
+JDK25-запись читается JDK21, поток — через поле sampledThread).
+
+ПОТОКИ ОКНА: Paper Common Worker #0 = 229 (36.6%) — движок e2e;
+idle-IO (HttpClient-selector, RCON-listener, console-stdin, netty) =
+290 (46%); Watchdog 61 (9.6%); **Server thread = 37 (5.9%), из них
+48.6% Thread.yield0 <- waitForTasks — мейн-тред ЖДЁТ**, т.е. статус-цепочка
+Paper в этой лане не им занята — латентность, а не CPU.
+
+WORKER #0 (229): нативный JNI-филл fillBeard 21.4% + fillBiomes 4.8% =
+26.2% — top-1 реальной работы (NativeMethodSample: поток в нативе);
+ванильная deco (OreFeature doPlace/place + GeodeFeature + FeaturePlacer)
+~12-13%; **наш собственный код: Field.getFieldAccessor <- Field.get <-
+layoutBulk 3.5%** (+ layoutBulk Java-часть 1.7%); NoiseStack$Perlin 2.6%;
+StaticCache2D.<init> <- WorldGenRegion.<init> 2.2%; StarLight 1.7%+1.3%.
+
+ФИКС (64e1ce1a): unreflected MethodHandles для 9 горячих рефлексивных
+сайтов bulk-пути (~120 вызовов/чанк: states.get, palData.set x2, 4
+setShort-счётчика, tickingList.get, hmaps.get, isOpaque.get) —
+Field.getFieldAccessor-диспатч был на КАЖДОМ вызове. Null-хендл
+(инициализация не удалась) → точный сырой Field-фолбэк; рантайм-фейл
+invoke распространяется как раньше (outer catch → layoutV1). Ожидание:
+−0.4-0.6мс gen + минус safepoint-байас сэмплирования в этом фрейме.
+
+Методическая находка: jfr view hot-methods смешивает idle-IO с работой
+(24% Watchdog сверху) — локальный стек-агрегат по потокам обязателен
+для атрибуции; артефакт .jfr качается из рана, JDK21-консьюмер читает
+JDK25-записи (сэмплированный поток только через getValue("sampledThread")).
+
+NEXT: (1) CI 64e1ce1a — verify plugin build + parity gates + hGet/hSet
+в прод-пути (BulkBroken=0, MissingPaletteEntry=0 в e2e-логах);
+(2) переоценка CRUS_NATIVE_DECO=1 дефолта (vanilla deco ~12-13% worker);
+(3) нативный филл 26.2% worker-duty — surf_walk 3.97/terrain-внутренности;
+(4) StaticCache2D/WorldGenRegion 2.2% — возможно, переиспользование региона.
