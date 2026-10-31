@@ -120,7 +120,7 @@ public final class GenStats {
     // window, unioned by windowSnapshot() into the worker-busy fraction of the
     // span (cont-82: JFR showed Worker #0 busy 36.6% of the par-lane window —
     // this measures the same thing server-side, per lane, every run).
-    private static final int WRING = 1024;
+    private static final int WRING = 8192; // 48x48=2304 + big N=47=2209 fit; truncation past this would bias cover low on wide windows
     /** In-window fill START nanoTime (chronological slot = W_N order). */
     private static final long[] W_START = new long[WRING];
     /** In-window fill wall ns, same slot as W_START. */
