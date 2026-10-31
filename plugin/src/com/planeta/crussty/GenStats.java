@@ -116,6 +116,18 @@ public final class GenStats {
     // first fill (satellites, ticket propagation, main-thread beat).
     private static volatile long WIN_T_ARMED;
 
+    // pipeline-coverage probe ring: per-fill [start..end] intervals inside the
+    // window, unioned by windowSnapshot() into the worker-busy fraction of the
+    // span (cont-82: JFR showed Worker #0 busy 36.6% of the par-lane window —
+    // this measures the same thing server-side, per lane, every run).
+    private static final int WRING = 1024;
+    /** In-window fill START nanoTime (chronological slot = W_N order). */
+    private static final long[] W_START = new long[WRING];
+    /** In-window fill wall ns, same slot as W_START. */
+    private static final long[] W_WALL = new long[WRING];
+    private static final java.util.concurrent.atomic.AtomicLong W_N =
+            new java.util.concurrent.atomic.AtomicLong();
+
     /** Arm the window: only chunks with x in [rx..rx+n], z in [rz..rz+n] are
      *  counted; zeroes the window counters. Global stats are untouched. */
     static void window(int rx, int rz, int n) {
@@ -129,6 +141,7 @@ public final class GenStats {
         WIN_BEARD.set(0);
         WIN_MARKS.set(0);
         WIN_CARVER.set(0);
+        W_N.set(0);
         WIN_T_FIRST = 0;
         WIN_T_LAST = 0;
         WIN_T_ARMED = System.nanoTime();
@@ -153,10 +166,44 @@ public final class GenStats {
         double spanMs = (WIN_T_LAST - WIN_T_FIRST) / 1e6;
         double rampMs = (WIN_T_FIRST > 0 && WIN_T_ARMED > 0)
                 ? (WIN_T_FIRST - WIN_T_ARMED) / 1e6 : 0.0;
+        // pipeline coverage: union of per-fill [start..end] over the span = the
+        // wall fraction where at least one fill runs; maxconc = peak parallel
+        // fills. coverage << 100% = the span is scheduling latency — Paper
+        // status-chain handoffs, not fill CPU — the lever is the pipeline,
+        // not the generator internals.
+        double busyMs = 0.0;
+        long maxconc = 0;
+        long wn = Math.min(W_N.get(), WRING);
+        if (wn > 0) {
+            // sweep line over [start..end] events; busy accumulates on
+            // every level 1->0 transition (the union segment), peak = maxconc
+            long[][] ev = new long[(int) wn * 2][2];
+            for (int k = 0; k < wn; k++) {
+                ev[2 * k][0] = W_START[k];
+                ev[2 * k][1] = 1;
+                ev[2 * k + 1][0] = W_START[k] + W_WALL[k];
+                ev[2 * k + 1][1] = -1;
+            }
+            java.util.Arrays.sort(ev, (a, b) -> a[0] != b[0]
+                    ? Long.compare(a[0], b[0]) : Long.compare(b[1], a[1]));
+            long level = 0, segStart = 0, peak = 0;
+            for (long[] e : ev) {
+                if (level == 1 && e[1] == -1) {
+                    busyMs += (e[0] - segStart) / 1e6;
+                } else if (level == 0 && e[1] == 1) {
+                    segStart = e[0];
+                }
+                level += e[1];
+                peak = Math.max(peak, level);
+            }
+            maxconc = peak;
+        }
+        double cover = spanMs > 0 ? 100.0 * busyMs / spanMs : 0.0;
         double cnt = n;
         return String.format(
                 "window[%d..%d,%d..%d] inside=%d span=%.2fms ramp=%.0fms e2e=%.2fms/chunk"
-                        + " gen=%.2f native=%.2f layout=%.2f beard=%.2f marks=%.2f carver=%.2f",
+                        + " gen=%.2f native=%.2f layout=%.2f beard=%.2f marks=%.2f carver=%.2f"
+                        + " busy=%.1fms/chunk cover=%.1f%% maxconc=%d",
                 WIN_MIN_X, WIN_MIN_X + WIN_N, WIN_MIN_Z, WIN_MIN_Z + WIN_N,
                 n, spanMs, rampMs, spanMs / n,
                 WIN_TOTAL.get() / cnt / 1e6,
@@ -164,7 +211,10 @@ public final class GenStats {
                 WIN_LAYOUT.get() / cnt / 1e6,
                 WIN_BEARD.get() / cnt / 1e6,
                 WIN_MARKS.get() / cnt / 1e6,
-                WIN_CARVER.get() / cnt / 1e6);
+                WIN_CARVER.get() / cnt / 1e6,
+                wn > 0 ? busyMs / wn : 0.0,
+                cover,
+                maxconc);
     }
 
     /** Zero the ring buffer + all counters: starts a fresh measurement window
@@ -235,6 +285,15 @@ public final class GenStats {
             WIN_LAYOUT.addAndGet(layoutNs);
             WIN_BEARD.addAndGet(beardNs);
             WIN_MARKS.addAndGet(marksNs);
+            // pipeline-coverage probe: per-fill [start..end] intervals let the
+            // snapshot union them into the worker-busy fraction of the span
+            // (cont-82: par lane showed Worker #0 busy 36.6% of the window);
+            // this measures the same thing server-side, per lane, every run.
+            long wi = W_N.getAndIncrement();
+            if (wi < WRING) {
+                W_START[(int) wi] = tEnd - nanos;
+                W_WALL[(int) wi] = nanos;
+            }
         }
     }
 
