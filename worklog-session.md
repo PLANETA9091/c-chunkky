@@ -4667,3 +4667,40 @@ NEXT: (1) c4cadad3 integration: gates + par4deco A/B вердикт + cover
 статус-цепочка (batching/handoff), ~100% -> terrain-внутренности
 (sample_final_density ~6.7 top-1, fused-program + interp cache);
 (4) дефолт CRUS_NATIVE_DECO по вердикту A/B.
+
+## cont-84b: par4deco-клинч = гонка DecoDriver.reg; первые cover-числа; сервер упал
+
+КОРЕНЬ КЛИНЧА (c4cadad3 integration, par4deco): DecoDriver — ОДИН
+world-level инстанс (world.getPopulators().add(new DecoDriver(world))),
+`reg` был plain instance-полем; при parallel chunk gen (worker-threads=4)
+populate идёт с 4 воркеров ОДНОВРЕМЕННО -> гонка (wrong-region deco
+записи / NPE между set и null). par4deco-сервер НЕ дошёл до "boot ok"
+(wedged на boot-pregen, native deco активна с первого чанка), 15:47:11
+"connection closed by server" = процесс умер. Serial-ланы не били (1
+воркер). ФИКС 27c6b35c: reg -> ThreadLocal + reg() accessor (44 call-site,
+REG.set/remove в populate, null-чеки reg()==null).
+
+ПЕРВЫЕ COVER-ЧИСЛА (cover-зонд, c4cadad3 cancelled-run ZIP):
+- timing par4:  e2e=28.16 gen=39.30 busy=21.4  cover=75.9% maxconc=4
+- deco serial:  e2e=37.11 gen=12.11 busy=12.1  cover=32.6% maxconc=1
+- nobeard ser.: e2e=34.27 gen=12.90 busy=12.9  cover=37.6% maxconc=1
+Serial пайплайн ПРОСТАИВАЕТ 62-67% спана — латентность статус-цепочки
+Paper измерена сервер-сайд; ramp=357-374мс (arm->первый филл) = 2.5мс/чанк
+фикс-оверхеда на 144-окне. par4 покрывает 76% спана, остаток 24% idle.
+ВЕРДИКТ ФРОНТА: при serial cover 32-38% главный рычаг e2e = ПАЙПЛАЙН
+(parallel gen), а не CPU генератора; par4 cover 76% -> остаточная
+латентность + gen-CPU (terrain 6.7 + surface 5.0).
+
+ПРОФ-ПАМЕТРИКА: lanes без CRUS_FILL263_PROF=1 печатают нули (prof-off,
+ожидаемо); timing-лана polluted x2.5-4.4 (484 pre-window филлов: spawn
+backlog 484 vs окно 144) — закрывается prof-reset-at-window-arm
+(62632772+). Чистые terr_* даст ран 27c6b35c.
+
+ОТМЕНЕНЫ 4 рана (все с buggy deco): c4cadad3, 74c907d7, 0fe7484d,
+62632772, 1e81e847 — их код superseded 27c6b35c (ThreadLocal deco +
+WRING + prof reset). Логи cancelled ранов доступны ZIP-ом (использовано
+для cover-чисел).
+
+NEXT: (1) CI 27c6b35c — par4deco должна пройти (boot ok + deco=1 окно +
+A/B ген против timing); (2) вердикт CRUS_NATIVE_DECO default; (3) фронт:
+par4-остаточная латентность (24% idle) + Paper status-chain для serial.
