@@ -377,6 +377,19 @@ pub struct ChunkLevel<'a> {
 }
 
 impl<'a> ChunkLevel<'a> {
+    /// Fetch-once tag registry over the known name, then the per-cell bridge
+    /// as the last resort (no snapshot/overlay name, or the bridge has no
+    /// tagMembers — the pre-registry semantics). Inherent (not a trait
+    /// member): the E0407 in run 41186720423 — a trait impl can't add methods
+    /// the trait doesn't declare.
+    fn tag_via_registry(&self, pos: BlockPos, tag: &str, name: Option<&str>) -> bool {
+        if let Some(name) = name {
+            if let Some(b) = tag_registry_is(tag, name, |t| self.inner.tag_members(t)) {
+                return b;
+            }
+        }
+        self.inner.tag_is(pos, tag)
+    }
     pub fn new(
         inner: &'a dyn DecoLevelExt,
         ov: &'a std::cell::RefCell<OvMap>,
@@ -1004,18 +1017,6 @@ impl DecoLevelExt for ChunkLevel<'_> {
             };
         }
         self.tag_via_registry(pos, tag, None)
-    }
-
-    /// Fetch-once tag registry over the known name, then the per-cell bridge
-    /// as the last resort (no snapshot/overlay name, or the bridge has no
-    /// tagMembers — the pre-registry semantics).
-    fn tag_via_registry(&self, pos: BlockPos, tag: &str, name: Option<&str>) -> bool {
-        if let Some(name) = name {
-            if let Some(b) = tag_registry_is(tag, name, |t| self.inner.tag_members(t)) {
-                return b;
-            }
-        }
-        self.inner.tag_is(pos, tag)
     }
     fn name_is_solid(&self, name: &str) -> bool {
         self.inner.name_is_solid(name)
