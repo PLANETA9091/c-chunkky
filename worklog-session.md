@@ -4329,3 +4329,70 @@ hood_compute 7.4 → 0.63 (−91%); RTree устранён.
 master-loop или OTel-breakdown (run-top уже в коде); (2) paper-side остаток
 ~16мс при par4 (lighting/convert/save — 16x16 JFR в очереди); (3) native
 terr_sample/surf_walk wall — плотны на 2 ядрах.
+
+## cont-79 (1de61da0 GREEN → 2e6fabf1): ore-prof назвал держателя — per-cell TagMatch JNI; tag-members registry
+
+Разбор рана 41133322149 (1de61da0, все джобы GREEN):
+- TIMING-ЛАНА (par4): e2e 22.70/26.96/26.95/27.70/28.42/22.95 (144),
+  16x16 JFR 25.98, 48x48=2304 **19.94** — лучший результат сессии
+  (было 23.81). deco=1 probe (par4): 34.48.
+- [run-top] (deco=1, 144, per-thread сумма): руды ≈ 5.0с/окно —
+  granite/andesite/diorite_lower по ~760-785мс, tuff 676, gravel 518;
+  wall при 4 воркерах ≈ 8.7мс/чанк.
+- [ore-prof] (x8-экстраполяция, окно 16 чанков): **tag=65-72мс** vs
+  nodes=0.8-1.2 hm=7-10 air=0.4-0.7 → rule-тесты = ~53% нативной стены
+  deco (native=8.3-8.7мс/чанк per-run). [run-prof]: loader ничтожен
+  (0.33-1.58мс/16 чанков), state_full/solid_render = 0.
+- JFR (16x16): WatchdogThread.run 47.79% (фоновый спиннер, ~1.7с CPU
+  за окно — фон, не gen), далее OreFeature.doPlace 5.52% + place 2.21%
+  (vanilla deco в главной лане), layoutBulk/FeaturePlacer по 2.21%,
+  StaticCache2D/StarLight по 1.93%.
+- ГЕЙТЫ: BIOME PARITY OK (144), far-gen все дистанции OK,
+  fill_chunk COLD median 5.28ms.
+
+КОРЕНЬ: конфиги руд 26.3 — вложенные композиты
+AnyOf(AllOf(TagMatch(height_specific_ore_replaceables), HeightMatch),
+AllOf(Not(TagMatch(...)), TagMatch(stone_ore_replaceables))): на КАЖДУЮ
+кандидатную ячейку 1-2 JNI-апколла (new_jstring + CallBooleanMethod),
+ибо tag_matches_name знал только stone_/deepslate_ore_replaceables.
+~3К ячеек/чанк × ~1.5мкс = tag=4.4мс/чанк CPU.
+
+ФИКС (2e6fabf1): process-wide tag-members registry —
+DecoDriver.tagMembers дампит полный набор членов тега (один JNI на тег
+на процесс), JniLevel.tag_members переносит (SOFT-резолв mid вне ok[]
+гейта — старый jar деградирует к per-cell мосту), ChunkLevel.tag_is
+отвечает из fetch-once реестра (tag_registry_is; при неудаче фетча
+ничего не кэшируется). Известные 2 рудных сета — прежний быстрый путь.
+Трейт-дефолт tag_members=None — моки не тронуты. Юнит-тест: fetch-once,
+membership, failed-fetch. Ожидание: tag 4.4 → ~0.3-0.6мс/чанк CPU,
+deco=1 probe −2..4мс/чанк относительно ванильного дефолта; шаг к переводу
+CRUS_NATIVE_DECO=1 в дефолт (vanilla OreFeature = топ-1 gen-метод в JFR
+главной ланы).
+
+СЛЕДУЮЩИЕ ФРОНТЫ: (1) vanilla-exact BitSet seen (сейчас HashSet —
+коллизии индексов vanilla BitSet воспроизводить бит-точно);
+(2) если deco=1 сравняется с vanilla — перевод дефолта; (3) paper-side
+остаток ~15мс при par4 (lighting/convert/save — ждёт 16x16 JFR
+аттрибуцию); (4) WatchdogThread спиннер как фон-шум профилей.
+
+## cont-79 РЕЗУЛЬТАТ (2e6fabf1 + d4b8b8ea GREEN, CI 41186827805): tag −78%, native deco wall −49%, deco probe 34.48 → 30.31
+
+Все 3 джобы GREEN; гейты BIOME PARITY OK (144 identical) + far-gen все
+дистанции OK — паритет сохранён при полном переводе tag-тестов на реестр.
+- [ore-prof] tag: 65-72 → **14.2-15.9 мс/окно** (−78%); остаток — локальные
+  ov/ensure/with_snap + реестр + x8-сэмплер. nodes/hm/air без изменений.
+- [run-prof] native: 8.3-8.7 → **4.25-4.68 мс/чанк** (−49%).
+- [run-prof-top]: granite 1373→568µs, diorite 1280→536, andesite 1198→586,
+  tuff 1045→492, gravel 518→343, dirt 430→261, coal 313→160.
+- deco=1 probe (par4): e2e **34.48 → 30.31** (−4.2мс — прогноз был −2..4).
+- Главная лана (par4): 23.13 (в шуме с 22.70 — фикс не влияет на
+  vanilla-deco дефолт, как задумано); 48x48: **19.46** (было 19.94);
+  16x16 JFR: 26.87; no-beard 27.80; PF=1 28.69; serial-par 27.49/28.67.
+- Юнит-тест tag_registry_fetch_once_and_membership прошёл в native-джобе.
+- E0407-инцидент (2e6fabf1): tag_via_registry попал в trait-impl —
+  перенесён в инхерент ChunkLevel (d4b8b8ea), переезд без семантики.
+Разрыв deco=1 к vanilla-дефолту: ~8-12 → ~3-5мс. Следующий шаг —
+vanilla-exact BitSet seen (скрипт scripts/patch_ore_bitset.py готов,
+якоря сверены; декомпил 26.3 подтверждает формулу индекса
+dx + dy*W + dz*W*H с алиасингом BitSet.get/set) — затем переоценка
+перевода CRUS_NATIVE_DECO=1 в дефолт.
