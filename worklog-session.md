@@ -4848,3 +4848,38 @@ NEXT: (1) CI 06cd6ec0 -> точная ветка deco-off -> фикс актив
 DecoDriver; (2) если активация ok — A/B: OreFeature уходит с Paper-side
 (JFR + e2e deco-ланы станут валидными); (3) потом hGet fallback-поля
 (Field.checkAccess) — кэшировать/VarHandle.
+
+## cont-84f: deco-диагностика в полёте (3 рана); Paper gate подтверждён по исходнику
+
+В ПОЛЁТЕ: 06cd6ec0 (native 6/9: perf calibration, integration 14/29),
+f2c8b7c1 (docs; integration deco-шаг 15 ПРОЙДЕН, далее), 717ab7fc
+(native 4/9, integration 12/29). Логи доступы ТОЛЬКО после конца джобы
+(job logs live -> BlobNotFound; zip -> после завершения рана). Разбор:
+bash scripts/pull_deco_diag.sh <run_id> (готов).
+
+PAPER-ГЕЙТ ПОДТВЕРЖДЁН ПО ИСХОДНИКУ (raw PaperMC/Paper main):
+CustomChunkGenerator.applyBiomeDecoration -> super.applyBiomeDecoration(
+  level, chunk, sm, generator.shouldGenerateDecorations(world, random, x, z));
+базовый ChunkGenerator.applyBiomeDecoration(...,flag):
+  if (flag) addVanillaDecorations(...); затем ВНЕ if — цикл по
+  world.getPopulators() через CraftLimitedRegion (populate + saveEntities).
+Bukkit ChunkGenerator: 3-арг shouldGenerateDecorations делегирует в
+0-арг (у нас: !NATIVE_DECO), 0-арг default=false.
+=> если NATIVE_DECO=true, Paper скипает vanilla deco И вызывает наши
+популяторы. DecoStats пуст => NATIVE_DECO=false => setupDeco не дошёл до
+конца => ctx.deco=None (embedded path) — WARN-ы 06cd6ec0/717ab7fc
+назовут точную ветку (build_plan / registry / split / from_assets /
+v263-biomes / panic).
+
+ПОПУТНО НАЙДЕНО (следующий фикс, отдельный пуш): unreflectGet/
+unreflectSet молча возвращают null -> ВСЕ hGet/hSet идут через
+Field.get/set (java.lang.reflect.Field.checkAccess в JFR hot = наш мост).
+unreflectGetter от private-поля NMS не может пройти с голым
+MethodHandles.lookup() — нужен privateLookupIn(f.getDeclaringClass(),
+lookup()).unreflectGetter(f) (NMS в unnamed module -> opens не нужны).
+Оценка: ~0.4ms/chunk Paper-side (hGet ~5-7 samples + Field.checkAccess).
+
+NEXT: (1) pull_deco_diag.sh на 717ab7fc/f2c8b7c1 -> точная deco-ветка ->
+фикс активации DecoDriver; (2) unreflect privateLookupIn фикс; (3) если
+DecoDriver оживёт — JFR OreFeature должен уйти с Paper-side, deco-ланы
+становятся валидными A/B.
