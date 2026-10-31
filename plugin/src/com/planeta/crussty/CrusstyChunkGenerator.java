@@ -1744,7 +1744,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     }
 
     private static void rebuildHeightmaps(Object handle, short[] out, int minY)
-            throws Exception {
+            throws Throwable {
         Object hmaps = hGet(mhChunkHmapsGet, fChunkHeightmaps, handle);
         // Fused single column pass for ALL heightmap types: one walk per
         // (x,z) column answers every type via a per-id opaque bitmask, so
