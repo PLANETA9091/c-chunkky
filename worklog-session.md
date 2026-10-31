@@ -5008,3 +5008,43 @@ f0bb3ec8 (carver-хоп + privateLookupIn) — ВЕСЬ ран зелёный:
 walk-кэшей (surf_calls назовёт доминирующий cond); (2) terr_sample/interp-
 cell 12мс — плотностной путь (SIMD/бóльшие ячейки — след. большой фронт);
 (3) Paper-side StaticCache2D ~0.4ms + NoiseStack ~0.4ms (JFR).
+
+## cont-88: 300d-int ЗЕЛЁНЫЙ — walk-кэши верифицированы сквозным раном: surf_walk 15.3->5.84 (-62%), honest e2e 23.14->13.59 (-41%); НОВАЯ БАЗА 13.59/12.82мс
+
+300d-int (41227947571) ПОЛНОСТЬЮ green: все гейты (12 surface A/B,
+13 carvers, 14 biome) + все окна + артефакты. Финальный readout:
+
+LANE 15 (par4 12x12, host EPYC 9V45):
+  honest e2e=13.59 native=16.43 busy=9.1 cover=66.7% maxconc=4
+  stage[terrain=10.265 surface=7.160 hood=0.134 park=0.070]
+  surf_aux=1.252 surf_walk=5.839 terr_sample=4.225 terr_walk=0.996
+  surf_calls[biome=22.76M vgrad=24.97M aboveprelim=12.5M stdepth=8.39M
+  water=1.89M noise3d=4512] (окно 400 филлов: 57K/62K/31K/21K на чанк)
+LANE 22 (48x48): e2e=12.82 (2304 чанка, span=29.5s — было 47.6s в f0bb)
+LANE 24 (par4 pinned): e2e=14.46
+
+ХОСТ-МАТЧ-ПАРА (f0bb без кэшей vs 300d с кэшами):
+  surf_walk 15.305 (9V74) -> 5.839 (9V45) = -62%
+  surface    17.106 -> 7.160 = -58%
+  native     31.57 -> 16.43 = -48%
+  honest e2e 23.14 -> 13.59 = -41%
+Хосты разные (9V74 vs 9V45) — но дельтыWalk/surface/native далеко за
+пределами host-дельты (единый bench перенос 9V74->9V45 давал ~1.7x на
+ВСЕ kind'ы; здесь targeted: walk -62% при terrain 13.3->10.3 = -23%).
+Кэши работают: (а) мат-пины юнит-тестов, (б) blockdump-судьи, (в)
+сквозная дельта walk-стадии.
+
+ДИАГ ПО surf_calls: vgrad (25M) и biome (22.8M) — доминирующие cond-ы
+rule-tree; кэш бьёт в оба. Остаток walk=5.84мс — след. кандидаты:
+per-point biome pick (8x 2add+1mul+min — можно кэшировать победителя на
+кварт-пару), vgrad band-края (hoist per column), noise3d (4.5K — шум).
+
+КАМПАНИЯ: honest e2e 56.5 (старт) -> 29.77 (06cd) -> 23.14 (f0bb, но
+хост-конфаунд) -> 13.59 (300d) = -76% от старта; 48x48 масштаб: 12.82.
+Цель 1мс/чанк: главный остаток terrain=10.3 (terr_sample 4.2 + хвост
+~4.8 unaccounted — shell/interp), затем Paper-side serial (~13.6-e2e при
+cover 66.7% = ramp+sync+status-цепочка).
+
+NEXT: (1) terrain-внутренности: точечный проф (shell-ops vs interp-cell
+vs noise-family внутри terrain-стены); (2) walk residual по surf_calls;
+(3) Paper-side StaticCache2D/NoiseStack по JFR (0.4+0.4).
