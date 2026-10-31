@@ -4704,3 +4704,53 @@ WRING + prof reset). Логи cancelled ранов доступны ZIP-ом (и
 NEXT: (1) CI 27c6b35c — par4deco должна пройти (boot ok + deco=1 окно +
 A/B ген против timing); (2) вердикт CRUS_NATIVE_DECO default; (3) фронт:
 par4-остаточная латентность (24% idle) + Paper status-chain для serial.
+
+## cont-84c: ЗЕЛЁНАЯ ВЕРИФИКАЦИЯ (681905dc + 82b86888); par4deco вылечена; вердикты A/B; beardifier = новый фронт #1
+
+CI: 41217357349 (681905dc: WRING+prof-reset+ThreadLocal-deco+compile-fix+wedge-probe)
+и 41217244645 (82b86888, без wedge-probe) — ОБА полностью зелёные (plugin/
+native/integration). par4deco-лана ПРОШЛА: boot ok, окно закрыто, клинча
+нет — гонка DecoDriver.reg была корнем. MethodHandle-фикс верифицирован
+(10 call-sites, 9 хендлов).
+
+ПОЛНАЯ ЛАН-ТАБЛИЦА (681905dc, cover-зонд во всех ланах впервые):
+лан            e2e    gen    busy  cover  maxconc
+timing par4    17.62  24.27  12.8  72.6%  4
+deco serial    22.33  7.35   7.4   32.9%  1
+nobeard serial 22.95  8.45   8.5   36.8%  1
+par4deco       18.62  21.59  12.5  67.0%  4
+jfr N=15 ser.  21.99  8.58   8.6   39.0%  1
+par serial     22.10  8.36   8.4   37.8%  1
+jfr_par        23.63  8.88   8.9   37.6%  1
+big 48x48      16.95  8.23   8.2   48.6%  1
+par4-last      16.89  22.08  11.7  69.3%  4
+
+ВЕРДИКТЫ:
+1. CRUS_NATIVE_DECO default ОСТАЁТСЯ OFF. Serial native deco mean=4.27мс/
+   чанк (wash с vanilla), но par4 mean=12.06мс (p50=11.1, max=68.8) —
+   контеншн на deco-пуле/апколлах (56 JNI-апколлов/чанк), дороже ванили
+   (~1.5-2мс эквивалент). e2e par4deco 18.62 vs timing 17.62/16.89 — шум.
+   Фронт: батчинг апколлов + пул без кросс-локов, потом пере-A/B.
+2. Латентность пайплайна измерена: serial cover 33-39% (61-67% спана
+   ПРОСТОЙ = Paper статус-цепочка), par4 cover 67-73%. ramp=339-347мс
+   константа (последовательные forceload-тайлы харнесса; 256-окно
+   1095мс = 10 тайлов). par4 главный рычаг e2e и дальше parallel.
+3. hood ПОЛНОСТЬЮ амортизирован: ncomp=0, hood_compute=0.000, hood
+   0.06-0.12 во всех ланах — prefetch-пул закрывает все гриды в окне.
+   Parallel hood compute закрыл вопрос (было hood=5.0, ncomp=1187).
+4. BEARDIFIER = НОВЫЙ ФРОНТ #1: nobeard-дискриминатор в одном ране:
+   native fill terrain=4.34 (no beard) vs 8.95 (beard, deco-лана, same
+   region) -> beard-потребление ~4.6мс/филл в structure-rich окне
+   (пробные trial chambers/ancient city в 1100). surf_walk тоже 3.5 ->
+   10.2 (beard-зависимый surface). JAVA-сайд collectBeard=0.01 — масса
+   В NATIVЕ (per-block blending + decode per strip). Кандидаты:
+   per-column envelope precompute, decode 1x/fill (не per strip),
+   spatial-hash кусков брода.
+5. Чистые sub-stage (serial, window-only, prof-reset работает):
+   terr_sample=4.27-4.52 terr_walk=1.02-1.09 terr_prefill=0.30-0.37
+   (deco/timing), surf_aux=0.82-1.33. terrain+surface = fill CPU ядро.
+
+NEXT: (1) beardifier-потребление (фронт #1, ~4.6мс/филл); (2) deco-пул
+под par4 (батчинг апколлов); (3) ramp: параллельная отправка forceload
+тайлов — СМЕНА СЕМАНТИКИ бенчмарка, только с явным решением; (4) Paper
+статус-цепочка для serial (простой 61-67%).
