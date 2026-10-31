@@ -4923,4 +4923,48 @@ honest e2e -0.3..-0.4 (внутри шума ±20-40%, честный компа
 внутрирановый bench); carver-лан больше не WARN-ит, carver=0.00 -> >0
 (если CRUS_NATIVE_CARVERS=1 лана активна).
 
-## cont-86: CI f0bb3ec8 — запуск верификации
+## cont-86: f0bb3ec8 (carver-хоп + privateLookupIn) и 300d7a38 (walk-кэши) в CI; diag-раны разобраны до конца
+
+CI 41223883945 (717ab7fc, green) — расширенный deco-diag:
+- НИ ОДИН deco-off WARN не сработал (нет "no deco engine"/"setup failed"/
+  "DecoDriver absent") = setupDeco доходит до NATIVE_DECO=true на deco=1
+  ланах; бут-строки "engine active" не видны только потому что tail.
+  Вопрос активации ЗАКРЫТ полностью: декор жив, вопрос только в цене.
+- Honest-окна по ланам: 15 (par4): e2e=28.67 cover=72.9% maxconc=4;
+  16 deco=0: 40.96 (шумная лана, maxconc=1); deco=1: 37.03; 17 nobeard:
+  30.62; 22 (48x48!): e2e=26.88/2304 чанков — лучшее число; 24 par4
+  pinned: 30.74. Large-window амортизация — реальный эффект (~-2мс).
+- stage[] на 15-лане (пофилл): terrain=16.8 surface=21.8
+  (surf_aux=2.4 surf_walk=19.2 = 88% surface!) hood=0.106 park=0.151.
+  СРАВНЕНИЕ РАНОВ: 06cd6ec0 давал те же 17.2/21.8/19.3 — стабильно.
+
+НОВЫЙ ГЛАВНЫЙ ФРОНТ: surf_walk 19.2мс/чанк (~50% нативного филла,
+195нс/точку — дороже полного плотностного сэмплинга terr_sample 76нс).
+
+f0bb3ec8 (пуш 1): (1) CarverDriver: WorldGenRegion.getHandle() не
+существует -> NoSuchMethodException на КАЖДОМ чанке, populate abort,
+carver=0.00 всегда. Фикс: region.getChunk(cx, cz) (cx/cz = populate
+аргументы = центр региона). (2) unreflectGet/Set: bare lookup().unreflect*
+делает СОБСТВЕННУЮ access-check и отклоняет private NMS поля даже при
+setAccessible(true) -> ВСЕ хэндлы моста null, каждый hGet/hSet шёл через
+Field.get/set (Field.checkAccess в JFR hot ~0.4мс/чанк). Фикс: tier-2
+privateLookupIn(declaringClass) (NMS unnamed module, opens не нужны).
+
+300d7a38 (пуш 2): walk-кэши, бит-точны по построению:
+(1) Fiddle-кэш: LCG-цепь fiddled_distance читает только (seed, corner
+xyz) — на фиксированной колонке 8 fiddle-троек КОНСТАНТНЫ в пределах
+parent quart-y, x2/z2 константны на всю колонку. Кэш x2/z2/fy по 8
+углам, на точку остаётся y2=(dy+fy)^2 + тот же порядок сложения
+z2+y2+x2 и строгий > — идентичные f64-операции.
+(2) VerticalGradient: from_hash_of(name)->fork_positional — чистая
+функция от сидов фабрики и имени (fork ест СВЕЖИЙ from_hash_of-источник
+и так) — MD5-рехэш с каждой in-band точки -> раз на cond.
+(3) Temperature: 4 шума get_temperature XZ-only — кэш на колонку по
+xz_counter. biome_idx_at стал &mut self (grid path держит кэш).
+(4) ДИАГ: счётчики вызовов по типам cond (SR_CALL_*), агрегат per fill
+под PROF, печать surf_calls[...] в prof263_snapshot — следующий таргет
+walk-а назовёт CI, а не арифметика.
+
+ОЖИДАНИЯ CI 300d7a38: parity-гейты (judge blockdump, material-count) —
+главный риск; surf_walk должен просесть (ожидание 19.2 -> 8-12, если
+biome-cond частый); surf_calls назовёт долю biome/vgrad/temp вызовов.
