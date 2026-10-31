@@ -82,7 +82,10 @@ impl DecoCtx {
 pub fn build_deco_ctx(
     assets: &crate::worldgen::Assets,
 ) -> Option<DecoCtx> {
-    let src = crate::biomes::BiomeSourceData::from_assets(assets)?;
+    let Some(src) = crate::biomes::BiomeSourceData::from_assets(assets) else {
+        crate::ffi::log_warn("deco: pack biome source data missing (build_deco_ctx)");
+        return None;
+    };
     build_deco_ctx_src(assets, &src)
 }
 
@@ -95,7 +98,10 @@ pub fn build_deco_ctx_src(
 ) -> Option<DecoCtx> {
     let mut biome_features: HashMap<String, Vec<Vec<String>>> = HashMap::new();
     for name in &src.biome_names {
-        let (ns, file) = name.split_once(':')?;
+        let Some((ns, file)) = name.split_once(':') else {
+            crate::ffi::log_warn(&format!("deco: biome name without namespace: {name}"));
+            return None;
+        };
         let key = format!("{ns}/worldgen/biome/{file}.json");
         let mut steps: Vec<Vec<String>> = Vec::new();
         if let Some(bytes) = assets.get(&key) {

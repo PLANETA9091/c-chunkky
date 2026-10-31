@@ -329,9 +329,20 @@ pub fn ctx_new(seed: i64, min_y: i32, height: i32, sea_level: i32) -> i64 {
     // datapack path builds it inside ctx_new_assets). Requires the native
     // biome stage (plan order = the 26.3 preset biome order). The Java
     // setupDeco handshake only activates the driver behind CRUS_NATIVE_DECO=1.
-    let deco = v263
+    let deco_src = v263
         .as_ref()
-        .and_then(|s| s.biomes.as_ref())
+        .and_then(|s| s.biomes.as_ref());
+    if v263.is_none() || deco_src.is_none() {
+        // WARN: INFO never reaches run.out; this is one of the known
+        // silent "deco engine off" branches (DecoStats stays empty and
+        // every CRUS_NATIVE_DECO A/B lane compares vanilla with itself).
+        log_warn(&format!(
+            "deco: embedded-vanilla deco skipped (v263={} biomes={})",
+            v263.is_some(),
+            deco_src.is_some()
+        ));
+    }
+    let deco = deco_src
         .and_then(|b| {
             let src = std::sync::Arc::clone(b);
             match std::panic::catch_unwind(move || {
