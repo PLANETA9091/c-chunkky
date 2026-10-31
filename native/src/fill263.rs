@@ -106,6 +106,11 @@ impl Gen263 {
         if std::env::var("CRUS_FILL263_PROF").ok().as_deref() == Some("1") {
             crate::df263::PROF_ON_263.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        // New tree = new generation for the cross-fill corner cache: fills of
+        // THIS gen stamp their contexts with the live value; a later ctor
+        // bumps it and older fills' stamps stop matching (bypass, not stale
+        // hits — recycled node pointers alias-proof via the generation key).
+        crate::df263::bump_corner_live();
         let mut builder = RouterBuilder263::new(seed);
         let router = builder.build_overworld();
         let aquifer_cfg = builder.build_aquifer_config();
@@ -314,6 +319,7 @@ impl Gen263 {
         }
 
         let mut ctx = SamplerCtx263::cached();
+        ctx.cc_gen = crate::df263::corner_live_stamp();
         ctx.beard = crate::beard263::Beardifier263::decode(beard_list);
 
         // Aquifer 26.3 constructor (maxSurfaceLevel prefill) runs BEFORE the
@@ -396,6 +402,7 @@ impl Gen263 {
             step_z: volume.step_z,
         };
         let mut ctx = SamplerCtx263::cached();
+        ctx.cc_gen = crate::df263::corner_live_stamp();
         ctx.beard = crate::beard263::Beardifier263::decode(beard_list);
         // aquifer from the SHARED prefill (the full-volume grid walk ran
         // once in fill_chunk — the strip grid converges to identical values)
@@ -479,6 +486,7 @@ impl Gen263 {
     pub fn base_height(&self, x: i32, z: i32, mode: u8) -> i32 {
         let volume = DensityVolume::block_step((1, self.height, 1), (x, self.min_y, z));
         let mut ctx = SamplerCtx263::cached();
+        ctx.cc_gen = crate::df263::corner_live_stamp();
         let mut aquifer = self.aquifer_for(&mut ctx, &volume);
         let mut buf = ctx.scratch.acquire(volume.size());
         self.sample_final_density(&mut ctx, &mut buf, &volume);
@@ -873,5 +881,102 @@ mod tests {
                 fuse[bad.unwrap_or(0)].to_bits()
             );
         }
+    }
+
+    /// Corner-cache parity (cont-89): the cross-fill corner cache must be
+    /// bit-invisible. The same volume sampled (a) with the cache bypassed
+    /// (cc_gen = 0) and (b) through the cold-insert / box-sample / warm-hit
+    /// paths must agree to the bit on every cell. The u64::MAX sentinel
+    /// forces engagement deterministically (no dependence on the global
+    /// CORNER_LIVE generation, which parallel tests keep bumping).
+    #[test]
+    fn corner_cache_bit_exact_vs_plain_volume() {
+        let g = Gen263::new(3257840388504953787, -64, 384, 63);
+
+        let vol_full = DensityVolume::block_step((16, 384, 16), (16 * 5, -64, 16 * 9));
+        let mut ref_buf = vec![0f32; vol_full.size()];
+        {
+            let mut ctx = SamplerCtx263::cached();
+            ctx.beard = crate::beard263::Beardifier263::decode(&[0, 0]);
+            g.final_density.sample_volume(&mut ctx, &mut ref_buf, &vol_full);
+        }
+
+        // (1) Neighbour chunk, cold: every corner misses -> plain full-grid
+        // sample + cache warm-up. (2) The target chunk: only the margins are
+        // primed -> box path (assert via the box counter). (3) Warm repeat:
+        // every corner hits. (4) z-strip of the target (fill_strip shape):
+        // warm too.
+        let neighbour = DensityVolume::block_step((16, 384, 16), (16 * 4, -64, 16 * 9));
+        let strip = DensityVolume {
+            size_x: 16,
+            size_y: 384,
+            size_z: 5,
+            min_x: vol_full.min_x,
+            min_y: vol_full.min_y,
+            min_z: vol_full.min_z + 7,
+            step_x: 1,
+            step_y: 1,
+            step_z: 1,
+        };
+        let box_before = crate::df263::PROF_CC_BOX.load(std::sync::atomic::Ordering::Relaxed);
+        let hit_before = crate::df263::PROF_CC_HIT.load(std::sync::atomic::Ordering::Relaxed);
+
+        let mut run = |vol: &DensityVolume| -> Vec<f32> {
+            let mut buf = vec![0f32; vol.size()];
+            let mut ctx = SamplerCtx263::cached();
+            ctx.cc_gen = u64::MAX;
+            ctx.beard = crate::beard263::Beardifier263::decode(&[0, 0]);
+            g.final_density.sample_volume(&mut ctx, &mut buf, vol);
+            buf
+        };
+
+        let _n = run(&neighbour);
+        let cached_box = run(&vol_full);
+        let cached_warm = run(&vol_full);
+        let cached_strip = run(&strip);
+        let box_after = crate::df263::PROF_CC_BOX.load(std::sync::atomic::Ordering::Relaxed);
+        let hit_after = crate::df263::PROF_CC_HIT.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            box_after > box_before,
+            "the partially primed grid must take the box path (box {box_before} -> {box_after})"
+        );
+        assert!(hit_after > hit_before, "the warm repeat must record hits");
+
+        for (name, buf) in [
+            ("box path", cached_box),
+            ("warm repeat", cached_warm),
+        ] {
+            let bad = ref_buf
+                .iter()
+                .zip(buf.iter())
+                .position(|(a, b)| a.to_bits() != b.to_bits());
+            assert!(
+                bad.is_none(),
+                "{name} diverged at index {bad:?} (ref {:08x} vs cached {:08x})",
+                ref_buf[bad.unwrap_or(0)].to_bits(),
+                buf[bad.unwrap_or(0)].to_bits()
+            );
+        }
+        // The strip is a strict subset of the warm full volume: compare its
+        // cells against the reference directly.
+        let mut bad = None;
+        'outer: for z in 0..strip.size_z {
+            for x in 0..strip.size_x {
+                for y in 0..strip.size_y {
+                    let s = strip.index_unchecked(x, y, z);
+                    let r = vol_full.index_unchecked(x, y, z + 7);
+                    if strip_buf_ne(&cached_strip, s, &ref_buf, r) {
+                        bad = Some((s, r));
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        assert!(bad.is_none(), "cached strip diverged at {bad:?}");
+    }
+
+    #[inline]
+    fn strip_buf_ne(a: &[f32], i: usize, b: &[f32], j: usize) -> bool {
+        a[i].to_bits() != b[j].to_bits()
     }
 }

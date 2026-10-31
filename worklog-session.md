@@ -5048,3 +5048,55 @@ cover 66.7% = ramp+sync+status-цепочка).
 NEXT: (1) terrain-внутренности: точечный проф (shell-ops vs interp-cell
 vs noise-family внутри terrain-стены); (2) walk residual по surf_calls;
 (3) Paper-side StaticCache2D/NoiseStack по JFR (0.4+0.4).
+
+## cont-89: corner-кэш (cross-fill) — terrain-внутренности по данным 300d-int; same-host A/B: fill_chunk 4.63->2.13 (-54%); golden бит-идентичен; 83/83 юнит-пинов
+
+ДИАГНОЗ (из логов 300d-int 41227947571, без нового пуша — PROF_KINDS уже там):
+- terr_sample=8.5мс/филл (сумма тредов, serial): interp_cell=7.77 = noise-family
+  7.27 (углы) + interp-математика 0.49; shell=1.87 spline=0.55 cache=0.08.
+  ДОМИНАНТ — сэмпл углов corner-грида: 5x49x5=1225 углов на Interpolated
+  (post_processed + noodle, оба 4x8), ~3мкс/угол полного дерева.
+- Дубли: (а) 4-стриповые serial-филлы сэмплируют 2 z-ряда углов на стрип
+  (8 рядов против 5 уникальных, 1.6x); (б) соседние чанки шарят 1-2
+  x/z-линии грида (36-64% углов пересэмплируются); (в) par4-конкуренция
+  4 филлов на 4 vCPU раздувает terrain wall 2.90 (solo bench) -> 10.26.
+- Beard ВНЕ обоих Interpolated (final = add(min(post, noodle), Beard)) —
+  углы чистые функции (дерево, позиция); aquifer-дерево без Interpolated.
+
+ФИКС (corner-кэш, бит-точен по построению):
+- Ключ (gen, node_ptr, packed_pos(x26|z26|y12)); глобальный шардированный
+  кэш 64xMutex<HashMap>, кап 6M записей с clear; gen бампается в Gen263::new
+  (bump_corner_live) — реюз указателей между деревьями alias-пруф.
+- Включение: ctx.cc_gen == CORNER_LIVE на момент сэмпла (fill-пути
+  штампуют ctx: fill_chunk/fill_strip/base_height; aux/biome-контексты
+  не штампованы -> байпас). u64::MAX = тестовый sentinel форс-включения.
+- miss-bbox: bbox недостающих углов сэмплируется тем же volume-путём
+  (позиционная чистота = strips-теорема); >=85% miss -> полный проход как
+  раньше + прогрев. hits собираются в scratch hit-буфер (грид-лейаут).
+- CRUS_CORNER_CACHE=0 — kill-switch (штамп=0, полный байпас).
+- prof: cc[hits= miss= box=] в prof263_snapshot.
+
+ПРОВЕРКИ:
+- юнит: corner_cache_bit_exact_vs_plain_volume — plain(cc=0) vs
+  cold-insert / box-path / warm-hit / strip-shape, to_bits на каждой
+  ячейке; 83/83 green (вкл. fuse_bit_exact_vs_tree_walk, ore_fused).
+- golden: fill-блок бит-идентичен oracle263_fill.txt, mark-сеты идентичны
+  (порядок — strip z-order, как и до кэша).
+- same-host bench A/B (песочница Xeon 2c, release): fill_chunk median
+  4.63 -> 2.13 (-54%), server_fill 4.93 -> 2.42; COLD 4.76 -> 4.38 (~0,
+  ожидаемо); WAVE fresh-frontier 6.45 -> 6.76 (+0.3мс probe-оверхед на
+  all-miss — худший случай, в окне не встречается после первых филлов).
+- CI: native-джоба получила same-host A/B шаг (fill263bench с
+  CRUS_CORNER_CACHE=0 сразу после ON-рана); ci_readout.sh печатает
+  cc[hits/miss/box] и оба бенча.
+
+ОЖИДАНИЯ CI: noise-family 7.3 -> ~2.5-3.5 (сумма) в honest-окнах;
+terr wall solo 2.9 -> ~2.2-2.4; судьи 12/13/14 (blockdump A/B) обязаны
+остаться зелёными (кэш не меняет байт вывода); в par4-лане налог
+конкуренции размажет часть соло-выигрыша.
+
+NEXT: (1) CI-ран + readout cc-счётчиков (hits должны доминировать);
+(2) par4-налог: native wall 16.43 при busy 9.1 — 7.3мс/чанк ожидания
+внутри JNI под 4-конкуренцией (кто блокирует?); (3) Paper-side
+StaticCache2D/NoiseStack (0.4+0.4 JFR); (4) surf_walk residual 5.84
+(biome-pick per quart-пару, vgrad band-края).

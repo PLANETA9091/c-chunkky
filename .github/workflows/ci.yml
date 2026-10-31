@@ -37,6 +37,12 @@ jobs:
           cargo run --release --bin phases
           echo "=== fill263 stage breakdown (per-kind exclusive, real seed) ==="
           cargo run --release --bin fill263bench | tee fill263bench.log
+          # Same-host corner-cache A/B (cont-89): the OFF run right after the
+          # ON run isolates the cross-fill corner-cache attribution from the
+          # runner lottery (the honest e2e comparators stay in the
+          # integration job; this is the same-host CPU delta).
+          echo "=== fill263bench CRUS_CORNER_CACHE=0 (same-host A/B) ==="
+          CRUS_CORNER_CACHE=0 cargo run --release --bin fill263bench | tee fill263bench_cc_off.log
           # HARD GATE: the vectorized paths (pointwise shell + trilinear
           # kernel) must be bit-identical to their scalar references over the
           # full-volume A/B — a single diff means silent worldgen drift.

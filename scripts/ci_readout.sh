@@ -28,8 +28,10 @@ echo "=== surf call counters ==="
 rg -N "surf_calls\[" "$INT" "$NAT" 2>/dev/null | head -6 || true
 echo "=== gate lines ==="
 rg -N "material-count gate|SIMD parity|divergent lines|parity fails" "$INT" "$NAT" 2>/dev/null | head -12 || true
-echo "=== bench medians ==="
-rg -N "server_fill median|fill_chunk  median" "$NAT" 2>/dev/null | head -6 || true
+echo "=== bench medians (ON run first, then CRUS_CORNER_CACHE=0 A/B) ==="
+rg -N "server_fill median|fill_chunk  median" "$NAT" 2>/dev/null | head -8 || true
+echo "=== corner-cache counters (cc[hits/miss/box], window totals) ==="
+rg -N "cc\[hits" "$INT" 2>/dev/null | head -8 || true
 echo "=== JFR hot (timed window) ==="
 rg -N -A 24 "JFR hot methods" "$INT" 2>/dev/null | head -28 || true
 echo "=== carver/deco WARNs ==="

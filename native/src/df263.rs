@@ -174,6 +174,11 @@ pub struct SamplerCtx263 {
     /// CI 41105141065: 6/144 chunks jungle<->lush_caves). Terrain fills keep
     /// the default false = scalar-get semantics (their parity gates pass).
     pub vv: bool,
+    /// Cross-fill corner-cache stamp (cont-89): 0 = never engage; otherwise
+    /// must equal CORNER_LIVE at sample time. Fill paths set it per fill —
+    /// the cached thread-local ctx may carry a stale stamp from a previous
+    /// fill, which then simply bypasses the cache.
+    pub cc_gen: u64,
 }
 
 impl SamplerCtx263 {
@@ -183,6 +188,7 @@ impl SamplerCtx263 {
             caches: None,
             beard: crate::beard263::Beardifier263::empty(),
             vv: false,
+            cc_gen: 0,
         }
     }
 
@@ -192,6 +198,7 @@ impl SamplerCtx263 {
             caches: Some(Vec::new()),
             beard: crate::beard263::Beardifier263::empty(),
             vv: false,
+            cc_gen: 0,
         }
     }
 
@@ -419,6 +426,15 @@ pub fn prof263_snapshot() -> String {
         ms(&PROF_STAGE_TERRAIN_SETUP),
         ms(&PROF_STAGE_TERRAIN_PREFILL)
     ));
+    // Cross-fill corner cache activity (cont-89): raw window totals — hits
+    // must dominate on steady-state windows (each fill's 5x5x49 grid is 36%
+    // new in a 2D field); box = sub-box samples taken instead of full grids.
+    s.push_str(&format!(
+        " cc[hits={} miss={} box={}]",
+        PROF_CC_HIT.load(std::sync::atomic::Ordering::Relaxed),
+        PROF_CC_MISS.load(std::sync::atomic::Ordering::Relaxed),
+        PROF_CC_BOX.load(std::sync::atomic::Ordering::Relaxed)
+    ));
     // Surface-rules per-cond-kind evaluation counts (raw window totals;
     // divide by fills for the per-chunk demand — tells the next walk
     // optimization which condition dominates).
@@ -532,6 +548,253 @@ pub fn prof_surf_calls_add(calls: &[u32; crate::surface263::SR_CALL_KINDS]) {
     }
 }
 thread_local! { static PROF_CHILD_T: std::cell::Cell<u64> = std::cell::Cell::new(0); }
+
+// ---------------------------------------------------------------------------
+// Cross-fill corner grid cache (cont-89). Interpolated corner values are pure
+// functions of (tree node, world position): the beardifier sits OUTSIDE both
+// 4x8 interpolated sources (final = add(min(post_processed, noodle), Beard))
+// and every node underneath is position-pure — the same property the strip
+// fill already relies on. Caching corners across fills removes (a) the ~1.6x
+// corner duplication of 4-strip serial fills and (b) the 36-64% margin
+// overlap between neighbouring chunk grids (5x5 corner grid per fill, 4x4 of
+// it new). Bit-exact by construction: values enter the cache only from the
+// SAME volume-path sampler (full grid or a sub-box of it — box values equal
+// full-grid values by position purity, the strips theorem), and the assemble
+// step copies stored f32 bits verbatim.
+//
+// Key = (fill generation, tree-node pointer, packed corner position). The
+// generation is bumped by every Gen263 construction: a dropped tree's node
+// pointers can be reused by a new tree, but the generation in the key makes
+// recycled addresses alias-proof. Fills stamp their ctx with the live
+// generation; interpolated_volume engages the cache only when the stamp
+// still equals CORNER_LIVE (stale aux/point contexts and mid-fill tree
+// rebuilds bypass — correctness first, caching best-effort).
+pub const CORNER_SHARDS: usize = 64;
+/// Global cache entry cap; on overflow every shard is cleared (values are
+/// recomputable; the cap only bounds memory for very long runs).
+pub const CORNER_CAP: u64 = 6_000_000;
+/// Bumped by every Gen263 construction; the value fills stamp their
+/// contexts with, and the only generation the cache accepts.
+pub static CORNER_LIVE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_CC_HIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_CC_MISS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_CC_BOX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub struct CornerCache263 {
+    shards: Box<[std::sync::Mutex<std::collections::HashMap<(u64, i64), f32>>]>,
+    len: std::sync::atomic::AtomicU64,
+}
+
+static CORNER_CACHE: std::sync::OnceLock<CornerCache263> = std::sync::OnceLock::new();
+
+impl CornerCache263 {
+    fn new() -> Self {
+        CornerCache263 {
+            shards: (0..CORNER_SHARDS)
+                .map(|_| std::sync::Mutex::new(std::collections::HashMap::new()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            len: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+    fn get() -> &'static CornerCache263 {
+        CORNER_CACHE.get_or_init(CornerCache263::new)
+    }
+    fn clear_all(&self) {
+        for s in self.shards.iter() {
+            s.lock().unwrap().clear();
+        }
+        self.len.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[inline]
+fn pack_corner_pos(x: i32, y: i32, z: i32) -> Option<i64> {
+    // 26 signed bits xz (±33.5M), 12 signed bits y (±2048) — real worldgen
+    // corner positions fit with a wide margin; anything else bypasses.
+    if x < -(1 << 25)
+        || x >= (1 << 25)
+        || z < -(1 << 25)
+        || z >= (1 << 25)
+        || y < -(1 << 11)
+        || y >= (1 << 11)
+    {
+        return None;
+    }
+    Some(
+        ((x as i64 & 0x3FF_FFFF) << 38)
+            | ((z as i64 & 0x3FF_FFFF) << 12)
+            | (y as i64 & 0xFFF),
+    )
+}
+
+#[inline]
+fn corner_shard(ptr: u64, pos: i64) -> usize {
+    let mut h = (pos as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ ptr.rotate_left(21);
+    h ^= h >> 29;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 32;
+    (h & (CORNER_SHARDS as u64 - 1)) as usize
+}
+
+#[inline]
+fn corner_probe(ptr: u64, pos: i64) -> Option<f32> {
+    let cache = CornerCache263::get();
+    let shard = cache.shards[corner_shard(ptr, pos)].lock().unwrap();
+    shard.get(&(ptr, pos)).copied()
+}
+
+#[inline]
+fn corner_insert(ptr: u64, pos: i64, v: f32) {
+    let cache = CornerCache263::get();
+    if cache.len.load(std::sync::atomic::Ordering::Relaxed) >= CORNER_CAP {
+        cache.clear_all();
+    }
+    let mut shard = cache.shards[corner_shard(ptr, pos)].lock().unwrap();
+    if shard.insert((ptr, pos), v).is_none() {
+        cache.len.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The stamp fills must put into SamplerCtx263::cc_gen to engage the cache.
+/// CRUS_CORNER_CACHE=0 disables the cache entirely (the A/B kill switch:
+/// the stamp becomes 0 and every fill bypasses — same code paths, cold
+/// decisions, honest same-host attribution).
+#[inline]
+pub fn corner_live_stamp() -> u64 {
+    const OFF: u64 = 0;
+    if CRUS_CC_STATE.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        let off = std::env::var("CRUS_CORNER_CACHE").ok().as_deref() == Some("0");
+        CRUS_CC_STATE.store(if off { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+    }
+    if CRUS_CC_STATE.load(std::sync::atomic::Ordering::Relaxed) == 1 {
+        return OFF;
+    }
+    CORNER_LIVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+/// 0 = unprobed, 1 = CRUS_CORNER_CACHE=0 (off), 2 = on.
+static CRUS_CC_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Gen263 ctor hook: a fresh tree generation — older fills' stamps stop
+/// matching (bypass), and the new generation in the key makes recycled node
+/// pointers alias-proof.
+pub fn bump_corner_live() {
+    CORNER_LIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Corner-grid sampling through the cross-fill cache. Returns false when the
+/// plain full-grid sample is the cheaper/possible route (cache bypassed, cold
+/// grid, oversized missing box, unpackable position) — the caller then falls
+/// back to the exact pre-cache behaviour (and warms the cache afterwards).
+fn corner_grid_cached(
+    a: &SamRef,
+    ctx: &mut SamplerCtx263,
+    node_ptr: u64,
+    cell_buf: &mut [f32],
+    cv: &DensityVolume,
+) -> bool {
+    let total = (cv.size_x * cv.size_y * cv.size_z) as usize;
+    // Probe pass: hit values land in a grid-layout scratch buffer; the
+    // missing-corner bounding box tightens as probes come back.
+    let mut hit_buf = ctx.scratch.acquire(total);
+    let mut miss_count = 0usize;
+    let (mut lox, mut loy, mut loz) = (cv.size_x, cv.size_y, cv.size_z);
+    let (mut hix, mut hiy, mut hiz) = (-1, -1, -1);
+    let mut packable = true;
+    for iz in 0..cv.size_z {
+        for ix in 0..cv.size_x {
+            for iy in 0..cv.size_y {
+                let idx = cv.index_unchecked(ix, iy, iz);
+                let pos = match pack_corner_pos(
+                    cv.block_x(ix),
+                    cv.block_y(iy),
+                    cv.block_z(iz),
+                ) {
+                    Some(p) => p,
+                    None => {
+                        packable = false;
+                        break;
+                    }
+                };
+                match corner_probe(node_ptr, pos) {
+                    Some(v) => hit_buf[idx] = v,
+                    None => {
+                        miss_count += 1;
+                        lox = lox.min(ix);
+                        loy = loy.min(iy);
+                        loz = loz.min(iz);
+                        hix = hix.max(ix);
+                        hiy = hiy.max(iy);
+                        hiz = hiz.max(iz);
+                    }
+                }
+            }
+            if !packable {
+                break;
+            }
+        }
+        if !packable {
+            break;
+        }
+    }
+    if !packable {
+        ctx.scratch.release(hit_buf);
+        return false;
+    }
+    PROF_CC_HIT.fetch_add((total - miss_count) as u64, std::sync::atomic::Ordering::Relaxed);
+    PROF_CC_MISS.fetch_add(miss_count as u64, std::sync::atomic::Ordering::Relaxed);
+    if miss_count == 0 {
+        cell_buf[..total].copy_from_slice(&hit_buf[..total]);
+        ctx.scratch.release(hit_buf);
+        return true;
+    }
+    // The missing box must pay for its own machinery; otherwise the plain
+    // full-grid sample (one cache-friendly pass, all corners inserted) wins.
+    if (miss_count as u64) * 100 > (total as u64) * 85 {
+        ctx.scratch.release(hit_buf);
+        return false;
+    }
+    // Sub-box volume over the missing corners, same steps/alignment — the
+    // source's volume path on a smaller volume produces identical per-
+    // position values (position purity, the strips theorem).
+    let box_vol = DensityVolume {
+        size_x: hix - lox + 1,
+        size_y: hiy - loy + 1,
+        size_z: hiz - loz + 1,
+        min_x: cv.block_x(lox),
+        min_y: cv.block_y(loy),
+        min_z: cv.block_z(loz),
+        step_x: cv.step_x,
+        step_y: cv.step_y,
+        step_z: cv.step_z,
+    };
+    PROF_CC_BOX.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut box_buf = ctx.scratch.acquire(box_vol.size());
+    a.sample_volume(ctx, &mut box_buf, &box_vol);
+    for iz in 0..cv.size_z {
+        for ix in 0..cv.size_x {
+            for iy in 0..cv.size_y {
+                let idx = cv.index_unchecked(ix, iy, iz);
+                let inside = ix >= lox && ix <= hix && iy >= loy && iy <= hiy && iz >= loz && iz <= hiz;
+                if inside {
+                    let v = box_buf[box_vol.index_unchecked(ix - lox, iy - loy, iz - loz)];
+                    cell_buf[idx] = v;
+                    corner_insert(
+                        node_ptr,
+                        pack_corner_pos(cv.block_x(ix), cv.block_y(iy), cv.block_z(iz)).unwrap(),
+                        v,
+                    );
+                } else {
+                    cell_buf[idx] = hit_buf[idx];
+                }
+            }
+        }
+    }
+    ctx.scratch.release(box_buf);
+    ctx.scratch.release(hit_buf);
+    true
+}
 
 #[inline]
 fn prof_now() -> u64 {
@@ -2137,7 +2400,7 @@ fn slice_volume_axis(
 
 /// InterpolatedFunction.sampleWithBlockStep + fillCell (26.3, exact).
 fn interpolated_volume(
-    a: &DfSam263,
+    a_arc: &SamRef,
     ctx: &mut SamplerCtx263,
     out: &mut Vec<f32>,
     vol: &DensityVolume,
@@ -2146,6 +2409,7 @@ fn interpolated_volume(
     inv_xz: f32,
     inv_y: f32,
 ) {
+    let a: &DfSam263 = a_arc;
     // Fastpath: aligned volume at cell step -> pass through.
     if (vol.step_x == cell_xz || vol.size_x == 1)
         && (vol.step_y == cell_y || vol.size_y == 1)
@@ -2198,7 +2462,46 @@ fn interpolated_volume(
     } else {
         0
     };
-    a.sample_volume(ctx, &mut cell_buf, &cell_volume);
+    // Cross-fill corner cache (cont-89): engage only when the ctx carries the
+    // live generation stamp (fill paths stamp it; stale aux contexts bypass).
+    // u64::MAX = test/bench sentinel — force engagement regardless of the
+    // live generation (deterministic A/B in unit tests; never produced by
+    // corner_live_stamp, which starts at 1).
+    let cc_engaged = ctx.cc_gen == u64::MAX
+        || (ctx.cc_gen != 0
+            && ctx.cc_gen == CORNER_LIVE.load(std::sync::atomic::Ordering::Relaxed));
+    let cached = cc_engaged
+        && corner_grid_cached(
+            a_arc,
+            ctx,
+            std::sync::Arc::as_ptr(a_arc) as u64,
+            &mut cell_buf,
+            &cell_volume,
+        );
+    if !cached {
+        a.sample_volume(ctx, &mut cell_buf, &cell_volume);
+        if cc_engaged {
+            // Warm the cache: every corner of the grid is now exact.
+            let node_ptr = std::sync::Arc::as_ptr(a_arc) as u64;
+            for iz in 0..cell_volume.size_z {
+                for ix in 0..cell_volume.size_x {
+                    for iy in 0..cell_volume.size_y {
+                        if let Some(pos) = pack_corner_pos(
+                            cell_volume.block_x(ix),
+                            cell_volume.block_y(iy),
+                            cell_volume.block_z(iz),
+                        ) {
+                            corner_insert(
+                                node_ptr,
+                                pos,
+                                cell_buf[cell_volume.index_unchecked(ix, iy, iz)],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
     if prof_t != 0 {
         PROF_INTERP_CELL.fetch_add(prof_now() - prof_t, std::sync::atomic::Ordering::Relaxed);
     }
