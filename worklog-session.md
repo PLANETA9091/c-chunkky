@@ -4502,3 +4502,47 @@ NEXT: (1) фикс в дефолте — CI перезапишет par4-лану
 (2) переоценка перевода CRUS_NATIVE_DECO=1 в дефолт в par4-режиме с фиксом;
 (3) fill-CPU фронты (surf_walk, hood, terrain-внутренности) — прямые
 рычаги и serial, и par4-throughput.
+
+## cont-81 РЕЗУЛЬТАТ (5e0a4f75 GREEN, CI 41194161059): unpin-лана верифицировала sticky-дефолт; JFR-профиль окна даёт первую метод-атрибуцию Paper-side
+
+Запуск 41194161059 (runner EPYC 7763, 4 vCPU; межрановый шум +40-50% к
+уровням конт-79/80 — уровни НЕ сравнивать между ранами, только same-run
+порядки):
+
+LANE-ТАБЛИЦА (e2e / gen / native, мс/чанк):
+- par4-timing (unpin, sticky CONCURRENT_SEEN дефолт): **29.71** / 42.03 / 41.37.
+- deco=1 (serial gen): 39.73 / 12.69 / 12.37.
+- no-beard: 36.90 / 14.40 / 14.09.
+- PF=1 (форс префетча): 37.75 / 14.11 / 13.77 — снова хуже serial-PF0.
+- CRUS_GEN_PARALLEL=1 (serial worker): 37.15 / 13.84 / 13.53.
+- 16x16 JFR-окно (256 чанков): 37.51 / 15.62 / 15.27;
+  stage[terrain=7.435 surface=5.982 hood=0.501 hood_compute=0.524
+  ncomp=289 park=0.102] surf_aux=1.261 surf_walk=4.635
+  terr_sample=16.795 terr_walk=3.397.
+Same-run порядок par4 (29.71) vs serial-ланы (36.9-39.7) подтверждает
+sticky-фикс: дельта ~ -8мс как в конт-80 (19.33 vs 27.78). Нативный bench
+джобы: fill_chunk 3.59 (COLD 4.16), SIMD parity fails 0/25, BIOME PARITY OK.
+
+JFR-ОКНО (CRUS_JFR=1 + CRUS_GEN_PARALLEL=1, 256 чанков, stackdepth=128) —
+первые hot-methods ЧИСТО таймед-окна:
+- org.spigotmc.WatchdogThread.run() 24.0% — idle-поток watchdog, шум
+  сэмплирования (wall-сэмплы всех потоков); вычитать из атрибуции.
+- OreFeature.doPlace 7.6% + OreFeature.place 1.6% = 9.2% — ВАНИЛЬНАЯ deco
+  (лана deco=0): главный реальный Java-потребитель окна. Прямой аргумент
+  за CRUS_NATIVE_DECO=1 дефолт (конт-80 уже показал cost-neutral стену).
+- PalettedContainer.get 3.2% — палитровые чтения (deco/light поверх чанков).
+- java.lang.reflect.Field.getFieldAccessor() 3.2% — РЕФЛЕКСИЯ в окне;
+  кандидат №1 на разбор (кто зовёт — нужен стек, не метод).
+- NoiseStack$Perlin.get 2.4% — ванильный noise (не наш JNI).
+- StaticCache2D.<init> 2.0% — ванильный кэш высот на генерацию.
+- StarLightEngine.performLightIncrease 1.6%, GeodeFeature 1.6%.
+Вывод: нативный JNI-филл (13.5-15.3) в окне почти не виден Java-методами
+(наш layoutBulk 1.6% — единственное своё) — остаток e2e это Paper-цепочка
+(тикет→schedule→light→convert) + ванильная deco, как и предсказано в конт-80.
+
+NEXT: (1) скачать артефакт e2e263_window.jfr и агрегировать
+MethodProfilingSample-стеки по потокам (исключить watchdog/idle) — назвать
+владельца Field.getFieldAccessor и точный вес Paper-цепочки;
+(2) переоценка CRUS_NATIVE_DECO=1 дефолта в par4-режиме;
+(3) fill-CPU фронты: surf_walk 3.97, terrain-внутренности (terr_sample
+16.8 на 2t-лане = 3x-инфляция той же природы).
