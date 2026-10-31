@@ -4968,3 +4968,43 @@ walk-а назовёт CI, а не арифметика.
 ОЖИДАНИЯ CI 300d7a38: parity-гейты (judge blockdump, material-count) —
 главный риск; surf_walk должен просесть (ожидание 19.2 -> 8-12, если
 biome-cond частый); surf_calls назовёт долю biome/vgrad/temp вызовов.
+
+## cont-87: f0bb зелёный ПОЛНОСТЬЮ (JFR: Field.checkAccess исчез; carver WARN исчез); 300d native green + parity-judges green; e2e-окна 23.1/20.6/21.8 (хост 9V74); 300d-int в полёте
+
+f0bb3ec8 (carver-хоп + privateLookupIn) — ВЕСЬ ран зелёный:
+- integration job success: все гейты (12 surface A/B, 13 carvers A/B,
+  14 biome A/B) + все honest-окна.
+- JFR lane 19 (timed window): java.lang.reflect.Field.checkAccess
+  ОТСУТСТВУЕТ (был 5 samples/0.72% в 717); layoutBulk 7->3 samples.
+  = privateLookupIn tier-2 работает, мост на MH-пути.
+- carver WARN "carver driver failed: NoSuchMethodException
+  WorldGenRegion.getHandle()" — 0 вхождений (был на каждом чанке).
+- honest-окна f0bb (host EPYC 9V74, НЕ 7763 — флот GitHub сменил хосты):
+  15 par4: e2e=23.14 native=31.57 busy=17.3 cover=74.7% maxconc=4
+  22 48x48: e2e=20.64 (2304 чанка, span=47.6s)
+  24 par4pinned: e2e=21.82
+  vs 717 (7763): 28.67/26.88/30.74 — КРОСС-ХОСТ, атрибуция невозможна;
+  внутрирановые stage: surf_walk=15.3 (9V74, серийный par4-walk).
+- Honest-компаратор приватной правки — только JFR-факт (checkAccess
+  исчез) + внутрирановые линии; e2e-дельта к 717 конфаунднута хостом.
+
+300d7a38 (walk-кэши + surf_calls) — native job ПОЛНОСТЬЮ green:
+- unit tests: fiddle_distance_java_reference (пин LCG-рефакторинга),
+  ore_fused_bit_exact_vs_walks — green; SIMD parity fails 0/25.
+- calibration (host EPYC 9V45!): server_fill median 2.71ms / fill_chunk
+  2.90 / COLD 3.53 / WAVE 3.47 (717: 4.73/4.67/6.33/6.43 на 9V74) — все
+  kind'ы упали 40-60% вкл. нетронутый terrain => хост-доминанта,
+  атрибуция кэшей из bench НЕВОЗМОЖНА (кросс-хост).
+- integration: гейты 12/13/14 (surface/carvers/biome A/B blockdump)
+  PASSED с walk-кэшами => ВЫВОДНАЯ паритетность доказана судьями.
+- ОСТАЛОСЬ: honest-окна + stage[] + surf_calls из 300d-int (шаг 18 в
+  полёте в момент записи); хост-матч с f0bb (9V74 vs ?) решит атрибуцию.
+
+ИНСТРУМЕНТ: scripts/ci_readout.sh (one-shot honest-comparator extraction);
+3 docs-дубликата ранов отменены (41226640291/41228023081/41228514415)
+для освобождения раннеров.
+
+СЛЕДУЮЩИЕ ФРОНТЫ (по убыванию): (1) 300d-int readout -> атрибуция
+walk-кэшей (surf_calls назовёт доминирующий cond); (2) terr_sample/interp-
+cell 12мс — плотностной путь (SIMD/бóльшие ячейки — след. большой фронт);
+(3) Paper-side StaticCache2D ~0.4ms + NoiseStack ~0.4ms (JFR).
