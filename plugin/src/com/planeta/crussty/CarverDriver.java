@@ -100,7 +100,15 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
         }
         try {
             Object handle = limited.getClass().getMethod("getHandle").invoke(limited);
-            ChunkAccess chunk = (ChunkAccess) handle.getClass().getMethod("getHandle").invoke(handle);
+            // WorldGenRegion IS the region handle (it has no getHandle(); the
+            // old second hop threw NoSuchMethodException on every chunk and the
+            // whole populate silently aborted — carver=0.00 in every window,
+            // CI 41223656202 WARN 'carver driver failed'). The chunk being
+            // populated is the region's CENTER chunk, i.e. (cx, cz) from the
+            // populate args, via LevelReader.getChunk(int,int).
+            ChunkAccess chunk = (ChunkAccess) handle.getClass()
+                    .getMethod("getChunk", int.class, int.class)
+                    .invoke(handle, cx, cz);
             // ---- pack sections ----
             int minSectionY = chunk.getMinSectionY();
             int sections = chunk.getSectionsCount();

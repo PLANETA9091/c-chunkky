@@ -1687,13 +1687,26 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
      * failure) falls back to the raw reflective call; an invoke failure at
      * runtime propagates exactly like the reflective call would (the outer
      * layoutBulk catch degrades the whole chunk to layoutV1 — same semantics
-     * as a reflective failure today). */
+     * as a reflective failure today).
+     * CI 41223656202 diag: bare MethodHandles.lookup().unreflect* performs its
+     * OWN access check on behalf of the lookup class and REJECTS private NMS
+     * fields (com.planeta package vs net.minecraft package) regardless of
+     * f.setAccessible(true) — every handle here silently returned null and all
+     * hGet/hSet ran Field.get/set (Field.checkAccess hot in JFR). Tier 2 uses
+     * privateLookupIn on the declaring class: NMS lives in the unnamed module
+     * (classpath), so no opens are needed and the deep lookup grants exactly
+     * the missing PRIVATE access. */
     private static MethodHandle unreflectGet(Field f) {
         try {
             f.setAccessible(true);
             return MethodHandles.lookup().unreflectGetter(f);
-        } catch (Throwable t) {
-            return null;
+        } catch (Throwable bare) {
+            try {
+                return MethodHandles.privateLookupIn(f.getDeclaringClass(),
+                        MethodHandles.lookup()).unreflectGetter(f);
+            } catch (Throwable deep) {
+                return null;
+            }
         }
     }
 
@@ -1701,8 +1714,13 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         try {
             f.setAccessible(true);
             return MethodHandles.lookup().unreflectSetter(f);
-        } catch (Throwable t) {
-            return null;
+        } catch (Throwable bare) {
+            try {
+                return MethodHandles.privateLookupIn(f.getDeclaringClass(),
+                        MethodHandles.lookup()).unreflectSetter(f);
+            } catch (Throwable deep) {
+                return null;
+            }
         }
     }
 
