@@ -5281,3 +5281,42 @@ LinearCongruentialGenerator):
 (2) par4 — оставляем в проде (e2e выигрывает перекрытием);
 (3) 1мс-цель без (1) недостижима: даже ноль-мс натив оставляет
     ~9-16мс ванильного Java-хвоста.
+
+## cont-92: фронт 2 — инструмент decorate-стадии: DecoMarker популятор (always-on), окно получило deco_inside/deco_tail/e2e_deco; harness ждёт deco-drain, JFR накрывает decorate-хвост
+
+CI: 41296752847 (1cc4e774, cont-91 docs) SUCCESS — вся цепочка HEAD
+зелёная. Sandbox ре-синхронизирован (recycled-снапшот откатил локально
+к 848b2b6d; stash + ff до 1cc4e774, всё на origin цело).
+
+ПРОБЛЕМА (фронт 2, база): честные окна закрываются по последнему
+noise-филлу — Paper-стадия decorate (structures/features/populators)
+для поздних чанков выходит ЗА span; все окна истории печатали
+"deco: no chunks decorated yet". Значит e2e=18.11 (2304-serial, 9V74)
+НЕ включает decorate-хвост — ванильный Java (OreFeature, FeaturePlacer,
+NoiseStack$Perlin, BiomeManager.getFiddledDistance из serial-JFR)
+частично живёт после закрытия окна.
+
+РЕШЕНИЕ (этот коммит, 4 файла):
+- DecoMarker: always-on Bukkit BlockPopulator, регистрация в
+  onWorldLoad ПОСЛЕ setupDeco (таймстамп чанка фиксируется ПОСЛЕ
+  нативных DecoDriver-оп или после ванильного addVanillaDecorations);
+  популяторы живут ВНЕ gate shouldGenerateDecorations — событие
+  декорации видно в ОБОИХ режимах (vanilla и native deco);
+- GenStats: WIN_DECO_INSIDE/FIRST/LAST + noteDeco(cx,cz);
+  windowSnapshot дополнен: deco_inside=%d deco_tail=%.0fms
+  e2e_deco=%.2f (deco_tail = конец последнего филла -> последняя
+  декорация — асинхронный хвост, который fill-e2e не видел;
+  e2e_deco = старт первого филла -> последняя декорация / чанки —
+  полная пайплайн-стена через decorate);
+- rcon wincount: window_deco_inside=N — полл харнесса;
+- e2e_ci.sh: deco-drain фаза после fill-полла (перед mspt/JFR-стопом):
+  ждёт deco_inside >= target до 30с (стэлл-выход 15с; старый плагин
+  без поля = мгновенный скип, обратная совместимость). JFR-окно теперь
+  НАКРЫВАЕТ decorate-хвост: ванильные фичи впервые попадут в профиль
+  честно;
+- семантика t1/harness_wall_ms_per_chunk/e2e НЕ изменена (fills) —
+  e2e_deco добавляется рядом, старые ряды сравнимы.
+
+СЛЕДУЮЩИЙ РАН ДАСТ: e2e_deco против e2e по всем лейнам = измеримый
+размер ванильного Java-хвоста (база фронта 2); JFR decorate-хвоста =
+точные горячие методы для порта в натив.

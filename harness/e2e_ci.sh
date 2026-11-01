@@ -261,6 +261,34 @@ for i in $(seq 1 6000); do
   sleep 0.05
 done
 t1=$(date +%s.%N)
+# ---- cont-92 deco drain: the fill span closes at the last noise fill, but
+# Paper's decorate phase (structures/features/populators) for the later
+# chunks lands after it — every window so far printed "deco: no chunks
+# decorated yet". The DecoMarker populator (always-on, both deco modes)
+# timestamps decorate events; wait up to 30s beyond fill completion for
+# window_deco_inside to reach the fill target, so the final GenStats
+# snapshot carries deco_tail/e2e_deco and (JFR lanes) the profile covers
+# the decorate tail. Best-effort: on grace timeout the snapshot still
+# shows the partial deco_inside (diagnostic, not a lane failure).
+dtarget=$target
+dgrace=0
+deco_last=-1
+for i in $(seq 1 600); do
+  d=$($RCON "crusgenstats wincount" 2>/dev/null | grep -o "window_deco_inside=[0-9]*" | cut -d= -f2)
+  d=${d:-}
+  # plugin without the cont-92 field: skip the drain entirely
+  [ -z "$d" ] && break
+  if [ "$d" -ge "$dtarget" ]; then dgrace=-1; break; fi
+  if [ "$d" = "$deco_last" ]; then dgrace=$((dgrace + 1)); else dgrace=0; deco_last=$d; fi
+  if (( dgrace >= 300 )); then echo "  [deco drain stalled 15s] deco_inside=$d / $dtarget — continuing"; break; fi
+  if (( i % 100 == 0 )); then echo "  [deco drain] deco_inside=$d / $dtarget"; fi
+  sleep 0.05
+done
+if [ -n "${d:-}" ] && [ "$d" -ge "$dtarget" ]; then
+  echo "  [deco drain] complete: deco_inside=$d / $dtarget"
+elif [ -n "${d:-}" ]; then
+  echo "  [deco drain] partial at snapshot: deco_inside=${d:-0} / $dtarget (deco_tail may be understated)"
+fi
 echo "=== mspt (tick pacing right after window; last-100-ticks digest) ==="
 $RCON "mspt" 2>/dev/null | head -6 || echo "mspt unavailable"
 if [ "${CRUS_JFR:-0}" = "1" ] && [ -n "$JC" ] && [ -n "$JPID" ]; then

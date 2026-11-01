@@ -110,6 +110,17 @@ public final class GenStats {
     private static final AtomicLong WIN_MARKS = new AtomicLong();
     private static final AtomicLong WIN_CARVER = new AtomicLong();
     private static volatile long WIN_T_FIRST, WIN_T_LAST;
+    // cont-92 decorate-stage counters: the fill-span honest e2e closes at the
+    // last in-window noise fill, but Paper's decorate phase (structures /
+    // features / populators) for the later chunks extends BEYOND that span —
+    // every window so far printed "deco: no chunks decorated yet". Bukkit
+    // populators fire per chunk in BOTH deco modes (they live outside the
+    // shouldGenerateDecorations gate), so the always-on DecoMarker populator
+    // feeds one timestamp per chunk here; windowSnapshot() turns it into
+    // deco_inside / deco_tail (last fill end -> last deco event, the tail the
+    // fill-e2e misses) / e2e_deco (first fill start .. last deco event).
+    private static final AtomicLong WIN_DECO_INSIDE = new AtomicLong();
+    private static volatile long WIN_DECO_FIRST, WIN_DECO_LAST;
     // nanoTime when "crusgenstats window" armed the rect — precedes the
     // forceload command by one rcon round-trip; ramp = first in-window fill
     // start minus this = the scheduling/status-chain latency BEFORE the
@@ -145,11 +156,38 @@ public final class GenStats {
         WIN_T_FIRST = 0;
         WIN_T_LAST = 0;
         WIN_T_ARMED = System.nanoTime();
+        WIN_DECO_INSIDE.set(0);
+        WIN_DECO_FIRST = 0;
+        WIN_DECO_LAST = 0;
     }
 
     /** In-window fill count so far (fast poll for the harness). */
     static long winInside() {
         return WIN_INSIDE.get();
+    }
+
+    /** cont-92 decorate-phase marker: called once per chunk from the
+     *  always-on DecoMarker populator (vanilla and native deco alike) —
+     *  the only per-chunk plugin-visible decoration event. */
+    static void noteDeco(int cx, int cz) {
+        if (WIN_N == 0) {
+            return;
+        }
+        if (cx < WIN_MIN_X || cx > WIN_MIN_X + WIN_N
+                || cz < WIN_MIN_Z || cz > WIN_MIN_Z + WIN_N) {
+            return;
+        }
+        long t = System.nanoTime();
+        if (WIN_DECO_FIRST == 0) {
+            WIN_DECO_FIRST = t;
+        }
+        WIN_DECO_LAST = t;
+        WIN_DECO_INSIDE.incrementAndGet();
+    }
+
+    /** In-window decorated-chunk count so far (harness deco-drain poll). */
+    static long winDecoInside() {
+        return WIN_DECO_INSIDE.get();
     }
 
     /** Server-side window snapshot: span + per-chunk component breakdown
@@ -200,10 +238,19 @@ public final class GenStats {
         }
         double cover = spanMs > 0 ? 100.0 * busyMs / spanMs : 0.0;
         double cnt = n;
+        // cont-92 decorate tail: deco_tail = last in-window fill end -> last
+        // in-window deco event (the async decorate/status-chain wall the fill
+        // span misses); e2e_deco = first fill start .. last deco event over
+        // the fill count = the full-pipeline honest number through decorate.
+        double decoTailMs = (WIN_DECO_LAST > 0 && WIN_T_LAST > 0)
+                ? (WIN_DECO_LAST - WIN_T_LAST) / 1e6 : 0.0;
+        double e2eDeco = (WIN_DECO_LAST > 0 && WIN_T_FIRST > 0)
+                ? (WIN_DECO_LAST - WIN_T_FIRST) / 1e6 / n : 0.0;
         return String.format(
                 "window[%d..%d,%d..%d] inside=%d span=%.2fms ramp=%.0fms e2e=%.2fms/chunk"
                         + " gen=%.2f native=%.2f layout=%.2f beard=%.2f marks=%.2f carver=%.2f"
-                        + " busy=%.1fms/chunk cover=%.1f%% maxconc=%d",
+                        + " busy=%.1fms/chunk cover=%.1f%% maxconc=%d"
+                        + " deco_inside=%d deco_tail=%.0fms e2e_deco=%.2f",
                 WIN_MIN_X, WIN_MIN_X + WIN_N, WIN_MIN_Z, WIN_MIN_Z + WIN_N,
                 n, spanMs, rampMs, spanMs / n,
                 WIN_TOTAL.get() / cnt / 1e6,
@@ -214,7 +261,10 @@ public final class GenStats {
                 WIN_CARVER.get() / cnt / 1e6,
                 wn > 0 ? busyMs / wn : 0.0,
                 cover,
-                maxconc);
+                maxconc,
+                WIN_DECO_INSIDE.get(),
+                decoTailMs,
+                e2eDeco);
     }
 
     /** Zero the ring buffer + all counters: starts a fresh measurement window

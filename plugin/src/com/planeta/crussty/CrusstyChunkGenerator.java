@@ -713,6 +713,25 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             CtxPool pool = poolForNamed(w.getName(), seed, minY, height);
             setupSurface(pool, w);
             setupDeco(pool, w);
+            // cont-92: always-on decorate marker. Bukkit populators run per
+            // chunk in BOTH deco modes (outside the shouldGenerateDecorations
+            // gate) — registered LAST so it timestamps the chunk after the
+            // native DecoDriver ops (when present) and after vanilla
+            // addVanillaDecorations (when not): the decorate-phase moment of
+            // the chunk. Feeds GenStats deco_inside/deco_tail/e2e_deco.
+            try {
+                w.getPopulators().add(new org.bukkit.generator.BlockPopulator() {
+                    @Override
+                    public void populate(org.bukkit.generator.WorldInfo info,
+                            java.util.Random random, int cx, int cz,
+                            org.bukkit.generator.LimitedRegion limited) {
+                        GenStats.noteDeco(cx, cz);
+                    }
+                });
+            } catch (Throwable t) {
+                Logger.getLogger("CrusstyGen").warning(
+                        "deco marker registration failed (window deco counters stay empty): " + t);
+            }
             if (NATIVE_CARVERS && "world_the_end".equals(w.getName()) == false) {
                 try {
                     Class<?> cd = Class.forName("com.planeta.crussty.CarverDriver");

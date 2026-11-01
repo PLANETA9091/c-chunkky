@@ -88,7 +88,8 @@ public final class CrusstyGenPlugin extends JavaPlugin {
                 return true;
             }
             if (args.length >= 1 && args[0].equalsIgnoreCase("wincount")) {
-                sender.sendMessage("window_inside=" + GenStats.winInside());
+                sender.sendMessage("window_inside=" + GenStats.winInside()
+                        + " window_deco_inside=" + GenStats.winDecoInside());
                 return true;
             }
             // Paper RCON delivers only ONE sendMessage per command — join the
