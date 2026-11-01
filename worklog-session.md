@@ -5219,3 +5219,65 @@ palette locals, sticky CONCURRENT_SEEN), par4 прошёл здоровым дв
 docs-раны 786c4391 и 25e6ba36 cancelled (новый пуш отменяет старый ран —
 concurrency), код идентичен зелёному e0df7c86; 25e6ba36 перепущен через
 rerun-failed-jobs (201).
+
+## cont-91: ФРОНТ 1 ЗАКРЫТ — par4-налог = оверподписка, НЕ блокировки; первое честное par4-JFR окно (41292371498 SUCCESS, integration EPYC 9V74)
+
+CI: 41292371498 (9bdb8ee8, cont-90) SUCCESS — запиненный jfr_par-лейн
+дал первое в истории кампании JFR-окно с настоящей 4-конкуренцией
+(maxconc=4); 41247413230 (rerun 25e6ba36) тоже SUCCESS — HEAD main
+полностью зелёный. Хосты рана: integration = EPYC 9V74 80-Core
+(avx512f=TRUE), native = Xeon Platinum 8573C — правило cont-90 снова
+подтверждено (джобы одного рана = разные VM; сравнения только
+внутри джобы).
+
+ЧТО ДАЛО PAR4-JFR (окно 09:53:53, inside=144, maxconc=4, e2e=21.30,
+span=3067мс):
+- ЛОКОВ НЕТ: парки воркеров #0..3 = 762-793мс на 3.07с окно (~25%),
+  ВСЕ на одном сайте Notifier$Lock.waitUntilReady() (ожидание задачи
+  из шедулера Paper), ни одного парка/монитора внутри филла;
+  гипотеза "кто-то держит мьютекс внутри JNI" ОПРОВЕРГНУТА;
+- воркеры загружены ровно (#0..3 = 57/51/49/37 exec-сэмплов) и
+  CPU-АКТИВНЫ, Java-сторона = ванильные фичи/биомы + layoutBulk
+  (OreFeature.place/doPlace, FeaturePlacer.place, NoiseStack$Perlin.get,
+  PalettedContainer.get, BitSet.get, LinearCongruentialGenerator);
+- CPU НА ФИЛЛ ВЫРОС В ~2x ПРИ ИДЕНТИЧНОЙ РАБОТЕ: par4 ~13мс Java +
+  ~10мс native на филл против serial ~7 + ~4.2 (serial: только
+  Worker #0, 88.8% профильда); surf_calls байт-в-байт совпадают
+  между окнами (biome=22759258, stdepth=8385486, vgrad=24968918) —
+  работа детерминированно та же; растяжение = конкуренция за CPU
+  (4 воркера + Server thread + GC + I/O + netty ≈ 7 рантайбл-тредов
+  на 4-vCPU cgroup-квоте);
+- фактическое перекрытие филлов: native-сумма 3.6с / union busy 2.25с
+  = 1.6x из 4x — воркеры и наполовину не перекрываются;
+- stage-инверсия подтверждает cont-81 sticky width=1 в проде:
+  terr_sample 12.8-13.6 (serial = СУММА CPU 4 strip-тредов) -> 5.9-6.5
+  (par4 = full-volume путь в 1 тред), terrain wall 5.3-5.9 -> 14.8-15.7,
+  surf_walk 1.9-2.2 -> 7.0-7.7.
+
+ВЕРДИКТ ФРОНТА 1: par4-налог (gen 2.7-3.3x, кросс-хостно Xeon+EPYC) —
+САМОНАНЕСЁННАЯ ОВЕРПОДПИСКА, не блокировки. Натив УЖЕ насыщает машину
+в serial (1 воркер x 4 strip-треда; Workers #1-3 в serial-JFR пусты).
+par4 e2e-выигрыш на 12x12 (serial 24.20/25.07 -> par4 19.32/21.30/19.99)
+даётся ПЕРЕКРЫТИЕМ Paper-side цепочки (cover 36-39% -> 68-73%), а не
+скоростью натива. JNI-wall инфляция под par4 — бенинг, par4 оставляем.
+
+НОВЫЙ БЕНЧМАРК РЯДА (integration 9V74): 2304-serial e2e=18.11
+(ряд 2304-serial: 25.82 rev1 Xeon 8370C -> 23.11 rev2 EPYC 7763 ->
+18.11 cont-90 EPYC 9V74; рекорд остаётся 13.59 на 9V45, cont-88).
+Corner-cache A/B: fill_chunk 1.74 ON vs 4.20 OFF = -59% (paired,
+8573C) — репликация -60% (9V45): эффект хост-робастен. FUSED
+bit-parity 0/175, SIMD parity 0/25, material-count судьи
+76/82/82 (deco order noise, зелёные), goldens/unit-пины ok.
+
+ПЕРЕСТАНОВКА ФРОНТОВ: serial gen=8.6-9.2 против e2e=18.1-25.1 —
+натив ~9мс/чанк, ОСТАЛЬНОЕ Paper-side/ванильный Java (serial-JFR:
+NoiseStack$Perlin.get, BiomeManager.getFiddledDistance, OreFeature,
+LinearCongruentialGenerator):
+(1) ГЛАВНЫЙ: портировать ванильные Java-стадии фич/биом-фиддла в
+    натив. Инфра CRUS_NATIVE_DECO=1 есть, но deco-лейн честные окна
+    НЕ ЛОВИТ декорации ("deco: no chunks decorated yet" во всех
+    окнах — окно встаёт раньше decorate-стадии); нужен дизайн окна
+    по декорированным чанкам + per-stage аттрибуция decorate;
+(2) par4 — оставляем в проде (e2e выигрывает перекрытием);
+(3) 1мс-цель без (1) недостижима: даже ноль-мс натив оставляет
+    ~9-16мс ванильного Java-хвоста.
