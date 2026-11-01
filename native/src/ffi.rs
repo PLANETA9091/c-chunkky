@@ -221,6 +221,18 @@ fn build_biome_state(
 pub(crate) static SESSIONS: Mutex<Option<HashMap<i64, Ctx>>> = Mutex::new(None);
 static NEXT_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
+/// Panic-tolerant SESSIONS lock. The deco JNI entries catch placement panics
+/// (cont-93: a panic unwinding across the extern "system" boundary ABORTS the
+/// JVM — run 41324500487 deco lanes died exactly that way, silently) — a
+/// caught panic unwinding past a MutexGuard poisons the mutex, and the next
+/// `.lock().unwrap()` would re-panic on the fill path and kill the JVM anyway.
+/// The map itself stays consistent: the guarded calls (chunk_plan /
+/// run_feature_master) mutate no cross-run invariants, and every deco panic
+/// is logged at its catch site.
+pub(crate) fn sessions_lock() -> std::sync::MutexGuard<'static, Option<HashMap<i64, Ctx>>> {
+    SESSIONS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Synthetic Assets from the embedded 26.3 vanilla blobs — feeds
 /// build_deco_ctx_src for the embedded-vanilla ctx (no datapack present).
 /// Path shape matches the assets convention "<ns>/worldgen/<kind>/<file>.json";
@@ -366,7 +378,7 @@ pub fn ctx_new(seed: i64, min_y: i32, height: i32, sea_level: i32) -> i64 {
     let env: &'static DEnv = Box::leak(env);
     let gen = ChunkGen::new(env);
     let carvers = crate::carver::CarverState::from_assets(&crate::worldgen::Assets::new(), env.wg.min_y as i32, env.wg.height as i32);
-    let mut map = SESSIONS.lock().unwrap();
+    let mut map = sessions_lock();
     map.get_or_insert_with(HashMap::new).insert(
         id,
         Ctx { gen, v263, biomes: None, surface: None, deco },
@@ -410,7 +422,7 @@ pub fn ctx_new_assets(
             return Err(msg);
         }
     };
-    let mut map = SESSIONS.lock().unwrap();
+    let mut map = sessions_lock();
     map.get_or_insert_with(HashMap::new).insert(
         id,
         Ctx { gen, v263: None, biomes, surface, deco },
@@ -419,7 +431,7 @@ pub fn ctx_new_assets(
 }
 
 pub fn ctx_free(id: i64) {
-    if let Some(map) = SESSIONS.lock().unwrap().as_mut() {
+    if let Some(map) = sessions_lock().as_mut() {
         map.remove(&id);
     }
 }
@@ -650,7 +662,7 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
     // Holding the lock across the whole fill serialized ALL noise fills AND
     // the biome fills against each other (~13ms exclusive each).
     let ctx_ptr: *mut Ctx = {
-        let mut map_guard = SESSIONS.lock().unwrap();
+        let mut map_guard = sessions_lock();
         let map = map_guard.as_mut().expect("sessions map");
         map.get_mut(&id).expect("ctx id") as *mut Ctx
     };
@@ -965,7 +977,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fillBeard(
                     0,
                 );
                 {
-                    let mut map = SESSIONS.lock().unwrap();
+                    let mut map = sessions_lock();
                     let map = map.as_mut().expect("sessions map");
                     if let Some(c) = map.get_mut(&ctx as &i64) {
                         if let Some(st) = c.v263.as_mut() {
@@ -1082,7 +1094,7 @@ unsafe fn fill_jni(
     }
     let mlen = ((*tbl).v1_1.GetArrayLength)(env, marks as jni_sys::jarray) as usize;
     let count = {
-        let map = SESSIONS.lock().unwrap();
+        let map = sessions_lock();
         let map = map.as_ref().expect("sessions map");
         let c = map.get(&ctx as &i64).expect("ctx id");
         let m: &[i64] = if let Some(st) = c.v263.as_ref() {
@@ -1126,7 +1138,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_ctxBiomeNa
     ctx: jni_sys::jlong,
 ) -> jni_sys::jobjectArray {
     let tbl = *env;
-    let bs_guard = SESSIONS.lock().unwrap();
+    let bs_guard = sessions_lock();
     // v263 ctxs carry the 26.3 preset biome source inside the Gen263 slot;
     // legacy ctxs use the pack-assets slot.
     let bs = bs_guard
@@ -1190,7 +1202,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fillBiomes
     out: jni_sys::jintArray,
 ) -> jni_sys::jint {
     let tbl = *env;
-    let state_guard = SESSIONS.lock().unwrap();
+    let state_guard = sessions_lock();
     let Some(c) = state_guard.as_ref().and_then(|m| m.get(&(ctx as i64))) else {
         return -1;
     };
@@ -1440,7 +1452,7 @@ fn hood263(
 /// Bench helper: the v263 biome grid + global store (no JNI).
 pub fn bench_fill_biomes263(id: i64, cx: i32, cz: i32, out: &mut [i32]) -> i32 {
     let (b, min_y, height) = {
-        let guard = SESSIONS.lock().unwrap();
+        let guard = sessions_lock();
         let Some((b, mn, h)) = guard
             .as_ref()
             .and_then(|m| m.get(&id))
@@ -1511,7 +1523,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_biome263Pr
     out: jni_sys::jlongArray,
 ) -> jni_sys::jint {
     let tbl = *env;
-    let state_guard = SESSIONS.lock().unwrap();
+    let state_guard = sessions_lock();
     let Some(c) = state_guard.as_ref().and_then(|m| m.get(&(ctx as i64))) else {
         return -1;
     };
@@ -1548,7 +1560,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_biome263Pr
 /// Bench/plugin-test helper: compute + store the biome grid for one chunk
 /// (the native half of the plugin's fillBiomes, without JNI).
 pub fn bench_fill_biomes(id: i64, cx: i32, cz: i32, out: &mut [i32]) -> i32 {
-    let guard = SESSIONS.lock().unwrap();
+    let guard = sessions_lock();
     let map = guard.as_ref().expect("sessions map");
     let c = map.get(&id).expect("ctx id");
     let Some(state) = &c.biomes else { return -1 };
@@ -1584,7 +1596,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_surfaceSta
     ctx: jni_sys::jlong,
 ) -> jni_sys::jobjectArray {
     let tbl = *env;
-    let guard = SESSIONS.lock().unwrap();
+    let guard = sessions_lock();
     let states: &[String] = match guard
         .as_ref()
         .and_then(|m| m.get(&(ctx as i64)))
@@ -1652,7 +1664,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_surfaceSet
 
 /// Rust-side helper shared by JNI + bins: assign material ids + bands.
 pub fn surface_assign_ids(id: i64, ids: &[u16]) -> Result<(), String> {
-    let mut guard = SESSIONS.lock().unwrap();
+    let mut guard = sessions_lock();
     let c = guard
         .as_mut()
         .and_then(|m| m.get_mut(&id))
@@ -1732,7 +1744,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_surfaceSet
 
 /// Rust-side helper shared by JNI + bins.
 pub fn surface_assign_temps(id: i64, temps: &[f32], frozen: &[bool]) -> Result<(), String> {
-    let mut guard = SESSIONS.lock().unwrap();
+    let mut guard = sessions_lock();
     let c = guard
         .as_mut()
         .and_then(|m| m.get_mut(&id))
@@ -1753,7 +1765,7 @@ pub fn surface_assign_temps(id: i64, temps: &[f32], frozen: &[bool]) -> Result<(
 
 /// Rust-side helper: native biome name table of a ctx.
 pub fn ctx_biome_names_of(id: i64) -> Option<Vec<String>> {
-    let guard = SESSIONS.lock().unwrap();
+    let guard = sessions_lock();
     guard
         .as_ref()
         .and_then(|m| m.get(&id))
@@ -1763,7 +1775,7 @@ pub fn ctx_biome_names_of(id: i64) -> Option<Vec<String>> {
 
 /// Rust-side helper: surface state strings of a ctx.
 pub fn surface_states_of(id: i64) -> Option<Vec<String>> {
-    let guard = SESSIONS.lock().unwrap();
+    let guard = sessions_lock();
     guard
         .as_ref()
         .and_then(|m| m.get(&id))
@@ -1837,7 +1849,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_carveOps(
 ) -> jni_sys::jint {
     let tbl = *env;
     let len = ((*tbl).v1_1.GetArrayLength)(env, ops as jni_sys::jarray) as usize;
-    let map = SESSIONS.lock().unwrap();
+    let map = sessions_lock();
     let Some(n) = map.as_ref().and_then(|m| m.get(&(ctx as i64))).and_then(|c| c.v263.as_ref()) else {
         return 0;
     };
@@ -1861,7 +1873,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_carveMarks
 ) -> jni_sys::jint {
     let tbl = *env;
     let len = ((*tbl).v1_1.GetArrayLength)(env, marks as jni_sys::jarray) as usize;
-    let map = SESSIONS.lock().unwrap();
+    let map = sessions_lock();
     let Some(n) = map.as_ref().and_then(|m| m.get(&(ctx as i64))).and_then(|c| c.v263.as_ref()) else {
         return 0;
     };

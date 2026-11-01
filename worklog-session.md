@@ -5320,3 +5320,90 @@ NoiseStack$Perlin, BiomeManager.getFiddledDistance из serial-JFR)
 СЛЕДУЮЩИЙ РАН ДАСТ: e2e_deco против e2e по всем лейнам = измеримый
 размер ванильного Java-хвоста (база фронта 2); JFR decorate-хвоста =
 точные горячие методы для порта в натив.
+
+## cont-93: фронт 2 readout — deco_tail впервые измерен (7 окон), JFR впервые накрыл decorate-хвост (~30% Java CPU на 144-ч); НО deco-лейны умирают: JVM abort молча → diag + panic-гарды
+
+CI: 41324500487 (2d8b2414, cont-92) SUCCESS, но оба CRUS_NATIVE_DECO=1
+лейна умерли. Все 7 честных окон на одном хосте (EPYC 7763 4c avx2,
+avx512f=false) — сравнения внутри джобы валидны. farprobe: D=64..61440
+все OK.
+
+### Фронт 2 readout (e2e_deco против e2e, deco-drain cont-92)
+
+| лейн | окно | e2e | e2e_deco | Δ (Java-хвост) | deco_tail | cover/maxconc |
+|---|---|---|---|---|---|---|
+| par4 timing | 144 | 23.70 | 26.03 | +2.33 | 335ms | 68.4% / 4 |
+| nobeard serial | 144 | 30.86 | 32.89 | +2.03 | 292ms | 35.2% / 1 |
+| jfr (serial) | 256 | 31.78 | 33.90 | +2.12 | 543ms | 40.9% / 1 |
+| par serial | 144 | 31.22 | 33.31 | +2.09 | 302ms | 36.0% / 1 |
+| jfr_par (par4) | 144 | 26.25 | 28.23 | +1.98 | 285ms | 70.6% / 4 |
+| big serial | 2304 | 23.26 | 23.40 | +0.14 | 322ms | 48.1% / 1 |
+| par4 rep | 144 | 24.58 | 26.38 | +1.80 | 259ms | 69.3% / 4 |
+
+deco_inside=144/144 (256/256, 2304/2304) на ВСЕХ окнах — DecoMarker
+популятор работает, honesty подтверждена. Математика e2e_deco
+сходится: (span+deco_tail)/inside точно по всем 7 окнам.
+
+ВЫВОДЫ:
+1. deco_tail АБСОЛЮТНО КОНСТАНТЕН: 259-543ms независимо от размера
+   окна (144/256/2304). Это drain-латентность асинхронной
+   decorate-очереди ПОСЛЕДНИХ чанков, НЕ пропорциональная работа.
+   На 144-ч окне хвост = +1.8-2.3мс/чанк; на 2304-ч = +0.14мс/чанк
+   (0.6% e2e) — АМОРТИЗИРУЕТСЯ.
+2. JFR впервые честно накрыл decorate-хвост (cont-92 сработал).
+   jfr_par (144-ч, 304 сэмпла, 4 воркера 25.3/23.7/20.4/18.8% + Server
+   11.2% — локи НЕ доминируют, фронт 1 подтверждён ещё раз):
+   OreFeature.doPlace 6.25% + OreFeature.place 3.62% = 9.9% (#1),
+   FeaturePlacer.place 3.62%, NoiseStack$Perlin.get 2.96%,
+   GeodeFeature.place 1.97%, PalettedContainer.get 2.30% +
+   LinearPalette idFor/valueFor 2.96%, OffsetPlacement 1.64%,
+   StaticCache2D 1.64%, LinearCongruentialGenerator 1.64%,
+   LakeFeature/MonsterRoomFeature 0.66% → ванильный decorate-стек
+   ≈ 30-32% профилированного Java CPU. Serial-jfr (256-ч): Ore 4.4%,
+   NoiseStack 2.0%, FeaturePlacer 1.3% (~16%) — доля decorate растёт
+   под par4 (окно короче, филлы быстрее).
+3. ВЕРДИКТ ФРОНТА 2: порт decorate в натив двигает (а) spawn-латентность
+   малых окон (+2мс/ч на 144-ч), (б) общий Java CPU на 30% в окнах,
+   но НЕ большой e2e (на 2304-ч хвост +0.14). OreFeature — цель #1
+   порта (9.9% jfr_par, чистая арифметика без 3x3-квери в основном
+   пути doPlace). Главный e2e-элект 2304-ч остаётся прежним:
+   gen 11.19 при e2e 23.26 → Java-пайплайн статусов.
+
+### КРАШ DECO-ЛЕЙНОВ (блокер deco=1, диагностикой в этом коммите)
+
+Симптом 2/2 лейнов (serial deco И par4deco, ~3-4.5 мин после boot):
+boot ok → spawn backlog drained (fills so far: 484) → CMD_FAIL:
+connection closed by server → [forceload tile FAILED] → ~8 мин
+мёртвых wincount-поллов → E2E WINDOW TIMEOUT (inside=0/144).
+ВАЖНО: run-prof-хвост ДОКАЗЫВАЕТ, что нативный deco работал до смерти:
+dripstone_cluster 1.9-5.4ms/16ч (топ), ore_* 0.2-0.4ms, chunks=16
+runs=775-816, native=7.4-9.6ms/16ч — сотни фич-ранов успешно.
+Причина скрыта: пост-оконный дамп run.out грепает ТОЛЬКО
+run-prof|ore-prof строки (e2e_ci.sh:330) — Rust panic / JVM fatal
+/OOM-текст в CI-лог не попал; артефакты run.out/hs_err не аплоудятся.
+
+Гипотеза #1 (главная): паника в нативном placement → unwind через
+extern "system" → abort JVM. decoRunFeature был БЕЗ catch_unwind
+(в ffi.rs — 8 гардов, в features_jni.rs — 0). Гипотеза #2: JNI-fatal
+(pending exception) или kernel OOM.
+
+ФИКСЫ (этот коммит, 3 файла):
+- features_jni.rs: catch_unwind вокруг chunk_plan (decoChunkPlan) и
+  run_feature_master (decoRunFeature) — гард ВНУТРИ скоупа
+  sessions_lock-гарда (мьютекс НЕ отравляется); при панике:
+  ReleasePrimitiveArrayCritical первым делом (анпин GC), log_warn с
+  step/gid/фичей/payload, возврат -1 (протоколный "скип", Java-ветка
+  n<0) → смерть JVM превращена в деградацию с именованным логом;
+- ffi.rs + features_jni.rs: sessions_lock() — panic-tolerant
+  SESSIONS.lock (26 сайтов, unwrap_or_else(into_inner)) — отравление
+  больше не каскадирует в fill-путь;
+- e2e_ci.sh: dump_server_diag() — НЕфильтрованный tail -250 run.out +
+  свежий hs_err_pid*.log head -120 + free + dmesg-OOM; fail-fast:
+  проба list сразу после backlog-drain (точка смерти deco-лейнов),
+  после forceload-тайлов и 40 мёртвых wincount-поллов подряд →
+  [SERVER DEAD] + diag + exit 0 (вместо 8 мин мёртвого поллинга);
+  diag также на E2E WINDOW TIMEOUT (wedged-but-alive кейс).
+
+СЛЕДУЮЩИЙ РАН: (а) deco-лейны живут → первые честные deco=1 окна +
+native-deco против vanilla-tail A/B; или (б) снова умирают → diag
+кладёт точный фатал (паника/JNI-fatal/OOM) прямо в CI-лог.

@@ -764,7 +764,18 @@ impl<'a> DecoLevelExt for JniLevel<'a> {
 // JNI exports
 // ---------------------------------------------------------------------------
 
-use crate::ffi::SESSIONS;
+use crate::ffi::sessions_lock;
+
+/// Best-effort panic payload to string (String / &'static str / opaque).
+fn panic_msg(p: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = p.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else {
+        "opaque panic payload".to_string()
+    }
+}
 
 /// decoBiomeFeaturesFull(ctx, String[] biomeNames, String[] joinedRefs) —
 /// the FULL pack biome -> placed-refs union map, matching the Java
@@ -833,7 +844,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoStates
     ctx: jlong,
 ) -> jobjectArray {
     let tbl = *env;
-    let guard = SESSIONS.lock().unwrap();
+    let guard = sessions_lock();
     let Some(d) = guard.as_ref().and_then(|m| m.get(&(ctx as i64)))
         .and_then(|c| c.deco.as_ref()) else {
         return std::ptr::null_mut();
@@ -867,7 +878,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoPlan(
     ctx: jlong,
 ) -> jobjectArray {
     let tbl = *env;
-    let guard = SESSIONS.lock().unwrap();
+    let guard = sessions_lock();
     let Some(d) = guard.as_ref().and_then(|m| m.get(&(ctx as i64)))
         .and_then(|c| c.deco.as_ref()) else {
         return std::ptr::null_mut();
@@ -916,7 +927,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoChunkP
     out: jni_sys::jintArray,
 ) -> jint {
     let tbl = *env;
-    let guard = SESSIONS.lock().unwrap();
+    let guard = sessions_lock();
     let Some(d) = guard.as_ref().and_then(|m| m.get(&(ctx as i64)))
         .and_then(|c| c.deco.as_ref()) else {
         return -1;
@@ -935,7 +946,24 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoChunkP
         biomes.push(std::ffi::CStr::from_ptr(cstr).to_string_lossy().into_owned());
         ((*tbl).v1_1.ReleaseStringUTFChars)(env, js as jni_sys::jstring, cstr);
     }
-    let runs = chunk_plan(&d.plan, &d.biome_features, &biomes);
+    // cont-93 panic guard: a placement panic unwinding across this
+    // extern "system" boundary aborts the JVM (run 41324500487 deco lanes
+    // died silently exactly this way). Catch inside the sessions_lock scope
+    // (no poisoning), log the payload, degrade to an empty plan — Java
+    // decorates nothing this chunk but the server lives and the log names
+    // the panic.
+    let runs = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        chunk_plan(&d.plan, &d.biome_features, &biomes)
+    })) {
+        Ok(r) => r,
+        Err(p) => {
+            crate::ffi::log_warn(&format!(
+                "deco: chunk_plan PANIC (chunk degrades to 0 runs): {}",
+                panic_msg(&p)
+            ));
+            Vec::new()
+        }
+    };
     let olen = ((*tbl).v1_1.GetArrayLength)(env, out as jni_sys::jarray) as usize;
     if olen < runs.len() * 2 {
         return -1;
@@ -978,7 +1006,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
         return -1;
     }
     let tbl = *env;
-    let guard = SESSIONS.lock().unwrap();
+    let guard = sessions_lock();
     let Some(d) = guard.as_ref().and_then(|m| m.get(&(ctx as i64)))
         .and_then(|c| c.deco.as_ref()) else {
         return -1;
@@ -1124,17 +1152,41 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
     }
     let slice = std::slice::from_raw_parts_mut(ptr as *mut i32, olen);
     let t_run = prof_now();
-    let n = run_feature_master(
-        &d.state,
-        &chunk_level,
-        deco_seed as i64,
-        if paper_seed == -1 { None } else { Some(paper_seed as i64) },
-        BlockPos::new(origin_x as i32, origin_y as i32, origin_z as i32),
-        &name,
-        step as usize,
-        gid as usize,
-        slice,
-    );
+    // cont-93 panic guard: run_feature_master is the largest unproven native
+    // surface (feature placement). A panic here unwinds across the
+    // extern "system" boundary = JVM abort (run 41324500487 deco lanes: the
+    // JVM died silently right after the spawn backlog, both CRUS_NATIVE_DECO
+    // lanes, reproducibly). Catch INSIDE the sessions_lock scope (no mutex
+    // poisoning), release the pinned ops buffer, log the payload with the
+    // feature name, return -1 — the Java loop skips the feature (the n<0
+    // protocol branch) and the server lives.
+    let run_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_feature_master(
+            &d.state,
+            &chunk_level,
+            deco_seed as i64,
+            if paper_seed == -1 { None } else { Some(paper_seed as i64) },
+            BlockPos::new(origin_x as i32, origin_y as i32, origin_z as i32),
+            &name,
+            step as usize,
+            gid as usize,
+            slice,
+        )
+    }));
+    let n = match run_res {
+        Ok(n) => n,
+        Err(p) => {
+            // release the critical pin FIRST (an unreleased critical blocks
+            // GC and can wedge the JVM a second way)
+            ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
+            crate::ffi::log_warn(&format!(
+                "deco: run_feature PANIC step={} gid={} feature={} (feature skipped, ops buffer stale): {}",
+                step, gid, name,
+                panic_msg(&p)
+            ));
+            return -1;
+        }
+    };
     let t_run_ns = prof_now() - t_run;
     PROF_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let rl = run_loader.get();
@@ -1178,7 +1230,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoChunkB
     zoom_seed: jlong,
 ) {
     prof_chunk_tick();
-    let guard = SESSIONS.lock().unwrap();
+    let guard = sessions_lock();
     if let Some(d) = guard
         .as_ref()
         .and_then(|m| m.get(&(ctx as i64)))
@@ -1219,7 +1271,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoOpsDro
             return;
         }
         let slice = std::slice::from_raw_parts(p as *const i32, len);
-        let guard = SESSIONS.lock().unwrap();
+        let guard = sessions_lock();
         if let Some(d) = guard
             .as_ref()
             .and_then(|m| m.get(&(ctx as i64)))
@@ -1309,7 +1361,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoDelega
     _class: jni_sys::jclass,
     ctx: jlong,
 ) {
-    let guard = SESSIONS.lock().unwrap();
+    let guard = sessions_lock();
     if let Some(d) = guard
         .as_ref()
         .and_then(|m| m.get(&(ctx as i64)))
@@ -1333,7 +1385,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoSetFla
     flags: jni_sys::jbyteArray,
 ) {
     let tbl = *env;
-    let guard = SESSIONS.lock().unwrap();
+    let guard = sessions_lock();
     let Some(d) = guard
         .as_ref()
         .and_then(|m| m.get(&(ctx as i64)))

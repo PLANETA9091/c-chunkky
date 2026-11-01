@@ -46,6 +46,35 @@ stop_server() {
   sleep 2
 }
 
+# cont-93: both CRUS_NATIVE_DECO lanes of run 41324500487 died silently
+# (boot ok -> spawn backlog drained -> "CMD_FAIL: connection closed" ->
+# forceload FAILED -> 8min of dead polls -> timeout) and the log hid the
+# cause: the post-window run.out dump greps ONLY run-prof|ore-prof lines,
+# so the Rust panic / JVM fatal error / OOM evidence never reached CI.
+dump_server_diag() {
+  echo "=== SERVER DEATH DIAG (unfiltered run.out tail + hs_err + memory) ==="
+  if [ -f "$SRV/run.out" ]; then
+    echo "--- run.out tail (last 250 lines, unfiltered) ---"
+    tail -n 250 "$SRV/run.out" 2>/dev/null
+  else
+    echo "(no $SRV/run.out)"
+  fi
+  local hs
+  hs=$(ls -t "$SRV"/hs_err_pid*.log 2>/dev/null | head -1)
+  if [ -n "$hs" ]; then
+    echo "--- hs_err: $hs (first 120 lines) ---"
+    head -n 120 "$hs" 2>/dev/null
+  else
+    echo "(no hs_err_pid*.log in $SRV)"
+  fi
+  echo "--- memory ---"
+  free -m 2>/dev/null || true
+  (dmesg 2>/dev/null || sudo -n dmesg 2>/dev/null) \
+    | grep -i "killed process\|out of memory" | tail -5 \
+    || echo "(no OOM evidence / dmesg unavailable)"
+  echo "=== END SERVER DEATH DIAG ==="
+}
+
 cat > "$SRV/server.properties" <<EOF
 level-name=world
 level-seed=$SEED
@@ -178,6 +207,11 @@ echo "spawn backlog drained (fills so far: ${last:-?})"
 # or the stats reset lands mid-spawn-gen and the timed window mixes in ~170
 # foreign fills (observed: chunks=313 for a 144-chunk window).
 before=$(stats_chunks)
+if ! $RCON "list" >/dev/null 2>&1; then
+  echo "  [SERVER DEAD] right after spawn backlog drain (the deco-lane death point) — lane ends early"
+  dump_server_diag
+  exit 0
+fi
 $RCON "forceload add $((WX * 16)) $((WZ * 16)) $(((WX + WN) * 16 + 15)) $(((WZ + WN) * 16 + 15))" >/dev/null
 wtarget=$((before + (WN + 1) * (WN + 1)))
 for i in $(seq 1 240); do
@@ -234,10 +268,37 @@ for bx in $(seq "$fminx" 256 "$fmaxx"); do
       || echo "  [forceload tile FAILED] $bx $bz -> $ex $ez"
   done
 done
+# cont-93 fail-fast: a tile failure is usually the first VISIBLE symptom of
+# a dead server (the death itself happened minutes earlier, e.g. the deco
+# lanes' JVM abort right after the spawn backlog). Probe once; on a dead
+# server dump the diag and skip the window entirely (the old path burned
+# ~8 min of dead polls before the timeout line).
+server_dead=0
+if ! $RCON "list" >/dev/null 2>&1; then
+  server_dead=1
+  echo "  [SERVER DEAD] rcon unreachable right after forceload tiles — lane ends early"
+  dump_server_diag
+  exit 0
+fi
 done=0
-stall=0; lastc=-1; dumped=0
+stall=0; lastc=-1; dumped=0; dead_polls=0
 for i in $(seq 1 6000); do
+  [ "$server_dead" = "1" ] && break
   c=$($RCON "crusgenstats wincount" 2>/dev/null | grep -o "window_inside=[0-9]*" | cut -d= -f2)
+  if [ -z "$c" ]; then
+    # transient empty (rcon hiccup) vs dead server: 40 consecutive dead
+    # polls (~20-40s) = dead — dump diag once and stop polling
+    dead_polls=$((dead_polls + 1))
+    if [ "$dead_polls" -ge 40 ]; then
+      server_dead=1
+      echo "  [SERVER DEAD] 40 consecutive dead wincount polls (inside was $lastc / $target) — lane ends early"
+      dump_server_diag
+      exit 0
+    fi
+    sleep 0.5
+    continue
+  fi
+  dead_polls=0
   c=${c:-0}
   if [ "$c" -ge "$target" ]; then done=1; break; fi
   # wedge probe: if the inside count stops moving for ~30s of polls, take
@@ -305,6 +366,9 @@ if [ "${CRUS_JFR:-0}" = "1" ] && [ -n "$JC" ] && [ -n "$JPID" ]; then
 fi
 if [ "$done" != "1" ]; then
   echo "E2E WINDOW TIMEOUT (inside=$c / $target)"
+  # alive-but-wedged or late death: the unfiltered run.out tail still names
+  # the cause (exceptions, plugin errors, native warnings) — dump it here too
+  [ "$server_dead" != "1" ] && dump_server_diag
 fi
 
 nchunks=$(( (N + 1) * (N + 1) ))
