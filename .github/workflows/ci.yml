@@ -242,14 +242,16 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-          # Serial-gen JFR window sampled ONLY Paper Common Worker #0 doing
-          # JNI fills (Workers #1-3 fully idle). This lane records the window
-          # WITH CRUS_GEN_PARALLEL=1: if Workers #1-N stay absent, Paper's
-          # gen-parallelism never spreads OUR fills and the par-lane verdict
-          # (no wall gain) is explained; if they appear, the residual wall
-          # is downstream (light/tickets/main-thread beat) — mspt + parks
-          # decide which.
-          CRUS_JFR=1 CRUS_GEN_PARALLEL=1 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_jfr_par.log
+          # cont-90: CRUS_WORKER_THREADS=4 pins the gen pool — the auto
+          # heuristic is 1 worker on the 4-vCPU runner (<=3 physical),
+          # so every historical JFR window was serial (maxconc=1) and the
+          # par4 blocking tax (gen wall 2.7-3.3x, host-invariant) had no
+          # attribution. This lane now records a TRUE par4 window:
+          # jfr_wait per-thread native/park on Workers #0..3 answers
+          # "who blocks workers inside JNI under 4-concurrency" (front 1).
+          # Pin leak to later lanes is reset by e2e_ci.sh when unset;
+          # par4 stability verified cont-74/81 (twice per run, rev1+rev2).
+          CRUS_JFR=1 CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_jfr_par.log
       - name: E2E large window 48x48 (amortized per-chunk at scale)
         continue-on-error: true
         run: |

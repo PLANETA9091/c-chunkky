@@ -5169,3 +5169,53 @@ HOST-ЧУВСТВИТЕЛЬНОСТЬ (главный урокcont-89): cont-88 
 (4) terrain-хвост: shell/interp после кэша (~16.3 serial Xeon — хост-чувств).
 ИНСТРУМЕНТ: ccdiag (модель probe-ов), cc[hits/miss/box] в readout,
 CRUS_CORNER_CACHE=0 kill-switch + paired bench A/B в native-джобе.
+
+## cont-90: хост-атрибуция cont-89 исправлена (джобы одного рана = разные VM); par4-налог кросс-хостно инвариантен (2.7-3.3x); jfr_par-лейн запинен на 4 воркера — инструмент фронта 1
+
+КОРРЕКЦИЯ HOST-ЧУВСТВИТЕЛЬНОСТИ (перечитаны [cpu]-строки логов трёх ранов):
+- каждая джоба рана садится на СВОЙ раннер-VM: [cpu] в integration и
+  "model name" в native одного рана НЕ совпадают. "Тот же хост" на
+  уровне рана — некорректное утверждение; сравнивать можно только
+  внутри одной джобы или по [cpu]-строкам integration-джоб;
+- cont-88 300d7a38 (41227947571): integration = EPYC 9V45 96-Core,
+  avx512f=TRUE — honest e2e 13.59/12.82;
+- rev1 612869d9 (41239009417): integration = Xeon Platinum 8370C
+  (avx512f=TRUE), native = EPYC 9V74; 2304-serial e2e 25.82;
+- rev2 e0df7c86 (41243746128): integration = EPYC 7763 (avx512f=FALSE!),
+  native = EPYC 9V45; 2304-serial e2e 23.11.
+=> cont-89 final назвал rev2 "Xeon 8370C" — это хост REV1; сравнение
+   stage[] "rev2 vs rev1 (тот же хост Xeon)" НЕВАЛИДНО (7763 vs 8370C).
+   Остаются валидными: (а) paired bench A/B внутри native-джобы rev2
+   (9V45): fill_chunk 1.18 ON vs 2.96 OFF = -60%; (б) судьи/паритеты
+   (хост-независимы); (в) внутрирановые honest-окна.
+- avx512-гипотеза: 7763 без avx512f — часть 9V45->7763 дельты e2e
+  может сидеть в SIMD-пути noise-ядер. Проверка потребует явного
+  A/B (CRUS-флага под avx512-пути сейчас нет) — TODO, не атрибуция.
+
+PAR4-НАЛОГ КРОСС-ХОСТНО ИНВАРИАНТЕН (фронт 1 подтверждён на двух хостах):
+- rev1 Xeon 8370C: par4 gen=36.28/42.27 vs serial(144) gen=12.93-13.27
+  = 2.8-3.3x; busy 19.3/21.9; cover 70.9/71.8%; e2e par4 27.23/30.49
+  vs serial 33.93-35.67 (par4 выручает ~4-8мс, но не 4x);
+- rev2 EPYC 7763: par4 gen=30.75/31.70 vs serial(144) gen=10.76-11.90
+  = 2.7-2.9x; busy 17.8/18.0; cover 69.5/70.6%; e2e par4 25.66/25.47
+  vs serial 30.31-32.64; 2304-serial 23.11 — лучший;
+- форма одинакова на разных хостах => это блокировка внутри JNI/обвязки,
+  не хост-шум. Но JFR-окно rev2 снято на SERIAL (maxconc=1): profiled
+  224 сэмпла — 90% Worker #0 (OreFeature/NoiseStack/LinearCongruential
+  ~1.4-1.7% каждый), parks только у интра-тредов (I/O 9.0s idle-wait,
+  DensityBuffer GC 10.0s) — аттрибуции par4-блокировок НЕТ.
+
+ИНСТРУМЕНТ ФРОНТА 1 (этот коммит): ci.yml e2e263_jfr_par-лейн получил
+CRUS_WORKER_THREADS=4 (был без пина: авто на 4-vCPU <=3 physical = 1
+воркер, потому все JFR-окна истории были serial). Следующий ран даст
+jfr_wait-аттрибуцию native/park по Worker #0..3 под настоящей
+4-конкуренцией — прямой ответ "кто блокирует воркеров внутри JNI".
+Сброс пина при unset в e2e_ci.sh защищает последующие лейны
+(big/farprobe); дестабилизация cont-72 закрыта в cont-74/81 (per-call
+palette locals, sticky CONCURRENT_SEEN), par4 прошёл здоровым дважды
+в rev1 и дважды в rev2.
+
+СОСТОЯНИЕ CI: 41239009417 (rev1) SUCCESS, 41243746128 (rev2) SUCCESS;
+docs-раны 786c4391 и 25e6ba36 cancelled (новый пуш отменяет старый ран —
+concurrency), код идентичен зелёному e0df7c86; 25e6ba36 перепущен через
+rerun-failed-jobs (201).
