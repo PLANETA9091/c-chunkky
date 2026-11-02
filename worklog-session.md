@@ -5481,3 +5481,90 @@ pos) — те же типы, что и прежний вызов, топ-фич�
 deco=1 A/B окна + делегат перестаёт терять 5 фич (strict-материалы
 сдвинутся к ваниле); (б) снова зависание → [WEDGE] + полный jcmd стек
 Server thread прямо в CI-логе → точка зависания названа кодом.
+
+## cont-95: deco-lane смерть ДОКАЗАНА по коду и стеку: recount-шторм карвера (M_RECOUNT на ячейку = O(cells×4096)) голодает воркеры → Server thread вечно ждёт syncLoad → Paper Watchdog (spigot.yml!) добивает. Бонус: deco=0-лейны НИКОГДА не запускали карверы (decoAcquire ctx=0) — база A/B была нечестной. Фиксы: батч-recount, carver-ctx из мирового пула, настоящий watchdog-off, тайл-таймаут 90с
+
+CI: 41409735829 (a662b793, cont-94) SUCCESS, оба deco-лейна умерли ОПЯТЬ
+(3м03с / 3м21с) — но diag cont-94 сработал полностью: полный thread dump
+ловится живым, и стек называет точку кодом.
+
+### Форензика (integration-джоба 125159795493, оба лейна идентичны)
+
+boot ok → backlog drained (deco=1: 61с против 18с у deco=0 — филлы
+стойли за декоратом backlog'а) → пробы list прошли → ПЕРВЫЙ forceload
+тайла окна (17600,17600 → chunk 1100,1100) — rcon-вызов в полёте ~120с
+→ 08:15:14 watchdog-дамп → Stopping server → CMD_FAIL → SERVER DEAD.
+
+WATCHDOG-ДАМП (наконец-то полный, awk-экстракция cont-94):
+- Server thread RUNNABLE: Thread.yield0 ← BlockableEventLoop.
+  waitForTasks ← managedBlock ← ServerChunkCache.syncLoad ← getChunk ←
+  ServerLevel.setChunkForced ← ForceLoadCommand — серверный тред ЖДЁТ
+  чанк (1103,1100), holder: currentGenStatus=initialize_light,
+  requestedGenStatus=full, generationTask=null (задачи НЕТ — воркеров
+  нет), priority=BLOCKING;
+- Paper Common Worker #0/#1/#2 (3 из 4): RUNNABLE, ВЕРТУШКА в
+  CarverDriver.populate:211 → LevelChunkSection.recalcBlockCounts ←
+  Short2ShortOpenHashMap.find/putIfAbsent (ShortList.add) — активный
+  CPU-жор, НЕ блокировка, НЕ натив;
+- Worker #3 + I/O: idle. Worker-Main-1 (global pool): idle.
+
+### Корневая цепочка (все звенья проверены по коду)
+
+1. e2e_ci.sh:179 гонит CRUS_NATIVE_CARVERS=1 на ВСЕХ лейнах →
+   shouldGenerateCaves()=false → ванильные карверы выключены везде.
+2. CarverDriver.populate берёт ctx через decoAcquire → DECO_POOL, а
+   DECO_POOL выставляется ТОЛЬКО в setupDeco (deco=1). В deco=0: ctx=0
+   → ранний return → карверов в deco=0-лейнах НЕТ ВООБЩЕ. Вот почему
+   carver=0.00 в каждом honest-окне всех прошлых ранов! База deco=0
+   была БЕЗ карверов, deco=1 платил полный карвер-прайс — A/B смещён.
+3. В deco=1 ctx есть → carve возвращает сотни-тысячи ops на чанк →
+   СТАРЫЙ код: M_GET_AND_SET + M_RECOUNT.invoke(sec) НА КАЖДУЮ ячейку.
+   recalcBlockCounts = полный обход палитры секции (4096 ячеек).
+   O(cells × 4096) на чанк — минуты чистого Java-CPU на 484 backlog +
+   144 окна. Итог: 3/4 воркеров в вертушке, chunk system не
+   обслуживает syncLoad форслоада, Server thread голодает ≥60с.
+4. cont-94 ставил max-tick-time=-1 в server.properties — но убил
+   сервер org.spigotmc.WatchdogThread по spigot.yml
+   settings.timeout-time (дефолт 60; текст дампа сам говорит
+   "consider increasing timeout-time in spigot.yml"). Не тот конфиг.
+
+### ФИКСЫ (этот коммит)
+
+- CarverDriver.populate: recount БАТИЧИТСЯ — все M_GET_AND_SET ленятся
+  в boolean[24] touched, затем ОДИН M_RECOUNT на затронутую секцию.
+  Финальное состояние идентично (recount пересчитывает из storage),
+  O(sections) вместо O(cells) — ~1000x меньше обходов;
+- CrusstyChunkGenerator.decoAcquire(+WorldInfo): fallback на мировой
+  пул (poolFor — lookup, пул уже создан onWorldLoad; seed/minY/height
+  из WorldInfo, кэши resolveSeaLevel/packData тёплые) → карверы
+  работают в ОБЕИХ режимах → A/B честный (обе стороны несут один
+  карвер-прайс). DecoDriver/CarverDriver звать с info;
+- e2e_ci.sh: spigot.yml предсоздаётся с settings.timeout-time=-1
+  (настоящий watchdog-off; wedge-probe/jcmd — путь доказательств);
+  тайл-таймаут 180→90с (здоровый тайл <10с; при зависании — live
+  jcmd-дамп на 90-й секунде вместо 180-й).
+
+### Честные окна cont-94 (все deco=0, EPYC 9V74 4c avx512 — хост cont-88)
+
+| лейн | окно | e2e | deco_tail | e2e_deco |
+|---|---|---|---|---|
+| par4 timing | 144 | 20.21 | 238мс | 21.86 |
+| nobeard serial | 144 | 25.51 | 258мс | 27.30 |
+| jfr serial | 256 | 25.76 | 433мс | 27.46 |
+| par serial | 144 | 24.74 | 248мс | 26.46 |
+| jfr_par par4 | 144 | 19.52 | 197мс | 20.89 |
+| big serial | 2304 | 19.30 | 247мс | 19.41 |
+| par4 pinned | 144 | 20.91 | 206мс | 22.35 |
+
+deco_inside=144/256/2304 complete на ВСЕХ живых окнах. deco_tail на
+2304 = 247мс → +0.107мс/ч — амортизация хвоста подтверждена на ВТОРОМ
+хосте (9V74; cont-93: 7763, +0.14). ВАЖНО: это последние окна СТАРОЙ
+базы — cont-96+ считает deco=0 С карверами (честная база), числа
+сдвинутся вверх на карвер-прайс; сравнивать окна старого и нового
+бейслайна нельзя.
+
+СЛЕДУЮЩИЙ РАН: (а) deco-лейны живы → ПЕРВЫЙ честный deco A/B (обе
+стороны с карверами) + deco_tail/e2e_deco против нового бейслайна;
+(б) зависание → tile-timeout 90с + live jcmd прямо в CI-логе. После
+закрытия deco-блокера — фронт 3: порт OreFeature (цель #1, 9.9%
+jfr_par).

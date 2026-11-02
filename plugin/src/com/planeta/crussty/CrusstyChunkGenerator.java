@@ -250,9 +250,22 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     /** Pool for the deco populator (set by setupDeco). */
     private static volatile CtxPool DECO_POOL;
 
-    /** Populator-side ctx acquisition (same pool protocol as fills). */
-    static long decoAcquire(java.util.concurrent.locks.ReentrantLock[] lockOut) {
+    /** Populator-side ctx acquisition (same pool protocol as fills).
+     *  cont-95: takes the WorldInfo so the carver populator can fall back to
+     *  the WORLD pool when the deco engine is absent — under deco=0 the
+     *  DECO_POOL is null and the carver populator silently no-oped
+     *  (carver=0.00 in every e2e window; vanilla carvers are also gated off
+     *  by shouldGenerateCaves), so the deco=0 baseline carried NO carver work
+     *  while the deco=1 lanes paid the full carver cost — the A/B was biased.
+     *  poolFor is a lookup (the pool exists by populate time — onWorldLoad
+     *  created it), so the fallback adds no setup cost. */
+    static long decoAcquire(java.util.concurrent.locks.ReentrantLock[] lockOut,
+            org.bukkit.generator.WorldInfo info) {
         CtxPool p = DECO_POOL;
+        if (p == null && info != null) {
+            p = poolFor(info, info.getSeed(),
+                    info.getMinHeight(), info.getMaxHeight() - info.getMinHeight());
+        }
         if (p == null) {
             return 0;
         }

@@ -118,6 +118,20 @@ motd=crussty e2e263
 max-tick-time=-1
 EOF
 
+# cont-95: the cont-94 watchdog-off was INCOMPLETE. server.properties
+# max-tick-time=-1 silences the VANILLA tick watcher, but the killer in run
+# 41409735829 was the PAPER watchdog (org.spigotmc.WatchdogThread) driven by
+# spigot.yml settings.timeout-time (default 60) — its own dump text says
+# "consider increasing timeout-time in spigot.yml". It dumped threads 60s
+# into the first forceload tile and STOPPED the JVM before any harness probe.
+# Pre-seed spigot.yml (Paper merges the rest with defaults) so a wedged lane
+# survives to the harness wedge-probe / tile-timeout, which take LIVE jcmd
+# dumps — better evidence than a post-mortem watchdog dump.
+cat > "$SRV/spigot.yml" <<EOF2
+settings:
+  timeout-time: -1
+EOF2
+
 stop_server
 rm -rf "$SRV/world" "$SRV/world_nether" "$SRV/world_the_end"
 # Kill the spawn backlog AT THE SOURCE: without a pre-set paper-world-defaults
@@ -292,7 +306,10 @@ for bx in $(seq "$fminx" 256 "$fmaxx"); do
     # by watchdog with the command still pending). timeout() the call so a
     # wedged server cannot stall the tile loop, and take a LIVE thread dump
     # on the first failure while the JVM is still attachable.
-    if ! timeout 180 $RCON "forceload add $bx $bz $ex $ez" >/dev/null; then
+    # cont-95: 180 -> 90s (a healthy tile takes <10s even on slow hosts; with
+    # the watchdog now REALLY off via spigot.yml, a wedged tile costs 90s of
+    # lane time before the live dump instead of 180).
+    if ! timeout 90 $RCON "forceload add $bx $bz $ex $ez" >/dev/null; then
       rc=$?
       echo "  [forceload tile FAILED rc=$rc] $bx $bz -> $ex $ez"
       if [ "$rc" -eq 124 ] && [ -z "$tile_livedump_done" ]; then

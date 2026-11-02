@@ -94,7 +94,7 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
         long tCarver0 = System.nanoTime();
         java.util.concurrent.locks.ReentrantLock[] lockBox =
                 new java.util.concurrent.locks.ReentrantLock[1];
-        long ctx = CrusstyChunkGenerator.decoAcquire(lockBox);
+        long ctx = CrusstyChunkGenerator.decoAcquire(lockBox, info);
         if (ctx == 0) {
             return;
         }
@@ -190,7 +190,20 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
             // ids span the full palette (base materials + the extended
             // surface states the topMaterial fix can write, e.g. dirt/grass
             // at ids 22+). Unknown/out-of-range ids are skipped defensively.
+            // cont-95: recount ONCE per touched section, not per cell.
+            // recalcBlockCounts walks every palette entry of the section
+            // (4096 cells); a carved chunk produces thousands of ops, so the
+            // per-cell recount made decorate O(cells x 4096) — run
+            // 41409735829 deco lanes: 3/4 Paper Common Workers RUNNABLE in
+            // recalcBlockCounts for >=2min, the chunk system starved, the
+            // Server thread waited forever in syncLoad(first forceload tile)
+            // and the Paper Watchdog (spigot.yml timeout-time, NOT the
+            // server.properties knob cont-94 silenced) killed the JVM. All
+            // writes of a section land first; one recount per touched
+            // section then rebuilds the counts from the storage — identical
+            // final state, O(sections) recounts instead of O(cells).
             Object[] statesById = STATES_BY_ID;
+            boolean[] touched = new boolean[sections];
             for (int i = 0; i < got; i++) {
                 long op = ops[i];
                 int idx = (int) (op >>> 16);
@@ -208,7 +221,12 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
                 LevelChunkSection sec = chunk.getSection(s);
                 PalettedContainer<?> pc = sec.getStates();
                 M_GET_AND_SET.invoke(pc, sx, sy, sz, state);
-                M_RECOUNT.invoke(sec);
+                touched[s] = true;
+            }
+            for (int s = 0; s < sections; s++) {
+                if (touched[s]) {
+                    M_RECOUNT.invoke(chunk.getSection(s));
+                }
             }
             if (nm > 0) {
                 markPositions(chunk, marks, nm);
