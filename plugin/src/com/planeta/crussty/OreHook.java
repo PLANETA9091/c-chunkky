@@ -106,7 +106,7 @@ public final class OreHook {
      *  +3% skew carrier and was never audited: the per-chunk first-N audit
      *  only ever picked dirt/gravel veins). Empty = audit first-N as before. */
     private static final String AUDIT_NAME =
-            System.getenv().getOrDefault("CRUS_ORE_AUDIT_NAME", "granite");
+            System.getenv().getOrDefault("CRUS_ORE_AUDIT_NAME", "ore_coal");
 
     private OreHook() {
     }
