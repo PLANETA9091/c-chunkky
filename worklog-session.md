@@ -5838,3 +5838,16 @@ run.out + draw-trace.
 ОЖИДАНИЕ от гейта: если ore-материалы STRICT-PASS -> бит-в-бит и
 сразу e2e-замер; если STRICT-FAIL на тысячах блоков -> RNG/координаты,
 форензика; единичные блоки -> deco-order кромки.
+
+### cont-99c: CI 41491819685 (8a691d11) ПОЛНАЯ ЗЕЛЁНОСТЬ (plugin/native/integration, все ЧЕТЫРЕ ab-гейта PASS) — но форензика артефакта показала: ore-гейт был ВАКУУМНЫМ для хука (урок cont-97 повторился в новой форме). "ore hook ACTIVE: 24 ore features" — свап работает; НО "ore hook fallback (ctx)" x8+ — decoAcquire возвращал 0: DECO_POOL сеется ТОЛЬКО в setupDeco (deco=1), ab-ноги ходят в deco=0 -> каждый ore-вызов падал в vanilla -> ab_on выродился в чистую ваниль, ab_on==ab_off тривиально. Гейт тем не менее дал прочную информацию: fallback-дисциплина БЕЗУПРЕЧНА (ноль дрейфа, ноль аварий — обвязка жива), STRICT-материалы бит-в-бит, дрейф только deco-order класса (vines ±9, amethyst buds, AIR ±18) — тот же класс, что vanilla-vs-vanilla boots
+
+ФИКС (одна строка): setupOre сеет DECO_POOL = pool перед
+OreHook.setup — хук получает fill-ctx на каждый ore-вызов. states=null
+в логе — вызов setupOre для НЕЙТЕР-мира (ctx без deco-реестра,
+безвредный ранний return).
+
+СЛЕДУЮЩИЙ РАН (cont-99d): при живом DECO_POOL ждём ПЕРВЫЙ честный
+ore-верdict: STRICT-PASS = бит-в-бит нативного ore-расширения внутри
+vanilla decorate (RNG-продолжение подтверждено) -> e2e-замер выгоды
+на deco=0 окнах; STRICT-FAIL на тысячах блоков -> RNG/координаты
+(draw-trace форензика); единичные блоки -> deco-order кромки жил.

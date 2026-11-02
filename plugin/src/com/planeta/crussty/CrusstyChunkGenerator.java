@@ -2467,6 +2467,12 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             // the native plan (biome-union placed names) drives the registry
             // walk: every hooked configured feature is natively known
             String[][] plan = ChunkGenNative.decoPlan(ctx0);
+            // the hook acquires fill-ctxs per ore call; in deco=0 mode
+            // setupDeco never ran, so DECO_POOL stays null and EVERY ore
+            // call falls back on decoAcquire==0 — the A/B gate would be
+            // vacuous (CI 41491819685 forensics: 8+ "fallback (ctx)" lines,
+            // ab_on degenerated to pure vanilla)
+            DECO_POOL = pool;
             Class.forName("com.planeta.crussty.OreHook")
                     .getMethod("setup", org.bukkit.World.class, String[].class, String[][].class)
                     .invoke(null, w, states, plan);
