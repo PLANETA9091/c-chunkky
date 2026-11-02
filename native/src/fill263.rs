@@ -687,6 +687,16 @@ impl Gen263 {
         b263: Option<&std::sync::Arc<crate::biome263::BiomeState263>>,
     ) {
         io.fill(0);
+        // cont-96: DEFENSIVE unpack. The Java pack (CarverDriver.populate)
+        // snapshots pc.data reflectively; a palette GROWTH racing the snapshot
+        // (idFor/resize under vanilla decorate, deco=0) can leave storage
+        // values == palette size, and pack.pal[po + v] then PANICS — with
+        // panic=abort (profile.release, pre-cont-96) that KILLED the JVM
+        // instantly (run 41447324352 deco=0 lanes: "index out of bounds: the
+        // len is 122 but the index is 122" in fill263.rs:711, 7/7 deaths, no
+        // hs_err, no watchdog). OOB palette indices degrade to AIR (0) here —
+        // the affected cells skip carving instead of aborting the process.
+        let mut oob = 0usize;
         for s in 0..24usize {
             let bits = pack.bits[s];
             if bits < 0 {
@@ -694,7 +704,7 @@ impl Gen263 {
             }
             let base = s * 4096;
             if bits == 0 {
-                let id = pack.pal[pack.pal_off[s] as usize] as u16;
+                let id = pack.pal.get(pack.pal_off[s] as usize).copied().unwrap_or(0) as u16;
                 io[base..base + 4096].fill(id);
             } else {
                 let ro = pack.raw_off[s] as usize;
@@ -703,14 +713,34 @@ impl Gen263 {
                     let bit_idx = i * bits as usize;
                     let word = bit_idx / 64;
                     let shift = bit_idx % 64;
-                    let mut v = (pack.raw[ro + word] >> shift) as i64;
+                    let (w0, w1) = match (pack.raw.get(ro + word), pack.raw.get(ro + word + 1)) {
+                        (Some(&a), b) => (a, b.copied().unwrap_or(0)),
+                        (None, _) => {
+                            io[base + i] = 0;
+                            oob += 1;
+                            continue;
+                        }
+                    };
+                    let mut v = (w0 >> shift) as i64;
                     if shift + bits as usize > 64 {
-                        v |= pack.raw[ro + word + 1] << (64 - shift);
+                        v |= w1 << (64 - shift);
                     }
                     let v = (v & ((1i64 << bits) - 1)) as usize;
-                    io[base + i] = pack.pal[po + v] as u16;
+                    match pack.pal.get(po + v) {
+                        Some(&id) => io[base + i] = id as u16,
+                        None => {
+                            io[base + i] = 0;
+                            oob += 1;
+                        }
+                    }
                 }
             }
+        }
+        if oob > 0 {
+            eprintln!(
+                "crussty carve: {} OOB palette cells degraded to air (torn section pack, cx={cx} cz={cz})",
+                oob
+            );
         }
         let top_ids = crate::surface263::TopMatIds::build(sf);
         let wg_hm = take_wg_heightmap(cx, cz);

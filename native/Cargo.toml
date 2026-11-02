@@ -15,7 +15,15 @@ cplug-sdk = { path = "cplug-sdk" }
 [profile.release]
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# cont-96: panic=abort REMOVED. With abort, every Rust panic inside a JNI
+# call KILLED the JVM instantly — no hs_err, no unwind, no catch_unwind
+# (the abort fires before the guard runs): the cont-93 catch_unwind guards
+# (8 in ffi.rs, 2 in features_jni.rs) were DEAD CODE in release, and the
+# fill263.rs unpack panic (run 41447324352 deco=0 lanes, 7/7 deaths) aborted
+# the process on the spot. With unwind (default) the guards actually catch:
+# a panic degrades to the n<0 protocol skip and the panic hook names the
+# site in run.out. Unwind tables cost a little binary size; the gen hot
+# path never panics, so runtime cost is nil.
 opt-level = 3
 
 [[bin]]
