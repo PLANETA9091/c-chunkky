@@ -97,7 +97,10 @@ public final class OreHook {
      *  ab_on leg) print the same quantities — the artifact diff localizes
      *  the divergence to injection vs geometry vs node loop. */
     private static final java.util.concurrent.atomic.AtomicInteger TRACE_LEFT =
-            new java.util.concurrent.atomic.AtomicInteger(10);
+            new java.util.concurrent.atomic.AtomicInteger(2);
+    /** Global audit budget across chunks (the per-chunk refill respects it). */
+    private static final java.util.concurrent.atomic.AtomicInteger AUDIT_BUDGET =
+            new java.util.concurrent.atomic.AtomicInteger(40);
 
     private OreHook() {
     }
@@ -263,7 +266,7 @@ public final class OreHook {
         if (st == null) {
             return fallback(name, "rng");
         }
-        boolean audit = TRACE_LEFT.getAndDecrement() > 0;
+        boolean audit = TRACE_LEFT.getAndDecrement() > 0 && AUDIT_BUDGET.getAndDecrement() > 0;
         java.util.ArrayList<String> vanillaCells = audit ? new java.util.ArrayList<>() : null;
         if (audit) {
             // the shadow reads the LIVE region via the bridge — must run
@@ -295,7 +298,14 @@ public final class OreHook {
                 lc = new long[3];
                 LAST_CHUNK.set(lc);
             }
-            if (lc[2] == 0 || lc[0] != cx || lc[1] != cz) {
+            boolean chunkChanged = lc[2] == 0 || lc[0] != cx || lc[1] != cz;
+            if (chunkChanged) {
+                // audit the first veins of EVERY chunk (the transition surface
+                // is the unaudited drift suspect — cont-99f audited only the
+                // first chunk, where the native proved cell-exact)
+                if (AUDIT_BUDGET.get() > 0) {
+                    TRACE_LEFT.set(2);
+                }
                 // chunk retarget (same clears as the native per-run reset +
                 // the snapshot origin/section retarget + biome zoom seed)
                 long zoom = 0;
@@ -330,6 +340,7 @@ public final class OreHook {
                 return fallback(name, "native" + n);
             }
             if (audit) {
+                LOG.warning("[audit-ctx] c=" + cx + "," + cz + " h=" + handle);
                 for (String vc : vanillaCells) {
                     LOG.warning("[audit-vanilla] " + vc);
                 }
@@ -338,7 +349,8 @@ public final class OreHook {
                             + " " + (ops[i * 6 + 2] + oz) + " "
                             + DecoDriver.stateAt(ops[i * 6 + 3]));
                 }
-                LOG.warning("[audit-end] native_ops=" + n + " vanilla_cells=" + vanillaCells.size());
+                LOG.warning("[audit-end] c=" + cx + "," + cz + " h=" + handle
+                        + " native_ops=" + n + " vanilla_cells=" + vanillaCells.size());
             }
             int total = 0;
             for (int i = 0; i < n; i++) {
