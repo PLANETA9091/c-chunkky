@@ -97,7 +97,7 @@ public final class OreHook {
      *  ab_on leg) print the same quantities — the artifact diff localizes
      *  the divergence to injection vs geometry vs node loop. */
     private static final java.util.concurrent.atomic.AtomicInteger TRACE_LEFT =
-            new java.util.concurrent.atomic.AtomicInteger(3);
+            new java.util.concurrent.atomic.AtomicInteger(10);
 
     private OreHook() {
     }
@@ -249,6 +249,7 @@ public final class OreHook {
      * back to the vanilla feature (Java RNG untouched — bit-exact).
      */
     static Boolean place(String name, int oreSize, float oreDiscard,
+                         String[] targetTags, String[] targetStates,
                          WorldGenLevel level, ChunkGenerator gen,
                          RandomSource random, BlockPos origin) {
         DecoDriver drv = DecoDriver.oreBridge();
@@ -262,8 +263,21 @@ public final class OreHook {
         if (st == null) {
             return fallback(name, "rng");
         }
-        if (TRACE_LEFT.getAndDecrement() > 0) {
-            traceShadow(name, oreSize, oreDiscard, origin, st);
+        boolean audit = TRACE_LEFT.getAndDecrement() > 0;
+        java.util.ArrayList<String> vanillaCells = audit ? new java.util.ArrayList<>() : null;
+        if (audit) {
+            // the shadow reads the LIVE region via the bridge — must run
+            // BEFORE the native's ops are applied (pre-vein state, the same
+            // view vanilla's own doPlace would read)
+            drv.hookRegion(region);
+            try {
+                traceShadow(name, oreSize, oreDiscard, targetTags, targetStates,
+                        origin, st, drv, region, vanillaCells);
+            } catch (Throwable t) {
+                LOG.warning("ore-shadow failed: " + t);
+            } finally {
+                drv.hookRegion(null);
+            }
         }
         ReentrantLock[] lockBox = new ReentrantLock[1];
         long handle = CrusstyChunkGenerator.decoAcquire(lockBox);
@@ -314,6 +328,14 @@ public final class OreHook {
                 // in the native registry). Java RNG untouched — the vanilla
                 // feature runs from the EXACT state the modifiers left.
                 return fallback(name, "native" + n);
+            }
+            if (audit) {
+                for (int i = 0; i < n; i++) {
+                    LOG.warning("[audit-native] " + (ops[i * 6] + ox) + " " + ops[i * 6 + 1]
+                            + " " + (ops[i * 6 + 2] + oz) + " "
+                            + DecoDriver.stateAt(ops[i * 6 + 3]));
+                }
+                LOG.warning("[audit-end] native_ops=" + n + " vanilla_cells=" + vanillaCells.size());
             }
             int total = 0;
             for (int i = 0; i < n; i++) {
@@ -377,39 +399,161 @@ public final class OreHook {
         return nextBits(s, 24) * 5.9604645E-8f;
     }
 
-    /** The EXACT 26.3 vanilla OreFeature.place prologue, recomputed in Java
-     *  from the captured raw engine state (the SAME math the native mirror
-     *  implements — the [vein@] trace prints its copy). Logging format keeps
-     *  every quantity comparable field-by-field. */
+    /** vanilla nextDouble: ((next(26) << 27) + next(27)) — quantized through
+     *  f32 (the WgrRef golden-validated quirk the native mirror implements). */
+    private static double nextF64(long[] s) {
+        long l = ((long) nextBits(s, 26) << 27) + nextBits(s, 27);
+        return (double) ((float) l * 1.1102230246251565e-16f);
+    }
+
+    /**
+     * cont-99e FULL vanilla ore simulation in Java, from the captured raw
+     * engine state: place() prologue (Math.sin/cos) + doPlace node cloud
+     * (Mth.lerp + the REAL Mth.sin table + nextDouble segments) + sphere
+     * elimination + cell loops + canPlaceOre evaluated through the bridge
+     * reads (tagIs/isAir = the EXACT live-region view vanilla reads). Every
+     * placed cell is logged as [audit-vanilla]; the native's ops are logged
+     * as [audit-native] — the artifact diff is the cell-level verdict.
+     */
     private static void traceShadow(String name, int size, float discard,
-                                    BlockPos origin, long[] captured) {
-        try {
-            long[] s = {captured[0], captured[1]};
-            float f = nextF32(s) * 3.1415927f;
-            float f1 = (float) size / 8.0f;
-            int j = (int) Math.ceil(((float) size / 16.0f * 2.0f + 1.0f) / 2.0f);
-            double minX = origin.getX() + Math.sin((double) f) * (double) f1;
-            double maxX = origin.getX() - Math.sin((double) f) * (double) f1;
-            double minZ = origin.getZ() + Math.cos((double) f) * (double) f1;
-            double maxZ = origin.getZ() - Math.cos((double) f) * (double) f1;
-            double minY = origin.getY() + nextIntB(s, 3) - 2;
-            double maxY = origin.getY() + nextIntB(s, 3) - 2;
-            int x0 = origin.getX() - (int) Math.ceil(f1) - j;
-            int y0 = origin.getY() - 2 - j;
-            int z0 = origin.getZ() - (int) Math.ceil(f1) - j;
-            int w = 2 * ((int) Math.ceil(f1) + j);
-            int h = 2 * (2 + j);
-            LOG.warning("ore-shadow: " + name + " o=(" + origin.getX() + "," + origin.getY()
-                    + "," + origin.getZ() + ") size=" + size + " disc=" + discard
-                    + " st=(" + captured[0] + "," + captured[1] + ")"
-                    + " f=" + f + " f1=" + f1 + " j=" + j
-                    + " minx=" + minX + " maxx=" + maxX
-                    + " miny=" + minY + " maxy=" + maxY
-                    + " minz=" + minZ + " maxz=" + maxZ
-                    + " box=(" + x0 + "," + y0 + "," + z0 + ") w=" + w + " h=" + h
-                    + " d2=" + draw(s) + " d3=" + draw(s) + " d4=" + draw(s));
-        } catch (Throwable t) {
-            LOG.warning("ore-shadow failed: " + t);
+                                    String[] targetTags, String[] targetStates,
+                                    BlockPos origin, long[] captured,
+                                    DecoDriver drv, WorldGenRegion region,
+                                    java.util.ArrayList<String> out) {
+        long[] s = {captured[0], captured[1]};
+        // --- place() prologue (26.3 bytecode-exact) ---
+        float f = nextF32(s) * 3.1415927f;
+        float f1 = (float) size / 8.0f;
+        int j = net.minecraft.util.Mth.ceil(((float) size / 16.0f * 2.0f + 1.0f) / 2.0f);
+        double minX = origin.getX() + Math.sin((double) f) * (double) f1;
+        double maxX = origin.getX() - Math.sin((double) f) * (double) f1;
+        double minZ = origin.getZ() + Math.cos((double) f) * (double) f1;
+        double maxZ = origin.getZ() - Math.cos((double) f) * (double) f1;
+        double minY = origin.getY() + nextIntB(s, 3) - 2;
+        double maxY = origin.getY() + nextIntB(s, 3) - 2;
+        int x0 = origin.getX() - net.minecraft.util.Mth.ceil(f1) - j;
+        int y0 = origin.getY() - 2 - j;
+        int z0 = origin.getZ() - net.minecraft.util.Mth.ceil(f1) - j;
+        int w = 2 * (net.minecraft.util.Mth.ceil(f1) + j);
+        int h = 2 * (2 + j);
+        out.add("hdr " + name + " o=(" + origin.getX() + "," + origin.getY() + "," + origin.getZ()
+                + ") size=" + size + " disc=" + discard + " st=(" + captured[0] + "," + captured[1]
+                + ") f=" + f + " box=(" + x0 + "," + y0 + "," + z0 + ") w=" + w + " h=" + h);
+        // --- the OF_WG gate: any column with y0 <= height passes ---
+        boolean gate = false;
+        outer:
+        for (int gx = x0; gx <= x0 + w; gx++) {
+            for (int gz = z0; gz <= z0 + w; gz++) {
+                if (y0 <= drv.height(2, gx, gz)) {
+                    gate = true;
+                    break outer;
+                }
+            }
+        }
+        if (!gate) {
+            out.add("gate=false");
+            return;
+        }
+        // --- doPlace node cloud (Mth.lerp + the REAL Mth.sin table) ---
+        double[] px = new double[size];
+        double[] py = new double[size];
+        double[] pz = new double[size];
+        double[] pr = new double[size];
+        for (int i = 0; i < size; i++) {
+            float fr = (float) i / (float) size;
+            px[i] = net.minecraft.util.Mth.lerp(fr, minX, maxX);
+            py[i] = net.minecraft.util.Mth.lerp(fr, minY, maxY);
+            pz[i] = net.minecraft.util.Mth.lerp(fr, minZ, maxZ);
+            double d = nextF64(s) * (double) size / 16.0;
+            float f2 = net.minecraft.util.Mth.sin((double) (3.1415927f * fr));
+            pr[i] = ((double) (f2 + 1.0f) * d + 1.0) / 2.0;
+        }
+        // --- sphere elimination ---
+        for (int i2 = 0; i2 < size - 1; i2++) {
+            if (pr[i2] <= 0.0) continue;
+            for (int i3 = i2 + 1; i3 < size; i3++) {
+                if (pr[i3] <= 0.0) continue;
+                double dd = pr[i2] - pr[i3];
+                if (dd * dd > (px[i2] - px[i3]) * (px[i2] - px[i3])
+                        + (py[i2] - py[i3]) * (py[i2] - py[i3])
+                        + (pz[i2] - pz[i3]) * (pz[i2] - pz[i3])) {
+                    if (dd > 0.0) pr[i3] = -1.0;
+                    else pr[i2] = -1.0;
+                }
+            }
+        }
+        // --- cell loops (clamped-low bounds + vanilla BitSet-index dedup) ---
+        java.util.HashSet<Long> tested = new java.util.HashSet<>();
+        int ox = region.getCenter().x() << 4;
+        int oz = region.getCenter().z() << 4;
+        for (int i2 = 0; i2 < size; i2++) {
+            double rad = pr[i2];
+            if (rad < 0.0) continue;
+            int bxLo = Math.max((int) Math.floor(px[i2] - rad), x0);
+            int byLo = Math.max((int) Math.floor(py[i2] - rad), y0);
+            int bzLo = Math.max((int) Math.floor(pz[i2] - rad), z0);
+            int bxHi = Math.max((int) Math.floor(px[i2] + rad), bxLo);
+            int byHi = Math.max((int) Math.floor(py[i2] + rad), byLo);
+            int bzHi = Math.max((int) Math.floor(pz[i2] + rad), bzLo);
+            for (int ix = bxLo; ix <= bxHi; ix++) {
+                double dx = (ix + 0.5 - px[i2]) / rad;
+                if (!(dx * dx < 1.0)) continue;
+                for (int iy = byLo; iy <= byHi; iy++) {
+                    double dy = (iy + 0.5 - py[i2]) / rad;
+                    if (!(dx * dx + dy * dy < 1.0)) continue;
+                    for (int iz = bzLo; iz <= bzHi; iz++) {
+                        double dz = (iz + 0.5 - pz[i2]) / rad;
+                        if (!(dx * dx + dy * dy + dz * dz < 1.0)) continue;
+                        long bi = (long) (ix - x0) + (long) (iy - y0) * w + (long) (iz - z0) * w * h;
+                        if (!tested.add(bi)) continue;
+                        // ensureCanWrite: the 3x3 region write bounds
+                        if (ix < ox - 16 || ix > ox + 47 || iz < oz - 16 || iz > oz + 47) {
+                            out.add("vw " + ix + " " + iy + " " + iz + " out-of-region");
+                            continue;
+                        }
+                        if (iy < region.getMinY() || iy > region.getMaxY()) {
+                            out.add("vw " + ix + " " + iy + " " + iz + " outside-height");
+                            continue;
+                        }
+                        // --- canPlaceOre (26.3) through the bridge reads ---
+                        boolean placed = false;
+                        for (int ti = 0; ti < targetTags.length && !placed; ti++) {
+                            String tt = targetTags[ti];
+                            boolean tagHit = tt.startsWith("minecraft:")
+                                    ? drv.tagIs(ix, iy, iz, tt)
+                                    : false;
+                            if (!tagHit) {
+                                out.add("vc " + ix + " " + iy + " " + iz + " t" + ti
+                                        + " tag=false read=" + drv.stateFull(ix, iy, iz));
+                                continue;
+                            }
+                            boolean skip;
+                            if (discard <= 0.0f) {
+                                skip = true;
+                            } else if (discard >= 1.0f) {
+                                skip = false;
+                            } else {
+                                skip = nextF32(s) < discard;
+                            }
+                            if (skip) {
+                                placed = true;
+                            } else {
+                                boolean air = drv.isAir(ix + 1, iy, iz) || drv.isAir(ix - 1, iy, iz)
+                                        || drv.isAir(ix, iy + 1, iz) || drv.isAir(ix, iy - 1, iz)
+                                        || drv.isAir(ix, iy, iz + 1) || drv.isAir(ix, iy, iz - 1);
+                                placed = !air;
+                                if (air) {
+                                    out.add("vc " + ix + " " + iy + " " + iz + " t" + ti
+                                            + " air=true");
+                                }
+                            }
+                            if (placed) {
+                                out.add("vw " + ix + " " + iy + " " + iz + " t" + ti);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

@@ -40,6 +40,10 @@ public final class CrusstyOreFeature extends AbstractOreFeature {
      *  without touching the original instance's private state). */
     public final int oreSize;
     public final float oreDiscard;
+    /** Per-target audit info: the tag id (TagMatchTest) or rule class name,
+     *  and the written block identity. */
+    public final String[] targetTags;
+    public final String[] targetStates;
 
     /** The original registry-bound feature instance — the vanilla fallback
      *  path (super.place() is abstract here; the exact original instance
@@ -52,6 +56,27 @@ public final class CrusstyOreFeature extends AbstractOreFeature {
         this.vanilla = vanilla;
         this.oreSize = vanilla.size();
         this.oreDiscard = vanilla.discardChanceOnAirExposure();
+        var ts = vanilla.targetStates();
+        this.targetTags = new String[ts.size()];
+        this.targetStates = new String[ts.size()];
+        for (int i = 0; i < ts.size(); i++) {
+            net.minecraft.world.level.levelgen.feature.BlockReplacement br = ts.get(i);
+            net.minecraft.world.level.levelgen.structure.templatesystem.RuleTest rt = br.target();
+            if (rt instanceof net.minecraft.world.level.levelgen.structure.templatesystem.TagMatchTest t) {
+                try {
+                    java.lang.reflect.Field tf = net.minecraft.world.level.levelgen.structure.templatesystem.TagMatchTest.class
+                            .getDeclaredField("tag");
+                    tf.setAccessible(true);
+                    net.minecraft.tags.TagKey<?> tk = (net.minecraft.tags.TagKey<?>) tf.get(t);
+                    targetTags[i] = tk.location().toString();
+                } catch (Throwable tt) {
+                    targetTags[i] = "TagMatchTest?";
+                }
+            } else {
+                targetTags[i] = rt.getClass().getSimpleName();
+            }
+            targetStates[i] = br.state().toString();
+        }
     }
 
     @Override
@@ -65,7 +90,7 @@ public final class CrusstyOreFeature extends AbstractOreFeature {
         if (!OreHook.on()) {
             return vanilla.place(level, gen, random, origin);
         }
-        Boolean r = OreHook.place(featureName, oreSize, oreDiscard, level, gen, random, origin);
+        Boolean r = OreHook.place(featureName, oreSize, oreDiscard, targetTags, targetStates, level, gen, random, origin);
         if (r == null) {
             return vanilla.place(level, gen, random, origin);
         }

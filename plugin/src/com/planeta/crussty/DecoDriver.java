@@ -202,6 +202,12 @@ public final class DecoDriver extends BlockPopulator {
         ORE_BRIDGE = new DecoDriver(world);
     }
 
+    /** Audit access: the decoStates table entry for an op stateIdx. */
+    static String stateAt(int idx) {
+        String[] st = STATES;
+        return st != null && idx >= 0 && idx < st.length ? st[idx] : "idx" + idx;
+    }
+
     /** The ore-hook bridge (null = ore hook not set up). */
     static DecoDriver oreBridge() {
         return ORE_BRIDGE;
