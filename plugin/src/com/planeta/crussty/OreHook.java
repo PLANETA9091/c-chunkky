@@ -330,6 +330,9 @@ public final class OreHook {
                 return fallback(name, "native" + n);
             }
             if (audit) {
+                for (String vc : vanillaCells) {
+                    LOG.warning("[audit-vanilla] " + vc);
+                }
                 for (int i = 0; i < n; i++) {
                     LOG.warning("[audit-native] " + (ops[i * 6] + ox) + " " + ops[i * 6 + 1]
                             + " " + (ops[i * 6 + 2] + oz) + " "

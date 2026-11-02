@@ -2766,17 +2766,19 @@ fn place_ore(
                                     Some(!is_adjacent_to_air(ctx.level, pos))
                                 };
                                 eprintln!(
-                                    "O cand {} {} {} tag={} skip={} air={:?} w={}",
+                                    "O cand {} {} {} tag={} skip={} air={:?} w={} rd={}",
                                     pos.x, pos.y, pos.z, tag_hit, skip, air,
-                                    if w { st.as_str() } else { "-" }
+                                    if w { st.as_str() } else { "-" },
+                                    ctx.level.state_name(pos)
                                 );
                             }
                             w
                         };
                         if vein_trace && !tag_hit {
                             eprintln!(
-                                "O cand {} {} {} tag=false w=-",
-                                pos.x, pos.y, pos.z
+                                "O cand {} {} {} tag=false w=- rd={}",
+                                pos.x, pos.y, pos.z,
+                                ctx.level.state_name(pos)
                             );
                         }
                         if hit {
