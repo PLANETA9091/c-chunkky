@@ -100,7 +100,13 @@ public final class OreHook {
             new java.util.concurrent.atomic.AtomicInteger(2);
     /** Global audit budget across chunks (the per-chunk refill respects it). */
     private static final java.util.concurrent.atomic.AtomicInteger AUDIT_BUDGET =
-            new java.util.concurrent.atomic.AtomicInteger(40);
+            new java.util.concurrent.atomic.AtomicInteger(60);
+    /** cont-99j: audit veins whose feature name contains this substring
+     *  (CRUS_ORE_AUDIT_NAME, default granite — the size-64 family is the
+     *  +3% skew carrier and was never audited: the per-chunk first-N audit
+     *  only ever picked dirt/gravel veins). Empty = audit first-N as before. */
+    private static final String AUDIT_NAME =
+            System.getenv().getOrDefault("CRUS_ORE_AUDIT_NAME", "granite");
 
     private OreHook() {
     }
@@ -266,7 +272,10 @@ public final class OreHook {
         if (st == null) {
             return fallback(name, "rng");
         }
-        boolean audit = TRACE_LEFT.getAndDecrement() > 0 && AUDIT_BUDGET.getAndDecrement() > 0;
+        boolean audit = (AUDIT_NAME.isEmpty()
+                ? TRACE_LEFT.getAndDecrement() > 0
+                : name.contains(AUDIT_NAME))
+                && AUDIT_BUDGET.getAndDecrement() > 0;
         java.util.ArrayList<String> vanillaCells = audit ? new java.util.ArrayList<>() : null;
         if (audit) {
             // the shadow reads the LIVE region via the bridge — must run
