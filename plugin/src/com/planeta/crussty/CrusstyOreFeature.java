@@ -36,6 +36,11 @@ public final class CrusstyOreFeature extends AbstractOreFeature {
      *  — the native registry lookup key (placed or configured). */
     public final String featureName;
 
+    /** The original 26.3 config fields (the trace shadow needs size/discard
+     *  without touching the original instance's private state). */
+    public final int oreSize;
+    public final float oreDiscard;
+
     /** The original registry-bound feature instance — the vanilla fallback
      *  path (super.place() is abstract here; the exact original instance
      *  carries the original config fields). */
@@ -45,6 +50,8 @@ public final class CrusstyOreFeature extends AbstractOreFeature {
         super(List.<BlockReplacement>of(), 0, 0.0f);
         this.featureName = featureName;
         this.vanilla = vanilla;
+        this.oreSize = vanilla.size();
+        this.oreDiscard = vanilla.discardChanceOnAirExposure();
     }
 
     @Override
@@ -58,7 +65,7 @@ public final class CrusstyOreFeature extends AbstractOreFeature {
         if (!OreHook.on()) {
             return vanilla.place(level, gen, random, origin);
         }
-        Boolean r = OreHook.place(featureName, level, gen, random, origin);
+        Boolean r = OreHook.place(featureName, oreSize, oreDiscard, level, gen, random, origin);
         if (r == null) {
             return vanilla.place(level, gen, random, origin);
         }

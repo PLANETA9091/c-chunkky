@@ -5851,3 +5851,29 @@ ore-верdict: STRICT-PASS = бит-в-бит нативного ore-расши
 vanilla decorate (RNG-продолжение подтверждено) -> e2e-замер выгоды
 на deco=0 окнах; STRICT-FAIL на тысячах блоков -> RNG/координаты
 (draw-trace форензика); единичные блоки -> deco-order кромки жил.
+
+### cont-99d: DECO_POOL фикс сработал — hook ПОЛНОСТЬЮ ЖИВ (CI 41498647788: runs=4096 ops=89794 fallbacks=0!) — и первый честный ore-вердикт: GATE FAIL, 144/144 чанков расходятся, РАЗРЫВ СОСТАВНОЙ: (а) систематический перекос blob-объёмов: GRANITE +3956 (+3.0%), DIORITE +1270, DEEPSLATE +2644, COAL +307, COPPER +204 против DIRT -1847, GRAVEL -1285, CLAY -306, LAVA -54 — чистый desync дал бы симметричный шум (среднее ~0), а тут смещение объёмов; (б) пространственная перетасовка (per-chunk ANDESITE 278 vs 850). Дрейф РЕАЛЬНЫЙ (не вакуум): native ore-расширение расставляет жилы иначе, чем vanilla 26.3
+
+Отсечённое статикой (javap 26.3 vs 1.21.8): draw-последовательность
+place/doPlace/canPlaceOre ИДЕНТИЧНА; next(bits)-routing для xoro-обёртки
+тот же (новый instanceof LegacyRandomSource-бранч не задевает); движок
+xoroshiro128++ тот же (seedLo/seedHi, result-then-scramble);
+nextInt(bound) = interface default -> next(31) -> движок; embedded
+assets УЖЕ 26.3 (ore_granite size=64 — 26.3 переналадил 30->64, но натив
+использует 64); параметры 26.3 = код-бутстрап (configured-слой удалён из
+сервера).
+
+ОСТАЮЩИЕСЯ гипотезы: (1) инжекция состояния (seedLo/seedHi прочитаны не
+той пары/не того объекта — напр. Paper подменяет обёртку на per-feature
+fork), (2) геометрия place_ore (sin/cos/бокс/нод-цикл) отличается в
+деталях от 26.3 vanilla при ПРОДОЛЖЕНИИ потока, (3) внутри-run перерасход
+дропов (draw-семантика canPlaceOre/discard при не-нулевом discard).
+
+ДИАГНОСТИКА (cont-99d, в этом же пуше): ore-shadow — hook на первых 3
+вызовах печатает捕获态 (lo,hi) + ТОЧНУЮ vanilla place()-пролог-математику,
+пересчитанную в Java из этого состояния (xoroshiro-продолжение + next(24)
+float + Math.sin/cos + nextInt(3) дизеры + бокс); ab_on нога AB-пары
+идёт с CRUS_VEIN_TRACE= + CRUS_DRAW_TRACE=1 — native печатает те же
+величины ([vein@]/[draw]). Сравнение в артефакте локализует уровень:
+инжекция (f разошёлся) vs геометрия (f совпал, бокс нет) vs нод-цикл
+(бокс совпал). CrusstyOreFeature несёт oreSize/oreDiscard от оригинала.

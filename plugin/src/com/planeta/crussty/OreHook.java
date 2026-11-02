@@ -90,6 +90,15 @@ public final class OreHook {
     private static final LongAdder FALLBACKS = new LongAdder();
     private static volatile long LAST_LOG_MS = 0;
 
+    /** cont-99d shadow-trace budget: the first N ore calls log the captured
+     *  raw engine state + the EXACT vanilla place() prologue math computed
+     *  in Java from that state (xoroshiro128++ continuation). The native's
+     *  [vein@]/[draw] traces (CRUS_VEIN_TRACE=/CRUS_DRAW_TRACE=1 on the
+     *  ab_on leg) print the same quantities — the artifact diff localizes
+     *  the divergence to injection vs geometry vs node loop. */
+    private static final java.util.concurrent.atomic.AtomicInteger TRACE_LEFT =
+            new java.util.concurrent.atomic.AtomicInteger(3);
+
     private OreHook() {
     }
 
@@ -239,7 +248,8 @@ public final class OreHook {
      * the native expansion produced ops and they were applied; NULL = fall
      * back to the vanilla feature (Java RNG untouched — bit-exact).
      */
-    static Boolean place(String name, WorldGenLevel level, ChunkGenerator gen,
+    static Boolean place(String name, int oreSize, float oreDiscard,
+                         WorldGenLevel level, ChunkGenerator gen,
                          RandomSource random, BlockPos origin) {
         DecoDriver drv = DecoDriver.oreBridge();
         if (drv == null || !ON) {
@@ -251,6 +261,9 @@ public final class OreHook {
         long[] st = engineState(random);
         if (st == null) {
             return fallback(name, "rng");
+        }
+        if (TRACE_LEFT.getAndDecrement() > 0) {
+            traceShadow(name, oreSize, oreDiscard, origin, st);
         }
         ReentrantLock[] lockBox = new ReentrantLock[1];
         long handle = CrusstyChunkGenerator.decoAcquire(lockBox);
@@ -326,6 +339,78 @@ public final class OreHook {
                     + " -> vanilla OreFeature (bit-exact)");
         }
         return null;
+    }
+
+    // --- xoroshiro128++ continuation (26.3 engine semantics, from the
+    // Xoroshiro128PlusPlus.nextLong bytecode) + the BitRandomSource default
+    // draw shapes — used ONLY by the shadow trace on a local state copy ---
+
+    private static long draw(long[] s) {
+        long l = s[0];
+        long m = s[1];
+        long r = Long.rotateLeft(l + m, 17) + l;
+        m ^= l;
+        s[0] = Long.rotateLeft(l, 49) ^ m ^ (m << 21);
+        s[1] = Long.rotateLeft(m, 28);
+        return r;
+    }
+
+    private static int nextBits(long[] s, int bits) {
+        return (int) (draw(s) >>> (64 - bits));
+    }
+
+    /** BitRandomSource.nextInt(bound) default: next(31) + rejection. */
+    private static int nextIntB(long[] s, int bound) {
+        if ((bound & -bound) == bound) {
+            return (int) ((bound * (long) nextBits(s, 31)) >> 31);
+        }
+        int i;
+        int r;
+        do {
+            i = nextBits(s, 31);
+            r = i % bound;
+        } while (i - r + (bound - 1) < 0);
+        return r;
+    }
+
+    private static float nextF32(long[] s) {
+        return nextBits(s, 24) * 5.9604645E-8f;
+    }
+
+    /** The EXACT 26.3 vanilla OreFeature.place prologue, recomputed in Java
+     *  from the captured raw engine state (the SAME math the native mirror
+     *  implements — the [vein@] trace prints its copy). Logging format keeps
+     *  every quantity comparable field-by-field. */
+    private static void traceShadow(String name, int size, float discard,
+                                    BlockPos origin, long[] captured) {
+        try {
+            long[] s = {captured[0], captured[1]};
+            float f = nextF32(s) * 3.1415927f;
+            float f1 = (float) size / 8.0f;
+            int j = (int) Math.ceil(((float) size / 16.0f * 2.0f + 1.0f) / 2.0f);
+            double minX = origin.getX() + Math.sin((double) f) * (double) f1;
+            double maxX = origin.getX() - Math.sin((double) f) * (double) f1;
+            double minZ = origin.getZ() + Math.cos((double) f) * (double) f1;
+            double maxZ = origin.getZ() - Math.cos((double) f) * (double) f1;
+            double minY = origin.getY() + nextIntB(s, 3) - 2;
+            double maxY = origin.getY() + nextIntB(s, 3) - 2;
+            int x0 = origin.getX() - (int) Math.ceil(f1) - j;
+            int y0 = origin.getY() - 2 - j;
+            int z0 = origin.getZ() - (int) Math.ceil(f1) - j;
+            int w = 2 * ((int) Math.ceil(f1) + j);
+            int h = 2 * (2 + j);
+            LOG.warning("ore-shadow: " + name + " o=(" + origin.getX() + "," + origin.getY()
+                    + "," + origin.getZ() + ") size=" + size + " disc=" + discard
+                    + " st=(" + captured[0] + "," + captured[1] + ")"
+                    + " f=" + f + " f1=" + f1 + " j=" + j
+                    + " minx=" + minX + " maxx=" + maxX
+                    + " miny=" + minY + " maxy=" + maxY
+                    + " minz=" + minZ + " maxz=" + maxZ
+                    + " box=(" + x0 + "," + y0 + "," + z0 + ") w=" + w + " h=" + h
+                    + " d2=" + draw(s) + " d3=" + draw(s) + " d4=" + draw(s));
+        } catch (Throwable t) {
+            LOG.warning("ore-shadow failed: " + t);
+        }
     }
 
     private static void rateLog() {
