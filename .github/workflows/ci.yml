@@ -184,6 +184,10 @@ jobs:
         run: |
           set -o pipefail
           SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh ore 2>&1 | tee ab263_ore.log
+      - name: A/B orebase (vanilla-vs-vanilla baseline for the ore gate epsilon)
+        run: |
+          set -o pipefail
+          SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh orebase 2>&1 | tee ab263_orebase.log
       - name: E2E per-chunk timing (fresh 12x12, par4 workers, GenStats window)
         run: |
           set -o pipefail

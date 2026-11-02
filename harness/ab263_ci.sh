@@ -141,7 +141,16 @@ case "$PAIR" in
     boot_run "ab_on"  "CRUS_NATIVE_CARVERS=0 CRUS_NATIVE_ORE=1 CRUS_VEIN_TRACE= CRUS_DRAW_TRACE=1" || exit 1
     boot_run "ab_off" "CRUS_NATIVE_CARVERS=0"                   || exit 1
     ;;
-  *) echo "unknown pair: $PAIR (surface|carvers|biome|ore)" >&2; exit 1;;
+  orebase)
+    # cont-99h: the vanilla-vs-vanilla BASELINE for the ore gate — two PURE
+    # vanilla boots (hook off in both). If the ore materials drift HERE with
+    # the same magnitude as the ore pair, the strict-ore assumption is wrong
+    # (cross-boot chunk-decorate order rewrites border-vein overwrites) and
+    # the ore gate needs an epsilon class, not a hook fix.
+    boot_run "ab_on"  "CRUS_NATIVE_CARVERS=0" || exit 1
+    boot_run "ab_off" "CRUS_NATIVE_CARVERS=0" || exit 1
+    ;;
+  *) echo "unknown pair: $PAIR (surface|carvers|biome|ore|orebase)" >&2; exit 1;;
 esac
 
 cp "$SRV"/ab_on_stat.txt "$SRV"/ab_off_stat.txt "$SRV"/ab_on_block.txt "$SRV"/ab_off_block.txt \
