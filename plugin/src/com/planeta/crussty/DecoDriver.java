@@ -177,6 +177,48 @@ public final class DecoDriver extends BlockPopulator {
     }
 
     // ------------------------------------------------------------------
+    // Ore-hook tables (cont-99 front 3, deco=0 side): the vanilla decorate
+    // loop stays in charge; only OreFeature.place() calls are intercepted by
+    // the swapped CrusstyOreFeature instances. That path needs ONLY the
+    // state tables (ops apply) and a bridge instance for the native upcalls
+    // — the populator machinery (plan/biome-features/ACTIVE) stays off.
+    // Gated by CRUS_NATIVE_ORE=1 (CrusstyChunkGenerator.setupOre).
+    // ------------------------------------------------------------------
+
+    /** World-level bridge instance for the ore-hook upcalls (null until
+     *  setupOreTables ran; upcalls read via the per-thread REG). */
+    private static volatile DecoDriver ORE_BRIDGE;
+
+    /** Ore-hook table setup: STATES/STATE_FAST (+ parse cache warm) and a
+     *  bridge instance. Does NOT register the populator nor flip ACTIVE —
+     *  vanilla decorations keep running (the hook is surgical). */
+    public static synchronized void setupOreTables(World world, String[] states) {
+        STATES = states;
+        BlockState[] fast = new BlockState[states.length];
+        for (int i = 0; i < states.length; i++) {
+            fast[i] = state(states[i]);
+        }
+        STATE_FAST = fast;
+        ORE_BRIDGE = new DecoDriver(world);
+    }
+
+    /** The ore-hook bridge (null = ore hook not set up). */
+    static DecoDriver oreBridge() {
+        return ORE_BRIDGE;
+    }
+
+    /** Per-thread region for the ore-hook bridge: the hook sets the
+     *  decorate WorldGenRegion before every native ore call and clears it
+     *  after (mirrors populate()'s REG lifecycle). */
+    void hookRegion(WorldGenRegion region) {
+        if (region == null) {
+            REG.remove();
+        } else {
+            REG.set(region);
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Populator entry (the native decoration master loop)
     // ------------------------------------------------------------------
 
@@ -548,6 +590,16 @@ public final class DecoDriver extends BlockPopulator {
      *  a dropped op is a phantom that would serve stale answers all chunk). */
     private boolean applyOp(LimitedRegion limited,
                          int ox, int oz, int[] ops, int o) {
+        return applyOpStatic(reg(), ox, oz, ops, o);
+    }
+
+    /** Static op applier: `region` replaces reg() so the ore hook (which
+     *  holds the decorate WorldGenRegion, not a Bukkit populate callback)
+     *  applies ops with the exact same semantics (FLAG_RAW section write,
+     *  FLAG_POSTPROC marks, rotation/tick flags). The `limited` parameter
+     *  of the instance path was never used by the body. */
+    static boolean applyOpStatic(WorldGenRegion region,
+                         int ox, int oz, int[] ops, int o) {
         int rx = ops[o];
         int y = ops[o + 1];
         int rz = ops[o + 2];
@@ -558,7 +610,7 @@ public final class DecoDriver extends BlockPopulator {
         if ((flags & 32) != 0) {
             // FLAG_POSTPROC: vanilla markAboveForPostProcessing (DiskFeature)
             // — chunk-level postprocessing mark, no block write.
-            ChunkAccess ch = reg().getChunk((ox + rx) >> 4, (oz + rz) >> 4);
+            ChunkAccess ch = region.getChunk((ox + rx) >> 4, (oz + rz) >> 4);
             ch.markPosForPostProcessing(new BlockPos(ox + rx, y, oz + rz)); // 26.3 name
             return false;
         }
@@ -600,8 +652,8 @@ public final class DecoDriver extends BlockPopulator {
             // FLAG_RAW: vanilla BulkSectionAccess write (OreFeature) — section-
             // level setBlockState(state, false): NO heightmap update, no
             // postprocessing marks, no block events.
-            ChunkAccess ch = reg().getChunk((ox + rx) >> 4, (oz + rz) >> 4);
-            int si = reg().getSectionIndex(y);
+            ChunkAccess ch = region.getChunk((ox + rx) >> 4, (oz + rz) >> 4);
+            int si = region.getSectionIndex(y);
             if (si < 0 || si >= ch.getSectionsCount()) {
                 return false;
             }
@@ -609,9 +661,9 @@ public final class DecoDriver extends BlockPopulator {
             sec.setBlockState((ox + rx) & 15, y & 15, (oz + rz) & 15, st, false);
             return true;
         }
-        reg().setBlock(pos, st, 2);
+        region.setBlock(pos, st, 2);
         if ((flags & 1) != 0) { // FLAG_TICK
-            reg().scheduleTick(pos, st.getBlock(), 0);
+            region.scheduleTick(pos, st.getBlock(), 0);
         }
         return true;
     }

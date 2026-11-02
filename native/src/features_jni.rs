@@ -31,7 +31,7 @@
 use crate::features_deco::{DecoLevel, DecoLevelExt, HeightmapTy};
 use crate::features_master::{chunk_plan, decoration_seed, run_feature_master};
 use crate::features_placement::BlockPos;
-use jni_sys::{jint, jintArray, jlong, jobject, jobjectArray};
+use jni_sys::{jint, jintArray, jlong, jobject, jobjectArray, jstring};
 
 // ---------------------------------------------------------------------------
 // run-phase split profiler (CRUS_RUN_PROF=1): where does the decoRunFeature
@@ -1242,6 +1242,217 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoChunkB
         d.chunk_hms.borrow_mut().clear();
         d.chunk_zoom_seed.set(zoom_seed);
     }
+}
+
+/// oreRunConfigured(ctx, rngLo, rngHi, cornerX, minY, cornerZ, maxY,
+/// featX, featY, featZ, configuredName, bridge, out) -> int ops.
+///
+/// (cornerX, cornerZ) = the chunk origin block coords (the ops-rel base,
+/// same as decoRunFeature's origin); (featX, featY, featZ) = the ABSOLUTE
+/// FeaturePlaceContext.origin() — the position the vanilla placement
+/// modifiers produced.
+///
+/// cont-99 front 3 (deco=0 ore takeover): the vanilla decorate loop runs in
+/// Java and the placement modifiers (Count/InSquare/HeightRange/...) have
+/// ALREADY consumed their draws from the shared WorldgenRandom by the time
+/// OreFeature.place() is invoked on the swapped CrusstyOreFeature instance.
+/// This entry expands ONLY the configured feature graph at the given origin,
+/// continuing the Java RNG stream from the RAW Xoroshiro128PlusPlus engine
+/// state (seedLo/seedHi read by reflection at place() entry). Everything else
+/// mirrors decoRunFeature: per-run chunk scope (fresh overlay + lazy 3x3
+/// snapshot — earlier ore/vanilla writes are applied to the live region
+/// before this call and therefore visible), JNI upcalls for the rare
+/// queries the snapshot cannot serve, ops as 6-i32 records.
+///
+/// Return protocols: n>=0 = ops written; -1 = ctx/bridge/env failure;
+/// -3 = configured name absent from the native registry (the Java hook
+/// falls back to super.place() — the Java RNG is untouched by this entry
+/// in every non-success case, so the fallback is bit-exact).
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_oreRunConfigured(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jlong,
+    rng_lo: jlong,
+    rng_hi: jlong,
+    corner_x: jint,
+    origin_y: jint,
+    corner_z: jint,
+    max_y: jint,
+    feat_x: jint,
+    feat_y: jint,
+    feat_z: jint,
+    configured: jstring,
+    bridge: jobject,
+    out: jni_sys::jintArray,
+) -> jint {
+    if bridge.is_null() || out.is_null() || configured.is_null() {
+        return -1;
+    }
+    let tbl = *env;
+    let guard = sessions_lock();
+    let Some(d) = guard.as_ref().and_then(|m| m.get(&(ctx as i64)))
+        .and_then(|c| c.deco.as_ref()) else {
+        return -1;
+    };
+    // configured name -> utf8
+    let clen = ((*tbl).v1_1.GetStringUTFLength)(env, configured) as usize;
+    let cptr = ((*tbl).v1_1.GetStringUTFChars)(env, configured, std::ptr::null_mut());
+    if cptr.is_null() {
+        return -1;
+    }
+    let name = std::ffi::CStr::from_ptr(cptr as *const i8).to_string_lossy().into_owned();
+    ((*tbl).v1_1.ReleaseStringUTFChars)(env, configured, cptr);
+    let _ = clen;
+    // -3: the native registry has no such configured feature (decode gap) —
+    // the Java hook falls back to the vanilla expansion for this feature.
+    if !d.state.reg.configured.contains_key(&name) {
+        return -3;
+    }
+    // per-run scope (deco=0 ore hook): between two ore place() calls the
+    // vanilla decorate loop wrote non-ore features through the live region
+    // and this hook's own earlier ops were applied Java-side. A stale
+    // overlay would shadow those region writes for THIS run and a stale
+    // snapshot would miss them entirely (canPlaceOre isAdjacentToAir drift)
+    // — enforce the exactness contract here: fresh overlay + epoch bump +
+    // fresh heightmaps every run. Idempotent with the Java-side
+    // decoChunkBegin retarget (chunk change = same clears + snap.reset).
+    d.chunk_ov.borrow_mut().clear();
+    d.chunk_ov_cols.borrow_mut().clear();
+    d.chunk_snap.borrow().bump_epoch();
+    d.chunk_hms.borrow_mut().clear();
+    let Some(level) = JniLevel::new(env, bridge, &d.uid_names, origin_y, max_y) else {
+        return -1;
+    };
+    let ov: &std::cell::RefCell<crate::features_snap::OvMap> = &d.chunk_ov;
+    let ov_cols: &std::cell::RefCell<std::collections::HashMap<(i32, i32), Vec<i32>>> =
+        &d.chunk_ov_cols;
+    let snap: &std::cell::RefCell<crate::features_snap::SnapRegion> = &d.chunk_snap;
+    let hms: &std::cell::RefCell<
+        std::collections::HashMap<
+            (i32, i32),
+            Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>>,
+        >,
+    > = &d.chunk_hms;
+    let zoom_seed = d.chunk_zoom_seed.get();
+    let level_ref = &level;
+    let run_loader = std::cell::Cell::new(0u64);
+    let loader = |cx: i32, cz: i32, sec_y: i32| -> Option<crate::features_snap::SnapSection> {
+        let t0 = prof_now();
+        PROF_LOADER_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let bytes = level_ref.snap_section(cx, cz, sec_y);
+        let p0 = prof_now();
+        let parsed = bytes.and_then(|b| crate::features_snap::parse_section(&b));
+        PROF_PARSE_NS.fetch_add(prof_now() - p0, std::sync::atomic::Ordering::Relaxed);
+        run_loader.set(run_loader.get() + (prof_now() - t0));
+        parsed
+    };
+    let hm_loader = |cx: i32, cz: i32| -> Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>> {
+        if let Some(cached) = hms.borrow().get(&(cx, cz)) {
+            return cached.clone();
+        }
+        let loaded = level_ref
+            .heightmaps(cx, cz)
+            .map(|v| std::sync::Arc::new(std::sync::Mutex::new(v)));
+        hms.borrow_mut().insert((cx, cz), loaded.clone());
+        loaded
+    };
+    let st_flags = |name: &str| -> Option<u8> {
+        let idx = *d.state.state_index.get(name)?;
+        d.state.state_flags.lock().unwrap().get(idx as usize).copied()
+    };
+    let chunk_level = crate::features_snap::ChunkLevel::new(
+        level_ref,
+        ov,
+        ov_cols,
+        snap,
+        &loader,
+        &hm_loader,
+        &d.uid_names,
+        zoom_seed,
+        &st_flags,
+    );
+    let olen = ((*tbl).v1_1.GetArrayLength)(env, out as jni_sys::jarray) as usize;
+    if olen < 6 {
+        return -1;
+    }
+    let ptr = ((*tbl).v1_2.GetPrimitiveArrayCritical)(env, out as jni_sys::jarray, std::ptr::null_mut());
+    if ptr.is_null() {
+        return -1;
+    }
+    let slice = std::slice::from_raw_parts_mut(ptr as *mut i32, olen);
+    let t_run = prof_now();
+    // same panic discipline as decoRunFeature (cont-93): a panic must not
+    // unwind across the extern "system" boundary (JVM abort) — catch inside,
+    // release the pin, log, return -1 (Java falls back to the vanilla
+    // expansion with the untouched Java RNG).
+    let run_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut rng = crate::features_rng::WorldgenRandom::from_state(
+            rng_lo as i64,
+            rng_hi as i64,
+        );
+        let pctx = crate::features_place::PlaceCtx {
+            reg: &d.state.reg,
+            level: &chunk_level,
+            center_x: corner_x as i32,
+            center_z: corner_z as i32,
+            state_index: &d.state.state_index,
+            uid_index: &d.state.uid_index,
+        };
+        let mut ops: Vec<crate::features_place::DecoOp> = Vec::new();
+        let placed = crate::features_place::place_configured(
+            &pctx,
+            &name,
+            &mut rng,
+            crate::features_placement::BlockPos::new(
+                feat_x as i32,
+                feat_y as i32,
+                feat_z as i32,
+            ),
+            &mut ops,
+            0,
+        );
+        let _ = placed;
+        let mut n = 0usize;
+        for op in &ops {
+            if n * 6 + 5 >= slice.len() {
+                break;
+            }
+            slice[n * 6] = op.x as i32;
+            slice[n * 6 + 1] = op.y as i32;
+            slice[n * 6 + 2] = op.z as i32;
+            slice[n * 6 + 3] = op.state as i32;
+            slice[n * 6 + 4] = op.flags as i32;
+            slice[n * 6 + 5] = op.aux as i32;
+            n += 1;
+        }
+        n as i32
+    }));
+    let n = match run_res {
+        Ok(n) => n,
+        Err(p) => {
+            ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
+            crate::ffi::log_warn(&format!(
+                "ore: run_configured PANIC feature={} (fallback to vanilla): {}",
+                name,
+                panic_msg(&p)
+            ));
+            return -1;
+        }
+    };
+    let t_run_ns = prof_now() - t_run;
+    PROF_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let rl = run_loader.get();
+    PROF_LOADER_NS.fetch_add(rl, std::sync::atomic::Ordering::Relaxed);
+    PROF_NATIVE_NS.fetch_add(t_run_ns.saturating_sub(rl), std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut m) = PROF_FEAT.lock() {
+        let e = m.entry(format!("ore:{name}")).or_insert((0, 0));
+        e.0 += t_run_ns.saturating_sub(rl);
+        e.1 += 1;
+    }
+    ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
+    n as jint
 }
 
 /// decoOpsDropped(ctx, coords, count) — ops the Java apply loop dropped

@@ -726,6 +726,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             CtxPool pool = poolForNamed(w.getName(), seed, minY, height);
             setupSurface(pool, w);
             setupDeco(pool, w);
+            setupOre(pool, w);
             // cont-92: always-on decorate marker. Bukkit populators run per
             // chunk in BOTH deco modes (outside the shouldGenerateDecorations
             // gate) — registered LAST so it timestamps the chunk after the
@@ -2440,6 +2441,38 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             }
             Logger.getLogger("CrusstyGen").warning(
                     "native deco setup failed; vanilla decorations stay: " + c);
+        }
+    }
+
+    /**
+     * Stage G (cont-99 front 3) — deco=0 ore takeover handshake, opt-in via
+     * CRUS_NATIVE_ORE=1. Independent of CRUS_NATIVE_DECO: the vanilla
+     * decorate loop stays in charge; only the OreFeature place() calls are
+     * intercepted (OreHook swaps the frozen configured-feature registry
+     * entries to CrusstyOreFeature). Reflection only — this class compiles
+     * against the Bukkit API.
+     */
+    private static void setupOre(CtxPool pool, org.bukkit.World w) {
+        if (!"1".equals(System.getenv("CRUS_NATIVE_ORE"))) {
+            return;
+        }
+        try {
+            long ctx0 = pool.firstCtx();
+            String[] states = ChunkGenNative.decoStates(ctx0);
+            if (states == null) {
+                Logger.getLogger("CrusstyGen").warning(
+                        "native ore: ctx has no deco registry (states=null) — vanilla ores stay");
+                return;
+            }
+            // the native plan (biome-union placed names) drives the registry
+            // walk: every hooked configured feature is natively known
+            String[][] plan = ChunkGenNative.decoPlan(ctx0);
+            Class.forName("com.planeta.crussty.OreHook")
+                    .getMethod("setup", org.bukkit.World.class, String[].class, String[][].class)
+                    .invoke(null, w, states, plan);
+        } catch (Throwable t) {
+            Logger.getLogger("CrusstyGen").warning(
+                    "native ore setup failed (vanilla ores stay): " + t);
         }
     }
 

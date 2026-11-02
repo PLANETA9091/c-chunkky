@@ -5742,3 +5742,67 @@ JNI-роунтрипы по ~50 фич/чанк).
 СЛЕДУЮЩИЙ ШАГ: фронт 3 — порт OreFeature в натив (или, дешевле,
 сперва deco-JNI батчинг — оценочные трудозатраты сопоставимы, выгода
 двусторонняя). Решение по порядку — за следующим континуумом.
+
+## cont-99: фронт 3 — порт OreFeature в натив (deco=0 ore takeover, хирургическая форма). Вместо полного перехвата decorate (cont-98 показал: deco=1 медленнее на стагнации пайплайна) — заменяется ТОЛЬКО вызов OreFeature.place() внутри живого vanilla decorate: placement-модификаторы продолжают тянуть свои дропы в Java, натив продолжает ТОТ ЖЕ поток RNG от сырого состояния движка Xoroshiro128PlusPlus (seedLo/seedHi читаются рефлексией на входе place()). Fallback-дисциплина: любой неуспех = super.place() с НЕтронутым Java RNG = бит-в-бит ваниль
+
+Код:
+- native `features_rng.rs`: `WorldgenRandom::from_state(lo,hi)` — сырая
+  инжекция 128-битного состояния (зеркало vanilla ctor-пары при (lo|hi)==0);
+- native `features_jni.rs`: `oreRunConfigured(ctx, rngLo, rngHi, cornerX,
+  minY, cornerZ, maxY, featX..Z, configured, bridge, out)` — расширяет
+  ТОЛЬКО configured-граф по имени; per-run scope (ov/ov_cols clear +
+  snap epoch bump + hms clear на КАЖДЫЙ запуск — между ore-ранами vanilla
+  пишет в регион: stale overlay/snapshot = canPlaceOre isAdjacentToAir
+  дрейф); return n>=0 = ops, -1 = сбой (fallback, RNG нетронут), -3 = имени
+  нет в нативном реестре (fallback);
+- java `OreHook` + `CrusstyOreFeature`: Unsafe-свап поля feature
+  (ConfiguredFeature — record, поле final) на ВСЕХ ore-configured
+  записях, достижимых из нативного плана (walk: registryAccess ->
+  lookupOrThrow(PLACED_FEATURE) -> get(Identifier.parse(placedName)) —
+  проверенный идиом делегат-кэша; заодно гарантирует: каждый hookнутый
+  feature есть в нативном реестре, -3 невозможен);
+  RNG-цепочка рефлексии: WorldgenRandom.randomSource ->
+  XoroshiroRandomSource.randomNumberGenerator -> Xoroshiro128PlusPlus
+  .seedLo/.seedHi (поле ПЕРЕчитывается на каждый вызов — setSeed
+  между фичами ЗАМЕНЯЕТ объект движка); любой звоночек (не
+  WorldgenRandom/не xoro/нет ctx) = fallback = бит-в-бит ваниль;
+  chunk-ритуал: decoChunkBegin на смене чанка (ThreadLocal last),
+  пер-ран scope делает сам вход (см. выше); ops применяются через
+  DecoDriver.applyOpStatic (limited-параметр старого applyOp никогда
+  не использовался телом — извлечён статический вариант);
+- `CrusstyChunkGenerator.setupOre(pool, w)` (CRUS_NATIVE_ORE=1, рефлексия —
+  класс Bukkit-only) рядом с setupDeco в onWorldLoad; decoStates+decoPlan
+  с ctx0; дефолт OFF — прод-дефолт не тронут до вердикта гейта;
+- гейт `ab263_ci.sh ore`: ab_on (CRUS_NATIVE_ORE=1) vs ab_off, оба
+  carvers=0 (изолирует ore-хук); ore-материалы остаются STRICT в
+  material-count gate (не в SOFT, не deco-класс) — честная планка
+  бит-в-бит; ожидаемый шум — только кросс-чанковый overwrite кромок
+  жил (deco-order класс, единичные блоки);
+- CI: шаг "A/B ore" после A/B biome в integration-джобе.
+
+Ключевые основания дизайна (проверено по байткоду paper 1.21.8):
+- decorate-луп обёрнут в XoroshiroRandomSource (подтверждено golden-тестами
+  features_rng vs WgrRef 1.21.8 + коммент f1_hyb в DecoDriver: 9669-блочный
+  дрейф деревьев при legacy-движке) — значит сырая инжекция состояния
+  корректна, а НЕ xoro-движок = безопасный fallback;
+- ConfiguredFeature.feature — final-поле record (Unsafe putObject — прецедент
+  уже в DecoDriver для PalettedContainer.Data);
+- OreFeature ctor (Codec)V; FeaturePlaceContext несёт level(random)/origin;
+- WorldGenRegion.getCenter/getSeed/getMinSectionY — все нужные точки.
+JniLevel: oreRunConfigured конструирует его ТОЛЬКО от bridge (DecoDriver
+экземпляр, REG ThreadLocal ставится на время вызова) — все 19 upcall-методов
+живут на DecoDriver.
+
+Локальная валидация: cargo test 82/83 (единственный фейл
+fill263::corner_cache_bit_exact_vs_plain_volume — df263.rs:647 `gen < 1<<16`
+— ПРЕДСУЩЕСТВУЮЩИЙ на чистом базовом коммите a79094e3, воспроизведён на
+stash-базе: средозависимый flake песочницы, не связан с ore-изменениями);
+OreHook+CrusstyOreFeature компилируются против реального mojmap 1.21.8
+(stub-валидация: full compile в CI с 26.3 jar — Identifier-нейминг
+совпадает с DecoDriver).
+
+СЛЕДУЮЩИЙ РАН: A/B ore гейт в CI — вердикт по материалам (STRICT):
+(а) PASS (бит-в-бит) -> фронт 3 жив: e2e-замер выгоды на deco=0 окнах +
+решение о дефолте; (б) дрейф -> по величине: единицы блоков = deco-order
+кромки (сузить гейт), тысячи = RNG-продолжение/координаты -> форензика
+run.out + draw-trace.

@@ -186,6 +186,33 @@ public final class ChunkGenNative {
      *  is \u0001-separated. Must run after decoStates/decoPlan at world load. */
     public static native void decoBiomeFeaturesFull(long ctx, String[] biomeNames, String[] joinedRefs);
 
+    /**
+     * oreRunConfigured(ctx, rngLo, rngHi, cornerX, minY, cornerZ, maxY,
+     * featX, featY, featZ, configured, bridge, out) -> int ops.
+     *
+     * cont-99 front 3 (deco=0 ore takeover): the vanilla decorate loop runs
+     * in Java; placement modifiers already consumed their draws from the
+     * shared WorldgenRandom by the time OreFeature.place() fires on the
+     * swapped CrusstyOreFeature. This entry expands ONLY the configured
+     * feature graph at the absolute origin, continuing the Java RNG stream
+     * from the RAW Xoroshiro128PlusPlus engine state (seedLo/seedHi of the
+     * engine object read by reflection at place() entry).
+     *
+     * (cornerX, cornerZ) = chunk origin block coords (ops-rel base, same as
+     * decoRunFeature's origin); (featX..Z) = absolute
+     * FeaturePlaceContext.origin().
+     *
+     * Return: n >= 0 = ops written (6 i32 each, relative x/z + abs y);
+     * -1 = ctx/bridge/env failure (Java falls back — the Java RNG is
+     * untouched on every non-success return, so the fallback is bit-exact);
+     * -3 = configured name absent from the native registry (decode gap —
+     * Java falls back to super.place()).
+     */
+    public static native int oreRunConfigured(long ctx, long rngLo, long rngHi,
+            int cornerX, int minY, int cornerZ, int maxY,
+            int featX, int featY, int featZ, String configured,
+            Object bridge, int[] out);
+
     public static native int fillMarked(long ctx, int chunkX, int chunkZ, short[] out, long[] marks);
 
     /**

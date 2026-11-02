@@ -124,7 +124,19 @@ case "$PAIR" in
     boot_run "ab_on"  "CRUS_NATIVE_CARVERS=0 CRUS_BIOME_GRID=1 CRUS_BIOME_DEBUG=1" || exit 1
     boot_run "ab_off" "CRUS_NATIVE_CARVERS=0"                  || exit 1
     ;;
-  *) echo "unknown pair: $PAIR (surface|carvers|biome)" >&2; exit 1;;
+  ore)
+    # front-3 deco=0 ore takeover (cont-99): the swapped CrusstyOreFeature
+    # hook expands the native ore graphs INSIDE the vanilla decorate loop,
+    # continuing the shared decorate RNG from the raw engine state. Both
+    # legs carvers=0 — isolates the ore hook. Ore materials stay STRICT in
+    # the gate (they are not in SOFT and do not match is_deco): the honest
+    # bar is bit-exact ore placement; cross-chunk vein-edge overwrite noise
+    # (the documented deco-order class) will show up as a tiny strict fail
+    # and must be judged by magnitude (a real break is thousands of blocks).
+    boot_run "ab_on"  "CRUS_NATIVE_CARVERS=0 CRUS_NATIVE_ORE=1" || exit 1
+    boot_run "ab_off" "CRUS_NATIVE_CARVERS=0"                   || exit 1
+    ;;
+  *) echo "unknown pair: $PAIR (surface|carvers|biome|ore)" >&2; exit 1;;
 esac
 
 cp "$SRV"/ab_on_stat.txt "$SRV"/ab_off_stat.txt "$SRV"/ab_on_block.txt "$SRV"/ab_off_block.txt \

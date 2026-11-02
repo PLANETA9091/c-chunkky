@@ -34,6 +34,25 @@ impl WorldgenRandom {
         self.rng = Xoroshiro128PlusPlus::from_128(lo, hi);
     }
 
+    /// RAW 128-bit state injection (cont-99 deco=0 ore hook): the Java
+    /// XoroshiroRandomSource engine state at feature.place() entry. The
+    /// vanilla decorate loop shares ONE WorldgenRandom across all features
+    /// and the placement modifiers consume their draws IN JAVA before
+    /// Feature.place() runs — the native configured-graph expansion must
+    /// CONTINUE that exact stream, not re-seed it. Mirror of the vanilla
+    /// Xoroshiro128PlusPlus ctor (lo|hi)==0 fixed pair.
+    pub fn from_state(lo: i64, hi: i64) -> Self {
+        let (lo, hi) = if (lo | hi) == 0 {
+            (-7046029254386353131i64, 7640891576956012809i64)
+        } else {
+            (lo, hi)
+        };
+        WorldgenRandom {
+            rng: Xoroshiro128PlusPlus::from_128(lo, hi),
+            count: 0,
+        }
+    }
+
     /// WorldgenRandom.next(bits) — delegated (int)(xoro.nextLong() >>> (64-bits))
     #[inline]
     pub fn next_bits(&mut self, bits: u32) -> i32 {
