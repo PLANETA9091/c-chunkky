@@ -94,7 +94,7 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
         long tCarver0 = System.nanoTime();
         java.util.concurrent.locks.ReentrantLock[] lockBox =
                 new java.util.concurrent.locks.ReentrantLock[1];
-        long ctx = CrusstyChunkGenerator.decoAcquire(lockBox, info);
+        long ctx = CrusstyChunkGenerator.decoAcquire(lockBox);
         if (ctx == 0) {
             return;
         }

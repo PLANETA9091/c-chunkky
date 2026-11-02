@@ -5635,3 +5635,54 @@ deco-лейнов cont-92/93/94 (тихий JVM abort без hs_err) — это�
 одинаковом карвер-прайсе + решение о deco=1-дефолте; (б) OOB-счётчик
 покажет частоту разрыва снапшота — если массово, фиксить сам снапшот
 (двойной volatile-перечит или lock под pack).
+
+## cont-97: cont-96 упал на A/B carvers gate — и форензика артефактов вскрыла: гейт был ВАКУУМНЫМ всю жизнь (ab_on==ab_off до нуля, карверов не было ни на одной стороне: shouldGenerateCaves не цепляет carver-стейдж в этой связке Paper/Bukkit). Паритет карверов ИЗ ЭТОГО ГЕЙТА никогда не существовал. Fallback контекста откачен (карверы снова deco=1-only), разрыв снапшота — открытым вопросом; unwind + защитная распаковка остаются
+
+CI: 41455623671 (3beab159, cont-96) FAILURE на шаге "A/B carvers".
+
+### Что показал ран cont-96
+
+Пал A/B carvers gate СРАЗУ (до e2e не дошло — оба e2e-смертельных
+класса не проверялись). Дрейф: AIR +916k, DEEPSLATE -548k, ANDESITE
+-59k, GRANITE -59k, DIORITE -53k, DIRT -41k, LAVA +5.4k — "native
+carve" против "ничего".
+
+### Форензика по артефактам (ab263-<run_id> c per-leg статдампами)
+
+cont-93 (прошедший ран) ab_on_stat vs ab_off_stat: AIR delta=-13,
+STONE delta=0, DEEPSLATE delta=0, GRANITE delta=0 — СТАТИСТИЧЕСКИ
+ИДЕНТИЧНЫЕ миры. ВЫВОД: ни одна сторона ab-пары carvers НИКОГДА не
+резала — ab_on (carvers=1): decoAcquire→ctx=0 (DECO_POOL null, deco=0)
+→ populate молчал; ab_off (carvers=0): shouldGenerateCaves=true, НО
+vanilla carver stage в этой связке Paper 26.3/Bukkit НЕ СТАРТОВАЛ
+(статистика доказывает). Гейт сравнивал пустоту с пустотой — зелёный
+вакуум. "Паритет карверов", на который опирались фронт-1/2 вердикты, —
+НЕ ДОКАЗАН ЭТИМ ГЕЙТОМ (реальные доказательства карверов: oracle_marks
+путь и bench-тесты, не ab gate).
+
+cont-96 ab_on (с fallback cont-95): carve АКТИВЕН впервые в ab-лейне —
+и 34 torn-pack OOB ("crussty carve: N OOB palette cells degraded to
+air", N=1-42 на чанк) — защитная распаковка превратила мгновенный
+abort в именованную деградацию, судья поймал дрейф. Разрыв снапшота
+коррелирует с vanilla-decorate-записанными чанками (в cont-95 deco=1,
+где ванильный decorate выключен — 628+ карвов, НОЛЬ разрывов и паник).
+
+### Решение cont-97
+
+- decoAcquire fallback ОТКАТЕН: карверы deco=1-only (там packs sane,
+  проверено cont-95 нулём разрывов). deco=0 база снова без карверов;
+  deco A/B несёт ИЗВЕСТНЫЙ крен +~3.8мс/ч (carver= бакет) на deco=1
+  стороне — вычитается вручную;
+- ОСТАЮТСЯ: panic=unwind (гарды живы), защитная распаковка fill263
+  (OOB→air + счётчик), recount-батч, spigot.yml watchdog-off, тайл
+  90с;
+- ОТКРЫТЫЕ ВОПРОСЫ: (1) механизм разрыва pack-снапшота (idFor/resize
+  гонка с рефлексивным pc.data-чтением — ведущая гипотеза), (2) почему
+  shouldGenerateCaves не включает vanilla carver stage в Paper 26.3
+  (для честного carve-паритета нужен REDESIGN гейта: native-carve ON
+  vs OFF с carve-осведомлённым судьёй, а не против мёртвой ванили),
+  (3) carver=10.72 под par4 в cont-95 — par4-налог или двойной счёт.
+
+СЛЕДУЮЩИЙ РАН: если оба deco-класса живы → первый честный deco A/B
+(deco=1 с карверами против deco=0 без — с поправкой на крен) и
+решение о deco=1-дефолте; фронт 3 (OreFeature порт) — сразу после.

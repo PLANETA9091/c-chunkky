@@ -197,7 +197,7 @@ public final class DecoDriver extends BlockPopulator {
         REG.set(region);
         java.util.concurrent.locks.ReentrantLock[] lockBox =
                 new java.util.concurrent.locks.ReentrantLock[1];
-        long ctx = CrusstyChunkGenerator.decoAcquire(lockBox, info);
+        long ctx = CrusstyChunkGenerator.decoAcquire(lockBox);
         if (ctx == 0) {
             return;
         }

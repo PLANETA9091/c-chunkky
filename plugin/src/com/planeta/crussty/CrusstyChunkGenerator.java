@@ -251,21 +251,21 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static volatile CtxPool DECO_POOL;
 
     /** Populator-side ctx acquisition (same pool protocol as fills).
-     *  cont-95: takes the WorldInfo so the carver populator can fall back to
-     *  the WORLD pool when the deco engine is absent — under deco=0 the
-     *  DECO_POOL is null and the carver populator silently no-oped
-     *  (carver=0.00 in every e2e window; vanilla carvers are also gated off
-     *  by shouldGenerateCaves), so the deco=0 baseline carried NO carver work
-     *  while the deco=1 lanes paid the full carver cost — the A/B was biased.
-     *  poolFor is a lookup (the pool exists by populate time — onWorldLoad
-     *  created it), so the fallback adds no setup cost. */
-    static long decoAcquire(java.util.concurrent.locks.ReentrantLock[] lockOut,
-            org.bukkit.generator.WorldInfo info) {
+     *  cont-97: the cont-95 world-pool fallback (carvers in deco=0 too) is
+     *  REVERTED. Cont-95 run 41447324352 proved the carver section-pack
+     *  snapshot tears WHENEVER the chunk was written by the vanilla decorate
+     *  stage first (deco=0 + carvers = torn pack: the A/B carver judge caught
+     *  massive drift — AIR +916k, DEEPSLATE -548k — and the e2e deco=0 lanes
+     *  died on the fill263.rs:711 OOB panic; 6/6 lanes). Under deco=1 the
+     *  vanilla decorate never touches the chunk (shouldGenerateDecorations
+     *  =false), the packs are sane and both deco=1 lanes ran 144+484 chunks
+     *  of carves with ZERO panics. Carvers stay deco=1-only until the
+     *  snapshot tear is root-caused (leading hypothesis: palette idFor/resize
+     *  racing the reflective pc.data read); the deco=0 baseline stays
+     *  carver-less and the A/B carries a KNOWN +~3.8ms/ch carver bias on the
+     *  deco=1 side (measured separately, carver= bucket). */
+    static long decoAcquire(java.util.concurrent.locks.ReentrantLock[] lockOut) {
         CtxPool p = DECO_POOL;
-        if (p == null && info != null) {
-            p = poolFor(info, info.getSeed(),
-                    info.getMinHeight(), info.getMaxHeight() - info.getMinHeight());
-        }
         if (p == null) {
             return 0;
         }
