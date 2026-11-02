@@ -1305,11 +1305,23 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_oreRunConf
     let name = std::ffi::CStr::from_ptr(cptr as *const i8).to_string_lossy().into_owned();
     ((*tbl).v1_1.ReleaseStringUTFChars)(env, configured, cptr);
     let _ = clen;
-    // -3: the native registry has no such configured feature (decode gap) —
-    // the Java hook falls back to the vanilla expansion for this feature.
-    if !d.state.reg.configured.contains_key(&name) {
-        return -3;
-    }
+    // -3: the native registry has no such feature (decode gap) — the Java
+    // hook falls back to the vanilla expansion for this feature.
+    // 26.3: the Java-side registry has NO configured layer — the hook binds
+    // the FEATURE registry name ("minecraft:ore_dirt"), which is the PLACED
+    // name for every ore. Accept both: configured names expand directly,
+    // placed names resolve through reg.placed -> configured.
+    let cfg_name = if d.state.reg.configured.contains_key(&name) {
+        name.clone()
+    } else {
+        match d.state.reg.placed.get(&name) {
+            Some(pd) if d.state.reg.configured.contains_key(&pd.feature) => {
+                pd.feature.clone()
+            }
+            _ => return -3,
+        }
+    };
+    let cfg_name = cfg_name.as_str();
     // per-run scope (deco=0 ore hook): between two ore place() calls the
     // vanilla decorate loop wrote non-ore features through the live region
     // and this hook's own earlier ops were applied Java-side. A stale
@@ -1403,7 +1415,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_oreRunConf
         let mut ops: Vec<crate::features_place::DecoOp> = Vec::new();
         let placed = crate::features_place::place_configured(
             &pctx,
-            &name,
+            cfg_name,
             &mut rng,
             crate::features_placement::BlockPos::new(
                 feat_x as i32,
@@ -1435,7 +1447,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_oreRunConf
             ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
             crate::ffi::log_warn(&format!(
                 "ore: run_configured PANIC feature={} (fallback to vanilla): {}",
-                name,
+                cfg_name,
                 panic_msg(&p)
             ));
             return -1;
@@ -1447,7 +1459,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_oreRunConf
     PROF_LOADER_NS.fetch_add(rl, std::sync::atomic::Ordering::Relaxed);
     PROF_NATIVE_NS.fetch_add(t_run_ns.saturating_sub(rl), std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut m) = PROF_FEAT.lock() {
-        let e = m.entry(format!("ore:{name}")).or_insert((0, 0));
+        let e = m.entry(format!("ore:{cfg_name}")).or_insert((0, 0));
         e.0 += t_run_ns.saturating_sub(rl);
         e.1 += 1;
     }

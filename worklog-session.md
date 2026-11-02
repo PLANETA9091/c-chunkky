@@ -5806,3 +5806,35 @@ OreHook+CrusstyOreFeature компилируются против реально
 решение о дефолте; (б) дрейф -> по величине: единицы блоков = deco-order
 кромки (сузить гейт), тысячи = RNG-продолжение/координаты -> форензика
 run.out + draw-trace.
+
+### cont-99b: 26.3 API ground truth — первый CI-ран вскрыл мировой сдвиг worldgen-API (26.3 != 1.21.8): Feature СТАЛ интерфейсом (FeaturePlaceContext/ConfiguredFeature УДАЛЕНЫ из маппингов), OreConfiguration исчез как класс — поля конфига (targetStates/size/discardChance) живут НА экземпляре фичи (новый AbstractOreFeature, OreFeature extends его). Хук переписан на реальные 26.3-факты (проверено javap по paper-26.3-222, локальный jdk-25 + patchonly-экстракция):
+
+- swap-цель: Holder.Reference.value (Unsafe putObject) вместо
+  ConfiguredFeature.feature — PlacedFeature.feature() теперь
+  Holder<Feature> (registry-bound Reference для всех vanilla placed
+  JSONов по имени); walk плана остался (idiom DecoDriver-делегата:
+  registryAccess -> lookupOrThrow(PLACED_FEATURE) -> get(Identifier));
+- CrusstyOreFeature extends AbstractOreFeature (List.of(), 0, 0f) +
+  ХРАНИТ оригинальный экземпляр = vanilla-fallback (super.place()
+  абстрактен в 26.3 — оригинал несёт исходные поля конфига);
+- Feature.place(WGL, ChunkGenerator, RandomSource, BlockPos) — контекст
+  распакован в параметры; RandomSource тот же (RNG-цепочка рефлексии
+  НЕ изменилась: WorldgenRandom.randomSource ->
+  XoroshiroRandomSource.randomNumberGenerator -> engine.seedLo/seedHi —
+  подтверждено javap 26.3);
+- ResourceKey.location() -> identifier(); ChunkPos.x/z -> x()/z();
+  MapCodec<? extends AbstractOreFeature> для codec() (ковариантный
+  override);
+- native oreRunConfigured принимает ИМЯ placed-фичи (26.3 не оставляет
+  configured-имен Java-стороне): configured name -> напрямую, иначе
+  reg.placed[name].feature -> configured (обе стороны реестра натива
+  живут в asset-декоде, ключи "minecraft:ore_dirt" сохранены);
+- ЛОКАЛЬНАЯ валидация стала полной: JDK25 (temurin 25.0.5) +
+  paperclip patchonly (paper-26.3-222) — MAIN pass (все Bukkit-only
+  файлы) + NMS pass (все 7 mojmap-компаньонов включая OreHook/
+  CrusstyOreFeature) компилируются ЗЕЛЁНО против реального 26.3;
+  cargo check чисто.
+
+ОЖИДАНИЕ от гейта: если ore-материалы STRICT-PASS -> бит-в-бит и
+сразу e2e-замер; если STRICT-FAIL на тысячах блоков -> RNG/координаты,
+форензика; единичные блоки -> deco-order кромки.

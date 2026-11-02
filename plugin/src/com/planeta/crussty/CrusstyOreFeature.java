@@ -1,38 +1,67 @@
 package com.planeta.crussty;
 
-import net.minecraft.world.level.levelgen.feature.FeaturePlaceContext;
+import java.util.List;
+
+import com.mojang.serialization.MapCodec;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.level.WorldGenLevel;
+import net.minecraft.world.level.chunk.ChunkGenerator;
+import net.minecraft.world.level.levelgen.feature.AbstractOreFeature;
+import net.minecraft.world.level.levelgen.feature.BlockReplacement;
+import net.minecraft.world.level.levelgen.feature.Feature;
 import net.minecraft.world.level.levelgen.feature.OreFeature;
-import net.minecraft.world.level.levelgen.feature.configurations.OreConfiguration;
 
 /**
- * cont-99 front 3 — OreFeature replacement swapped into the frozen
- * configured-feature registry entries at world load (OreHook.swapFeatures,
- * Unsafe final-field write). The vanilla decorate loop invokes place() here
- * AFTER the placement modifiers consumed their draws from the shared
- * WorldgenRandom; the expansion delegates to the native ore engine
+ * cont-99 front 3 — ore hook replacement instance, swapped into the placed
+ * features' Feature holders at world load (OreHook.swapFeatures, Unsafe
+ * write on Holder.Reference.value). The vanilla decorate loop invokes
+ * place() here AFTER the placement modifiers consumed their draws from the
+ * shared WorldgenRandom; the expansion delegates to the native ore engine
  * (ChunkGenNative.oreRunConfigured) which CONTINUES that exact RNG stream
  * from the raw Xoroshiro128PlusPlus engine state.
  *
- * Every non-success path returns vanilla super.place() with the Java RNG
- * untouched — the fallback is bit-exact vanilla by construction.
+ * 26.3 worldgen shape: Feature is an interface, the config fields
+ * (targetStates/size/discardChance) live on the feature instance itself
+ * (AbstractOreFeature), and there is no ConfiguredFeature layer — the hook
+ * binds the FEATURE registry name ("minecraft:ore_dirt") and keeps the
+ * ORIGINAL instance for the vanilla fallback (every non-success path calls
+ * vanilla.place(...) with the Java RNG untouched — bit-exact by
+ * construction).
  */
-public final class CrusstyOreFeature extends OreFeature {
+public final class CrusstyOreFeature extends AbstractOreFeature {
 
-    /** Registry name of the configured feature this instance replaced
-     *  ("minecraft:ore_dirt") — the native registry lookup key. */
-    public final String configuredName;
+    /** Feature registry name this instance replaced ("minecraft:ore_dirt")
+     *  — the native registry lookup key (placed or configured). */
+    public final String featureName;
 
-    CrusstyOreFeature(String configuredName) {
-        super(OreConfiguration.CODEC);
-        this.configuredName = configuredName;
+    /** The original registry-bound feature instance — the vanilla fallback
+     *  path (super.place() is abstract here; the exact original instance
+     *  carries the original config fields). */
+    private final AbstractOreFeature vanilla;
+
+    CrusstyOreFeature(String featureName, AbstractOreFeature vanilla) {
+        super(List.<BlockReplacement>of(), 0, 0.0f);
+        this.featureName = featureName;
+        this.vanilla = vanilla;
     }
 
     @Override
-    public boolean place(FeaturePlaceContext<OreConfiguration> ctx) {
+    public MapCodec<? extends AbstractOreFeature> codec() {
+        return vanilla.codec();
+    }
+
+    @Override
+    public boolean place(WorldGenLevel level, ChunkGenerator gen,
+                         RandomSource random, BlockPos origin) {
         if (!OreHook.on()) {
-            return super.place(ctx);
+            return vanilla.place(level, gen, random, origin);
         }
-        Boolean r = OreHook.place(configuredName, ctx);
-        return r != null && r;
+        Boolean r = OreHook.place(featureName, level, gen, random, origin);
+        if (r == null) {
+            return vanilla.place(level, gen, random, origin);
+        }
+        return r;
     }
 }
