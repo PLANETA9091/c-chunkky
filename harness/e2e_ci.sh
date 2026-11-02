@@ -54,10 +54,26 @@ stop_server() {
 dump_server_diag() {
   echo "=== SERVER DEATH DIAG (unfiltered run.out tail + hs_err + memory) ==="
   if [ -f "$SRV/run.out" ]; then
-    echo "--- run.out tail (last 250 lines, unfiltered) ---"
-    tail -n 250 "$SRV/run.out" 2>/dev/null
+    echo "--- run.out tail (last 600 lines, unfiltered) ---"
+    tail -n 600 "$SRV/run.out" 2>/dev/null
+    # cont-94: the watchdog/paper thread dump prints Server thread FIRST, so
+    # a 250-line tail kept only the tail threads (spark, Data-IO, RCON) and
+    # lost the one stack that names a hang. Extract the head explicitly.
+    echo "--- Server thread block from run.out (cont-94 extraction) ---"
+    awk '/Current Thread: Server thread/{f=1} f{print; if(++n>=70) exit}' "$SRV/run.out" 2>/dev/null \
+      || true
+    [ -n "$(awk '/Current Thread: Server thread/{f=1} f{print; exit}' "$SRV/run.out" 2>/dev/null)" ] \
+      || echo "(no 'Current Thread: Server thread' block found in run.out)"
   else
     echo "(no $SRV/run.out)"
+  fi
+  # cont-94: the server may be ALIVE here (max-tick-time=-1 keeps a hang
+  # from killing the JVM). A live jcmd dump is strictly better evidence than
+  # any log tail — full all-threads stacks, native frames included.
+  if [ -n "${JPID:-}" ] && [ -n "${JC:-}" ] && kill -0 "$JPID" 2>/dev/null; then
+    echo "--- LIVE jcmd Thread.print (server still alive) ---"
+    timeout 60 "$JC" "$JPID" Thread.print 2>/dev/null | head -500 \
+      || echo "  (jcmd timed out or failed — if it TIMED OUT, a thread is spinning outside safepoint: Java/JNI infinite loop)"
   fi
   local hs
   hs=$(ls -t "$SRV"/hs_err_pid*.log 2>/dev/null | head -1)
@@ -93,6 +109,13 @@ spawn-protection=0
 max-players=2
 enable-command-block=false
 motd=crussty e2e263
+# cont-94: watch dog OFF for e2e lanes. The deco-lane hang (run 41330292527:
+# Server thread stopped ticking ~30s into the first forceload tile) is
+# evidence we need; the watchdog dumped threads 60s in and KILLED the JVM
+# 30s BEFORE the wincount wedge-probe could jcmd it — and its dump landed
+# above the tail-250 window of run.out. With the watchdog disabled a hang
+# survives to the wedge probe, which takes a FULL live jcmd dump.
+max-tick-time=-1
 EOF
 
 stop_server
@@ -264,8 +287,25 @@ for bx in $(seq "$fminx" 256 "$fmaxx"); do
   for bz in $(seq "$fminz" 256 "$fmaxz"); do
     ex=$((bx + 255)); [ "$ex" -gt "$fmaxx" ] && ex=$fmaxx
     ez=$((bz + 255)); [ "$ez" -gt "$fmaxz" ] && ez=$fmaxz
-    $RCON "forceload add $bx $bz $ex $ez" >/dev/null \
-      || echo "  [forceload tile FAILED] $bx $bz -> $ex $ez"
+    # cont-94: the forceload rcon call can BLOCK while the server thread is
+    # wedged (run 41330292527 deco lanes: first tile in flight ~95s, JVM died
+    # by watchdog with the command still pending). timeout() the call so a
+    # wedged server cannot stall the tile loop, and take a LIVE thread dump
+    # on the first failure while the JVM is still attachable.
+    if ! timeout 180 $RCON "forceload add $bx $bz $ex $ez" >/dev/null; then
+      rc=$?
+      echo "  [forceload tile FAILED rc=$rc] $bx $bz -> $ex $ez"
+      if [ "$rc" -eq 124 ] && [ -z "$tile_livedump_done" ]; then
+        # rc=124 = the rcon call TIMED OUT: the JVM is alive but the server
+        # thread is not completing work (wedge). Take ONE full thread dump.
+        if [ -n "${JPID:-}" ] && [ -n "${JC:-}" ] && kill -0 "$JPID" 2>/dev/null; then
+          echo "  [LIVE THREAD DUMP after tile timeout]"
+          timeout 30 "$JC" "$JPID" Thread.print 2>/dev/null | head -400 \
+            || echo "  (jcmd failed/timed out — timeout here means a thread spins outside safepoint)"
+        fi
+        tile_livedump_done=1
+      fi
+    fi
   done
 done
 # cont-93 fail-fast: a tile failure is usually the first VISIBLE symptom of
@@ -311,12 +351,26 @@ for i in $(seq 1 6000); do
   fi
   if [ "$stall" -ge 600 ] && [ "$dumped" = "0" ]; then
     dumped=1
-    echo "  [WEDGE] inside=$c stalled ~30s — thread dump:"
+    echo "  [WEDGE] inside=$c stalled ~30s — FULL thread dump (server alive, watchdog off):"
     if [ -n "${JC:-}" ] && [ -n "${JPID:-}" ]; then
-      "$JC" "$JPID" Thread.print 2>/dev/null | head -120 || echo "  thread dump failed"
+      # cont-94: full dump, not head -120 — the Server thread block and the
+      # gen workers are what name a hang. jcmd itself is wrapped: if IT times
+      # out, the JVM cannot reach safepoint = a thread spins in Java/JNI.
+      if timeout 60 "$JC" "$JPID" Thread.print 2>/dev/null | head -500; then
+        :
+      else
+        echo "  (jcmd failed/TIMED OUT — timeout = thread spinning outside safepoint: Java/JNI infinite loop)"
+      fi
     else
       echo "  (no jcmd/jpid in this lane)"
     fi
+  fi
+  # cont-94: a 30s stall takes the evidence; a 90s stall is a real wedge —
+  # end the lane early instead of burning the rest of the poll loop
+  # (a transient hiccup has 60s to disprove the wedge between the two).
+  if [ "$stall" -ge 1800 ]; then
+    echo "  [WEDGE] inside=$c stalled ~90s — lane ends early (diag captured)"
+    break
   fi
   if (( i % 600 == 0 )); then echo "  [window progress] inside=$c / $target"; fi
   sleep 0.05

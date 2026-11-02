@@ -36,6 +36,7 @@ import net.minecraft.world.level.chunk.PalettedContainer.Data;
 import net.minecraft.util.BitStorage;
 import java.util.stream.Collectors;
 
+import net.minecraft.world.level.levelgen.placement.FeaturePlacer;
 import net.minecraft.world.level.levelgen.placement.PlacedFeature;
 import net.minecraft.world.level.chunk.ChunkGenerator;
 import net.minecraft.world.level.LevelAccessor;
@@ -404,7 +405,18 @@ public final class DecoDriver extends BlockPopulator {
             WorldgenRandom rng = new WorldgenRandom(
                     new XoroshiroRandomSource(RandomSupport.generateUniqueSeed()));
             rng.setFeatureSeed(decoSeed, gid, step);
-            holder.value().place(reg(), NMS_GEN, rng, new BlockPos(ox, oy, oz)); // 26.3: biome filter lives in placement modifiers
+            // cont-94: PlacedFeature.place() builds the PlacementContext with
+            // topFeature=Optional.empty() (FeaturePlacer.place(..., biomeCheck=false)).
+            // Every 26.3 placement chain ends in BiomeFilter, whose shouldPlace
+            // throws "Tried to biome check an unregistered feature, or a feature that
+            // should not restrict the biome" on an empty topFeature — so every native-
+            // refused feature delegated here (monster_room(_deep), pointed_dripstone,
+            // trees_birch_and_oak_leaf_litter, freeze_top_layer) lost its deco and
+            // WARN-spammed per chunk (run 41330292527 both deco lanes). Vanilla
+            // decorate walks FeaturePlacer.placeWithBiomeCheck — do the same: the
+            // BiomeFilter now receives the real topFeature and biome-gates placement
+            // exactly like vanilla.
+            new FeaturePlacer(reg(), NMS_GEN).placeWithBiomeCheck(holder.value(), rng, new BlockPos(ox, oy, oz));
         } catch (Throwable t) {
             LOG.warning("deco delegate failed for " + placedName + ": " + t);
         }

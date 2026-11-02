@@ -5407,3 +5407,77 @@ extern "system" → abort JVM. decoRunFeature был БЕЗ catch_unwind
 СЛЕДУЮЩИЙ РАН: (а) deco-лейны живут → первые честные deco=1 окна +
 native-deco против vanilla-tail A/B; или (б) снова умирают → diag
 кладёт точный фатал (паника/JNI-fatal/OOM) прямо в CI-лог.
+
+## cont-94: deco-лейны умерли и в cont-93 — НО diag наконец назвал механизм: это НЕ краш, это watchdog. Server thread завис в deco=1-пути на ПЕРВОМ forceload-тайле → 60с без тика → дамп → graceful stop. Плюс пойман и починен баг делегата (BiomeFilter против PlacedFeature.place). cont-94: диаг выживает зависание (watchdog off + live jcmd), делегат = FeaturePlacer.placeWithBiomeCheck
+
+CI: 41330292527 (1c50499a, cont-93) SUCCESS, но оба deco-лейна снова умерли
+(3м21с / 3м03с). Диаг cont-93 сработал и разложил всё по полочкам.
+
+### Форензика смерти (лог integration-джобы 124918760191)
+
+Таймлайн лейна (обоих): boot ok → 17:29:06 spawn backlog drained (484
+fills) → проба list ПРОШЛА (сервер жив, смерть СДВИНУЛАСЬ дальше против
+cont-92 — гард catch_unwind что-то изменил) → первый forceload-тайл
+окна (17600,17600 -> 17791,17791, дальние координаты, deco=1) в полёте
+~95с → 17:30:40 watchdog-дамп тредов (ERROR, "Current Thread: ...") →
+17:30:41 "Stopping server" → сохранение 1625 чанков → чистый exit →
+17:30:42 CMD_FAIL на тайле → diag.
+
+ВЫВОД: НЕ паника (guard'ы молчали), НЕ OOM (free 13GB), НЕ hs_err (его
+нет) — серверный тред ПЕРЕСТАЛ ТИКАТЬ на ≥60с внутри deco=1-генерации
+первого тайла → Paper Watchdog корректно усыпил сервер (дамп + graceful
+stop). Гипотеза #1: воркер завис в нативном placement (бесконечный цикл
+на дальних координатах?), держа sessions_lock (cont-93 держит его через
+весь run_feature_master) → Server thread вечно ждёт в decoChunkPlan.
+Гипотеза #2: завис сам Server thread внутри нативного вызова.
+
+ДОКАЗАТЬ НЕ ЧЕМ: tail -250 run.out взял только ХВОСТ watchdog-дампа
+(spark/Data-IO/RCON — 14 "Current Thread:" без Server thread и без
+gen-воркеров); wedge-probe (jcmd через 30с стагнации wincount) НЕ
+СТРЕЛЯЛ — forceload-команда первого тайла сама заблокировала rcon-
+клиент, wincount-цикл не стартовал, а watchdog убил JVM на 30с РАНЬШЕ
+порога пробы. Хвост пробы 250 строк срезал именно ту часть дампа, где
+был Server thread (Paper печатает его первым).
+
+### Баг делегата (пойман по WARN'ам в diag, починен)
+
+5 фич, отказанных нативом (monster_room, monster_room_deep,
+pointed_dripstone, trees_birch_and_oak_leaf_litter, freeze_top_layer),
+делегировались в Java и ВЕСЬ свой deco теряли:
+"IllegalStateException: Tried to biome check an unregistered feature,
+or a feature that should not restrict the biome" — на КАЖДЫЙ чанк.
+Throw-сайт (reference/dec263): BiomeFilter.shouldPlace —
+context.topFeature().orElseThrow(...). PlacedFeature.place() строит
+FeaturePlacer.place(..., biomeCheck=false) → topFeature=Optional.empty()
+→ первый же BiomeFilter в цепи (в 26.3 фильтр живёт в
+placement-модификаторах) кидает. Ванильный decorate идёт через
+FeaturePlacer.placeWithBiomeCheck (ChunkGenerator.applyBiomeDecoration:475).
+ФИКС (DecoDriver.delegateVanilla): new
+FeaturePlacer(reg(), NMS_GEN).placeWithBiomeCheck(holder.value(), rng,
+pos) — те же типы, что и прежний вызов, топ-фича теперь реальная,
+биом-гейт работает как в ваниле (побочно: раньше делегат ставил фичу без
+биом-проверки, теперь exactly vanilla).
+
+### ФИКСЫ (этот коммит, 2 файла)
+
+- harness/e2e_ci.sh:
+  * server.properties += max-tick-time=-1 — watchdog OFF: зависание
+    переживает до wedge-probe и отдаёт ПОЛНЫЙ живой стек (дамп
+    watchdog'а больше не убивает доказательство);
+  * dump_server_diag: tail 250→600 + awk-экстракция блока "Current
+    Thread: Server thread" из run.out + LIVE jcmd Thread.print (timeout
+    60, head -500) если JPID жив;
+  * forceload-тайлы: timeout 180 на rcon-вызов (зависший сервер больше
+    не блокирует тайл-луп) + при rc=124 (timeout = жив-но-завис) ОДИН
+    полный live jcmd-дамп;
+  * wedge-probe: полный дамп (head 120→500, timeout 60; таймаут jcmd
+    сам по себе диагноз — тред крутится вне safepoint) + ранний выход
+    лейна при 90с стагнации (после 30с дампа; 60с форы против
+    транзиентной паузы);
+- plugin/src/com/planeta/crussty/DecoDriver.java: делегат через
+  FeaturePlacer.placeWithBiomeCheck (см. выше) + импорт.
+
+ОЖИДАНИЯ ОТ СЛЕДУЮЩЕГО РАНА: (а) deco-лейны живы → первые честные
+deco=1 A/B окна + делегат перестаёт терять 5 фич (strict-материалы
+сдвинутся к ваниле); (б) снова зависание → [WEDGE] + полный jcmd стек
+Server thread прямо в CI-логе → точка зависания названа кодом.
