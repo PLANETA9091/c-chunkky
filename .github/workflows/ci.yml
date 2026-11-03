@@ -188,6 +188,21 @@ jobs:
         run: |
           set -o pipefail
           SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh ore 2>&1 | tee ab263_ore.log
+      - name: E2E par4 + native ore (deco=0, CRUS_NATIVE_ORE=1 — the default-candidate timing lane; runs even when the STRICT ore gate fails)
+        if: always()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          chmod +x harness/e2e_ci.sh
+          # cont-100: the ore hook (Front 3) targets the deco=0 regime — the
+          # vanilla decorate loop keeps running (placement modifiers, trees,
+          # springs stay Java) and only the OreFeature blob expansion goes
+          # native. Same-run comparator = the "E2E per-chunk timing" lane
+          # below (par4, deco=0, ore=0). This lane MUST run even when the
+          # STRICT ore gate above fails: the diagnostic period still needs
+          # the honest performance number to weigh accept-drift vs
+          # keep-fixing (worklog cont-100).
+          CRUS_NATIVE_ORE=1 CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4ore.log
       - name: E2E per-chunk timing (fresh 12x12, par4 workers, GenStats window)
         run: |
           set -o pipefail
@@ -307,8 +322,10 @@ jobs:
             ab263_surface.log
             ab263_carvers.log
             ab263_biome.log
+            ab263_ore.log
             e2e263_timing.log
             e2e263_deco.log
+            e2e263_par4ore.log
             farprobe263.log
             e2e263_nobeard.log
             e2e263_par4deco.log
