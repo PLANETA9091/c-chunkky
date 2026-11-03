@@ -5948,3 +5948,36 @@ CI 428 упал на A/B surface (первая же после cont-103): еди
 ФИКС: is_deco() в ab263_ci.sh дополнен 'LITTER' (LEAF_LITTER) и 'DRY_GRASS' (SHORT_DRY_GRASS/TALL_DRY_GRASS — 26.x badlands-варианты с той же уязвимостью: substring 'SHORT_GRASS' в них не попадает). Проверка офлайн на материалах 428: LEAF_LITTER/dry-grass → allowed; GRANITE/DEEPSLATE_IRON_ORE/DIRT/AIR/LAVA/STONE остаются STRICT/SOFT/vein-eps как раньше. E2E-полосы рана 428 были пропущены (обрыв на surface-гейте до них) — следующий ран пересчитает всё.
 
 ### cont-104 РЕЗУЛЬТАТ (CI 41654778802, EPYC 9V74): ПОЛНАЯ ЗЕЛЁНОСТЬ — native ✓ plugin ✓ integration ✓; surface-гейт PASS (all strict materials bit-equal) — whitelist-фикс работает, flake закрыт. Параллелизм подтверждён на ТРЕТЬЕМ CPU: par4 e2e=20.71-20.84 maxconc=4 cover=68-75% vs auto 12x12 e2e=25.07 maxconc=1 (-4.36ms/ch, -17%); 48x48 auto e2e=18.46 (gen=8.74) — НОВЫЙ ИСТОРИЧЕСКИЙ МИНИМУМ крупного окна (было 22.56 Platinum / 22.x Milan). cont-103 без регрессий. Дальше: cont-105 кандидат — живая проверка прода-пина (server263_up.sh) на свежем буте локально (нужна переустановка JDK25 + paperclip-экстракция — /tmp пережил очистку песочницы), либо Front O решение (wrapper-v2 ~1ms/ch net против большой стройки + незакрытой честности 2-3%).
+
+### cont-105: живая валидация прода-пина на свежем буте (локальная песочница, 2 vCPU) — ПОЛНОЕ ПОДТВЕРЖДЕНИЕ
+
+Восстановление окружения после чистки: Temurin 25.0.5+8 переустановлен (точный
+пин, /home/z/tools/jdk-25.0.5+8); paper-26.3-222.jar перезакачан через fill v3
+(md5 f49e299618f021d813b0ac69ec11e03d). plugin/CrusstyGen.jar и native .so — из
+дерева cont-103 (deployed263.md5 зафиксирован).
+
+МАТРИЦА БУТА: (1) свежий бут (миров нет), дефолт nproc=2: up.sh пропатчил
+paper-global.yml worker-threads -1 -> 2 до бута (echo-строка + md5-манифест),
+Boot Done (26.792s), CrusstyGen enabled (generator takeover, ctx pool, оба
+бриджа), spawn 100% по всем трём мирам, хинт МОЛЧИТ (2 < 4 ядер — негативный
+путь порога cores>=4 верен). (2) RUNTIME-ПРОПАГАЦИЯ: в Paper 26.3 чанк-воркеры
+именуются "Paper Common Worker #N" — jcmd Thread.print на живом сервере: РОВНО
+2 воркера (#0,#1) при пине 2. (3) OVERRIDE-КАНАЛ: CRUS_WORKER_THREADS=3 ->
+yml=3 -> бут Done (13.517s) на существующих мирах -> jcmd: РОВНО 3 воркера
+(#0,#1,#2). (4) Сервер остановлен консольным stop, чисто.
+
+Грабли (не баг): `bash up.sh | head -2` — head закрыл пайп, SIGPIPE убил скрипт
+ДО строки запуска java: бут не стартовал, а tail run.out показывал shutdown
+ПЕРВОГО сервера — маскировалось под "бут без Done". Глушить вывод up.sh
+перенаправлением в файл, не head.
+
+ВЕРДИКТ: cont-103 прода-пин валидирован сквозь весь стек — sed-механика по yml,
+env-override, runtime-пул (Paper Common Worker #N = пин), хинт-порог. На 4+ vCPU
+хостах прод получает параллельный ген по умолчанию; -1 возвращает Paper auto.
+
+ДАЛЬШЕ (cont-106 кандидат): профиль после параллелизма — non-decorate часть
+Java-CPU 47% (biome-checks 30/247, starlight 12%), noise/spline 33% (ваниль,
+трогается только с decorate), остаток wall = dispatch/idle. Бит-точных путей
+нет (deco=1 +15ms, ore-hook +19.1ms отвергнуты; Front O ~1ms/ch net отложен) —
+кандидат: поиск рычага в dispatch/idle остатке и starlight-доле по свежему
+JFR-профилю par4-окна (ран 429, EPYC 9V74, новый исторический минимум 18.46).
