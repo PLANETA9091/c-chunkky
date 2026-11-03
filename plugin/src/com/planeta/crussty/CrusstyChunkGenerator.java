@@ -1007,6 +1007,9 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static MethodHandle mhBulkStatesGet, mhPalDataSet;
     private static MethodHandle mhNonEmptySet, mhTickingBlockSet, mhTickingFluidSet, mhSpecialSet;
     private static MethodHandle mhTickingListGet, mhChunkHmapsGet, mhIsOpaqueGet;
+    /** cont-106: one-shot log guard for the hGet Field.get fallback (CI-only). */
+    private static final java.util.concurrent.atomic.AtomicBoolean HGET_FALLBACK_LOGGED =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     private static Constructor<?> ctorPal;
     /** true = 26.3 ctor (T, Strategy, T[] presetValues); false = legacy (IdMap, T, Strategy). */
     private static boolean ctorPalPreset;
@@ -1738,6 +1741,12 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 return MethodHandles.privateLookupIn(f.getDeclaringClass(),
                         MethodHandles.lookup()).unreflectGetter(f);
             } catch (Throwable deep) {
+                // cont-106: silent nulls hid the CI-only fallback (run 429,
+                // 3.6% window Java-CPU in Field.checkAccess). Name both tiers.
+                LOG.warning("[reflect] getter handle unavailable for "
+                    + f.getDeclaringClass().getSimpleName() + "." + f.getName()
+                    + " — bare=" + bare.getClass().getSimpleName()
+                    + " deep=" + deep.getClass().getSimpleName());
                 return null;
             }
         }
@@ -1752,6 +1761,10 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 return MethodHandles.privateLookupIn(f.getDeclaringClass(),
                         MethodHandles.lookup()).unreflectSetter(f);
             } catch (Throwable deep) {
+                LOG.warning("[reflect] setter handle unavailable for "
+                    + f.getDeclaringClass().getSimpleName() + "." + f.getName()
+                    + " — bare=" + bare.getClass().getSimpleName()
+                    + " deep=" + deep.getClass().getSimpleName());
                 return null;
             }
         }
@@ -1760,6 +1773,16 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static Object hGet(MethodHandle mh, Field f, Object o) throws Throwable {
         if (mh != null) {
             return mh.invoke(o);
+        }
+        // cont-106: run 429 (EPYC 9V74) showed 3.6% of window Java-CPU inside
+        // Field.checkAccess via THIS fallback on the CI runner — with override
+        // =false, i.e. setAccessible had not taken effect there (local boots
+        // never reproduce: handles all non-null). One-shot log names the field
+        // and the override state so the next CI run pinpoints the env diff.
+        if (HGET_FALLBACK_LOGGED.compareAndSet(false, true)) {
+            LOG.warning("[reflect] hGet fallback in use for "
+                + f.getDeclaringClass().getSimpleName() + "." + f.getName()
+                + " (override=" + f.isAccessible() + ") — per-call Field.get");
         }
         return f.get(o);
     }

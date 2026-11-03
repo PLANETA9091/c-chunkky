@@ -5981,3 +5981,59 @@ Java-CPU 47% (biome-checks 30/247, starlight 12%), noise/spline 33% (ванил�
 нет (deco=1 +15ms, ore-hook +19.1ms отвергнуты; Front O ~1ms/ch net отложен) —
 кандидат: поиск рычага в dispatch/idle остатке и starlight-доле по свежему
 JFR-профилю par4-окна (ран 429, EPYC 9V74, новый исторический минимум 18.46).
+
+### cont-106: JFR-профиль par4-окна на 9V74 (ран 429) — CI-only рефлекс-фолбэк найден, инструментирован
+
+ПРОФИЛЬ ОКНА (12x12 par4, 220 сэмплов ≈ 2.2s Java-CPU, EPYC 9V74): ALL-FRAME
+generateFeatures 122/220 = 55% Java-CPU (decorate — воспроизводит 53% с
+Platinum), OreFeature place+doPlace 43+38 ≈ 37% (было 34%), buildTerrain 31 =
+14% (Java-обвязка натив-филла), starlight ≈ 5%, биом-чеки внутри decorate.
+Форма профиля стабильна на третьем CPU — decorate остаётся главным
+Java-потребителем, бит-точных путей нет.
+
+ЛИСТЬЯ: ConcurrentChainedLong2ReferenceHashTable.getNode 10 (4.5%) — скедулинг
+чанк-системы Paper (не наше). **Field.checkAccess 8 (3.6%) — НАШЕ**: полный
+стек layoutBulk(bci 245 -> line 1402, hGet(mhBulkStatesGet, bulkFieldStates,
+section)) -> hGet(bci 12 = f.get-фолбэк) -> Field.get(bci 14) ->
+Field.checkAccess(bci 10) с РЕАЛЬНОЙ работой внутри checkAccess => по исходникам
+JDK 25 Field.get зовёт checkAccess только при override=false — на CI-раннере
+setAccessible не взял эффект, и фолбэк ходит полным access-check'ом на каждый
+section-read (16/чанк).
+
+ПАРАДОКС И ПОИСК: локально НЕ воспроизводится ни в каком варианте — тот же
+JDK 25.0.5+8, тот же jar, ТОЧНЫЙ CI-лейн (CRUS_JFR=1 CRUS_GEN_PARALLEL=1
+CRUS_WORKER_THREADS=4, свежий мир, boot через paper.jar + patchonly), плюс
+JDI-проба в живой сервер: все 9 хэндлов = DirectMethodHandle$Accessor,
+bulkReady=true, override=true, 0 checkAccess в 335 сэмплов окна. Проба
+unreflectGet на живом classpath: все 6 полей LevelChunkSection unreflect'ятся
+(bare-тир, т.е. JDK 25 unreflectGetter ХОНОРИТ setAccessible). CI-состояние
+(bulk=ok И override=false одновременно) статически невозможно при текущем коде
+(1045 setAccessible до 1147-48 присваиваний; провал 1045 = bulkBroken = нет
+layoutBulk) — значит среда CI отличается: кэшированный workspace
+server/versions+libraries (cache paper-26.3-b222-v1) против свежей экстракции;
+коммент в коде "public final" против private final в локальной пробе намекает,
+что CI-банник другой. Точный why — не установлен, инструментация его выдаст.
+
+ФИКС (инструментация, хот-путь не тронут): (1) unreflectGet/unreflectSet при
+провале ОБОИХ тиров логируют WARNING с именем поля и классами исключений обоих
+тиров (раньше — молчаливый null: источник состояния не виден); (2) hGet в
+null-ветке — one-shot WARNING (AtomicBoolean guard) с именем поля и
+override-состоянием; горячая mh-ветка не получила ни одной лишней инструкции.
+Следующий CI-ран сам назовёт: какое поле, какой тир упал, какой override.
+
+ЛОКАЛЬНАЯ ВАЛИДАЦИЯ: build зелёный (MAIN), e2e-лейн с точным CI-env зелёный
+(e2e=35.43ms/ch на 2-ядерной песочнице, maxconc=3), [reflect]-строк нет —
+ожидаемо, фолбэк локально не engages.
+
+ГРАБЛИ ТИКА: e2e_ci.sh пишет JFR только при CRUS_JFR=1 (иначе секция молча
+пропускается); jdb-печать статиков плагина ненадёжна ("Name unknown") —
+JDI-проба (scripts/probe_mh/JdiProbe.java) надёжна; bci-атрибуция —
+scripts/jfr_bci.java (bci->line через javap LineNumberTable), авторы стеков —
+scripts/jfr_callers.java.
+
+ДАЛЬШЕ (cont-107): (a) вердикт [reflect]-логов CI-рана — точечный фикс фолбэка
+(если override=false на CI: гарантированный setAccessible-ретрай при первом
+фолбэке или приватный канал в инициализации); (b) параллельно — фронт по
+профилю остаётся decorate (бит-точных путей нет); dispatch/idle остаток
+(cover 68-75% на 4 воркерах на 9V74) — следующий кандидат для JFR-разбора
+парков/очередей окна par4.
