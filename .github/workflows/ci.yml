@@ -188,21 +188,30 @@ jobs:
         run: |
           set -o pipefail
           SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh ore 2>&1 | tee ab263_ore.log
-      - name: E2E par4 + native ore (deco=0, CRUS_NATIVE_ORE=1 — the default-candidate timing lane; runs even when the STRICT ore gate fails)
+      - name: E2E par4 + native ore PAIR (same-runner ore=1 vs ore=0; runs even when the STRICT ore gate fails)
         if: always()
         continue-on-error: true
         run: |
           set -o pipefail
           chmod +x harness/e2e_ci.sh
-          # cont-100: the ore hook (Front 3) targets the deco=0 regime — the
-          # vanilla decorate loop keeps running (placement modifiers, trees,
-          # springs stay Java) and only the OreFeature blob expansion goes
-          # native. Same-run comparator = the "E2E per-chunk timing" lane
-          # below (par4, deco=0, ore=0). This lane MUST run even when the
-          # STRICT ore gate above fails: the diagnostic period still needs
-          # the honest performance number to weigh accept-drift vs
-          # keep-fixing (worklog cont-100).
+          # cont-101: run 41582756447 landed the ore lane on a DIFFERENT
+          # runner CPU (EPYC 9V45 Genoa, avx512f=true) than the historical
+          # ore=0 comparator (EPYC 7763 Milan, avx512f=false) — cross-run
+          # deltas are meaningless (the lane alone read e2e=25.76 vs the
+          # 23.36 historical, while its JNI gen dropped 29.63->17.93: the
+          # signs disagree, the CPU differs). The pair below runs BOTH legs
+          # in THIS step on THIS machine — e2e_ci.sh rm -rf's the world dirs
+          # on entry, so each leg is a fresh world, same seed/coords, same
+          # par4 mode; the only delta is the ore flag. Leg-2 (ore=0) enjoys
+          # a warm disk cache — any bias favors the comparator, i.e. it is
+          # conservative AGAINST the ore hook. The accept-drift decision
+          # (worklog cont-100) hangs on this pair.
+          echo "=== ore=1 leg ==="
           CRUS_NATIVE_ORE=1 CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4ore.log
+          echo "=== ore=0 leg (comparator) ==="
+          CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4ore_off.log
+          echo "=== ore PAIR verdict (same runner) ==="
+          grep -h "honest window" e2e263_par4ore.log e2e263_par4ore_off.log || true
       - name: E2E per-chunk timing (fresh 12x12, par4 workers, GenStats window)
         run: |
           set -o pipefail
@@ -326,6 +335,7 @@ jobs:
             e2e263_timing.log
             e2e263_deco.log
             e2e263_par4ore.log
+            e2e263_par4ore_off.log
             farprobe263.log
             e2e263_nobeard.log
             e2e263_par4deco.log
