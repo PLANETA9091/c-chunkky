@@ -34,6 +34,17 @@ public final class CrusstyGenPlugin extends JavaPlugin {
         // Eager datapack pre-resolve + native biome source swap per world.
         getServer().getPluginManager().registerEvents(listener(), this);
         getLogger().info("CrusstyGen enabled — generator: CrusstyChunkGenerator (noise stage takeover)");
+        // cont-103: Paper chunk-system auto worker-threads = 1 thread at <=3
+        // PHYSICAL cores (2-vCPU/4-thread cloud runners included) -> gen pipeline
+        // serializes (maxconc=1, 3 of 4 cores idle; measured +9.3ms/ch e2e on
+        // 4 vCPU vs pinned-4, same runner CI 41588638543). The gen pool is
+        // server-config territory — point operators at the pin.
+        int cores = Runtime.getRuntime().availableProcessors();
+        if (cores >= 4) {
+            getLogger().warning("chunk-system hint: Paper auto worker-threads can be 1 on <=3 physical cores;"
+                + " pin worker-threads: " + cores + " in config/paper-global.yml for parallel gen"
+                + " (measured -9.3ms/ch e2e on 4 vCPU, CI 41588638543)");
+        }
     }
 
     private org.bukkit.event.Listener listener() {

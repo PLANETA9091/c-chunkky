@@ -7,12 +7,12 @@ API_JAR="${API_JAR:-../probe/paper-api-26.3.jar}"
 # fallback: the paper-api jar extracted from the paperclip (CI / fresh envs);
 # the name is build-pinned (paper-api-26.3.build.<N>-stable.jar) — resolve by glob
 if [ ! -f "$API_JAR" ]; then
-  API_JAR="$(find "$SRV_DIR/libraries/io/papermc/paper/paper-api" -name 'paper-api-*.jar' 2>/dev/null | sort | tail -1)"
+  API_JAR="$(find "$SRV_DIR/libraries/io/papermc/paper/paper-api" -name 'paper-api-*.jar' 2>/dev/null | sort | tail -1 || true)"
 fi
 LIBS="$(ls ../probe/libs/*.jar 2>/dev/null | tr '\n' ':')"
 # paper-api 26.3 signatures reference guava (Multimap) — pulled from the
 # server runtime libraries when present.
-GUAVA_JAR="$(find "$SRV_DIR/libraries" -name 'guava-*.jar' 2>/dev/null | head -1)"
+GUAVA_JAR="$(find "$SRV_DIR/libraries" -name 'guava-*.jar' 2>/dev/null | head -1 || true)"
 [ -n "$GUAVA_JAR" ] && LIBS="${LIBS}${GUAVA_JAR}:"
 [ -f "$API_JAR" ] || { echo "missing $API_JAR"; exit 1; }
 JAVAC="${JAVAC:-$(command -v javac || true)}"

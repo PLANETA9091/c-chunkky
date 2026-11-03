@@ -12,6 +12,18 @@ if pgrep -f 'java .*paper-26\.3.*\.jar' >/dev/null 2>&1; then
   exit 1
 fi
 
+# cont-103: production default — pin chunk-system worker-threads. Paper auto
+# = 1 thread at <=3 PHYSICAL cores (2-vCPU/4-thread cloud runners included),
+# which serializes the gen pipeline (maxconc=1; measured +9.3ms/ch e2e on
+# 4 vCPU vs pinned-4, same runner CI 41588638543). Pin to all logical cores;
+# override with CRUS_WORKER_THREADS (= -1 restores Paper auto).
+WT="${CRUS_WORKER_THREADS:-$(nproc)}"
+PGEN_YML="config/paper-global.yml"
+if [ -f "$PGEN_YML" ] && ! grep -qE "^[[:space:]]*worker-threads:[[:space:]]*${WT}[[:space:]]*$" "$PGEN_YML"; then
+  sed -i -E "s/^([[:space:]]*)worker-threads:.*$/\1worker-threads: ${WT}/" "$PGEN_YML"
+  echo "chunk-system.worker-threads=${WT} (patched $PGEN_YML; CRUS_WORKER_THREADS=-1 restores auto)"
+fi
+
 # deploy fresh plugin + native visibility
 cp "$ROOT/plugin/CrusstyGen.jar" plugins/CrusstyGen.jar
 NATIVE_SO="$ROOT/native/target/release/libcrussty_chunkgen.so"
