@@ -209,14 +209,15 @@ def is_deco(m):
        or m.endswith('PRESSURE_PLATE') or m.endswith('SAPLING'):
         return True
     return any(k in m for k in (
-        'SHORT_GRASS', 'TALL_GRASS', 'FERN', 'FLOWER', 'BUSH', 'SEEDL',
+        'SHORT_GRASS', 'TALL_GRASS', 'DRY_GRASS', 'FERN', 'FLOWER', 'BUSH', 'SEEDL',
         'KELP', 'SEAGRASS', 'PICKLE', 'VINE', 'LILY', 'BAMBOO', 'SUGAR_CANE',
         'CACTUS', 'MUSHROOM', 'FUNGUS', 'ROOTS', 'SPROUTS', 'FIRE', 'COBWEB',
         'AZALEA', 'PETAL', 'TORCH', 'LANTERN', 'AMETHYST_BUD', 'SCULK',
         'MOSS_CARPET', 'HANGING', 'GLOW_LICHEN', 'LICHEN', 'PUMPKIN',
         'MELON', 'BEEHIVE', 'NETHER_WART', 'COCOA', 'WHEAT', 'CARROTS',
         'POTATOES', 'BEETROOTS', 'BIG_DRIPLEAF', 'SMALL_DRIPLEAF',
-        'DRIPSTONE', 'SPORE_BLOSSOM', 'AZURE_BLUET', 'BLOB', 'CARPET'))
+        'DRIPSTONE', 'SPORE_BLOSSOM', 'AZURE_BLUET', 'BLOB', 'CARPET',
+        'LITTER'))  # LEAF_LITTER: 26.x patch ground-decoration (leaf_litter feature)
 strict_fail, soft, allowed = [], [], []
 for m in sorted(set(on) | set(off)):
     a, b = on.get(m, 0), off.get(m, 0)
