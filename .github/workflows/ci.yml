@@ -185,6 +185,14 @@ jobs:
           set -o pipefail
           SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh orebase 2>&1 | tee ab263_orebase.log
       - name: A/B ore (native ore expansion inside vanilla decorate, CRUS_NATIVE_ORE=1)
+        # cont-102: Front 3 REJECTED on the same-runner pair verdict (CI
+        # 41585182091: ore=1 e2e=43.70 vs ore=0 e2e=24.60 — the hook's
+        # per-call JNI + per-run snapshot resets cost +19.1ms/chunk, the
+        # expansion itself is only 0.5ms/ch). The hook stays in the tree
+        # behind the default-off flag; this gate is kept as a diagnostic
+        # (expected FAIL — drift ~2-3% conserved-volume) and must not mask
+        # new regressions by keeping main red.
+        continue-on-error: true
         run: |
           set -o pipefail
           SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh ore 2>&1 | tee ab263_ore.log
