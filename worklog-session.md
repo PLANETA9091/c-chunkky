@@ -6168,3 +6168,32 @@ par4-невязка замораживается как платформенна
 (GenStats-таймер 3.43s окна), Java ~1.5s (decorate 37%). Локальная среда к этому
 тику переbootstrap'ена (JDK25 + paper-26.3-b222 + patchonly-экстракция) —
 build-цепочка готова к работе без CI.
+
+### cont-109 дополнение: криминалистика рана 434 (все A/B-хуки воспроизведены), локальная среда переbootstrap'ена ЦЕЛИКОМ, зелёный lane с бит-идентичным GenStats
+
+ФОРЕНЗИКА РАНА 434 (c08c4e96, 9V74, все честные окна 12x12 если не сказано):
+timing par4 e2e=23.66 (busy=16.6 cover=70.2% maxconc=4) — свежий par4-бейзлайн
+того же раннера для чтения par6-пары; par4deco e2e=37.09 (carver=8.56) и
+par4ore e2e=44.17 vs ore_off 24.61 — ОБА хука воспроизвели известные вердикты
+(cont-102: ore +19.1ms/ch, deco регресс) — фронты deco/ore остаются ЗАКРЫТЫМИ,
+дефолты OFF не трогаются; big 48x48 auto e2e=23.51 maxconc=1 (par4 на 48x48
+исторически 27.93, ран 41194161059 — пин большому окну не в помощь, лейн
+остаётся auto); par auto 12x12 e2e=32.71 — пар4-пин на 12x12 держит -9ms/ch.
+
+ЛОКАЛЬНЫЙ BOOTSTRAP (полная цепочка, всё с нуля после отката песочницы):
+Temurin 25.0.5+8 (md5 paper.jar f49e2996 совпал с историческим, sha256
+f649771a по fill v3); patchonly-экстракция; rustup minimal (cargo 1.99.1) ->
+native release Finished (libcrussty_chunkgen.so 8.4MB); plugin build GREEN;
+probe263 собран; server/ собран переиспользованием paper.jar+экстракции +
+bootstrap_server.sh (пре-сид config/paper-global.yml с chunk-system секцией).
+СМОУК-ЛЕЙН (2 vCPU, par4): ЗЕЛЁН — e2e=46.18 (busy=34.0 cover=73.6% maxconc=4,
+ramp=374ms), GenStats БИТ-ИДЕНТИЧЕН историческому (marks_seen=landed=38544,
+sections mixed=8720 air=15952 bulk=ok — детерминизм генерации пережил полную
+переэкстракцию сервера), "[reflect] state: (none — all handles direct)" —
+наблюдаемость cont-107 работает и локально. Среда готова к cont-110 без CI.
+
+ЖДЕМ: run 435 (75d9ac9) в очереди — par4-vs-par6 пара ("honest window" обоих
+лейнов одного рана). Вердикт по логике из cont-109: значимый выигрыш par6 ->
+пул-запас жив; паритет -> par4-невязка замораживается как платформенная, фронт
+на fill/decorate-смежное (hooks закрыты — остаются натив-филл микроразломы и
+wrapper-v2 решение Front O из cont-104).
