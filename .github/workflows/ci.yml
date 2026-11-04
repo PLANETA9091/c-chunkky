@@ -234,6 +234,28 @@ jobs:
           # core CPU contention (the pin is lane-local: the next lanes boot
           # with the reset worker-threads=-1).
           CRUS_FILL263_PROF=1 CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_timing.log
+      - name: E2E par6 timing (fresh 12x12, CRUS_WORKER_THREADS=6 — pool-headroom experiment, cont-109)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          chmod +x harness/e2e_ci.sh
+          # cont-109: the par4 window verdict (run 433 JFR, worklog cont-108)
+          # showed avg gen concurrency 1.23/4 workers with bursts to 4 and
+          # cover 69.3% — the residue is the Paper status-chain (ramp 869ms
+          # = 30% of the 12x12 window + inter-chunk status handoffs), not
+          # worker starvation. This lane tests the ONE cheap lever left
+          # before freezing the par4 residue as platform-bound: a 6-thread
+          # pool as headroom for bursty dispatch. On the 4-vCPU runner six
+          # threads oversubscribe CPU, but idle threads are free and deeper
+          # queues may absorb bursts faster. Same-run comparator = the par4
+          # timing lane above (identical env, only the pin differs);
+          # e2e_ci.sh rm -rf's the world dirs on entry, so this leg is a
+          # fresh world on a warm page cache — the warm-cache bias favors
+          # par6, i.e. the comparison is conservative AGAINST par4 winning.
+          # The pin is lane-local: unset below, later lanes reset to -1.
+          CRUS_FILL263_PROF=1 CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=6 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par6timing.log
+          echo "=== par4 vs par6 verdict (same runner, same commit) ==="
+          grep -h "honest window" e2e263_timing.log e2e263_par6timing.log || true
       - name: E2E native-deco probe (DecoDriver vs vanilla deco delta)
         continue-on-error: true
         run: |
@@ -341,6 +363,7 @@ jobs:
             ab263_biome.log
             ab263_ore.log
             e2e263_timing.log
+            e2e263_par6timing.log
             e2e263_deco.log
             e2e263_par4ore.log
             e2e263_par4ore_off.log
