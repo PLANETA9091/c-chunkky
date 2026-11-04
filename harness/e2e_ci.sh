@@ -464,3 +464,13 @@ if [ -f "$SRV/run.out" ]; then
   echo "=== native run-prof (run.out tail; deco lanes only) ==="
   grep -h "run-prof\|ore-prof" "$SRV/run.out" 2>/dev/null | tail -14 || true
 fi
+
+# cont-107: [reflect] lines (unreflect failures, self-heal outcomes) live in
+# the server console — run.out — which EVERY e2e step overwrites; only the
+# last step's run.out reaches the artifact. Echo them into the step output so
+# each per-step log (e2e263_*.log, all uploaded) carries its JVM's reflect
+# state. Absence = every handle direct in this boot.
+if [ -f "$SRV/run.out" ]; then
+  echo "=== [reflect] state (this step's JVM) ==="
+  grep -h "\[reflect\]" "$SRV/run.out" 2>/dev/null || echo "(none — all handles direct)"
+fi

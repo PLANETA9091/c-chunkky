@@ -6037,3 +6037,54 @@ scripts/jfr_callers.java.
 профилю остаётся decorate (бит-точных путей нет); dispatch/idle остаток
 (cover 68-75% на 4 воркерах на 9V74) — следующий кандидат для JFR-разбора
 парков/очередей окна par4.
+
+### cont-107: CI-only фолбэк самозалечен (self-heal ladder r1/r2/r3) + [reflect] в каждый шаг
+
+ВЕРДИКТИ: run 431 зелён (cont-105), run 432 зелён (cont-106-инструментация).
+Сбор [reflect]-вердикта run 432: в job-логе строк НЕТ (консоль сервера вообще
+не эхоится в шаг), в артефакте — только run.out ПОСЛЕДНЕГО бута (13КБ, каждый
+e2e-шаг перезаписывает run.out) и там [reflect] тоже нет — при том, что
+e2e263_window.jfr ТОГО ЖЕ рана показывает фолбэк горячим. Итого деградация
+CI ИНТЕРМИТТИРУЮЩАЯ от бута к буту (последний бут 17:13 чист, окна 17:08-17:11
+сломаны), и cont-106-логи просто не доезжали до наблюдаемого места.
+
+JFR РАЗБОР АРТЕФАКТА (e2e263_window.jfr, 376 сэмплов; _par.jfr, 221): фолбэк
+hGet:1787 -> Field.get:440 -> getOverrideFieldAccessor:1164. ПО ИСХОДНИКУ
+JDK 25 (src.zip Field.java) строка 440 = ВЕТКА override=TRUE — вывод cont-106
+"на CI setAccessible не взял эффект" был ошибочной атрибуцией листа; setAccessible
+работает, жар — полная рефлекс-цепочка Field.get+акцессор на каждый section-read
+(14/376 ≈ 3.7% окна, тот же layoutBulk:1405 -> bulkFieldStates). hSetShort при
+этом ходит хот-путём (mh.invoke:1800, 1 сэмпл) — сломан НЕ "вся рефлексия", а
+конкретно unreflect states-геттера, и не в каждом буте. JDK подтверждён
+идентичный (Temurin 25.0.5+8 обе стороны, bootstrap-строка run.out).
+
+ФИКС (хот-путь не тронут): hGet null-ветка = самозалечивающая лестница, ОДИН
+раз на Field при первом фолбэке: r1 setAccessible+unreflectGetter ретрай,
+r2 privateLookupIn unreflectGetter, r3 Unsafe objectFieldOffset + findStatic
+unsafeGetObj + insertArguments (чтение мимо access-механики вовсе) — успешный
+хэндл кэшируется в HGET_REPAIR на жизнь JVM, полный провал логируется и поле
+остаётся на Field.get как раньше. locateUnsafe() — стандартный theUnsafe-трюк
+(jdk.unsupported ОПЕН sun.misc). Тест-хук CRUS_TEST_BREAK_UNREFLECT=1 силит
+mhBulkStatesGet=null после init — путь валидируем локально навсегда.
+Наблюдаемость: e2e_ci.sh в конце каждого шага эхоит секцию "=== [reflect]
+state (this step's JVM) ===" из run.out — каждый e2e263_*.log теперь несёт
+состояние рефлексии своего бута.
+
+ЛОКАЛЬНАЯ ВАЛИДАЦИЯ: build зелёный; лейн 1 (чистый) зелён e2e=36.42ms/ch,
+секция "[reflect] state: (none — all handles direct)", bulk=ok; лейн 2
+(CRUS_TEST_BREAK_UNREFLECT=1) зелён e2e=35.78ms/ch (без регрессии), логи
+"TEST hook: mhBulkStatesGet forced to null" + "hGet self-heal OK for
+LevelChunkSection.states — direct getter cached", GenStats бит-идентичны
+(marks 38467/38467, sections mixed=8720 air=15952 в обоих лейнах).
+
+ГРАБЛИ ТИКА: job-logs API без токена = 403 "Must have admin rights" (негатив
+по логу пуст, проверяй хвост); MethodHandles.methodType не существует —
+MethodType.methodType (ловится только компиляцией); rg "hSet" матчит
+OpenHashSet-подстроки — 37 ложных стеков, реальный hSet-фолбэк 1 сэмпл;
+артефакт ab263 несёт run.out только последнего бута.
+
+ДАЛЬШЕ (cont-108): (a) по пер-шаговым [reflect]-секциям следующего CI-рана —
+если self-heal OK на CI: сверить JFR-окно (фолбэк должен исчезнуть из профиля,
+~3.7% окна вернуть в dispatch); если FAILED — r3 отвергнут тоже, копать
+env-диф (кэш paper-26.3-b222-v1 против свежей экстракции); (b) параллельный
+фронт прежний — dispatch/idle остаток par4 (cover 68-75%) по парковам/очередям.

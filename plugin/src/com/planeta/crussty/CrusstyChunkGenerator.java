@@ -1007,9 +1007,71 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static MethodHandle mhBulkStatesGet, mhPalDataSet;
     private static MethodHandle mhNonEmptySet, mhTickingBlockSet, mhTickingFluidSet, mhSpecialSet;
     private static MethodHandle mhTickingListGet, mhChunkHmapsGet, mhIsOpaqueGet;
-    /** cont-106: one-shot log guard for the hGet Field.get fallback (CI-only). */
-    private static final java.util.concurrent.atomic.AtomicBoolean HGET_FALLBACK_LOGGED =
-            new java.util.concurrent.atomic.AtomicBoolean(false);
+    // cont-107: self-heal for the hGet Field.get fallback. Run 429 AND 432 JFR
+    // windows both showed the fallback hot on the CI runner only (~3.7% window
+    // Java-CPU, hGet line 1787 -> Field.get, leaf getOverrideFieldAccessor =
+    // the override=true branch — setAccessible DID take effect there), while
+    // local boots always have every handle non-null. Root cause of the CI-only
+    // unreflect failure is still unnamed (intermittent: some boots of the same
+    // env have clean handles — run 432's last boot run.out carries no
+    // [reflect] line). The repair ladder below is root-cause-agnostic: retry
+    // setAccessible+unreflect at first fallback time, then fall back to a
+    // plain Unsafe offset read (no access machinery at all). The hot
+    // mh != null branch is untouched.
+    /** Repaired direct getters, keyed by the Field whose unreflect failed. */
+    private static final java.util.concurrent.ConcurrentHashMap<Field, MethodHandle> HGET_REPAIR =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** Fields whose repair ladder was already attempted and failed (stay on Field.get). */
+    private static final java.util.Set<Field> HGET_REPAIR_FAILED =
+            java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
+    /** jdk.unsupported sun.misc.Unsafe for the tier-r3 raw read (null = unavailable). */
+    private static final sun.misc.Unsafe UNSAFE = locateUnsafe();
+    /** cont-107 test hook: CRUS_TEST_BREAK_UNREFLECT=1 forces the bulk states
+     *  getter handle to null after init, so the self-heal path is exercised
+     *  locally (CI reproduces it on its own). Zero effect when unset. */
+    private static final boolean TEST_BREAK_UNREFLECT =
+            "1".equals(System.getenv("CRUS_TEST_BREAK_UNREFLECT"));
+
+    private static sun.misc.Unsafe locateUnsafe() {
+        try {
+            java.lang.reflect.Field f = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+            f.setAccessible(true);
+            return (sun.misc.Unsafe) f.get(null);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** Raw instance-field read through Unsafe — the tier-r3 repair target;
+     *  bound to a concrete offset via insertArguments (no access checks). */
+    private static Object unsafeGetObj(long offset, Object o) {
+        return UNSAFE.getObject(o, offset);
+    }
+
+    /** Repair ladder for a getter whose unreflect returned null. Runs ONCE
+     *  per Field at first fallback use (not at init — the CI failure happens
+     *  at init, retrying at first real use is the point of tier r1/r2). */
+    private static MethodHandle repairGetter(Field f) {
+        try {
+            f.setAccessible(true);
+            return MethodHandles.lookup().unreflectGetter(f);
+        } catch (Throwable t1) { /* r2 */ }
+        try {
+            return MethodHandles.privateLookupIn(f.getDeclaringClass(),
+                    MethodHandles.lookup()).unreflectGetter(f);
+        } catch (Throwable t2) { /* r3 */ }
+        if (UNSAFE != null && !java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+            try {
+                long off = UNSAFE.objectFieldOffset(f);
+                MethodHandle raw = MethodHandles.lookup().findStatic(
+                        CrusstyChunkGenerator.class, "unsafeGetObj",
+                        java.lang.invoke.MethodType.methodType(
+                                Object.class, long.class, Object.class));
+                return MethodHandles.insertArguments(raw, 0, off);
+            } catch (Throwable t3) { /* give up */ }
+        }
+        return null;
+    }
     private static Constructor<?> ctorPal;
     /** true = 26.3 ctor (T, Strategy, T[] presetValues); false = legacy (IdMap, T, Strategy). */
     private static boolean ctorPalPreset;
@@ -1149,6 +1211,13 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 sectionStatesById = states;
                 bulkFieldStates = fStates;
                 mhBulkStatesGet = unreflectGet(fStates);
+                if (TEST_BREAK_UNREFLECT) {
+                    // cont-107: simulate the CI-only unreflect failure locally
+                    // so the self-heal path is exercised and validated.
+                    mhBulkStatesGet = null;
+                    LOG.warning("[reflect] TEST hook: mhBulkStatesGet forced to null"
+                            + " (CRUS_TEST_BREAK_UNREFLECT=1) — self-heal will engage");
+                }
                 // ---- v3 Data-swap init ----
                 fPalData = cPaletted.getField("data"); // public volatile
                 mhPalDataSet = unreflectSet(fPalData);
@@ -1774,15 +1843,27 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         if (mh != null) {
             return mh.invoke(o);
         }
-        // cont-106: run 429 (EPYC 9V74) showed 3.6% of window Java-CPU inside
-        // Field.checkAccess via THIS fallback on the CI runner — with override
-        // =false, i.e. setAccessible had not taken effect there (local boots
-        // never reproduce: handles all non-null). One-shot log names the field
-        // and the override state so the next CI run pinpoints the env diff.
-        if (HGET_FALLBACK_LOGGED.compareAndSet(false, true)) {
-            LOG.warning("[reflect] hGet fallback in use for "
-                + f.getDeclaringClass().getSimpleName() + "." + f.getName()
-                + " (override=" + f.isAccessible() + ") — per-call Field.get");
+        // cont-107: self-heal the CI-only null-handle fallback. First use of a
+        // broken field runs the repair ladder once and caches the direct
+        // handle for the JVM lifetime; Field.get stays only as the last
+        // resort. The mh != null hot path above gained nothing.
+        MethodHandle rep = HGET_REPAIR.get(f);
+        if (rep == null && !HGET_REPAIR_FAILED.contains(f)) {
+            rep = repairGetter(f);
+            if (rep != null) {
+                HGET_REPAIR.put(f, rep);
+                LOG.warning("[reflect] hGet self-heal OK for "
+                        + f.getDeclaringClass().getSimpleName() + "." + f.getName()
+                        + " — direct getter cached for JVM lifetime");
+            } else {
+                HGET_REPAIR_FAILED.add(f);
+                LOG.warning("[reflect] hGet self-heal FAILED for "
+                        + f.getDeclaringClass().getSimpleName() + "." + f.getName()
+                        + " — setAccessible+unreflect and Unsafe both rejected, staying on Field.get");
+            }
+        }
+        if (rep != null) {
+            return rep.invoke(o);
         }
         return f.get(o);
     }
