@@ -6415,3 +6415,74 @@ CI-пара): локально — ab263 ore-пара, blockdump fingerprint, с
 +19.1ms/ch хука (cont-102), сигнатурный гейт cont-113 не расширяется. Целевой
 вердикт: накладные обвязки < 1мс/ч -> net ~1мс/ч против deco=0-базы и до
 ~14мс/ч потенциала в deco-мирах (профиль cont-100).
+
+### cont-115: wrapper-v2 вердикт по живому профилю — мёртв; реальный фронт = per-cell read-path; tag-memo построен и локально верифицирован
+
+КОНТЕКСТ: cont-114 оставил пред-дизайн wrapper-v2 (батч ore-ранов чанка в один
+натив-вызов, thread-local батч + ранний TRUE, ops применяются на границе
+чанка). Тик начал со сборки среды после очередного рецикла песочницы (repo
+уцелел на de289430, но JDK25/server263/.so стёрты; локальный server/ оказался
+старым снапшотом build 60 — рассинхрон). Восстановлено: Temurin 25.0.5+8,
+paper 26.3 build 222 (md5 f49e299... sha256 f649771a... — подлинник),
+patchonly-экстракция (versions/26.3 + 104 библиотек), cargo-пересборка .so,
+plugin+probe263. Нюанс: repo1.maven.org из песочницы отдал HTTP-ошибку —
+annotations-26.0.2-1.jar найден локально в probe/libs/ (унаследован от
+старого 1.21.8-пробника) и подложен в /tmp/jb-annotations.jar.
+
+ПЕРЕВОРОТ ДИЗАЙНА (профиль вместо гипотезы): прежде чем строить батч-обвязку,
+прочитан живой профиль ore-ноги run 438 (persistent-копия ab438). Числа на
+окно из 16 чанков: native wall 280-309ms (17.5-19.3ms/ч) = ВЕСЬ дельта
++19.1ms/ч хука (cont-102); loader (снапшот-перезагрузки per-run) 0.3-1.1ms на
+окно = 0.02-0.07ms/ч ≈ НОЛЬ; state_full/solid_render = 0. Вывод: обвязка
+(acquire/release/JniLevel/ChunkLevel/snapshot-ресеты) — не стоимость; стоимость
+— ПОКЛЕТОЧНЫЙ read-path нативной экспансии (в ~2.4-4 раза медленнее ванильной
+Java на кандидата). Батч с отложенным применением ops вдобавок НЕЗВУКОПОДОБЕН:
+сдвиг момента записи блоков против ваниллы = другой видимый интерливинг для
+последующих шагов декорации и соседних чанков (у Paper нет делегируемого хука
+на границе ore-фазы: CustomChunkGenerator.applyBiomeDecoration зовёт
+InternalChunkGenerator.applyBiomeDecoration через invokespecial — переопреде-
+ление на нашем генераторе мертво; delegate-вызовы — только getBiomeSource/
+getGenDepth/getMinY/getSeaLevel/spawnOriginalMobs(поздно, после LIGHT)/...).
+wrapper-v2 закрыт как фронт; cont-114 остаётся ценным разбором рисков.
+
+ГДЕ СИДИТ ПОКЛЕТОЧНАЯ ЦЕНА (цепочка на кандидата): ChunkLevel::tag_is —
+ov.borrow() + SipHash-lookup (i32,i32,i32) → ensure() → snap.borrow() +
+block()-распаковка → tag_matches_name (хардкод только stone/deepslate_ore_
+replaceables) → ПРОМАХ для base_stone_overworld (tuff) и
+height_specific_ore_replaceables (68 вхождений в 26.3-конфигах) →
+tag_via_registry → tag_registry_is: МЬЮТЕКС + HashMap<String,_>.get(tag) +
+итерация member-set со strip_prefix на КАЖДУЮ ячейку. ore-prof-бакет tag=
+1.5-1.66s/окно против nodes=0.34-0.39s (сэмплер с Instant::now() ~0.35-0.4us
+на этой VM завышает x~6 — абсолюты бакетов читать нельзя, но wall-clock
+native честен).
+
+ФИКС (cont-115, только features_snap.rs): per-run tag-memo в ChunkLevel —
+Vec<(tag, HashMap<(slot, nameIdx), bool>)>. Ключ (slot, palette-nameIdx)
+легален, потому что инстанс живёт ОДИН ран фичи: epoch бампается на входе в
+ран, секции замораживаются после первой загрузки (лейзи-загрузка = first
+touch, к моменту любой memo-записи секция уже заморожена; перезагрузка
+невозможна — она требует bump, которого внутри рана нет). Хит: один короткий
+str-компат тега + один int-ключ map.get — ноль строк/хешей/локов/мьютексов.
+Миссы ограничены tags×sections×palette на ран (~540 worst, ~50 типично) и
+вычисляются ТОЙ ЖЕ цепочкой (matches-name → registry → bridge) — бит-тожде-
+ственность по построению; overlay-путь не тронут (живые записи отвечают
+прежней семантикой), bridge-фоллбек прежний.
+
+ВЕРИФИКАЦИЯ (локально, 2 vCPU, одиночная генерация): ab263 ore-пара —
+GATE: PASS (24 материала в детерминистической сигнатуре cont-113: COAL/DEEPSLATE
+дельты в допуске max(4%, 500)); blockdump fingerprint 288 расходящихся строк —
+класс deco-order шума (info-only, тот же что cont-113). runs-счётчики
+идентичны run 438 (3632/3867/3865... — тот же workload). native wall по
+[run-prof]: 182-303ms/окно (avg ~230) против 280-309 (avg ~295) на run 438 =
+-22%; ore-prof tag-бакет -35%; run-prof-top: tuff -30%, diorite -40%, granite
+-25%, iron -20%. Замечание: локально генерация одиночная — мьютекс был
+без контеншена; на CI 4 vCPU (par4) выигрыш от снятия общего мьютекса
+должен быть больше.
+
+ДАЛЬШЕ (cont-116): CI same-runner вердикт по push этого тика — ab-ore lane
+(гейт не расширяется на CI-железе) + [run-prof] CI-ноги против 280-309;
+если подтверждается — второй слой per-cell цены: SipHash оверлея
+(ov.borrow + (i32,i32,i32)-ключ ~30-40ns/кандидата — свой hasher или int-модель
+оверлея), затем structural-остаток (unpack+loop+RNG-зеркало ~60-80ns —
+близко к пределу паритета с Java). Целевой вердикт: дельта ore-хука
++19.1 → ~10ms/ч после memo, потолок паритета ~5-6ms/ч.

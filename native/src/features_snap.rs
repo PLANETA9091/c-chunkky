@@ -374,6 +374,19 @@ pub struct ChunkLevel<'a> {
     /// Fed by the decoStates/decoSetFlags handshake (one JNI at boot, zero
     /// runtime cost). None = unknown state (skip the WG-map update).
     st_flags: &'a dyn Fn(&str) -> Option<u8>,
+    /// cont-115 tag-answer memo, keyed (section slot, palette nameIdx) per
+    /// TAG — the instance lives ONE feature run and within it the snapshot
+    /// is frozen (epoch bumps only at run entry; lazy loads happen at first
+    /// touch BEFORE any memo entry for that slot can exist), so (slot, ni)
+    /// resolves to the same block name for the whole run. Every entry is
+    /// the output of the exact pre-memo chain (matches-name -> registry ->
+    /// bridge) for the (tag, block name) pair — bit-identity by
+    /// construction. The hot ore cell loop (26.3: TagMatch(
+    /// height_specific_ore_replaceables) + Not(TagMatch(...)) per candidate
+    /// cell, ~35K+ candidates/chunk) answers with one short str compare +
+    /// one int-keyed map get instead of the registry Mutex + string-hash +
+    /// member-set scan.
+    tag_memo: std::cell::RefCell<Vec<(String, HashMap<(usize, u16), bool>)>>,
 }
 
 impl<'a> ChunkLevel<'a> {
@@ -403,7 +416,71 @@ impl<'a> ChunkLevel<'a> {
     ) -> Self {
         let no_snap = std::env::var("CRUS_DECO_NOSNAP").ok().as_deref() == Some("1");
         let no_hm = std::env::var("CRUS_DECO_NOHANDSHAKE").ok().as_deref() == Some("1");
-        ChunkLevel { inner, ov, ov_cols, snap, loader, hm_loader, uid_names, zoom_seed, no_snap, no_hm, st_flags }
+        ChunkLevel { inner, ov, ov_cols, snap, loader, hm_loader, uid_names, zoom_seed, no_snap, no_hm, st_flags, tag_memo: std::cell::RefCell::new(Vec::new()) }
+    }
+
+    /// cont-115: fused snapshot decode + memo probe for the tag test.
+    /// Some(answer) = memo hit; None = fall through to the exact pre-memo
+    /// chain (no snap / stale section / unsnapshotted cell / memo miss).
+    fn tag_snap_probe(&self, pos: BlockPos, tag: &str) -> Option<bool> {
+        if self.no_snap {
+            return None;
+        }
+        let s = self.snap.borrow();
+        let slot = s.slot(pos.x >> 4, pos.z >> 4, pos.y >> 4)?;
+        let sec = s.secs.get(slot)?.as_ref()?;
+        if sec.epoch != s.epoch.get() {
+            return None; // stale — ensure() reloads, then the old chain
+        }
+        let idx = ((pos.y & 15) as usize) << 8 | ((pos.z & 15) as usize) << 4 | (pos.x & 15) as usize;
+        let v = unpack(&sec.bits, &sec.raw, idx)? as usize;
+        let (ni, _) = *sec.pal.get(v)?;
+        let memo = self.tag_memo.borrow();
+        for (t, m) in memo.iter() {
+            if t == tag {
+                return m.get(&(slot, ni)).copied();
+            }
+        }
+        None // tag unseen this run — the caller computes + inserts
+    }
+
+    /// cont-115: memoize the tag answer for the (tag, block name) at pos.
+    /// Misses are bounded by tags x sections x palette entries per run
+    /// (~540 worst case, ~50 typical) — the re-decode cost is noise.
+    fn tag_memo_insert(&self, pos: BlockPos, tag: &str, answer: bool) {
+        if self.no_snap {
+            return;
+        }
+        let key = {
+            let s = self.snap.borrow();
+            let Some(slot) = s.slot(pos.x >> 4, pos.z >> 4, pos.y >> 4) else {
+                return;
+            };
+            let Some(sec) = s.secs.get(slot).and_then(|o| o.as_ref()) else {
+                return;
+            };
+            if sec.epoch != s.epoch.get() {
+                return; // stale — nothing frozen to memoize against yet
+            }
+            let idx = ((pos.y & 15) as usize) << 8 | ((pos.z & 15) as usize) << 4 | (pos.x & 15) as usize;
+            let Some(v) = unpack(&sec.bits, &sec.raw, idx) else {
+                return;
+            };
+            let Some(&(ni, _)) = sec.pal.get(v as usize) else {
+                return;
+            };
+            (slot, ni)
+        };
+        let mut memo = self.tag_memo.borrow_mut();
+        for (t, m) in memo.iter_mut() {
+            if t == tag {
+                m.insert(key, answer);
+                return;
+            }
+        }
+        let mut m = HashMap::new();
+        m.insert(key, answer);
+        memo.push((tag.to_string(), m));
     }
 
     /// prune one overlay entry (the ops-dropped path) — the column index
@@ -1005,16 +1082,23 @@ impl DecoLevelExt for ChunkLevel<'_> {
                 }
             }
         }
+        // cont-115 fast path: fused decode + per-run memo (zero string/
+        // lock work per candidate on the hot path)
+        if let Some(b) = self.tag_snap_probe(pos, tag) {
+            return b;
+        }
         self.ensure(pos.x, pos.y, pos.z);
         // world blocks can match exotic tags — the known ore sets answer
         // natively, everything else goes through the fetch-once tag registry
         // (one bridge crossing per tag per process instead of per cell) and
         // falls back to the exact bridge path when the registry can't answer
         if let Some(name) = self.snap.borrow().name_ref_at(pos.x, pos.y, pos.z) {
-            return match tag_matches_name(tag, name) {
+            let b = match tag_matches_name(tag, name) {
                 Some(b) => b,
                 None => self.tag_via_registry(pos, tag, Some(name)),
             };
+            self.tag_memo_insert(pos, tag, b);
+            return b;
         }
         self.tag_via_registry(pos, tag, None)
     }
