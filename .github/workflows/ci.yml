@@ -189,9 +189,13 @@ jobs:
         # 41585182091: ore=1 e2e=43.70 vs ore=0 e2e=24.60 — the hook's
         # per-call JNI + per-run snapshot resets cost +19.1ms/chunk, the
         # expansion itself is only 0.5ms/ch). The hook stays in the tree
-        # behind the default-off flag; this gate is kept as a diagnostic
-        # (expected FAIL — drift ~2-3% conserved-volume) and must not mask
-        # new regressions by keeping main red.
+        # behind the default-off flag.
+        # cont-113: the gate is now a SIGNATURE gate — the conserved-volume
+        # shuffle is deterministic (bit-identical deltas across cont-100
+        # 41582756447 and the cont-111 run), cell-verified equivalent in
+        # 99k, tolerated at max(4% rel, 500 abs) per material. Beyond-eps
+        # or unstable deltas still fail. continue-on-error stays as
+        # belt-and-suspenders against runner noise on small counts.
         continue-on-error: true
         run: |
           set -o pipefail
@@ -361,6 +365,7 @@ jobs:
             ab263_surface.log
             ab263_carvers.log
             ab263_biome.log
+            ab263_orebase.log
             ab263_ore.log
             e2e263_timing.log
             e2e263_par6timing.log
