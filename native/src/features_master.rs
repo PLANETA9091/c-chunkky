@@ -228,7 +228,9 @@ pub fn build_deco_ctx_src(
         plan,
         biome_features,
         uid_names,
-        chunk_ov: std::cell::RefCell::new(crate::features_snap::OvMap::new()),
+        chunk_ov: std::cell::RefCell::new(crate::features_snap::OvMap::with_hasher(
+            std::hash::BuildHasherDefault::<crate::features_snap::OvHasher>::default(),
+        )),
         chunk_ov_cols: std::cell::RefCell::new(HashMap::new()),
         chunk_snap: std::cell::RefCell::new(crate::features_snap::SnapRegion::new(0, 0, -1024, 26)),
         chunk_hms: std::cell::RefCell::new(HashMap::new()),

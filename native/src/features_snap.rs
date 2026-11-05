@@ -339,7 +339,33 @@ pub fn parse_section(data: &[u8]) -> Option<SnapSection> {
 
 /// Chunk-scoped feature-write overlay map (all of this chunk's feature
 /// writes; vanilla setBlock semantics — later features read earlier writes).
-pub type OvMap = std::collections::HashMap<(i32, i32, i32), String>;
+/// cont-116: multiply-xor hasher for the overlay's coordinate keys — std's
+/// default SipHash-1-3 spends ~30-40ns per (i32,i32,i32) probe; the ore cell
+/// loop pays it on EVERY candidate (tag_is / state_is probes + the 6-neighbor
+/// is_adjacent_to_air scan). Tuple Hash calls write_i32 per field; three
+/// multiply-xor rotations avalanche enough for world-coord keys (collisions
+/// fall back to key equality — correctness is unaffected, only clustering).
+#[derive(Default)]
+pub struct OvHasher(u64);
+impl std::hash::Hasher for OvHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, _b: &[u8]) {
+        // unreachable for integer keys via the tuple Hash impl; a benign
+        // mix keeps the contract if a byte-typed key ever lands here
+        self.0 = self.0.rotate_left(29) ^ 0x9E3779B97F4A7C15;
+    }
+    #[inline]
+    fn write_i32(&mut self, v: i32) {
+        self.0 = (self.0 ^ ((v as u64).wrapping_mul(0x9E3779B97F4A7C15))).rotate_left(29);
+    }
+}
+
+/// cont-116: OvMap with the fast coordinate hasher.
+pub type OvMap = std::collections::HashMap<(i32, i32, i32), String, std::hash::BuildHasherDefault<OvHasher>>;
 
 /// Wrapper: the per-chunk overlay over the region snapshot over the JNI
 /// bridge. Replaces the per-feature OverlayLevel in the deco path.
