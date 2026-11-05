@@ -6633,3 +6633,62 @@ steady-state 142-151ms/окно против 178-246 avg 215 на cont-116 — �
 CRUS_DRAW_TRACE-лог + 2-core -> rcon-таймауты, watchdog 10s) — методология
 CI (дефолт N=8) восстанавливает воспроизводимость; для локальных прогонов
 фиксировать N=8.
+ing; для локальных прогонов фиксировать N=8.
+
+### cont-119: вердикты CI ранов cont-117 (42071601599) и cont-118 (42084876496) собраны — оба SUCCESS, оба гейта PASS; e2e-дельта стабильно в runner-bound полосе; окружение восстановлено после третьего отката песочницы; hold-mode maintenance подтверждён
+
+САНДБОКС: третий откат (HEAD=cont-41, cargo/JDK25/server263/tools пусты) —
+восстановление по накатанной: git fetch + reset --hard origin/main,
+rustup 1.99.1 + cargo 1.99.1/rustc 1.99.1, JDK25 Temurin 25.0.5+8, cargo
+build --release 1m57s (свежий .so с cont-118 счётчиками). НОВОЕ: PaperMC
+v2 API ЗАКРЫТ ({"error":"sunset"} на
+api.papermc.io/v2/.../builds/222/downloads) — рабочий путь теперь fill v3:
+GET https://fill.papermc.io/v3/projects/paper/versions/26.3/builds/222 →
+downloads["server:default"].url (fill-data.papermc.io/v1/objects/<sha256>/
+paper-26.3-222.jar), sha256 f649771a...07d488 / md5 f49e29961...3d — бит-в-бит
+с Paper-базой cont-118. patchonly-извлечение versions/26.3 + libraries ОК.
+server/ переbootstrap'ен (build=222), plugin md5 5d107e3e (jar timestamp —
+не байт-воспроизводим, для функции не критично), probe263 md5 bf3dee4b —
+Maven 429 на jetbrains-annotations ВОСПРОИЗВЁЛСЯ, снова обойдён aliyun-зеркалом
+(/tmp/jb-annotations.jar, 30570 байт реальный zip) — путь стабильно рабочий.
+
+ВЕРДИКТ РАН 42071601599 (cont-117 / 6af75d73): SUCCESS.
+ore GATE: PASS (24 материала в допуске), orebase strict: PASS (все строгие
+материалы бит-equal), fallbacks=0. runs=3888/4066/3869, native
+12.9-14.7ms/окно, loader 0.30-0.38ms/окно. e2e-пара: ON 43.29 vs OFF
+25.94 → дельта +17.35ms/чанк (x1.67).
+
+ВЕРДИКТ РАН 42084876496 (cont-118 / 8801ac9e): SUCCESS.
+ore GATE: PASS (24 материала), orebase strict: PASS, fallbacks=0. runs=
+3431/4495/3872, native 11.9-14.1ms/окно, loader 0.33-0.42ms/окно. e2e-пара:
+ON 41.61 vs OFF 25.70 → дельта +15.91ms/чанк (x1.62).
+
+e2e-ряд полон: +10.64 (база 438) → +19.05 (ci115) → +17.73 (ci116) →
++17.35 (cont-117) → +15.91 (cont-118) — весь ряд внутри runner-bound полосы
+x1.6-1.8, дельта от перевода ore-prof на точные счётчики НЕ выросла (даже
+минимальная в ряду). Точная атрибуция дельты остаётся за локальным A/B на
+тёплой VM; CI-дельта — фоновый шум класса «runner-bound» (контроль по
+same-run гейтам, они зелёные пять ранов подряд).
+
+НОВЫЙ ФОРМАТ ore-prof ПОДТВЕРЖДЁН В CI: "[ore-prof] tag=N nodes=N hm=N
+air=N (calls/window, exact)" — старый "(ms/window, sampled x8)" отсутствует
+(0 грепов). CI-числа: tag=106-120k, nodes=1283-1636, hm=3431-4494,
+air=1096-1828 на окно; межоконный разброс ±2-4% — совпадает с локальным
+контуром cont-118 (tag=110-115k, nodes~1.4k, hm~3.9k, air~1.5k) и с заявкой
+(±2-4% против ±30% качелей сэмплера). Инструмент атрибуции теперь читаем и
+на CI.
+
+ВЫВОД: cont-117 и cont-118 верифицированы CI независимо (гейты зелёные на
+двух разных ранах после внедрения счётчиков), per-cell ore фронт остаётся
+ЗАКРЫТ, ore-хук OFF с забанкованными memo+hasher, кампания в hold-mode
+maintenance: CI-зелень + evidence-гигиена. Следующий тик: контроль
+локальной ore-пары на восстановленном окружении (прогрев-чек здоровья: GATE PASS
+PASS) и обычный maintenance-цикл.
+
+ЛОКАЛЬНЫЙ HEALTH-ЧЕК (после восстановления): ore-пара N=8 → GATE: PASS
+(24 материала в сигнатуре), blockdump 288 строк = deco-noise класс.
+ore-prof exact на свежем .so: tag=106-117k, nodes=1345-1464, hm=3632-3866,
+air=1232-1347 на окно — в контуре и с локальными числами cont-118, и с CI
+cont-118; runs-паттерн канонический (3632/3866). Окружение полностью
+рабочее: cargo 1.99.1, JDK25 25.0.5+8, server263 + server/ (build 222,
+hashes бит-в-бит), plugin + probe263 пересобраны.
