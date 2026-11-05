@@ -2462,46 +2462,51 @@ fn magma_is_water_or_air(ctx: &PlaceCtx, p: BlockPos) -> bool {
     ctx.level.state_name(p) == "minecraft:water" || ctx.level.is_air(p)
 }
 
-/// ore-internal run profile (sampled 1/8 of candidate cells): where the
-/// place_ore wall goes — the per-cell target (tag) test, the vein node
+/// ore-internal run profile (exact per-window call counts): where the
+/// place_ore work goes — the per-cell target (tag) test, the vein node
 /// cloud build (RNG draws + lerp + sphere elimination), the ocean-floor
 /// height gate, the 6-neighbor air scan. Printed via prof_chunk_tick as
 /// [ore-prof]; the e2e_ci.sh run.out grep surfaces it in CI logs.
+///
+/// cont-118: counters replace the Instant::now 1/8 time sampler. CI
+/// forensics (runs 438/42061238509/42064468247, three different CPUs)
+/// showed the old buckets were unreadable: the clock pair charged
+/// ~0.35-0.4us per sampled call (x~6 distortion, local calibration),
+/// scaled with JVM/JIT warmup state (ci116 ab-lane doubled tag+nodes on
+/// a cold fresh boot while the same-run e2e lane with the same overlay
+/// keys stayed flat; hm/air low-frequency buckets did not move), and the
+/// shared SAMPLES atomic ping-ponged a single cache line across all ore
+/// workers. Counts are exact, CPU-independent, and cost one relaxed add
+/// on the slot's own line; wall attribution stays with [run-prof]
+/// native= (honest per-chunk wall, low-frequency timer).
 pub mod ore_prof {
     use std::sync::atomic::{AtomicU64, Ordering};
     pub const S_TAG: usize = 0;
     pub const S_NODES: usize = 1;
     pub const S_HM: usize = 2;
     pub const S_AIR: usize = 3;
-    static NS: [AtomicU64; 4] = [
+    static CALLS: [AtomicU64; 4] = [
         AtomicU64::new(0),
         AtomicU64::new(0),
         AtomicU64::new(0),
         AtomicU64::new(0),
     ];
-    static SAMPLES: AtomicU64 = AtomicU64::new(0);
 
-    /// Run `f` under the sampler: every 8th call is timed (Instant::now on
-    /// every cell would itself cost; the x8 multiplier restores the est).
+    /// Run `f` under the counter: exact call count per window (no clock on
+    /// the hot path — see the module doc for why the time sampler died).
     #[inline]
     pub fn measure<R>(slot: usize, f: impl FnOnce() -> R) -> R {
-        let i = SAMPLES.fetch_add(1, Ordering::Relaxed);
-        if i & 7 != 0 {
-            return f();
-        }
-        let t = std::time::Instant::now();
-        let r = f();
-        NS[slot].fetch_add(t.elapsed().as_nanos() as u64 * 8, Ordering::Relaxed);
-        r
+        CALLS[slot].fetch_add(1, Ordering::Relaxed);
+        f()
     }
 
-    /// (tag, nodes, height-gate, air) ns estimates; resets the window.
+    /// (tag, nodes, height-gate, air) exact call counts; resets the window.
     pub fn drain() -> [u64; 4] {
         [
-            NS[0].swap(0, Ordering::Relaxed),
-            NS[1].swap(0, Ordering::Relaxed),
-            NS[2].swap(0, Ordering::Relaxed),
-            NS[3].swap(0, Ordering::Relaxed),
+            CALLS[0].swap(0, Ordering::Relaxed),
+            CALLS[1].swap(0, Ordering::Relaxed),
+            CALLS[2].swap(0, Ordering::Relaxed),
+            CALLS[3].swap(0, Ordering::Relaxed),
         ]
     }
 }

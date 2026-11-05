@@ -85,14 +85,13 @@ fn prof_chunk_tick() {
         sr as f64 / 16.0 / 1e6,
         srn / 16,
     ));
-    // ore internals: where the place_ore native wall goes (sampled 1/8)
+    // ore internals: where the place_ore work goes (exact call counts,
+    // cont-118 — the old 1/8 Instant::now sampler distorted x~6 and was
+    // JIT/CPU-dependent; wall attribution stays with [run-prof] native=)
     let ore = crate::features_place::ore_prof::drain();
     crate::ffi::log_warn(&format!(
-        "[ore-prof] tag={:.2} nodes={:.2} hm={:.2} air={:.2} (ms/window, sampled x8)",
-        ore[0] as f64 / 1e6,
-        ore[1] as f64 / 1e6,
-        ore[2] as f64 / 1e6,
-        ore[3] as f64 / 1e6,
+        "[ore-prof] tag={} nodes={} hm={} air={} (calls/window, exact)",
+        ore[0], ore[1], ore[2], ore[3],
     ));
     // top-10 features by accumulated native wall (window only)
     let mut top: Vec<(String, u64, u64)> = PROF_FEAT
