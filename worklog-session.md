@@ -6692,3 +6692,10 @@ air=1232-1347 на окно — в контуре и с локальными ч�
 cont-118; runs-паттерн канонический (3632/3866). Окружение полностью
 рабочее: cargo 1.99.1, JDK25 25.0.5+8, server263 + server/ (build 222,
 hashes бит-в-бит), plugin + probe263 пересобраны.
+
+ВЕРДИКТ РАН 42098787317 (cont-119 / 8f6333e6, docs-коммит): SUCCESS.
+ore GATE: PASS (24 материала), orebase strict: PASS, e2e-пара ON 43.83 vs
+OFF 28.31 → дельта +15.52 (x1.55, внутри runner-bound полосы). ore-prof
+exact в CI: tag=112-113k, nodes≈1.4k, hm≈3.8k, air≈1.3k — в контуре с
+cont-118 CI и локальными числами. ТРИ РАНА ПОДРЯД ЗЕЛЁНЫЕ (cont-117/118/119),
+все гейты PASS на каждом — hold-mode maintenance стабилен.
