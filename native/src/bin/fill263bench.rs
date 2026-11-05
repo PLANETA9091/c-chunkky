@@ -289,6 +289,12 @@ fn main() {
     }
     println!("  {:7.3}  interp: cell-grid sample", ms(&PROF_INTERP_CELL));
     println!("  {:7.3}  interp: trilinear fill", ms(&PROF_INTERP_FILL));
+    // cont-112 spike: the noise-family internal split (6-chunk means)
+    crussty_chunkgen::df263::PROF_FILLS_263.store(6, std::sync::atomic::Ordering::Relaxed);
+    println!(
+        "  {}",
+        crussty_chunkgen::df263::prof263_nf_snapshot()
+    );
 
     println!(
         "fill_chunk  median {:.2}ms  min {:.2}  max {:.2}",

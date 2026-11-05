@@ -366,6 +366,20 @@ pub fn prof263_reset() {
     }
     PROF_INTERP_CELL.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_INTERP_FILL.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_NF_NOISE2D_NS.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_NF_NOISE2D_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_NF_NOISE3D_NS.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_NF_NOISE3D_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_NF_NOISE3D_FB.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_NF_SHIFT_NS.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_NF_SHIFT_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_NF_SHIFTB_NS.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_NF_SHIFTB_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_NF_BLEND_NS.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_NF_BLEND_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_NF_PERLIN_NS.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_NF_PERLIN_PTS.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_NF_PERLIN_LAYERS.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_STAGE_TERRAIN.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_STAGE_SURFACE.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_STAGE_HOOD.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -453,7 +467,39 @@ pub fn prof263_snapshot() -> String {
     if !calls.is_empty() {
         s.push_str(&format!(" surf_calls[{}]", calls.join(" ")));
     }
+    // cont-112 spike: the noise-family internal split (see prof263_nf_snapshot).
+    s.push_str(&format!(" {}", prof263_nf_snapshot()));
     s
+}
+
+/// cont-112 spike: the noise-family internal split — per-fill ms per branch
+/// (2D per-point stack gets, 3D column-kernel stacks, ShiftA plumbing,
+/// ShiftB transposed gets, Blended) plus the perlin column-kernel share
+/// (ns+pts+layers) and the plain-fallback volume-call count.
+pub fn prof263_nf_snapshot() -> String {
+    let n = PROF_FILLS_263.load(std::sync::atomic::Ordering::Relaxed) as f64;
+    let n = if n < 1.0 { 1.0 } else { n };
+    let ms = |v: &std::sync::atomic::AtomicU64| {
+        v.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6 / n
+    };
+    let c = |v: &std::sync::atomic::AtomicU64| v.load(std::sync::atomic::Ordering::Relaxed);
+    format!(
+        "nf[2d={:.3}ms n={} 3d={:.3}ms n={} fb={} shift={:.3} n={} shiftB={:.3} n={} blend={:.3} n={} perlin={:.3}ms pts={} lay={}]",
+        ms(&PROF_NF_NOISE2D_NS),
+        c(&PROF_NF_NOISE2D_CALLS),
+        ms(&PROF_NF_NOISE3D_NS),
+        c(&PROF_NF_NOISE3D_CALLS),
+        c(&PROF_NF_NOISE3D_FB),
+        ms(&PROF_NF_SHIFT_NS),
+        c(&PROF_NF_SHIFT_CALLS),
+        ms(&PROF_NF_SHIFTB_NS),
+        c(&PROF_NF_SHIFTB_CALLS),
+        ms(&PROF_NF_BLEND_NS),
+        c(&PROF_NF_BLEND_CALLS),
+        ms(&PROF_NF_PERLIN_NS),
+        c(&PROF_NF_PERLIN_PTS),
+        c(&PROF_NF_PERLIN_LAYERS),
+    )
 }
 
 /// Exclusive per-kind nanos: 0 shell, 1 noise-family, 2 blended, 3 spline,
@@ -473,6 +519,40 @@ pub static PROF_KINDS: [std::sync::atomic::AtomicU64; 9] = [
 pub static PROF_INTERP_CELL: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub static PROF_INTERP_FILL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+// ---- cont-112 spike: noise-family INTERNAL split -------------------------
+// Where the noise-family prof-kind goes: perlin column kernels (ns+pts),
+// 2D per-point stack gets (cache_2d semantics branch), ShiftA/ShiftB
+// plumbing, Blended stacks, and how often the 3D stack falls back to the
+// per-point plain fill. All prof-gated; zero cost when PROF is off.
+pub static PROF_NF_NOISE2D_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_NF_NOISE2D_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_NF_NOISE3D_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_NF_NOISE3D_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_NF_NOISE3D_FB: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_NF_SHIFT_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_NF_SHIFT_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_NF_SHIFTB_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_NF_SHIFTB_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_NF_BLEND_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_NF_BLEND_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_NF_PERLIN_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_NF_PERLIN_PTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_NF_PERLIN_LAYERS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 /// In-server STAGE timers (ffi.rs fill path, v263): where the fill wall goes
@@ -1355,6 +1435,11 @@ impl DfSam263 {
                 // noise_col4 kernels) is the future direction; the batch
                 // kernel + bit-exact tests stay in n263.rs for that work.
                 if *y_scale == 0.0 {
+                    let nf_t = if PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed) {
+                        prof_now()
+                    } else {
+                        0
+                    };
                     // 2D noise (cache_2d semantics): the sampled y is
                     // block_y(y)*0.0 = ±0.0 for EVERY row of a column — the
                     // same value by construction (sign-of-zero only; every
@@ -1431,7 +1516,17 @@ impl DfSam263 {
                             }
                         }
                     }
+                    if nf_t != 0 {
+                        PROF_NF_NOISE2D_NS
+                            .fetch_add(prof_now() - nf_t, std::sync::atomic::Ordering::Relaxed);
+                        PROF_NF_NOISE2D_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 } else {
+                    let nf3_t = if PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed) {
+                        prof_now()
+                    } else {
+                        0
+                    };
                     // 3D: column kernels (per-column hoisted x/z prologue,
                     // bit-exact vs the plain loop); plain per-point fallback
                     // for Smeared/nested-stack shapes. ctx.vv routes to the
@@ -1464,7 +1559,13 @@ impl DfSam263 {
                         _ => false,
                     };
                     if !filled {
+                        PROF_NF_NOISE3D_FB.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         noise_plain_fill(noise, out, vol, *xz_scale, *y_scale);
+                    }
+                    if nf3_t != 0 {
+                        PROF_NF_NOISE3D_NS
+                            .fetch_add(prof_now() - nf3_t, std::sync::atomic::Ordering::Relaxed);
+                        PROF_NF_NOISE3D_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }
@@ -1475,6 +1576,11 @@ impl DfSam263 {
                 xz_scale,
                 y_scale,
             } => {
+                let nf_t = if PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed) {
+                    prof_now()
+                } else {
+                    0
+                };
                 shift_x.sample_volume(ctx, out, vol);
                 let mut sz = ctx.scratch.acquire(vol.size());
                 shift_z.sample_volume(ctx, &mut sz, vol);
@@ -1516,6 +1622,11 @@ impl DfSam263 {
                 }
                 }
                 ctx.scratch.release(sz);
+                if nf_t != 0 {
+                    PROF_NF_SHIFT_NS
+                        .fetch_add(prof_now() - nf_t, std::sync::atomic::Ordering::Relaxed);
+                    PROF_NF_SHIFT_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
             }
             DfSam263::Binary { op, l, r, .. } => {
                 l.sample_volume(ctx, out, vol);
@@ -1882,6 +1993,11 @@ impl DfSam263 {
             }
             DfSam263::BlendDensity { a } => a.sample_volume(ctx, out, vol),
             DfSam263::ShiftB { noise } => {
+                let nf_t = if PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed) {
+                    prof_now()
+                } else {
+                    0
+                };
                 // Transposed volume: thin (sizeZ, sizeX, 1) buffer at (minZ, minX, 0).
                 let transposed = DensityVolume {
                     size_x: vol.size_z,
@@ -1918,6 +2034,11 @@ impl DfSam263 {
                     }
                 }
                 ctx.scratch.release(tb);
+                if nf_t != 0 {
+                    PROF_NF_SHIFTB_NS
+                        .fetch_add(prof_now() - nf_t, std::sync::atomic::Ordering::Relaxed);
+                    PROF_NF_SHIFTB_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
             }
             DfSam263::Blended {
                 min_stack,
@@ -1928,6 +2049,11 @@ impl DfSam263 {
                 main_xz_div,
                 main_y_div,
             } => {
+                let nf_t = if PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed) {
+                    prof_now()
+                } else {
+                    0
+                };
                 // 26.3 compiled BlendedNoise = NoiseFunction.Samplers: the z
                 // coordinate is scaled by xzMultiplier (NOT bare z). Column
                 // kernels for the three stacks (min/max at (bx, yv, bz),
@@ -1957,6 +2083,11 @@ impl DfSam263 {
                         out,
                         vol,
                     );
+                }
+                if nf_t != 0 {
+                    PROF_NF_BLEND_NS
+                        .fetch_add(prof_now() - nf_t, std::sync::atomic::Ordering::Relaxed);
+                    PROF_NF_BLEND_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             DfSam263::Spline {
@@ -3102,6 +3233,12 @@ fn perlin263_fill_col(
     // SmearedPerlin fudge-y scale (None = plain Perlin).
     smear_fudge: Option<f64>,
 ) {
+    let nf_t = if PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed) {
+        prof_now()
+    } else {
+        0
+    };
+    let nf_pts = vol.size() as u64;
     let mut index = 0usize;
     for z in 0..vol.size_z {
         let wz = wrap(tz(vol.block_z(z)) * freq) + off_z;
@@ -3177,6 +3314,11 @@ fn perlin263_fill_col(
                 index += 1;
             }
         }
+    }
+    if nf_t != 0 {
+        PROF_NF_PERLIN_NS.fetch_add(prof_now() - nf_t, std::sync::atomic::Ordering::Relaxed);
+        PROF_NF_PERLIN_PTS.fetch_add(nf_pts, std::sync::atomic::Ordering::Relaxed);
+        PROF_NF_PERLIN_LAYERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -3266,6 +3408,12 @@ fn perlin263_fill_col_vv(
     // SmearedPerlin fudge-y scale (None = plain Perlin).
     smear_fudge: Option<f64>,
 ) {
+    let nf_t = if PROF_ON_263.load(std::sync::atomic::Ordering::Relaxed) {
+        prof_now()
+    } else {
+        0
+    };
+    let nf_pts = vol.size() as u64;
     let mut index = 0usize;
     for z in 0..vol.size_z {
         let wz = wrap(tz(vol.block_z(z)) * freq) + off_z;
@@ -3343,6 +3491,11 @@ fn perlin263_fill_col_vv(
                 index += 1;
             }
         }
+    }
+    if nf_t != 0 {
+        PROF_NF_PERLIN_NS.fetch_add(prof_now() - nf_t, std::sync::atomic::Ordering::Relaxed);
+        PROF_NF_PERLIN_PTS.fetch_add(nf_pts, std::sync::atomic::Ordering::Relaxed);
+        PROF_NF_PERLIN_LAYERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
