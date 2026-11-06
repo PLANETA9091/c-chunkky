@@ -101,24 +101,46 @@ pub const GRADIENT: [(i32, i32, i32); 16] = [
     (0, -1, -1),
 ];
 
+/// Precomputed f32 gradient components — identical VALUES to GRADIENT
+/// (each entry is ±1.0 or 0.0). Kills the 24 int→f32 conversions per
+/// lattice point (8 dots × 3 components) in the column kernels; the
+/// products are bit-identical because multiplying by 1.0 / -1.0 / 0.0 is
+/// an IEEE-exact operation and the operand of the old `gx as f32` cast is
+/// exactly the value stored here.
+pub static GRADIENT_F32: [(f32, f32, f32); 16] = {
+    let mut t = [(0f32, 0f32, 0f32); 16];
+    let mut i = 0;
+    while i < 16 {
+        let (a, b, c) = GRADIENT[i];
+        t[i] = (a as f32, b as f32, c as f32);
+        i += 1;
+    }
+    t
+};
+
 /// NoiseGradients.dot(hash, f32 x, y, z) — float math, flat table.
+///
+/// ВЕРДИКТ cont-124 (замер, не мнение): mask-форма (from_bits((bits & and)
+/// ^ xor) вместо умножений) ПРОИГРАЛА 4.49-4.51ns/pt против 4.03 у этой
+/// f32-таблицы — 6 movd GPR↔FPR domain-crossings на дот (48/точку) дороже
+/// трёх f32-mul на FP-портах. Оставлена табличная форма.
 #[inline]
 pub fn gradient_dot_f32(hash: usize, x: f32, y: f32, z: f32) -> f32 {
-    let (gx, gy, gz) = GRADIENT[hash & 15];
-    gx as f32 * x + gy as f32 * y + gz as f32 * z
+    let (gx, gy, gz) = GRADIENT_F32[hash & 15];
+    gx * x + gy * y + gz * z
 }
 
 /// NoiseGradients.dotXz.
 #[inline]
 pub fn gradient_dot_xz_f32(hash: usize, x: f32, z: f32) -> f32 {
-    let (gx, _, gz) = GRADIENT[hash & 15];
-    gx as f32 * x + gz as f32 * z
+    let (gx, _, gz) = GRADIENT_F32[hash & 15];
+    gx * x + gz * z
 }
 
 /// NoiseGradients.gradY.
 #[inline]
 pub fn gradient_y(hash: usize) -> f32 {
-    GRADIENT[hash & 15].1 as f32
+    GRADIENT_F32[hash & 15].1
 }
 
 /// GradientNoise (base): byte[256] permutation + offsets.

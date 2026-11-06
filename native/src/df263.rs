@@ -3201,11 +3201,11 @@ fn spline_value_point(
 // ---------------------------------------------------------------------------
 // Column kernels: per-column hoisted x/z prologue for the noise leaves.
 //
-// The DensityVolume walk visits y innermost per (x,z) column, so a column of
-// consecutive out[] indices shares the wrap/floor/relative/smoothstep setup
-// and the p_adj chain roots (x0/x1) of both noise inputs. Every per-point
-// f32/f64 op keeps the EXACT order of the scalar paths (PerlinNoise263::get
-// / sample_and_lerp / NoiseStack263::get) — bit-exact by identity:
+// The coordinate maps are MONOMORPHIZED generics (TX/TY/TZ) instead of
+// `&dyn Fn` trait objects: every caller passes a trivial linear closure,
+// and the dyn dispatch was an indirect call + vtable load per lattice
+// point (and per column for x/z). Monomorphization inlines them to 2-3
+// arithmetic ops — bit-exact by identity (same expression, now direct).
 //   * layer accumulation order unchanged (layer passes add amp*v in the
 //     same sequence the scalar accumulator would; 0.0 + (-0.0) == +0.0 both
 //     ways),
@@ -3218,7 +3218,7 @@ fn spline_value_point(
 /// `tx/ty/tz` map raw volume coords to the stack-level input (node scale);
 /// the lattice coordinate is `wrap(t(r) * freq) + offset`.
 #[allow(clippy::too_many_arguments)]
-fn perlin263_fill_col(
+fn perlin263_fill_col<TX: Fn(i32) -> f64 + Copy, TY: Fn(i32) -> f64 + Copy, TZ: Fn(i32) -> f64 + Copy>(
     p: &[u16; 256],
     freq: f64,
     off_x: f64,
@@ -3227,9 +3227,9 @@ fn perlin263_fill_col(
     amp: f32,
     out: &mut [f32],
     vol: &DensityVolume,
-    tx: &dyn Fn(i32) -> f64,
-    ty: &dyn Fn(i32) -> f64,
-    tz: &dyn Fn(i32) -> f64,
+    tx: TX,
+    ty: TY,
+    tz: TZ,
     // SmearedPerlin fudge-y scale (None = plain Perlin).
     smear_fudge: Option<f64>,
 ) {
@@ -3393,7 +3393,7 @@ pub(crate) fn perlin263_get_vv(
 /// replaces associates the f32 sum differently and drifts by 1 ULP, which
 /// flips near-tie biomes at the dump gate).
 #[allow(clippy::too_many_arguments)]
-fn perlin263_fill_col_vv(
+fn perlin263_fill_col_vv<TX: Fn(i32) -> f64 + Copy, TY: Fn(i32) -> f64 + Copy, TZ: Fn(i32) -> f64 + Copy>(
     p: &[u16; 256],
     freq: f64,
     off_x: f64,
@@ -3402,9 +3402,9 @@ fn perlin263_fill_col_vv(
     amp: f32,
     out: &mut [f32],
     vol: &DensityVolume,
-    tx: &dyn Fn(i32) -> f64,
-    ty: &dyn Fn(i32) -> f64,
-    tz: &dyn Fn(i32) -> f64,
+    tx: TX,
+    ty: TY,
+    tz: TZ,
     // SmearedPerlin fudge-y scale (None = plain Perlin).
     smear_fudge: Option<f64>,
 ) {
@@ -3501,13 +3501,13 @@ fn perlin263_fill_col_vv(
 
 /// NoiseStack263 column fill — vanilla-addToVolume semantics (ctx.vv).
 /// Returns false when a layer needs the plain per-point path.
-fn stack263_fill_col_vv(
+fn stack263_fill_col_vv<TX: Fn(i32) -> f64 + Copy, TY: Fn(i32) -> f64 + Copy, TZ: Fn(i32) -> f64 + Copy>(
     layers: &[(Noise263, f64, f32)],
     out: &mut [f32],
     vol: &DensityVolume,
-    tx: &dyn Fn(i32) -> f64,
-    ty: &dyn Fn(i32) -> f64,
-    tz: &dyn Fn(i32) -> f64,
+    tx: TX,
+    ty: TY,
+    tz: TZ,
 ) -> bool {
     for (noise, _, _) in layers {
         match noise {
@@ -3554,13 +3554,13 @@ fn stack263_fill_col_vv(
 
 /// NoiseStack263 column fill. Returns false when a layer needs the plain
 /// per-point path (Smeared fudge-y / nested stacks) — the caller falls back.
-fn stack263_fill_col(
+fn stack263_fill_col<TX: Fn(i32) -> f64 + Copy, TY: Fn(i32) -> f64 + Copy, TZ: Fn(i32) -> f64 + Copy>(
     layers: &[(Noise263, f64, f32)],
     out: &mut [f32],
     vol: &DensityVolume,
-    tx: &dyn Fn(i32) -> f64,
-    ty: &dyn Fn(i32) -> f64,
-    tz: &dyn Fn(i32) -> f64,
+    tx: TX,
+    ty: TY,
+    tz: TZ,
 ) -> bool {
     for (noise, _, _) in layers {
         match noise {
