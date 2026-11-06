@@ -42,6 +42,26 @@ fingerprint deco-noise класса). Не-бит-точная территор�
 - **Paper 26.3 = build 222** (sha256 f649771a..., md5 f49e29961...);
   PaperMC v2 API sunset — только fill v3 (ключ `server:default`).
 
+## Граница цели 1ms e2e (квантифицирована cont-123)
+
+Чистый 4-рановый ряд prod-ноги (ген-код идентичен с cont-118): native
+30.1–36.2ms/chunk, cover (at-least-one-busy доля стены) 68.9–73.8%,
+deco-хвост 221–329ms, e2e 23.98–28.31.
+
+| Метрика | Значение |
+| --- | --- |
+| native CPU на окно (144 чанков) | 4.34–5.22 CPU-s (avg 4.71) |
+| CPU-утилизация par4 (4 воркера) | **31.0–32.0%** (avg 31.5%) |
+| Идеальный 4-воркерный пол | **7.54–9.05 ms/chunk** (avg 8.18) |
+| Воркеров для 1ms/chunk amortized | **30.1–36.2** (avg 32.7) |
+
+**Вердикт**: 1ms e2e на Paper 26.3 + par4 недостижима внутри инварианта
+бит-точности. Путь «30x срез CPU нативного филла» противоречит
+структурным вердиктам (interp заморожена, per-cell фронт закрыт);
+путь «32.7 воркеров» — dependency-волны chunk-системы Paper (Paper-side,
+вне зоны репо). Реалистичный потолок in-scope — пол 8.18ms/chunk, и тот
+закрыт Paper-планировщиком. Кампания в hold-mode.
+
 ## Индекс собранных CI-ранов (repo id 1412863908)
 
 | Ран | Commit | Вердикт |
@@ -55,6 +75,8 @@ fingerprint deco-noise класса). Не-бит-точная территор�
 | 42105093915 | f294a207 (cont-119 add.) | SUCCESS |
 | 42177866803 | 24903aa6 (cont-120) | SUCCESS |
 | 42231520636 | 7a9fc2cc (cont-121) | SUCCESS |
+| 42271100713 | be438653 (cont-122) | SUCCESS |
+| 42279356696 | e46f357f (cont-123) | SUCCESS |
 
 Гейты PASS на каждом; runs-паттерн канонический (3632/3857-3871);
 fallbacks=0; loader 0.3-0.55ms/окно; ore-prof exact в CI = tag 106-120k,
@@ -90,6 +112,11 @@ JAVA_HOME=/home/z/tools/jdk-25.0.5+8 SRV_DIR=$PWD/server \
 
 ## Известные грабли (закодированы в recover-скрипте)
 
+- **fill263/stage/surf_calls-профиль — spawn-загрязнён CPU-учёт**
+  (cont-123): fills=400 при inside=144 — спавн-чанки интерливятся в окно;
+  per-fill means (terrain/surface/interp_cell) — смешанная выборка,
+  годны только как относительные веса. Чистые числа — только honest
+  window (region-bounded) в GenStats.
 - PaperMC v2 sunset → fill v3, ключ `downloads["server:default"]`.
 - Maven repo1 429 на jetbrains-annotations → aliyun-зеркало в probe263.
 - bootstrap_server.sh пинит build только при самостоятельной загрузке
