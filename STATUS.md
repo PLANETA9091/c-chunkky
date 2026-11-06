@@ -84,6 +84,7 @@ deco-хвост 221–329ms, e2e 23.98–28.31.
 | 42271100713 | be438653 (cont-122) | SUCCESS |
 | 42279356696 | e46f357f (cont-123) | SUCCESS |
 | 42284831079 | b5820b42 (cont-123 docs) | SUCCESS |
+| 42303293298 | 019bd9d0 (cont-124 perlin −13.8%) | SUCCESS |
 
 Гейты PASS на каждом; runs-паттерн канонический (3632/3857-3871);
 fallbacks=0; loader 0.3-0.55ms/окно; ore-prof exact в CI = tag 106-120k,
