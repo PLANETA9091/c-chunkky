@@ -24,9 +24,21 @@
 #   8. server  — versions+libraries copied with sentinels (no cp nesting),
 #                then LEVEL_NAME=world bootstrap_server.sh <build>
 #   9. sanity  — tool versions + artifact hashes printed for the worklog
+#  10. health  — optional (--health): the full ab263_ci.sh ore pair as an
+#                end-to-end generation check; the script FAILS unless the
+#                gate prints "gate verdict: PASS" (cont-122)
 #
-# Usage: bash harness/sandbox_recover.sh [--skip-git]
+# Usage: bash harness/sandbox_recover.sh [--skip-git] [--health]
 set -uo pipefail
+
+SKIP_GIT=0; DO_HEALTH=0
+for a in "$@"; do
+  case "$a" in
+    --skip-git) SKIP_GIT=1 ;;
+    --health)   DO_HEALTH=1 ;;
+    *) echo "unknown flag: $a" >&2; exit 1 ;;
+  esac
+done
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
@@ -45,7 +57,7 @@ stage() { echo ""; echo "=== [$1] $(date -u +%H:%M:%S) ==="; }
 die() { echo "RECOVER FAILED at [$1]: $2" >&2; exit 1; }
 
 # ---- 1. git sync -----------------------------------------------------------
-if [ "${1:-}" != "--skip-git" ]; then
+if [ "$SKIP_GIT" != "1" ]; then
   stage git
   git fetch origin 2>&1 | tail -1
   LOCAL=$(git rev-parse HEAD); REMOTE=$(git rev-parse origin/main)
@@ -171,4 +183,18 @@ echo "plugin:  $(md5sum plugin/CrusstyGen.jar | cut -d' ' -f1)"
 echo "probe:   $(md5sum probe263/CrusstyProbe263.jar | cut -d' ' -f1)"
 echo ".so:     $(stat -c%s native/target/release/libcrussty_chunkgen.so) bytes"
 echo ""
-echo "RECOVER OK — environment ready (ab263_ci.sh ore is the health check)"
+
+# ---- 10. health (optional, --health) -----------------------------------------
+# The full generation-path check: two boots (hook ON vs OFF), the material
+# gate must print "gate verdict: PASS". Takes ~8 min on the 2-core sandbox.
+if [ "$DO_HEALTH" = "1" ]; then
+  stage health
+  OUT=$(JAVA_HOME="$JDK_DIR" SRV_DIR="$ROOT/server" bash harness/ab263_ci.sh ore 2>&1) \
+    || { echo "$OUT" | tail -20; die health "ore pair run failed"; }
+  echo "$OUT" | tail -6
+  echo "$OUT" | grep -q "gate verdict: PASS" \
+    || die health "ore gate did not PASS"
+  echo "health: ore pair GATE PASS — environment generates bit-identically"
+fi
+
+echo "RECOVER OK — environment ready$( [ "$DO_HEALTH" = "1" ] && echo ' (health checked)' || echo ' (ab263_ci.sh ore is the health check)')"
