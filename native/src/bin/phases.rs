@@ -11,9 +11,14 @@ fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String,
             } else if p.extension().map(|x| x == "json").unwrap_or(false) {
                 if let Ok(rel) = p.strip_prefix(root) {
                     let rel = rel.to_string_lossy().replace('\\', "/");
-                    let Some(stripped) = rel.strip_prefix("data/") else { continue };
+                    // roots come in two layouts: raw pack trees (data/<ns>/...)
+                    // or pre-merged trees (<ns>/... with data/ already stripped)
+                    let stripped = match rel.strip_prefix("data/") {
+                        Some(s) => s.to_string(),
+                        None => rel.clone(),
+                    };
                     if let Ok(bytes) = std::fs::read(&p) {
-                        out.push((stripped.to_string(), bytes));
+                        out.push((stripped, bytes));
                     }
                 }
             }
@@ -99,9 +104,10 @@ fn main() {
     }
     let g = |v: u64| v as f64 / n as f64;
     println!(
-        "aq: substance_calls {} fluid_calls {} prelim_scans {} prelim_steps {}",
+        "aq: substance_calls {} fluid_calls {} summary_hits {} prelim_scans {} prelim_steps {}",
         g(crussty_chunkgen::nochunk::AQ_SUBSTANCE_CALLS.load(std::sync::atomic::Ordering::Relaxed)),
         g(crussty_chunkgen::nochunk::AQ_FLUID_CALLS.load(std::sync::atomic::Ordering::Relaxed)),
+        g(crussty_chunkgen::nochunk::AQ_SUMMARY_HITS.load(std::sync::atomic::Ordering::Relaxed)),
         g(crussty_chunkgen::nochunk::PRELIM_SCANS.load(std::sync::atomic::Ordering::Relaxed)),
         g(crussty_chunkgen::nochunk::PRELIM_SCAN_STEPS.load(std::sync::atomic::Ordering::Relaxed)),
     );

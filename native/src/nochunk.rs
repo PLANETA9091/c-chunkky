@@ -923,52 +923,48 @@ impl<'e> ChunkGen<'e> {
         if std::env::var("CRUS_LANES").ok().and_then(|v| v.parse::<usize>().ok()) == Some(4) {
             return 4;
         }
-        let child0 = match compiled.interp_children.first() {
-            Some(&c) => c,
-            None => return 4,
-        };
-        let interp = InterpState::new(compiled.interp_slots, 4, 48);
-        let mut pts: Vec<Pt> = Vec::with_capacity(245);
-        for i in 0..5i32 {
-            for y in 0..49i32 {
-                pts.push(Pt { x: 48, y: (y - 8) * 8, z: -32 + i * 4 });
-            }
+        let children = compiled.interp_children.clone();
+        if children.is_empty() {
+            return 4;
         }
+        // Calibrate on the PRODUCTION plane kernel, not on synthetic point
+        // batches: chunks() over a mixed-z point vec falls into the generic
+        // dispatch while real planes batch y-runs inside one (x, z) column
+        // and hit the column-memo path — the width ranking differs (observed:
+        // synthetic probe picked 4 while the real fill is ~6% faster at 8).
+        // Vanilla-ish geometry (16-wide cells, 384 height, cell 4x8); the
+        // kernels are world-independent, only their cost scales.
+        let ccx = 4usize;
+        let ccy = 48usize;
+        let cnmy = -8i32;
+        let plane_len = children.len() * (ccx + 1) * (ccy + 1);
+        let mut out = vec![0f64; plane_len];
         let mut sink = 0u64;
-        let time = |g: usize, sink: &mut u64| -> f64 {
+        let time = |lanes: usize, out: &mut [f64], sink: &mut u64| -> f64 {
             let t0 = std::time::Instant::now();
-            let reps = 12;
+            let reps = 8;
             for _ in 0..reps {
-                if g == 8 {
-                    let mut memo = BatchMemo::<8>::new(compiled.arena.len()).with_cols(compiled.col_count as usize);
-                    for c in pts.chunks(8) {
-                        let mut p8 = [c[0]; 8];
-                        for (k, pt) in c.iter().enumerate() {
-                            p8[k] = *pt;
-                        }
-                        let v = env.eval_batch::<8>(compiled, child0, &p8, Mode::Slice, &interp, &memo);
-                        for x in v {
-                            *sink ^= x.to_bits();
-                        }
-                    }
-                } else {
-                    let mut memo = BatchMemo::<4>::new(compiled.arena.len()).with_cols(compiled.col_count as usize);
-                    for c in pts.chunks(4) {
-                        let p4 = [c[0], c[(1).min(c.len() - 1)], c[(2).min(c.len() - 1)], c[(3).min(c.len() - 1)]];
-                        let v = env.eval_batch::<4>(compiled, child0, &p4, Mode::Slice, &interp, &memo);
-                        for x in v {
-                            *sink ^= x.to_bits();
-                        }
-                    }
-                }
+                Self::eval_plane_into_pub(
+                    env, compiled, &children, 48, -32, ccx, ccy, cnmy, 4, 8, lanes, out,
+                );
+                *sink ^= out[0].to_bits();
             }
             t0.elapsed().as_nanos() as f64
         };
-        // warm both, then time both
-        let _ = time(4, &mut sink);
-        let _ = time(8, &mut sink);
-        let d4 = time(4, &mut sink);
-        let d8 = time(8, &mut sink);
+        // warm both, then interleave rounds with MIN aggregation: a single
+        // sequential measurement races CPU frequency ramp + shared-runner
+        // neighbours and can pick the wrong width. Min over interleaved
+        // rounds is the noise-free estimate per variant (same pattern as
+        // probe_avx512_width).
+        let _ = time(4, &mut out, &mut sink);
+        let _ = time(8, &mut out, &mut sink);
+        let (mut best4, mut best8) = (f64::MAX, f64::MAX);
+        for _ in 0..3 {
+            best4 = best4.min(time(4, &mut out, &mut sink));
+            best8 = best8.min(time(8, &mut out, &mut sink));
+        }
+        let d4 = best4;
+        let d8 = best8;
         let pick = if d8 < d4 * 0.97 { 8 } else { 4 };
         if std::env::var("CRUS_DEBUG_LANES").is_ok() {
             eprintln!("[crussty] slice lanes calibration: 4={d4:.0}ns 8={d8:.0}ns -> {pick} (sink={sink})");
