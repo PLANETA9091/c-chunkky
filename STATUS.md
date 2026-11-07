@@ -2,7 +2,7 @@
 
 Компактная карточка состояния кампании. Полная хроника — `worklog-session.md`
 (записи cont-XX по датам). Этот файл обновляется при изменении КАРТЫ, не при
-каждом тике. Последнее обновление: cont-126.
+каждом тике. Последнее обновление: cont-127.
 
 ## Цель и инвариант
 
@@ -24,7 +24,7 @@ fingerprint deco-noise класса). Не-бит-точная территор�
 | noise / surface / biomes / carvers | **натив, бит-точен, в проде** |
 | heights | fill-based, в проде |
 | ore-хук (per-cell deco) | **OFF** (дефолт `CRUS_NATIVE_ORE=OFF`); memo (cont-115) + OvHasher (cont-116) забанкованы бит-точными |
-| interp_cell: perlin-ядро | **УСКОРЕНО cont-124 + cont-125** (монофоморфизация + f32-таблица градиентов −13.8% ns/pt; Y-CHAIN HOIST колонка-инвариантной f64 y-цепочки = ядро −53% ns/pt-vol, fill COLD −19.7%, серверный филл COLD −18.8%; mask-форма и x2-interleave замерены — mask отвергнута, interleave −16% отложен как кандидат) |
+| interp_cell: perlin-ядро | **УСКОРЕНО cont-124 + cont-125 + cont-127** (y-pair interleave поверх hoist: fill COLD −3%, ns/pt −1-2%, бит-точен, CRUS_YX2=0 kill-switch; probe'овские −16% съел сам hoist) (монофоморфизация + f32-таблица градиентов −13.8% ns/pt; Y-CHAIN HOIST колонка-инвариантной f64 y-цепочки = ядро −53% ns/pt-vol, fill COLD −19.7%, серверный филл COLD −18.8%; mask-форма и x2-interleave замерены — mask отвергнута, interleave −16% отложен как кандидат) |
 | interp_cell: SIMD-батчинг | заморожено (gather-доминанта 92%, cont-112) |
 | decorate | фронт закрыт |
 | light / serialization | Paper-side, вне зоны кампании |
@@ -88,6 +88,7 @@ HOIST — ядро −53%, fill COLD −19.7%, nf[perlin] 3.61→1.52ms/ч) — 
 | 42303293298 | 019bd9d0 (cont-124 perlin −13.8%) | SUCCESS |
 | 42348486359 | a4ce187c (cont-125 y-chain hoist, ядро −53%, fill COLD −19.7%) | SUCCESS |
 | 42360150406 | 682af190 (cont-126: 1.21.8 lane-probe fix + blended scratch-пул, бит-нейтрален) | SUCCESS |
+| 42407187681 | dee2177b (cont-127 y-pair interleave, fill COLD −3%) | SUCCESS |
 
 Гейты PASS на каждом; runs-паттерн канонический (3632/3857-3871);
 fallbacks=0; loader 0.3-0.55ms/окно; ore-prof exact в CI = tag 106-120k,

@@ -7145,3 +7145,10 @@ Stage Summary:
 - СЛЕДУЮЩИЕ ФРОНТЫ: (в) бит-точные фолды Abs∘Abs/Negate∘Negate (малы); марка-оракул
   перегенерация; wrapper-v2 (deco) по Horizon-референсу — крупнейший нереализованный
   однониточный резерв e2e (deco_tail 221-329ms/окно).
+
+CI-ВЕРДИКТ cont-127 (доб.): ран 42407187681 (dee2177b) — **SUCCESS**, полный poll до
+completed. Гейты из артефакта ab263-42407187681 (скачан в /tmp/abzip, репо-id endpoint):
+biome / surface / carvers / orebase — GATE PASS (**all strict materials bit-equal**),
+ore — GATE PASS (24 материала в детерминистической сигнатуре); blockdump divergent
+84-288 строк = deco-noise класс (норма). Бит-точность y-pair interleave подтверждена
+на CI-железе. Джобы: native SUCCESS, plugin SUCCESS, integration SUCCESS.
