@@ -3894,8 +3894,20 @@ fn blended_plain_fill(
     }
 }
 
-/// BlendedNoise column fill: the three stacks into private buffers, then the
-/// exact per-point blend. Returns false when a stack needs the plain path.
+/// Thread-local scratch buffers for blended_col_fill. Each call allocated
+/// 3 x vol.size() f32 (>= 393KB at the 98k volume) — past the malloc mmap
+/// threshold, so EVERY call paid mmap+munmap and first-touch page faults
+/// before the kernel could start. stack263_fill_col fills(0.0) and then
+/// accumulates over the full volume, so reused buffers are stateless:
+/// values are identical bit-for-bit, only the allocator churn is gone.
+thread_local! {
+    static BLENDED_SCRATCH: std::cell::RefCell<[Vec<f32>; 3]> =
+        const { std::cell::RefCell::new([Vec::new(), Vec::new(), Vec::new()]) };
+}
+
+/// BlendedNoise column fill: the three stacks into thread-local scratch
+/// buffers, then the exact per-point blend. Returns false when a stack needs
+/// the plain path.
 #[allow(clippy::too_many_arguments)]
 fn blended_col_fill(
     min_stack: &Noise263,
@@ -3912,59 +3924,70 @@ fn blended_col_fill(
     let bym = y_multiplier;
     let mdiv = main_xz_div;
     let mydiv = main_y_div;
-    let mut minb = vec![0f32; vol.size()];
-    let mut maxb = vec![0f32; vol.size()];
-    let mut mainb = vec![0f32; vol.size()];
-    let min_ok = match min_stack {
-        Noise263::Stack(s) => stack263_fill_col(
-            &s.layers,
-            &mut minb,
+    let size = vol.size();
+    let ok = BLENDED_SCRATCH.with(|s| {
+        let mut s = s.borrow_mut();
+        for b in s.iter_mut() {
+            if b.len() < size {
+                b.resize(size, 0.0);
+            }
+        }
+        let [minb, maxb, mainb] = &mut *s;
+        let Noise263::Stack(s_min) = min_stack else {
+            return false;
+        };
+        if !stack263_fill_col(
+            &s_min.layers,
+            minb.as_mut_slice(),
             vol,
             &|b| b as f64 * bxz,
             &|b| b as f64 * bym,
             &|b| b as f64 * bxz,
-        ),
-        _ => false,
-    };
-    let max_ok = match max_stack {
-        Noise263::Stack(s) => stack263_fill_col(
-            &s.layers,
-            &mut maxb,
+        ) {
+            return false;
+        }
+        let Noise263::Stack(s_max) = max_stack else {
+            return false;
+        };
+        if !stack263_fill_col(
+            &s_max.layers,
+            maxb.as_mut_slice(),
             vol,
             &|b| b as f64 * bxz,
             &|b| b as f64 * bym,
             &|b| b as f64 * bxz,
-        ),
-        _ => false,
-    };
-    let main_ok = match main_stack {
-        Noise263::Stack(s) => stack263_fill_col(
-            &s.layers,
-            &mut mainb,
+        ) {
+            return false;
+        }
+        let Noise263::Stack(s_main) = main_stack else {
+            return false;
+        };
+        if !stack263_fill_col(
+            &s_main.layers,
+            mainb.as_mut_slice(),
             vol,
             &|b| (b as f64 * bxz) / mdiv,
             &|b| (b as f64 * bym) / mydiv,
             &|b| (b as f64 * bxz) / mdiv,
-        ),
-        _ => false,
-    };
-    if !(min_ok && max_ok && main_ok) {
-        return false;
-    }
-    for i in 0..out.len() {
-        let min = minb[i];
-        let max = maxb[i];
-        let main = mainb[i];
-        let choice = mth_clamp(main + 0.5, 0.0, 1.0);
-        out[i] = if choice == 0.0 {
-            min
-        } else if choice == 1.0 {
-            max
-        } else {
-            mth_lerp(choice, min, max)
-        };
-    }
-    true
+        ) {
+            return false;
+        }
+        for i in 0..out.len() {
+            let min = minb[i];
+            let max = maxb[i];
+            let main = mainb[i];
+            let choice = mth_clamp(main + 0.5, 0.0, 1.0);
+            out[i] = if choice == 0.0 {
+                min
+            } else if choice == 1.0 {
+                max
+            } else {
+                mth_lerp(choice, min, max)
+            };
+        }
+        true
+    });
+    ok
 }
 
 // ---------------------------------------------------------------------------
