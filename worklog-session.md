@@ -7078,3 +7078,7 @@ Stage Summary:
 - СЛЕДУЮЩИЙ ФРОНТ (по cont-125 «ДАЛЬШЕ»): (а) y-pair interleaving поверх hoist (looprep −16%,
   осознанно отложенный кандидат — главный однониточный резерв ядра); (в) бит-точные фолды
   Abs∘Abs/Negate∘Negate (малы); марка-оракул перегенерация.
+- CI-ВЕРДИКТ cont-126 (доб.): ран 42365179402 (d05bc953) — **SUCCESS**, полный poll до completed.
+  Гейты из артефакта: surface/carvers/biome/orebase/ore — GATE PASS (all strict materials
+  bit-equal), blockdump divergent 80-86 строк = deco-noise класс (норма). Бит-точность пула
+  подтверждена на CI-железе. Вердикт 1.21.8 lane-probe коммита 682af190 = ран 42360150406 SUCCESS.
