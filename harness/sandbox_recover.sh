@@ -87,7 +87,10 @@ if [ -x "$JDK_DIR/bin/java" ]; then
   echo "JDK25 present: $($JDK_DIR/bin/java -version 2>&1 | head -1)"
 else
   mkdir -p /home/z/tools /home/z/dl
-  [ -s "$JDK_TGZ" ] || curl -sL -o "$JDK_TGZ" "$JDK_URL" || die jdk25 "tarball download"
+  # cont-127: curl died silently here twice (no retry, -s eats the error);
+  # retry + fail-on-http-error + verbose fallback (cont-126 lesson)
+  [ -s "$JDK_TGZ" ] || curl -fL --retry 3 --retry-delay 2 --retry-all-errors -o "$JDK_TGZ" "$JDK_URL" \
+    || die jdk25 "tarball download (curl rc=$?)"
   tar -xzf "$JDK_TGZ" -C /home/z/tools || die jdk25 "tar -xzf"
   [ -x "$JDK_DIR/bin/java" ] || die jdk25 "java not executable after extract"
   echo "JDK25 installed: $($JDK_DIR/bin/java -version 2>&1 | head -1)"

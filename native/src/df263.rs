@@ -3342,6 +3342,206 @@ fn perlin_y_chain<TY: Fn(i32) -> f64 + Copy>(
     (fy, ry, sy)
 }
 
+/// cont-127 Y-PAIR INTERLEAVE kill-switch (CRUS_YX2=0 -> x1 y-loop).
+/// The pair form processes two independent points per iteration to overlap
+/// the serial p_adj-load chain; bit-exactness is by construction (identical
+/// per-point arithmetic on identical inputs, disjoint output indices).
+fn y_x2_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("CRUS_YX2").as_deref() != Ok("0"))
+}
+
+/// The hoisted y-loop, x1 form: one point per iteration, exactly the shape
+/// cont-125 shipped. Factored out so the x2 A/B and the unit tests share
+/// the shipped arithmetic 1:1.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn col_y_hoisted_x1_plain(
+    p: &[u16; 256],
+    x0: usize,
+    x1: usize,
+    fy_tab: &[i32; PERLIN_Y_TAB_MAX],
+    ry_tab: &[f32; PERLIN_Y_TAB_MAX],
+    sy_tab: &[f32; PERLIN_Y_TAB_MAX],
+    ny: usize,
+    fz: i32,
+    rz: f32,
+    rz1: f32,
+    rx: f32,
+    rx1: f32,
+    sx: f32,
+    sz: f32,
+    amp: f32,
+    out: &mut [f32],
+    mut index: usize,
+) {
+    for y in 0..ny {
+        let ry = ry_tab[y];
+        perlin_col_point_plain(
+            p,
+            x0,
+            x1,
+            fy_tab[y],
+            fz,
+            rx,
+            rx1,
+            ry,
+            ry - 1.0f32,
+            rz,
+            rz1,
+            sx,
+            sy_tab[y],
+            sz,
+            amp,
+            out,
+            index,
+        );
+        index += 1;
+    }
+}
+
+/// The hoisted y-loop, x2 form (cont-127): two independent point chains per
+/// iteration. Same `perlin_col_point_plain` call per point as x1 — the only
+/// change is the INTERLEAVE of two latency-bound chains; stores hit disjoint
+/// indices, so the result is bit-identical regardless of execution order.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn col_y_hoisted_x2_plain(
+    p: &[u16; 256],
+    x0: usize,
+    x1: usize,
+    fy_tab: &[i32; PERLIN_Y_TAB_MAX],
+    ry_tab: &[f32; PERLIN_Y_TAB_MAX],
+    sy_tab: &[f32; PERLIN_Y_TAB_MAX],
+    ny: usize,
+    fz: i32,
+    rz: f32,
+    rz1: f32,
+    rx: f32,
+    rx1: f32,
+    sx: f32,
+    sz: f32,
+    amp: f32,
+    out: &mut [f32],
+    mut index: usize,
+) {
+    let mut y = 0usize;
+    while y + 2 <= ny {
+        let ra = ry_tab[y];
+        perlin_col_point_plain(
+            p, x0, x1, fy_tab[y], fz, rx, rx1, ra, ra - 1.0f32, rz, rz1, sx,
+            sy_tab[y], sz, amp, out, index,
+        );
+        let rb = ry_tab[y + 1];
+        perlin_col_point_plain(
+            p, x0, x1, fy_tab[y + 1], fz, rx, rx1, rb, rb - 1.0f32, rz, rz1, sx,
+            sy_tab[y + 1], sz, amp, out, index + 1,
+        );
+        index += 2;
+        y += 2;
+    }
+    if y < ny {
+        let r = ry_tab[y];
+        perlin_col_point_plain(
+            p, x0, x1, fy_tab[y], fz, rx, rx1, r, r - 1.0f32, rz, rz1, sx,
+            sy_tab[y], sz, amp, out, index,
+        );
+    }
+}
+
+/// The hoisted y-loop, x1 form (vv split-dot point arithmetic).
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn col_y_hoisted_x1_vv(
+    p: &[u16; 256],
+    x0: usize,
+    x1: usize,
+    fy_tab: &[i32; PERLIN_Y_TAB_MAX],
+    ry_tab: &[f32; PERLIN_Y_TAB_MAX],
+    sy_tab: &[f32; PERLIN_Y_TAB_MAX],
+    ny: usize,
+    fz: i32,
+    rz: f32,
+    rz1: f32,
+    rx: f32,
+    rx1: f32,
+    sx: f32,
+    sz: f32,
+    amp: f32,
+    out: &mut [f32],
+    mut index: usize,
+) {
+    for y in 0..ny {
+        let ry = ry_tab[y];
+        perlin_col_point_vv(
+            p,
+            x0,
+            x1,
+            fy_tab[y],
+            fz,
+            rx,
+            rx1,
+            ry,
+            ry - 1.0f32,
+            rz,
+            rz1,
+            sx,
+            sy_tab[y],
+            sz,
+            amp,
+            out,
+            index,
+        );
+        index += 1;
+    }
+}
+
+/// The hoisted y-loop, x2 form (vv split-dot point arithmetic).
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn col_y_hoisted_x2_vv(
+    p: &[u16; 256],
+    x0: usize,
+    x1: usize,
+    fy_tab: &[i32; PERLIN_Y_TAB_MAX],
+    ry_tab: &[f32; PERLIN_Y_TAB_MAX],
+    sy_tab: &[f32; PERLIN_Y_TAB_MAX],
+    ny: usize,
+    fz: i32,
+    rz: f32,
+    rz1: f32,
+    rx: f32,
+    rx1: f32,
+    sx: f32,
+    sz: f32,
+    amp: f32,
+    out: &mut [f32],
+    mut index: usize,
+) {
+    let mut y = 0usize;
+    while y + 2 <= ny {
+        let ra = ry_tab[y];
+        perlin_col_point_vv(
+            p, x0, x1, fy_tab[y], fz, rx, rx1, ra,
+            ra - 1.0f32, rz, rz1, sx, sy_tab[y], sz, amp, out, index,
+        );
+        let rb = ry_tab[y + 1];
+        perlin_col_point_vv(
+            p, x0, x1, fy_tab[y + 1], fz, rx, rx1, rb,
+            rb - 1.0f32, rz, rz1, sx, sy_tab[y + 1], sz, amp, out, index + 1,
+        );
+        index += 2;
+        y += 2;
+    }
+    if y < ny {
+        let r = ry_tab[y];
+        perlin_col_point_vv(
+            p, x0, x1, fy_tab[y], fz, rx, rx1, r,
+            r - 1.0f32, rz, rz1, sx, sy_tab[y], sz, amp, out, index,
+        );
+    }
+}
+
 /// One y-point of the plain (scalar-get-association) column kernel: the
 /// p_adj chain + eight gradient dots + trilerp + amplitude accumulate.
 /// Factored so the hoisted and fallback y-loops share the exact same
@@ -3490,29 +3690,21 @@ fn perlin263_fill_col<TX: Fn(i32) -> f64 + Copy, TY: Fn(i32) -> f64 + Copy, TZ: 
             let x0 = p[(fx & 0xFF) as usize] as usize;
             let x1 = x0 >> 8;
             if hoisted {
-                for y in 0..vol.size_y {
-                    let yi = y as usize;
-                    let ry = ry_tab[yi];
-                    perlin_col_point_plain(
-                        p,
-                        x0,
-                        x1,
-                        fy_tab[yi],
-                        fz,
-                        rx,
-                        rx1,
-                        ry,
-                        ry - 1.0f32,
-                        rz,
-                        rz1,
-                        sx,
-                        sy_tab[yi],
-                        sz,
-                        amp,
-                        out,
-                        index,
+                // cont-127: y-pair interleave (CRUS_YX2=0 -> x1). Both forms
+                // share the shipped per-point arithmetic 1:1 (see the
+                // col_y_hoisted_* fns and their to_bits A/B test).
+                if y_x2_enabled() {
+                    col_y_hoisted_x2_plain(
+                        p, x0, x1, &fy_tab, &ry_tab, &sy_tab, size_y, fz, rz, rz1,
+                        rx, rx1, sx, sz, amp, out, index,
                     );
-                    index += 1;
+                    index += size_y;
+                } else {
+                    col_y_hoisted_x1_plain(
+                        p, x0, x1, &fy_tab, &ry_tab, &sy_tab, size_y, fz, rz, rz1,
+                        rx, rx1, sx, sz, amp, out, index,
+                    );
+                    index += size_y;
                 }
             } else {
                 for y in 0..vol.size_y {
@@ -3672,29 +3864,20 @@ fn perlin263_fill_col_vv<TX: Fn(i32) -> f64 + Copy, TY: Fn(i32) -> f64 + Copy, T
             let x0 = p[(fx & 0xFF) as usize] as usize;
             let x1 = x0 >> 8;
             if hoisted {
-                for y in 0..vol.size_y {
-                    let yi = y as usize;
-                    let ry = ry_tab[yi];
-                    perlin_col_point_vv(
-                        p,
-                        x0,
-                        x1,
-                        fy_tab[yi],
-                        fz,
-                        rx,
-                        rx1,
-                        ry,
-                        ry - 1.0f32,
-                        rz,
-                        rz1,
-                        sx,
-                        sy_tab[yi],
-                        sz,
-                        amp,
-                        out,
-                        index,
+                // cont-127: y-pair interleave (CRUS_YX2=0 -> x1), same
+                // contract as the plain kernel above.
+                if y_x2_enabled() {
+                    col_y_hoisted_x2_vv(
+                        p, x0, x1, &fy_tab, &ry_tab, &sy_tab, size_y, fz, rz, rz1,
+                        rx, rx1, sx, sz, amp, out, index,
                     );
-                    index += 1;
+                    index += size_y;
+                } else {
+                    col_y_hoisted_x1_vv(
+                        p, x0, x1, &fy_tab, &ry_tab, &sy_tab, size_y, fz, rz, rz1,
+                        rx, rx1, sx, sz, amp, out, index,
+                    );
+                    index += size_y;
                 }
             } else {
                 for y in 0..vol.size_y {
@@ -4524,6 +4707,123 @@ mod col_kernel_tests {
                     plain[bad.unwrap_or(0)].to_bits(),
                     col[bad.unwrap_or(0)].to_bits()
                 );
+            }
+        }
+    }
+
+    /// cont-127: the y-pair interleave (x2) vs the x1 hoisted loop — to_bits
+    /// parity through the SHIPPED loop helpers, both point forms (plain +
+    /// vv), on every perlin/smeared layer of the real noise stacks and every
+    /// test volume (odd size_y exercises the single-tail-point branch).
+    #[test]
+    fn col_y_hoisted_x2_bit_exact_vs_x1() {
+        let mut factory = NoiseFactory263::new(3257840388504953787);
+        let cases = vec![
+            ("continentalness", np(NoiseParams263::CONTINENTALNESS)),
+            ("cave_cheese", np(NoiseParams263::CAVE_CHEESE)),
+            ("jagged", np(NoiseParams263::JAGGED)),
+        ];
+        for (vi, vol) in volumes().iter().enumerate() {
+            for (name, prm) in &cases {
+                let n = factory.normal(name, prm.clone());
+                let nn = match &*n {
+                    N263::Normal(nn) => nn,
+                    _ => panic!("{name}: not a Normal stack"),
+                };
+                let size_y = vol.size_y as usize;
+                assert!(size_y <= PERLIN_Y_TAB_MAX);
+                let mut fy_tab = [0i32; PERLIN_Y_TAB_MAX];
+                let mut ry_tab = [0f32; PERLIN_Y_TAB_MAX];
+                let mut sy_tab = [0f32; PERLIN_Y_TAB_MAX];
+                for (li, (noise, freq, amp)) in nn.stack.layers.iter().enumerate() {
+                    let (p_tab, smear, off) = match noise {
+                        Noise263::Perlin(p) => (&p.p_adj, None, &p.base),
+                        Noise263::Smeared(s) => {
+                            (&s.perlin.p_adj, Some(s.fudge_y_scale), &s.perlin.base)
+                        }
+                        _ => continue, // nested stacks route elsewhere
+                    };
+                    for (yi, y) in (0..vol.size_y).enumerate() {
+                        let (fy, ry, sy) =
+                            perlin_y_chain(&|b| b as f64, vol, y, *freq, off.offset_y, smear);
+                        fy_tab[yi] = fy;
+                        ry_tab[yi] = ry;
+                        sy_tab[yi] = sy;
+                    }
+                    let mut out1 = vec![0f32; vol.size()];
+                    let mut out2 = vec![0f32; vol.size()];
+                    let mut index = 0usize;
+                    for z in 0..vol.size_z {
+                        let wz = wrap(vol.block_z(z) as f64 * *freq) + off.offset_z;
+                        let fz = mth_floor(wz);
+                        let rz = (wz - fz as f64) as f32;
+                        let rz1 = rz - 1.0f32;
+                        let sz = smoothstep(rz);
+                        for x in 0..vol.size_x {
+                            let wx = wrap(vol.block_x(x) as f64 * *freq) + off.offset_x;
+                            let fx = mth_floor(wx);
+                            let rx = (wx - fx as f64) as f32;
+                            let rx1 = rx - 1.0f32;
+                            let sx = smoothstep(rx);
+                            let x0 = p_tab[(fx & 0xFF) as usize] as usize;
+                            let x1 = x0 >> 8;
+                            col_y_hoisted_x1_plain(
+                                p_tab, x0, x1, &fy_tab, &ry_tab, &sy_tab, size_y, fz,
+                                rz, rz1, rx, rx1, sx, sz, *amp, &mut out1, index,
+                            );
+                            col_y_hoisted_x2_plain(
+                                p_tab, x0, x1, &fy_tab, &ry_tab, &sy_tab, size_y, fz,
+                                rz, rz1, rx, rx1, sx, sz, *amp, &mut out2, index,
+                            );
+                            index += size_y;
+                        }
+                    }
+                    let bad = out1
+                        .iter()
+                        .zip(out2.iter())
+                        .position(|(a, b)| a.to_bits() != b.to_bits());
+                    assert!(
+                        bad.is_none(),
+                        "{name} volume #{vi} layer #{li}: plain x1!=x2 at {bad:?}"
+                    );
+                    // vv form: same A/B through the split-dot point fn.
+                    let mut out3 = vec![0f32; vol.size()];
+                    let mut out4 = vec![0f32; vol.size()];
+                    let mut index = 0usize;
+                    for z in 0..vol.size_z {
+                        let wz = wrap(vol.block_z(z) as f64 * *freq) + off.offset_z;
+                        let fz = mth_floor(wz);
+                        let rz = (wz - fz as f64) as f32;
+                        let rz1 = rz - 1.0f32;
+                        let sz = smoothstep(rz);
+                        for x in 0..vol.size_x {
+                            let wx = wrap(vol.block_x(x) as f64 * *freq) + off.offset_x;
+                            let fx = mth_floor(wx);
+                            let rx = (wx - fx as f64) as f32;
+                            let rx1 = rx - 1.0f32;
+                            let sx = smoothstep(rx);
+                            let x0 = p_tab[(fx & 0xFF) as usize] as usize;
+                            let x1 = x0 >> 8;
+                            col_y_hoisted_x1_vv(
+                                p_tab, x0, x1, &fy_tab, &ry_tab, &sy_tab, size_y, fz,
+                                rz, rz1, rx, rx1, sx, sz, *amp, &mut out3, index,
+                            );
+                            col_y_hoisted_x2_vv(
+                                p_tab, x0, x1, &fy_tab, &ry_tab, &sy_tab, size_y, fz,
+                                rz, rz1, rx, rx1, sx, sz, *amp, &mut out4, index,
+                            );
+                            index += size_y;
+                        }
+                    }
+                    let bad = out3
+                        .iter()
+                        .zip(out4.iter())
+                        .position(|(a, b)| a.to_bits() != b.to_bits());
+                    assert!(
+                        bad.is_none(),
+                        "{name} volume #{vi} layer #{li}: vv x1!=x2 at {bad:?}"
+                    );
+                }
             }
         }
     }

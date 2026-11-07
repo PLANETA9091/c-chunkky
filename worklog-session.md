@@ -7082,3 +7082,66 @@ Stage Summary:
   Гейты из артефакта: surface/carvers/biome/orebase/ore — GATE PASS (all strict materials
   bit-equal), blockdump divergent 80-86 строк = deco-noise класс (норма). Бит-точность пула
   подтверждена на CI-железе. Вердикт 1.21.8 lane-probe коммита 682af190 = ран 42360150406 SUCCESS.
+
+---
+Task ID: cont-127 (2026-11-08, HORIZON-МАЙНИНГ + Y-PAIR INTERLEAVE поверх hoist)
+Agent: Super Z (main)
+Task: «продолжи... используй horizon, они портировали реально много» — майнинг horizon-rust/horizon
+(Minecraft 26.3, MIT, 281 дифф-харнесс) на предмет бит-точных однониточных приёмов для нативного
+филла + реализация отложенного кандидата (а) из cont-125/126; 11-й откат песочницы закрыт.
+
+Work Log:
+- РЕСИНК: локальный клон отставал на 85 сессий (cont-41 vs cont-126) — stash старых stage-D
+  правок 1.21.8-линии (backup/local-stageD-848b2b6), reset --hard origin/main (dda9006b).
+- ВОССТАНОВЛЕНИЕ: sandbox_recover.sh упал дважды (стадия jdk25 — curl без retry, известная
+  грабля cont-126; затем транзиент fill-v3 API) — JDK25 поставлен вручную с --retry 3,
+  остальные стадии добиты вручную (probe aliyun OK, server/ bootstrapped build 222,
+  sanity OK). ПРЕДЛОЖЕНИЕ: в stage jdk25 добавить curl --retry 3 --retry-delay 2.
+- HORIZON-МАЙНИНГ (клон horizon-rust/horizon, shallow):
+  * noise/perlin.rs, noise/stack.rs — чистый скалярный порт 26.3 (f32-таблица градиентов есть,
+    y-hoist НЕТ, AVX2/AVX-512 НЕТ) — медленнее наших ядер;
+  * density/interpolation.rs fill_whole_cells — цельноклеточный путь: 4 X-колонны клетки как
+    автогенерируемые SIMD-полосы, X-лерпы клетки разделяются с соседней (верх=низ следующей),
+    y-инкременты по шагу. Наш interpolated_volume уже имеет эквивалент И БОЛЬШЕ: AVX-512
+    fill_cell_v16 (16 xz-полос), corner-grid cache (cont-89), pass-through fastpath;
+  * density/cache.rs + aquifer/noise_based.rs — cell-cache/12-соседская выборка — наш аналог уже есть
+    (corner cache, terr_walk кэш позиций); blending.rs — у них «full vanilla Blender ещё pending»,
+    наш blend уже в проде с x2-ядрами. ВЕРДИКТ: по филлу наш код >= Horizon; Horizon ценен как
+    ЭТАЛОН семантики 26.3 и как источник для будущего фронта декорации (generator_decoration.rs
+    66KB, placement/, block_predicate.rs, state_provider.rs, feature_graph/region — всё то, что
+    у нас живёт в Java DecoDriver/OreHook; wrapper-v2 batch-архитектура cont-114 — вот где
+    Horizon-порт пригодится как референс при её реализации);
+  * native_generate.rs — их аналог Bukkit ChunkGenerator-хуков (surface/carvers/structures/
+    decorations флаги) — архитектурно то же семейство, что у нас.
+- РЕАЛИЗАЦИЯ (а) Y-PAIR INTERLEAVE поверх hoist: hoisted y-циклы обоих колоночных ядер
+  (plain + vv) факторизованы в col_y_hoisted_x1/x2_{plain,vv} (#\[inline(always)\], передают
+  x0/x1-пролог колонки); x2-форма обрабатывает ДВА независимых пункта на итерацию — та же
+  perlin_col_point_* арифметика 1:1, интерлив только перекрывает латентность p_adj-цепочки;
+  stores в непересекающиеся индексы. Kill-switch CRUS_YX2=0 -> x1 (A/B + откат).
+  НОВЫЙ ТЕСТ col_y_hoisted_x2_bit_exact_vs_x1: to_bits-парити x1 vs x2 через ШТАТНЫЕ хелперы,
+  обе точечные формы, все слои реальных стеков, все объёмы (нечётный size_y = хвост).
+- ЛОВУШКА ТИКА: первая версия потеряла index += size_y после hoisted-вызова — колонки
+  накапливались поверх друг друга (3 старых парити-теста поймали на index 0/1: хелпер-тест
+  зелёный, стековый красный). Урок: тест через штатные хелперы + тест через стек-путь ДОЛЖНЫ
+  идти парой — только так ловится ошибка связки.
+- ЗАМЕРЫ (локальная VM, fill263bench 3+3): fill_chunk COLD 3.41/3.54/3.50 (x1) vs
+  3.37/3.40/3.47 (x2) = −3% COLD (направление стабильно 3/3); тёплый 2.29 vs 2.29 = neutral.
+  kernelsize ns/pt: 5x49x5 58.75→58.34 (−0.7%), 19x25x19 58.64→58.66 (0%), 17x98x17
+  56.64→55.69 (−1.7%), 16x96x16 56.34→55.80 (−1.0%). ВЕРДИКТ: probe'овские −16% (looprep)
+  относились к ДО-hoist цепочке — hoist уже съел головку латентности интерлива; остаток
+  −1-2% ns/pt / −3% fill COLD, строго неотрицателен, ниже runner-полосы e2e.
+- БИТ-ТОЧНОСТЬ (4 слоя): (1) cargo test --lib 84/84 (вкл. новый x1-vs-x2 to_bits);
+  (2) fill263golden md5 569ae81b1801005ef66cc44dc084fa6d ИДЕНТИЧЕН x1 и x2 И совпадает с
+  базой cont-126; (3) ЖИВАЯ ore-пара (JDK25 + build 222, N=8): GATE PASS — all strict
+  materials bit-equal; blockdump 86 расходящихся строк = deco-noise класс (норма 88-288).
+
+Stage Summary:
+- Среда 26.3 восстановлена (JDK25 + paper-26.3-222 + .so + plugin + probe263; recover-скрипт;
+  stage jdk25 усилен: curl -fL --retry 3 --retry-all-errors).
+- Horizon-майнинг задокументирован: филловые ядра у нас быстрее; декорационный порт Horizon
+  (features/placement/state_provider) = референс для wrapper-v2, когда фронт вернётся к deco.
+- Y-PAIR INTERLEAVE забанкован как малый неотрицательный срез (−3% COLD fill, −1-2% ns/pt),
+  x1/x2-инфраструктура + kill-switch остаются; интерлив-кандидат (а) ЗАКРЫТ честным замером.
+- СЛЕДУЮЩИЕ ФРОНТЫ: (в) бит-точные фолды Abs∘Abs/Negate∘Negate (малы); марка-оракул
+  перегенерация; wrapper-v2 (deco) по Horizon-референсу — крупнейший нереализованный
+  однониточный резерв e2e (deco_tail 221-329ms/окно).
