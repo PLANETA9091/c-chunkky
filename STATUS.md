@@ -86,6 +86,7 @@ HOIST — ядро −53%, fill COLD −19.7%, nf[perlin] 3.61→1.52ms/ч) — 
 | 42279356696 | e46f357f (cont-123) | SUCCESS |
 | 42284831079 | b5820b42 (cont-123 docs) | SUCCESS |
 | 42303293298 | 019bd9d0 (cont-124 perlin −13.8%) | SUCCESS |
+| 42348486359 | a4ce187c (cont-125 y-chain hoist, ядро −53%, fill COLD −19.7%) | SUCCESS |
 
 Гейты PASS на каждом; runs-паттерн канонический (3632/3857-3871);
 fallbacks=0; loader 0.3-0.55ms/окно; ore-prof exact в CI = tag 106-120k,

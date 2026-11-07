@@ -7018,3 +7018,14 @@ shellcensus (ценз узлов DAG), секция synthetic-vs-real в fill263
 селекция зависит от точки — мертво), noise-хвост через scalar get();
 (д) cc-кэш: cell-keyed слоты (8 углов/слот) — срезает probe/insert ~8x, но hit-rate
 держит геометрия фронтира (20-36%) — вердикт cont-111 не ревизуется.
+
+CI-ВЕРДИКТ cont-125 (доб.): ран 42348486359 (a4ce187c) — **SUCCESS**, полный poll до
+completed. Гейты из артефакта (ab263-42348486359): ore PASS (24 материала в
+детерминистической сигнатуре), orebase PASS (**all strict materials bit-equal**), biome/
+surface/carvers PASS strict bit-equal — бит-точность hoist-ядер подтверждена на CI-железе.
+Honest window par4ore: native=24.66ms/ch — НИЖЕ всего чистого 4-ранового ряда cont-123
+(30.1-36.2) = −18..24% нативной стены, консистентно с локальной COLD-дельтой −19.7%;
+busy 19.1 (в полосе 17.3-20.9), cover 45.6%/maxconc=3 (форма окна раннера — e2e-дельта
+runner-bound, атрибуция по гейтам + native-стене). nf[perlin] CI-строки — смешанное окно
+(вердикт cont-123), pts/lay=719 подтверждает мелкозернистый режим вызовов ядер.
+Артефакт скачан в reference/ci_logs/run42348486359_*, гейты сверены.
