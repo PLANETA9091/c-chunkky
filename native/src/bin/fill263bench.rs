@@ -296,6 +296,63 @@ fn main() {
         crussty_chunkgen::df263::prof263_nf_snapshot()
     );
 
+    // cont-125 A/B: the synthetic offset-noise node sampled on the block
+    // volume, in THIS process (same codegen as the tree's kernels) —
+    // isolates per-layer-point kernel cost vs the window counters above.
+    {
+        use crussty_chunkgen::df263::{DfSam263, DensityVolume, NoiseFactory263, SamplerCtx263, prof263_reset};
+        use crussty_chunkgen::n263::{Normalization, NormalNoiseParameters};
+        let mut factory = NoiseFactory263::new(seed);
+        let params = NormalNoiseParameters {
+            base_amplitude: 0.9381732587751005,
+            base_octave: -3,
+            octave_count: 4,
+            normalize: Normalization::Enabled,
+            amplitude_modifiers: vec![1.0, 1.0, 1.0, 0.0],
+        };
+        let noise = factory.normal("offset", params);
+        let node = std::sync::Arc::new(DfSam263::Noise { noise, xz_scale: 1.0, y_scale: 1.0 });
+        let vol = DensityVolume::block_step((16, g.height, 16), (0, g.min_y, 0));
+        let mut ctx = SamplerCtx263::uncached();
+        let mut buf = ctx.scratch.acquire(vol.size());
+        for _ in 0..5 {
+            node.sample_volume(&mut ctx, &mut buf, &vol);
+        }
+        let reps = 200;
+        prof263_reset();
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            node.sample_volume(&mut ctx, &mut buf, &vol);
+        }
+        let dt = t0.elapsed().as_secs_f64() / reps as f64;
+        crussty_chunkgen::df263::PROF_FILLS_263.store(1, std::sync::atomic::Ordering::Relaxed);
+        println!("synthetic offset-node block-vol: {:.3}ms/sample {}", dt * 1e3, crussty_chunkgen::df263::prof263_nf_snapshot());
+        println!("  {}", crussty_chunkgen::df263::perlin_bkt_snapshot());
+        prof263_reset();
+        ctx.scratch.release(buf);
+
+        // the REAL router tree sampled on the SAME block volume — perlin
+        // ns/layer-pt in exactly the same conditions as the synthetic.
+        let mut builder = crussty_chunkgen::df263_router::RouterBuilder263::new(seed);
+        let router = builder.build_overworld();
+        let mut rctx = SamplerCtx263::uncached();
+        let mut rbuf = rctx.scratch.acquire(vol.size());
+        for _ in 0..2 {
+            router.final_density.sample_volume(&mut rctx, &mut rbuf, &vol);
+        }
+        prof263_reset();
+        let t0 = std::time::Instant::now();
+        for _ in 0..20 {
+            router.final_density.sample_volume(&mut rctx, &mut rbuf, &vol);
+        }
+        let dt2 = t0.elapsed().as_secs_f64() / 20.0;
+        crussty_chunkgen::df263::PROF_FILLS_263.store(1, std::sync::atomic::Ordering::Relaxed);
+        println!("real final_density block-vol:    {:.3}ms/sample {}", dt2 * 1e3, crussty_chunkgen::df263::prof263_nf_snapshot());
+        println!("  {}", crussty_chunkgen::df263::perlin_bkt_snapshot());
+        prof263_reset();
+        rctx.scratch.release(rbuf);
+    }
+
     println!(
         "fill_chunk  median {:.2}ms  min {:.2}  max {:.2}",
         median(&mut t_fill),

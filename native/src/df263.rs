@@ -380,6 +380,15 @@ pub fn prof263_reset() {
     PROF_NF_PERLIN_NS.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_NF_PERLIN_PTS.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_NF_PERLIN_LAYERS.store(0, std::sync::atomic::Ordering::Relaxed);
+    for b in PROF_PERLIN_BKT_NS.iter() {
+        b.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+    for b in PROF_PERLIN_BKT_CALLS.iter() {
+        b.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+    for b in PROF_PERLIN_BKT_PTS.iter() {
+        b.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
     PROF_STAGE_TERRAIN.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_STAGE_SURFACE.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_STAGE_HOOD.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -554,6 +563,76 @@ pub static PROF_NF_PERLIN_PTS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub static PROF_NF_PERLIN_LAYERS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+
+/// cont-125 diagnostic: perlin kernel call histogram by vol.size() bucket —
+/// ns / calls / pts per bucket, only maintained while PROF_ON_263 is set
+/// (free in production). Buckets: <64, <256, <1024, <4096, <16384, <65536,
+/// else. Answers where the real fill path's kernel nanos live.
+pub static PROF_PERLIN_BKT_NS: [std::sync::atomic::AtomicU64; 7] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+pub static PROF_PERLIN_BKT_CALLS: [std::sync::atomic::AtomicU64; 7] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+pub static PROF_PERLIN_BKT_PTS: [std::sync::atomic::AtomicU64; 7] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+#[inline]
+pub fn perlin_bkt_record(sz: u64, ns: u64) {
+    let b = if sz < 64 {
+        0
+    } else if sz < 256 {
+        1
+    } else if sz < 1024 {
+        2
+    } else if sz < 4096 {
+        3
+    } else if sz < 16384 {
+        4
+    } else if sz < 65536 {
+        5
+    } else {
+        6
+    };
+    PROF_PERLIN_BKT_NS[b].fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
+    PROF_PERLIN_BKT_CALLS[b].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    PROF_PERLIN_BKT_PTS[b].fetch_add(sz, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// cont-125: histogram snapshot (ns per bucket + calls + ns/pt).
+pub fn perlin_bkt_snapshot() -> String {
+    const NAMES: [&str; 7] = ["<64", "<256", "<1k", "<4k", "<16k", "<64k", "64k+"];
+    let mut s = String::from("perlin_bkt[");
+    for (i, n) in NAMES.iter().enumerate() {
+        let ns = PROF_PERLIN_BKT_NS[i].load(std::sync::atomic::Ordering::Relaxed);
+        let calls = PROF_PERLIN_BKT_CALLS[i].load(std::sync::atomic::Ordering::Relaxed);
+        let pts = PROF_PERLIN_BKT_PTS[i].load(std::sync::atomic::Ordering::Relaxed);
+        let nspt = if pts > 0 { ns as f64 / pts as f64 } else { 0.0 };
+        let nsms = ns as f64 / 1e6;
+        s.push_str(&format!("{n}={nsms:.1}ms c={calls} ns/pt={nspt:.1} "));
+    }
+    s.push(']');
+    s
+}
 
 /// In-server STAGE timers (ffi.rs fill path, v263): where the fill wall goes
 /// beyond the bare fill_chunk terrain the bench measures. All gated by
@@ -3214,6 +3293,149 @@ fn spline_value_point(
 //   * mul by 1.0 (freq for direct perlin) is an IEEE identity.
 // ---------------------------------------------------------------------------
 
+/// cont-125 Y-CHAIN HOIST: the per-point y coordinate chain (wrap -> floor
+/// -> frac -> [smear fudge] -> smoothstep) is column-INVARIANT — it depends
+/// only on (y, ty, freq, off_y, smear_fudge). The column kernels recomputed
+/// it once per (x-column, y): 25-256x redundant f64 work per call and a
+/// ~25-cycle serial f64 chain gating the p_adj loads at EVERY point.
+/// Hoisted into per-call tables evaluated once. BIT-EXACT: identical
+/// expressions on identical inputs — the y-loop reads the same (fy, ry, sy)
+/// bits the inline chain produced. Volumes taller than PERLIN_Y_TAB_MAX
+/// take the original inline chain (never hit by production: height <= 384).
+const PERLIN_Y_TAB_MAX: usize = 512;
+
+/// The per-point y coordinate chain shared by both column kernels.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn perlin_y_chain<TY: Fn(i32) -> f64 + Copy>(
+    ty: TY,
+    vol: &DensityVolume,
+    y: i32,
+    freq: f64,
+    off_y: f64,
+    smear_fudge: Option<f64>,
+) -> (i32, f32, f32) {
+    let wy = wrap(ty(vol.block_y(y)) * freq) + off_y;
+    let fy = mth_floor(wy);
+    let rel_y_f64 = wy - fy as f64;
+    // plain Perlin: ry == original (f32); Smeared: the dots use
+    // the FUDGED f32 y while smoothstep uses the UNfudged cast
+    // (sample_and_lerp's original_relative_y == relative_y as f32
+    // of the pre-fudge double) — both exactly as scalar get().
+    let (ry, sy) = match smear_fudge {
+        None => {
+            let ry = rel_y_f64 as f32;
+            (ry, smoothstep(ry))
+        }
+        Some(fudge_scale) => {
+            let original_y = ty(vol.block_y(y)) * freq;
+            let fudge_limit = if original_y >= 0.0 && original_y < rel_y_f64 {
+                original_y
+            } else {
+                rel_y_f64
+            };
+            let fudge = (fudge_limit / fudge_scale + 1.0e-7f32 as f64).floor() * fudge_scale;
+            let ry = (rel_y_f64 - fudge) as f32;
+            (ry, smoothstep(rel_y_f64 as f32))
+        }
+    };
+    (fy, ry, sy)
+}
+
+/// One y-point of the plain (scalar-get-association) column kernel: the
+/// p_adj chain + eight gradient dots + trilerp + amplitude accumulate.
+/// Factored so the hoisted and fallback y-loops share the exact same
+/// arithmetic (inlined at both sites).
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn perlin_col_point_plain(
+    p: &[u16; 256],
+    x0: usize,
+    x1: usize,
+    fy: i32,
+    fz: i32,
+    rx: f32,
+    rx1: f32,
+    ry: f32,
+    ry1: f32,
+    rz: f32,
+    rz1: f32,
+    sx: f32,
+    sy: f32,
+    sz: f32,
+    amp: f32,
+    out: &mut [f32],
+    index: usize,
+) {
+    let xy00 = p[(x0.wrapping_add(fy as usize)) & 0xFF] as usize;
+    let xy01 = xy00 >> 8;
+    let z000 = p[(xy00.wrapping_add(fz as usize)) & 0xFF] as usize;
+    let z001 = p[(xy01.wrapping_add(fz as usize)) & 0xFF] as usize;
+    let d000 = gradient_dot_f32(z000 & 15, rx, ry, rz);
+    let d001 = gradient_dot_f32(z000 >> 8 & 15, rx, ry, rz1);
+    let d010 = gradient_dot_f32(z001 & 15, rx, ry1, rz);
+    let d011 = gradient_dot_f32(z001 >> 8 & 15, rx, ry1, rz1);
+    let xy10 = p[(x1.wrapping_add(fy as usize)) & 0xFF] as usize;
+    let xy11 = xy10 >> 8;
+    let z100 = p[(xy10.wrapping_add(fz as usize)) & 0xFF] as usize;
+    let z101 = p[(xy11.wrapping_add(fz as usize)) & 0xFF] as usize;
+    let d100 = gradient_dot_f32(z100 & 15, rx1, ry, rz);
+    let d101 = gradient_dot_f32(z100 >> 8 & 15, rx1, ry, rz1);
+    let d110 = gradient_dot_f32(z101 & 15, rx1, ry1, rz);
+    let d111 = gradient_dot_f32(z101 >> 8 & 15, rx1, ry1, rz1);
+    out[index] += amp * lerp3_f32(
+        sx, sy, sz, d000, d100, d010, d110, d001, d101, d011, d111,
+    );
+}
+
+/// One y-point of the vv (vanilla addToVolume split-dot) column kernel.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn perlin_col_point_vv(
+    p: &[u16; 256],
+    x0: usize,
+    x1: usize,
+    fy: i32,
+    fz: i32,
+    rx: f32,
+    rx1: f32,
+    ry: f32,
+    ry1: f32,
+    rz: f32,
+    rz1: f32,
+    sx: f32,
+    sy: f32,
+    sz: f32,
+    amp: f32,
+    out: &mut [f32],
+    index: usize,
+) {
+    let xy00 = p[(x0.wrapping_add(fy as usize)) & 0xFF] as usize;
+    let xy01 = xy00 >> 8;
+    let z000 = p[(xy00.wrapping_add(fz as usize)) & 0xFF] as usize;
+    let z001 = p[(xy01.wrapping_add(fz as usize)) & 0xFF] as usize;
+    let xy10 = p[(x1.wrapping_add(fy as usize)) & 0xFF] as usize;
+    let xy11 = xy10 >> 8;
+    let z100 = p[(xy10.wrapping_add(fz as usize)) & 0xFF] as usize;
+    let z101 = p[(xy11.wrapping_add(fz as usize)) & 0xFF] as usize;
+    // THE VV DIFFERENCE vs perlin263_fill_col: the split dots.
+    let d000 = gradient_dot_xz_f32(z000 & 15, rx, rz) + gradient_y(z000 & 15) * ry;
+    let d001 =
+        gradient_dot_xz_f32(z000 >> 8 & 15, rx, rz1) + gradient_y(z000 >> 8 & 15) * ry;
+    let d010 = gradient_dot_xz_f32(z001 & 15, rx, rz) + gradient_y(z001 & 15) * ry1;
+    let d011 =
+        gradient_dot_xz_f32(z001 >> 8 & 15, rx, rz1) + gradient_y(z001 >> 8 & 15) * ry1;
+    let d100 = gradient_dot_xz_f32(z100 & 15, rx1, rz) + gradient_y(z100 & 15) * ry;
+    let d101 =
+        gradient_dot_xz_f32(z100 >> 8 & 15, rx1, rz1) + gradient_y(z100 >> 8 & 15) * ry;
+    let d110 = gradient_dot_xz_f32(z101 & 15, rx1, rz) + gradient_y(z101 & 15) * ry1;
+    let d111 =
+        gradient_dot_xz_f32(z101 >> 8 & 15, rx1, rz1) + gradient_y(z101 >> 8 & 15) * ry1;
+    out[index] += amp * lerp3_f32(
+        sx, sy, sz, d000, d100, d010, d110, d001, d101, d011, d111,
+    );
+}
+
 /// PerlinNoise263 column fill, add-with-amplitude mode.
 /// `tx/ty/tz` map raw volume coords to the stack-level input (node scale);
 /// the lattice coordinate is `wrap(t(r) * freq) + offset`.
@@ -3239,6 +3461,19 @@ fn perlin263_fill_col<TX: Fn(i32) -> f64 + Copy, TY: Fn(i32) -> f64 + Copy, TZ: 
         0
     };
     let nf_pts = vol.size() as u64;
+    let size_y = vol.size_y as usize;
+    let mut fy_tab = [0i32; PERLIN_Y_TAB_MAX];
+    let mut ry_tab = [0f32; PERLIN_Y_TAB_MAX];
+    let mut sy_tab = [0f32; PERLIN_Y_TAB_MAX];
+    let hoisted = size_y <= PERLIN_Y_TAB_MAX;
+    if hoisted {
+        for (yi, y) in (0..vol.size_y).enumerate() {
+            let (fy, ry, sy) = perlin_y_chain(ty, vol, y, freq, off_y, smear_fudge);
+            fy_tab[yi] = fy;
+            ry_tab[yi] = ry;
+            sy_tab[yi] = sy;
+        }
+    }
     let mut index = 0usize;
     for z in 0..vol.size_z {
         let wz = wrap(tz(vol.block_z(z)) * freq) + off_z;
@@ -3254,71 +3489,64 @@ fn perlin263_fill_col<TX: Fn(i32) -> f64 + Copy, TY: Fn(i32) -> f64 + Copy, TZ: 
             let sx = smoothstep(rx);
             let x0 = p[(fx & 0xFF) as usize] as usize;
             let x1 = x0 >> 8;
-            for y in 0..vol.size_y {
-                let wy = wrap(ty(vol.block_y(y)) * freq) + off_y;
-                let fy = mth_floor(wy);
-                let rel_y_f64 = wy - fy as f64;
-                // plain Perlin: ry == original (f32); Smeared: the dots use
-                // the FUDGED f32 y while smoothstep uses the UNfudged cast
-                // (sample_and_lerp's original_relative_y == relative_y as f32
-                // of the pre-fudge double) — both exactly as scalar get().
-                let (ry, sy) = match smear_fudge {
-                    None => {
-                        let ry = rel_y_f64 as f32;
-                        (ry, smoothstep(ry))
-                    }
-                    Some(fudge_scale) => {
-                        let original_y = ty(vol.block_y(y)) * freq;
-                        let fudge_limit = if original_y >= 0.0 && original_y < rel_y_f64 {
-                            original_y
-                        } else {
-                            rel_y_f64
-                        };
-                        let fudge = (fudge_limit / fudge_scale + 1.0e-7f32 as f64).floor()
-                            * fudge_scale;
-                        let ry = (rel_y_f64 - fudge) as f32;
-                        (ry, smoothstep(rel_y_f64 as f32))
-                    }
-                };
-                let ry1 = ry - 1.0f32;
-                // exact sample_and_lerp chain with the column-fixed parts
-                let xy00 = p[(x0.wrapping_add(fy as usize)) & 0xFF] as usize;
-                let xy01 = xy00 >> 8;
-                let z000 = p[(xy00.wrapping_add(fz as usize)) & 0xFF] as usize;
-                let z001 = p[(xy01.wrapping_add(fz as usize)) & 0xFF] as usize;
-                let d000 = gradient_dot_f32(z000 & 15, rx, ry, rz);
-                let d001 = gradient_dot_f32(z000 >> 8 & 15, rx, ry, rz1);
-                let d010 = gradient_dot_f32(z001 & 15, rx, ry1, rz);
-                let d011 = gradient_dot_f32(z001 >> 8 & 15, rx, ry1, rz1);
-                let xy10 = p[(x1.wrapping_add(fy as usize)) & 0xFF] as usize;
-                let xy11 = xy10 >> 8;
-                let z100 = p[(xy10.wrapping_add(fz as usize)) & 0xFF] as usize;
-                let z101 = p[(xy11.wrapping_add(fz as usize)) & 0xFF] as usize;
-                let d100 = gradient_dot_f32(z100 & 15, rx1, ry, rz);
-                let d101 = gradient_dot_f32(z100 >> 8 & 15, rx1, ry, rz1);
-                let d110 = gradient_dot_f32(z101 & 15, rx1, ry1, rz);
-                let d111 = gradient_dot_f32(z101 >> 8 & 15, rx1, ry1, rz1);
-                out[index] += amp * lerp3_f32(
-                    sx,
-                    sy,
-                    sz,
-                    d000,
-                    d100,
-                    d010,
-                    d110,
-                    d001,
-                    d101,
-                    d011,
-                    d111,
-                );
-                index += 1;
+            if hoisted {
+                for y in 0..vol.size_y {
+                    let yi = y as usize;
+                    let ry = ry_tab[yi];
+                    perlin_col_point_plain(
+                        p,
+                        x0,
+                        x1,
+                        fy_tab[yi],
+                        fz,
+                        rx,
+                        rx1,
+                        ry,
+                        ry - 1.0f32,
+                        rz,
+                        rz1,
+                        sx,
+                        sy_tab[yi],
+                        sz,
+                        amp,
+                        out,
+                        index,
+                    );
+                    index += 1;
+                }
+            } else {
+                for y in 0..vol.size_y {
+                    let (fy, ry, sy) = perlin_y_chain(ty, vol, y, freq, off_y, smear_fudge);
+                    perlin_col_point_plain(
+                        p,
+                        x0,
+                        x1,
+                        fy,
+                        fz,
+                        rx,
+                        rx1,
+                        ry,
+                        ry - 1.0f32,
+                        rz,
+                        rz1,
+                        sx,
+                        sy,
+                        sz,
+                        amp,
+                        out,
+                        index,
+                    );
+                    index += 1;
+                }
             }
         }
     }
     if nf_t != 0 {
-        PROF_NF_PERLIN_NS.fetch_add(prof_now() - nf_t, std::sync::atomic::Ordering::Relaxed);
+        let nf_ns = prof_now() - nf_t;
+        PROF_NF_PERLIN_NS.fetch_add(nf_ns, std::sync::atomic::Ordering::Relaxed);
         PROF_NF_PERLIN_PTS.fetch_add(nf_pts, std::sync::atomic::Ordering::Relaxed);
         PROF_NF_PERLIN_LAYERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        perlin_bkt_record(nf_pts, nf_ns);
     }
 }
 
@@ -3414,6 +3642,20 @@ fn perlin263_fill_col_vv<TX: Fn(i32) -> f64 + Copy, TY: Fn(i32) -> f64 + Copy, T
         0
     };
     let nf_pts = vol.size() as u64;
+    // cont-125 y-chain hoist — same column-invariance as the plain kernel.
+    let size_y = vol.size_y as usize;
+    let mut fy_tab = [0i32; PERLIN_Y_TAB_MAX];
+    let mut ry_tab = [0f32; PERLIN_Y_TAB_MAX];
+    let mut sy_tab = [0f32; PERLIN_Y_TAB_MAX];
+    let hoisted = size_y <= PERLIN_Y_TAB_MAX;
+    if hoisted {
+        for (yi, y) in (0..vol.size_y).enumerate() {
+            let (fy, ry, sy) = perlin_y_chain(ty, vol, y, freq, off_y, smear_fudge);
+            fy_tab[yi] = fy;
+            ry_tab[yi] = ry;
+            sy_tab[yi] = sy;
+        }
+    }
     let mut index = 0usize;
     for z in 0..vol.size_z {
         let wz = wrap(tz(vol.block_z(z)) * freq) + off_z;
@@ -3429,73 +3671,64 @@ fn perlin263_fill_col_vv<TX: Fn(i32) -> f64 + Copy, TY: Fn(i32) -> f64 + Copy, T
             let sx = smoothstep(rx);
             let x0 = p[(fx & 0xFF) as usize] as usize;
             let x1 = x0 >> 8;
-            for y in 0..vol.size_y {
-                let wy = wrap(ty(vol.block_y(y)) * freq) + off_y;
-                let fy = mth_floor(wy);
-                let rel_y_f64 = wy - fy as f64;
-                // same (ry, sy) split as the scalar kernel: the dots use the
-                // (fudged) f32 y, smoothstep the unfudged cast.
-                let (ry, sy) = match smear_fudge {
-                    None => {
-                        let ry = rel_y_f64 as f32;
-                        (ry, smoothstep(ry))
-                    }
-                    Some(fudge_scale) => {
-                        let original_y = ty(vol.block_y(y)) * freq;
-                        let fudge_limit = if original_y >= 0.0 && original_y < rel_y_f64 {
-                            original_y
-                        } else {
-                            rel_y_f64
-                        };
-                        let fudge = (fudge_limit / fudge_scale + 1.0e-7f32 as f64).floor()
-                            * fudge_scale;
-                        let ry = (rel_y_f64 - fudge) as f32;
-                        (ry, smoothstep(rel_y_f64 as f32))
-                    }
-                };
-                let ry1 = ry - 1.0f32;
-                let xy00 = p[(x0.wrapping_add(fy as usize)) & 0xFF] as usize;
-                let xy01 = xy00 >> 8;
-                let z000 = p[(xy00.wrapping_add(fz as usize)) & 0xFF] as usize;
-                let z001 = p[(xy01.wrapping_add(fz as usize)) & 0xFF] as usize;
-                let xy10 = p[(x1.wrapping_add(fy as usize)) & 0xFF] as usize;
-                let xy11 = xy10 >> 8;
-                let z100 = p[(xy10.wrapping_add(fz as usize)) & 0xFF] as usize;
-                let z101 = p[(xy11.wrapping_add(fz as usize)) & 0xFF] as usize;
-                // THE VV DIFFERENCE vs perlin263_fill_col: the split dots.
-                let d000 = gradient_dot_xz_f32(z000 & 15, rx, rz) + gradient_y(z000 & 15) * ry;
-                let d001 =
-                    gradient_dot_xz_f32(z000 >> 8 & 15, rx, rz1) + gradient_y(z000 >> 8 & 15) * ry;
-                let d010 = gradient_dot_xz_f32(z001 & 15, rx, rz) + gradient_y(z001 & 15) * ry1;
-                let d011 =
-                    gradient_dot_xz_f32(z001 >> 8 & 15, rx, rz1) + gradient_y(z001 >> 8 & 15) * ry1;
-                let d100 = gradient_dot_xz_f32(z100 & 15, rx1, rz) + gradient_y(z100 & 15) * ry;
-                let d101 =
-                    gradient_dot_xz_f32(z100 >> 8 & 15, rx1, rz1) + gradient_y(z100 >> 8 & 15) * ry;
-                let d110 = gradient_dot_xz_f32(z101 & 15, rx1, rz) + gradient_y(z101 & 15) * ry1;
-                let d111 =
-                    gradient_dot_xz_f32(z101 >> 8 & 15, rx1, rz1) + gradient_y(z101 >> 8 & 15) * ry1;
-                out[index] += amp * lerp3_f32(
-                    sx,
-                    sy,
-                    sz,
-                    d000,
-                    d100,
-                    d010,
-                    d110,
-                    d001,
-                    d101,
-                    d011,
-                    d111,
-                );
-                index += 1;
+            if hoisted {
+                for y in 0..vol.size_y {
+                    let yi = y as usize;
+                    let ry = ry_tab[yi];
+                    perlin_col_point_vv(
+                        p,
+                        x0,
+                        x1,
+                        fy_tab[yi],
+                        fz,
+                        rx,
+                        rx1,
+                        ry,
+                        ry - 1.0f32,
+                        rz,
+                        rz1,
+                        sx,
+                        sy_tab[yi],
+                        sz,
+                        amp,
+                        out,
+                        index,
+                    );
+                    index += 1;
+                }
+            } else {
+                for y in 0..vol.size_y {
+                    let (fy, ry, sy) = perlin_y_chain(ty, vol, y, freq, off_y, smear_fudge);
+                    perlin_col_point_vv(
+                        p,
+                        x0,
+                        x1,
+                        fy,
+                        fz,
+                        rx,
+                        rx1,
+                        ry,
+                        ry - 1.0f32,
+                        rz,
+                        rz1,
+                        sx,
+                        sy,
+                        sz,
+                        amp,
+                        out,
+                        index,
+                    );
+                    index += 1;
+                }
             }
         }
     }
     if nf_t != 0 {
-        PROF_NF_PERLIN_NS.fetch_add(prof_now() - nf_t, std::sync::atomic::Ordering::Relaxed);
+        let nf_ns = prof_now() - nf_t;
+        PROF_NF_PERLIN_NS.fetch_add(nf_ns, std::sync::atomic::Ordering::Relaxed);
         PROF_NF_PERLIN_PTS.fetch_add(nf_pts, std::sync::atomic::Ordering::Relaxed);
         PROF_NF_PERLIN_LAYERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        perlin_bkt_record(nf_pts, nf_ns);
     }
 }
 
