@@ -7312,3 +7312,8 @@ Stage Summary:
   нойзы на col-пути). fill263golden остался BIT-EXACT (Gen263 не тронут по значению).
 - Следующие фронты пак-пути: material-фаза (~0.6ms), y-walk механика (~0.8ms), перенос
   Gen263-ядровых оптимизаций в пак-движок (per cont-129), deco-фронт (wrapper-v2).
+- cont-130 CI-ВЕРДИКТ: ран 42533503370 (fa943302) = SUCCESS, все 3 джобы зелёные
+  (native: fill263golden статик-оракул BIT-EXACT на CI + SIMD-парити гейт; plugin; integration:
+  A/B surface/carvers/biome/orebase/ore все bit-equal, e2e пар4 22.8ms/ч, пар6, 48x48 окно
+  21.69ms/ч — в бэнде cont-129 20.84-21.91, Gen263-путь не изменился по значению/таймингам).
+  Пак-филл (наш фронт): локальный dpperf 6.42 -> 5.51ms p50 (-14%).
