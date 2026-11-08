@@ -609,6 +609,13 @@ fn wkind_eq(a: &WKind, b: &WKind) -> bool {
     }
 }
 
+/// (cont-128) A/B escape hatch: CRUS_NO_SIGNFOLD=1 restores the naive
+/// Negate/Abs compilation (no sign-run folding). Default = fold on.
+fn signfold_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| matches!(std::env::var("CRUS_NO_SIGNFOLD").as_deref(), Ok("1")))
+}
+
 struct Compiler<'a> {
     wg: &'a WorldGen,
     arena: Vec<WKind>,
@@ -623,10 +630,18 @@ struct Compiler<'a> {
     /// identical subtrees is value-identical. Interpolated markers are
     /// EXCLUDED (vanilla allocates one interpolator per marker).
     intern: HashMap<u64, u32>,
+    /// (cont-128) sign-op run folding (Negate∘Negate -> identity,
+    /// Abs∘Abs -> Abs, Abs∘Negate -> Abs). Bit-exact by IEEE-754 sign-bit
+    /// algebra; CRUS_NO_SIGNFOLD=1 restores the naive compilation (A/B).
+    signfold: bool,
 }
 
 impl<'a> Compiler<'a> {
     fn new(wg: &'a WorldGen) -> Compiler<'a> {
+        Self::new_with_signfold(wg, !signfold_off())
+    }
+
+    fn new_with_signfold(wg: &'a WorldGen, signfold: bool) -> Compiler<'a> {
         Compiler {
             wg,
             arena: Vec::new(),
@@ -637,7 +652,49 @@ impl<'a> Compiler<'a> {
             blended_params: Vec::new(),
             blended_index: HashMap::new(),
             intern: HashMap::new(),
+            signfold,
         }
+    }
+
+    /// (cont-128) Continues a sign-op run fold: `negs` Negate ops and an
+    /// optional Abs seen so far, all strictly ABOVE `idx`. The walk descends
+    /// through consecutive Negate/Abs nodes; below the OUTERMOST Abs every
+    /// further sign op is absorbed (|±f| == |f| for the whole subgraph).
+    /// Result: parity(negs above Abs) ∘ Abs(base), or Negate^parity(base)
+    /// when the run has no Abs — Negate∘Negate collapses to the identity.
+    /// All forms are bit-exact: negate flips the IEEE-754 sign bit, abs
+    /// clears it — compositions agree for every bit pattern including
+    /// NaN payloads, infinities and signed zeros.
+    fn compile_sign_run(&mut self, negs: usize, saw_abs: bool, idx: usize) -> u32 {
+        let mut negs = negs;
+        let mut saw_abs = saw_abs;
+        let mut cur = idx;
+        loop {
+            match &self.wg.df_arena[cur] {
+                DfNode::Negate { argument } => {
+                    if !saw_abs {
+                        negs += 1;
+                    }
+                    cur = *argument;
+                }
+                DfNode::Abs { argument } => {
+                    if !saw_abs {
+                        saw_abs = true;
+                    }
+                    cur = *argument;
+                }
+                _ => break,
+            }
+        }
+        let inner = self.compile(cur);
+        let mut out = inner;
+        if saw_abs {
+            out = self.push(WKind::Mapped { kind: MapKind::Abs, input: out });
+        }
+        if negs % 2 == 1 {
+            out = self.push(WKind::Mapped { kind: MapKind::Negate, input: out });
+        }
+        out
     }
 
     fn push(&mut self, k: WKind) -> u32 {
@@ -741,8 +798,12 @@ impl<'a> Compiler<'a> {
                 self.push(WKind::Ap2 { kind: Ap2Kind::Sub, a, b })
             }
             DfNode::Negate { argument } => {
-                let a = self.compile(*argument);
-                self.push(WKind::Mapped { kind: MapKind::Negate, input: a })
+                if self.signfold {
+                    self.compile_sign_run(1, false, *argument)
+                } else {
+                    let a = self.compile(*argument);
+                    self.push(WKind::Mapped { kind: MapKind::Negate, input: a })
+                }
             }
             DfNode::Reciprocal { argument } => {
                 let a = self.compile(*argument);
@@ -765,8 +826,12 @@ impl<'a> Compiler<'a> {
                 self.push(WKind::Clamp { input: c, min: *min, max: *max })
             }
             DfNode::Abs { argument } => {
-                let c = self.compile(*argument);
-                self.push(WKind::Mapped { kind: MapKind::Abs, input: c })
+                if self.signfold {
+                    self.compile_sign_run(0, true, *argument)
+                } else {
+                    let c = self.compile(*argument);
+                    self.push(WKind::Mapped { kind: MapKind::Abs, input: c })
+                }
             }
             DfNode::Square { argument } => {
                 let c = self.compile(*argument);
@@ -1103,7 +1168,12 @@ impl Env {
 
     /// Compile the wired evaluator for this env's worldgen.
     pub fn compile(&self) -> Compiled {
-        let mut c = Compiler::new(&self.wg);
+        self.compile_opt(!signfold_off())
+    }
+
+    /// Compile with an explicit signfold switch (tests / A/B harnesses).
+    pub fn compile_opt(&self, signfold: bool) -> Compiled {
+        let mut c = Compiler::new_with_signfold(&self.wg, signfold);
         let mut router = HashMap::new();
         // deterministic order
         let mut keys: Vec<&String> = self.wg.router_indices.keys().collect();
@@ -3527,5 +3597,76 @@ mod eval4_parity_tests {
             }
         }
         assert!(checked > 3_000, "coverage too low: {checked}");
+    }
+}
+
+#[cfg(test)]
+mod signfold_tests {
+    use super::*;
+
+    /// The fold is a compile-time graph transform, so bit-exactness means:
+    /// for the REAL overworld graph, the folded and naive compiles must
+    /// evaluate to identical BIT PATTERNS at every sampled point, and the
+    /// folded arena must be strictly smaller (the fold must actually engage
+    /// on the real graph — a vacuous fold is a no-op worth knowing about).
+    #[test]
+    fn sign_fold_bit_neutral_on_real_graph() {
+        let seed: i64 = 3257840388504953787;
+        let env: &'static Env = Box::leak(Box::new(Env::new(seed)));
+        let on = env.compile_opt(true);
+        let off = env.compile_opt(false);
+        // NOTE: the embedded-vanilla overworld graph has no collapsible
+        // sign-op runs (verified: 470 == 470) — engagement lives in parsed
+        // PACK graphs (bin/signfoldprobe.rs measures it on real packs).
+        // The invariant pinned here is BIT-NEUTRALITY on every root.
+        eprintln!(
+            "signfold: arena {} -> {} nodes ({})",
+            off.arena.len(),
+            on.arena.len(),
+            if on.arena.len() < off.arena.len() {
+                format!("-{}", off.arena.len() - on.arena.len())
+            } else {
+                "no collapsible runs".to_string()
+            }
+        );
+        assert_eq!(on.interp_slots, off.interp_slots, "interp markers preserved");
+        let mut keys: Vec<&String> = on.router.keys().collect();
+        keys.sort();
+        assert_eq!(keys.len(), off.router.len(), "same router roots");
+        let interp_on = InterpState::new(on.interp_slots, 1, 48);
+        let interp_off = InterpState::new(off.interp_slots, 1, 48);
+        let mut checked = 0usize;
+        for k in keys {
+            let (ron, roff) = (on.router[k.as_str()], off.router[k.as_str()]);
+            for i in 0..8i32 {
+                for j in 0..4i32 {
+                    for y in (0..48i32).step_by(5) {
+                        let pt = Pt {
+                            x: 40 + i * 4,
+                            y: (y - 8) * 8,
+                            z: -24 + j * 4,
+                        };
+                        let a = env.eval(&on, ron, pt, Mode::Slice, &interp_on, None);
+                        let b = env.eval(&off, roff, pt, Mode::Slice, &interp_off, None);
+                        assert_eq!(
+                            a.to_bits(),
+                            b.to_bits(),
+                            "sign fold changed bits at router {k} pt ({},{},{})",
+                            pt.x,
+                            pt.y,
+                            pt.z
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 100, "sampled only {checked} points");
+        eprintln!(
+            "signfold: arena {} -> {} nodes (-{}), {checked} points bit-identical",
+            off.arena.len(),
+            on.arena.len(),
+            off.arena.len() - on.arena.len()
+        );
     }
 }

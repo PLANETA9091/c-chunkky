@@ -7152,3 +7152,42 @@ biome / surface / carvers / orebase — GATE PASS (**all strict materials bit-eq
 ore — GATE PASS (24 материала в детерминистической сигнатуре); blockdump divergent
 84-288 строк = deco-noise класс (норма). Бит-точность y-pair interleave подтверждена
 на CI-железе. Джобы: native SUCCESS, plugin SUCCESS, integration SUCCESS.
+
+---
+Task ID: cont-128 (2026-11-08, восстановление после 12-го отката песочницы + фолды (в))
+Agent: Super Z (main)
+Task: «продолжи» — после отката песочницы: восстановление тулчейна, локальная верификация
+стабильных срезов, реализация следующего фронта (в) «бит-точные фолды Abs∘Abs/Negate∘Negate».
+
+Work Log:
+- ОТКАТ №12: потеряны rust-toolchain, JDK-шимы, клон horizon; ПОСТАВЛЕНЫ ЗАНОВО: rust 1.99.1
+  (rustup stable minimal), javac/javap/jar шимы через `java -m jdk.compiler/jdk.jdeps/jdk.jartool`
+  (в новом образе JRE-only; /home/z/tools/bin). cargo test --lib на HEAD: 84/84 сразу.
+- Стабильность процессов в песочнице: setsid-детач умирает между tool-calls (2 смерти бута на
+  remap); живой паттерн = plain `&` + присмотр в том же вызове до «Done», затем сервер ПЕРЕЖИВАЕТ
+  границы вызовов; длинные скрипты (>10 мин) MUST укладываться в один вызов.
+- (Археология) локальная копия отставала на 85 сессий (был собран дубль stage-D поверх базы
+  cont-41 — сохранён в ветке backup/cont42-stageD-local-rebuild, НЕ пушился: origin уже содержал
+  cont-42 «Stage D COMPLETE» и ушёл далеко вперёд).
+- (в) SIGN-OP RUN FOLD реализован в density.rs Compiler: схлопывание цепочек Negate/Abs
+  (Negate∘Negate -> identity, Abs∘Abs -> Abs, Abs∘Negate -> Abs; под верхним Abs всё
+  поглощается; IEEE-754 sign-bit алгебра, бит-точно для всех паттернов включая NaN/-0.0).
+  Kill-switch CRUS_NO_SIGNFOLD=1; Env::compile_opt(signfold) для тестов/A-B.
+- ЧЕСТНЫЙ ВЕРДИКТ — фолд ИНЕРТЕН на всех достижимых сегодня графах:
+  (1) ванильный overworld-граф: 470 == 470 узлов (ни одной схлопываемой пары);
+  (2) 26.3-линия: df263_router строится руками (минимален по построению);
+  (3) паки 1.21.8-парсера (Tectonic/Terralith): пробелы парсера (shift_a field, tectonic:__constants
+  ref) не дают собрать полный pack-граф — ручной fallback плагина = ванильный граф.
+  => в проде фолд — бит-нейтральный no-op; станет активным автоматически, когда pack-parse
+  coverage расширится (wrapper-v2 deco). Оставлен в дереве (0 риска, проверен, kill-switch есть).
+- Новый тест sign_fold_bit_neutral_on_real_graph: on/off компиляции реального графа, все router
+  roots, сетка 8x4x10 — to_bits парити 320+ точек + отчёт усадки арены. bin/signfoldprobe.rs —
+  замер вовлечённости на pack-ассетах (--zip a.zip b.zip ...).
+- ВЕРИФИКАЦИЯ: cargo test --lib 85/85; fill263golden + df263golden GREEN (оракулы не тронуты,
+  26.3-линия не проходит через density.rs Compiler).
+
+Stage Summary:
+- (в) закрыт честным negative/neutral-результатом с полной доказательной базой и полезной
+  инфраструктурой (compile_opt + probe + тест инварианта бит-нейтральности).
+- Следующие фронты (без изменений): марка-оракул перегенерация; wrapper-v2 (deco) по
+  Horizon-референсу — крупнейший однониточный резерв e2e (deco_tail 221-329ms/окно).
