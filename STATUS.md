@@ -2,7 +2,7 @@
 
 Компактная карточка состояния кампании. Полная хроника — `worklog-session.md`
 (записи cont-XX по датам). Этот файл обновляется при изменении КАРТЫ, не при
-каждом тике. Последнее обновление: cont-127.
+каждом тике. Последнее обновление: cont-129.
 
 ## Цель и инвариант
 
@@ -22,6 +22,7 @@ fingerprint deco-noise класса). Не-бит-точная территор�
 | Поверхность | Статус |
 | --- | --- |
 | noise / surface / biomes / carvers | **натив, бит-точен, в проде** |
+| pack-путь (Terralith+Tectonic) | **ОЖИВЛЁН cont-129** (shift_a/b фикс; был chimera с cont-47): высоты 0/16384 бит-точны, dptt 0.461% (океан-дно sand/water + seagrass — класс 1.21.8), пак-филл 6.07-6.16ms/ch идёт ОТДЕЛЬНЫМ движком ChunkGen/DEnv без яровых оптимизаций Gen263 — главный скоростной резерв для «1ms с паками» |
 | heights | fill-based, в проде |
 | ore-хук (per-cell deco) | **OFF** (дефолт `CRUS_NATIVE_ORE=OFF`); memo (cont-115) + OvHasher (cont-116) забанкованы бит-точными |
 | interp_cell: perlin-ядро | **УСКОРЕНО cont-124 + cont-125 + cont-127** (y-pair interleave поверх hoist: fill COLD −3%, ns/pt −1-2%, бит-точен, CRUS_YX2=0 kill-switch; probe'овские −16% съел сам hoist) (монофоморфизация + f32-таблица градиентов −13.8% ns/pt; Y-CHAIN HOIST колонка-инвариантной f64 y-цепочки = ядро −53% ns/pt-vol, fill COLD −19.7%, серверный филл COLD −18.8%; mask-форма и x2-interleave замерены — mask отвергнута, interleave −16% отложен как кандидат) |
@@ -89,6 +90,9 @@ HOIST — ядро −53%, fill COLD −19.7%, nf[perlin] 3.61→1.52ms/ч) — 
 | 42348486359 | a4ce187c (cont-125 y-chain hoist, ядро −53%, fill COLD −19.7%) | SUCCESS |
 | 42360150406 | 682af190 (cont-126: 1.21.8 lane-probe fix + blended scratch-пул, бит-нейтрален) | SUCCESS |
 | 42407187681 | dee2177b (cont-127 y-pair interleave, fill COLD −3%) | SUCCESS |
+| 42470859949 | 3b50a9f2 (cont-128 sign-op fold, бит-нейтрален) | SUCCESS |
+| 42478142628 | f65cf1a5 (cont-129 пак-путь REVIVAL; native-фейл = пути гейта) | FAILURE (gate cwd) |
+| 42480446942 | c4802117 (cont-129 fixup: пак-путь жив, статик-оракул гейт BIT-EXACT) | SUCCESS |
 
 Гейты PASS на каждом; runs-паттерн канонический (3632/3857-3871);
 fallbacks=0; loader 0.3-0.55ms/окно; ore-prof exact в CI = tag 106-120k,
