@@ -35,6 +35,34 @@ use super::rng::{XoroshiroPositionalRandomFactory, XoroshiroRandomSource};
 
 pub const MIN_LEVEL: i32 = i32::MIN;
 
+// ---- opt-in surface profiling (CRUS_SPROF=1) ----------------------------
+pub static SR_PROF_ON: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+pub static SR_TOTAL_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_PRELIM_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_PRELIM_EVALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_TEST_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_COMPUTE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_WALK_STEPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_HEIGHTMAP_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_NOISE_EVALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_TEST_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_C_BIOME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_C_NOISE_THR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_C_STONE_DEPTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_C_WATER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_C_YABOVE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_C_VGRAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_C_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_C_OTHER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[inline]
+fn sr_on() -> bool {
+    SR_PROF_ON.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+
+
 /// Per-ctx surface state (built once after ids/temps arrive from the JVM).
 pub struct SurfaceCtx {
     pub cfg: SurfaceConfig,
@@ -63,6 +91,16 @@ fn lerp2(dx: f64, dz: f64, v00: f64, v10: f64, v01: f64, v11: f64) -> f64 {
 }
 
 static TRACE_POS: std::sync::OnceLock<Option<(i32, i32, i32)>> = std::sync::OnceLock::new();
+
+static SF_TRACE_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// SF_TRACE env flag — resolved ONCE (was per-step env::var inside the
+/// prelim scan loop: a lock + environ linear search on every y step).
+#[inline]
+fn sf_trace_on() -> bool {
+    *SF_TRACE_ON.get_or_init(|| std::env::var("SF_TRACE").is_ok())
+}
+
 
 fn trace_pos() -> Option<(i32, i32, i32)> {
     *TRACE_POS.get_or_init(|| {
@@ -113,6 +151,29 @@ pub struct ColWalk<'a> {
     /// semantics), so Terralith's ~hundreds-of-branches biome dispatch
     /// re-resolved quart + set scan per band block. One u64 compare now.
     biome_cache: Vec<(u64, bool)>,
+    /// Test-level quart cache for Biome conds (cond_cache kind 2): lets the
+    /// inline VM fast-path resolve biome tests without entering test() at
+    /// all. Bit-exact: same (column, quart) -> same biome idx -> same value.
+    pub q_cache: Vec<(u64, bool)>,
+    pub q_counter: u64,
+    /// Per-column biome quart table ((sy, qy) -> native biome) filled in
+    /// update_xz; biome_idx_at becomes one array read (was full grid math).
+    pub col_bq: Vec<u16>,
+    /// Bandlands band lookup — clay_bands_offset noise is (x,z)-bound;
+    /// cached per column (was a NormalNoise eval per block).
+    pub band_off: i64,
+    pub band_last: u64,
+    /// vertical_gradient factories cached per name (vanilla
+    /// getOrCreateRandomFactory caches per name; was md5 + fork per eval).
+    pub grad_cache: std::collections::HashMap<String, XoroshiroPositionalRandomFactory>,
+    /// Temperature column caches: base temp (after FROZEN modifier, keyed by
+    /// (column, biome)) and the (x/8, z/8) temperature noise sample (all
+    /// xz-bound — vanilla re-evaluates per y).
+    pub temp_key_c: u64,
+    pub temp_key_bi: usize,
+    pub temp_base: f32,
+    pub temp_n_last: u64,
+    pub temp_n: f64,
     /// 26.3 ore-vein positional random factory ("minecraft:ore" from world seed)
     pub ore_factory: XoroshiroPositionalRandomFactory,
 }
@@ -168,6 +229,17 @@ impl<'a> ColWalk<'a> {
             xz_cache: vec![(0, false); cond_count],
             y_cache: vec![(0, false); cond_count],
             biome_cache: vec![(0, false); cond_count],
+            q_cache: vec![(0, false); cond_count],
+            q_counter: 0,
+            col_bq: vec![0u16; ((cfg.height >> 4).max(1) as usize) * 4],
+            band_off: 0,
+            band_last: 0,
+            grad_cache: std::collections::HashMap::new(),
+            temp_key_c: 0,
+            temp_key_bi: usize::MAX,
+            temp_base: 0.0,
+            temp_n_last: 0,
+            temp_n: 0.0,
         }
     }
 
@@ -177,18 +249,43 @@ impl<'a> ColWalk<'a> {
     fn update_xz(&mut self, bx: i32, bz: i32) {
         self.xz_counter += 1;
         self.y_counter += 1; // vanilla updateXZ bumps BOTH counters
+        // q_cache is keyed by q_counter ONLY — bump it here too so entries
+        // from the previous column can never leak into this column (the
+        // block_y>>2 comparison alone can miss at column starts).
+        self.q_counter += 1;
         self.block_x = bx;
         self.block_z = bz;
         let sn = noise_at(self.env, self.noise_handles[0]);
         let d = sn.get_value(bx as f64, 0.0, bz as f64);
         let jit = self.factory.at(bx, 0, bz).next_f64();
         self.surface_depth = ((d * 2.75 + 3.0 + jit * 0.25)) as i32;
+        // fill the per-column biome quart table: grid index
+        // i = sy*64 + qx*16 + qy*4 + qz with qx/qz fixed for the column.
+        let qx = ((bx & 15) >> 2) as usize;
+        let qz = ((bz & 15) >> 2) as usize;
+        let base = qx * 16 + qz;
+        let sections = self.col_bq.len() / 4;
+        for sy in 0..sections {
+            for qy in 0..4 {
+                let v = self
+                    .biome_grid
+                    .get(sy * 64 + base + qy * 4)
+                    .copied()
+                    .unwrap_or(0);
+                self.col_bq[sy * 4 + qy] = v.max(0) as u16;
+            }
+        }
         // reset min-surface + secondary column caches (counter compare does it)
     }
 
     #[inline]
     fn update_y(&mut self, sda: i32, sdb: i32, wh: i32, y: i32) {
         self.y_counter += 1;
+        // quart counter: bumped when the 4-block quart of block_y changes —
+        // Biome conds cache on it (biome idx is quart-constant).
+        if (y >> 2) != (self.block_y >> 2) {
+            self.q_counter += 1;
+        }
         self.stone_depth_above = sda;
         self.stone_depth_below = sdb;
         self.water_height = wh;
@@ -239,11 +336,11 @@ impl<'a> ColWalk<'a> {
                 self.interp,
                 Some(self.memo),
             );
-            if dbg > 0 && std::env::var("SF_TRACE").is_ok() {
+            if dbg > 0 && sf_trace_on() {
                 dbg -= 1;
                 eprintln!("PRELIM ({qx},{qz}) y={y} d={d}");
             }
-            if std::env::var("SF_TRACE").is_ok() && (6..64).contains(&y) && y % 4 == 0 {
+            if sf_trace_on() && (6..64).contains(&y) && y % 4 == 0 {
                 eprintln!("PRELIM2 ({qx},{qz}) y={y} d={d}");
             }
             if d > 0.390625f64 {
@@ -281,60 +378,86 @@ impl<'a> ColWalk<'a> {
 
     /// Bit-exact replica of the VerticalGradient cond band eval (only called
     /// inside a gradient band, where the plain range shortcuts don't fire).
+    /// The per-name fork is cached (vanilla getOrCreateRandomFactory caches
+    /// per name; was md5 + fork per eval).
     fn gradient_at(&mut self, name: &str, true_y: i32, false_y: i32, x: i32, y: i32, z: i32) -> bool {
         let d = mth_map(y as f64, true_y as f64, false_y as f64, 1.0, 0.0);
-        let mut gf = self.factory.from_hash_of(name).fork_positional();
-        let mut r: XoroshiroRandomSource = gf.at(x, y, z);
+        let fork = match self.grad_cache.get(name) {
+            Some(g) => g.clone(),
+            None => {
+                let f = self.factory.from_hash_of(name).fork_positional();
+                self.grad_cache.insert(name.to_string(), f.clone());
+                f
+            }
+        };
+        let mut r: XoroshiroRandomSource = fork.at(x, y, z);
         (r.next_f32() as f64) < d
     }
 
     // -- biome helpers ------------------------------------------------------
 
+    /// Biome index for the CURRENT column at block y — one array read from
+    /// the per-column quart table (update_xz filled it; every call site uses
+    /// block_x/block_z, so the quart/quart math is column-invariant).
     #[inline]
-    fn biome_idx_at(&self, bx: i32, y: i32, bz: i32) -> usize {
-        let sy = ((y - self.cfg.min_y) >> 4).max(0) as usize;
-        let qy = ((y - self.cfg.min_y) >> 2) & 3;
-        let qx = (bx & 15) >> 2;
-        let qz = (bz & 15) >> 2;
-        let i = sy * 64 + (qx as usize) * 16 + (qy as usize) * 4 + qz as usize;
-        let v = self.biome_grid.get(i).copied().unwrap_or(0);
-        v.max(0) as usize
+    fn biome_idx_at(&self, _bx: i32, y: i32, _bz: i32) -> usize {
+        let ry = (y - self.cfg.min_y).max(0);
+        let sy = (ry >> 4) as usize;
+        let qy = ((ry >> 2) & 3) as usize;
+        self.col_bq.get(sy * 4 + qy).copied().unwrap_or(0) as usize
     }
 
-    fn cold_enough_to_snow(&self, bi: usize, y: i32) -> bool {
+    /// coldEnoughToSnow. Column caches (bit-exact — all cached inputs are
+    /// pure functions of (x, z), vanilla re-evaluates them per y):
+    ///  * temp_base = biome base temp after the FROZEN modifier (keyed by
+    ///    (column, biome); the modifier's 3 simplex evals are xz-bound)
+    ///  * temp_n = temperature noise at (x/8, z/8) — xz-bound; only the
+    ///    f32 y-adjust below is per-y arithmetic.
+    fn cold_enough_to_snow(&mut self, bi: usize, y: i32) -> bool {
         if bi >= self.temps.len() {
             return false;
         }
-        let base = self.temps[bi];
-        let mut f = base;
-        if self.frozen.get(bi).copied().unwrap_or(false) {
-            // FROZEN modifier
-            let fx = self.block_x as f64 * 0.05;
-            let fz = self.block_z as f64 * 0.05;
-            let d1 = self.temps_noises.frozen.value(fx, fz, false) * 7.0;
-            let d2 = self.temps_noises.biome_info.value(
-                self.block_x as f64 * 0.2,
-                self.block_z as f64 * 0.2,
-                false,
-            );
-            if d1 + d2 < 0.3
-                && self.temps_noises.biome_info.value(
-                    self.block_x as f64 * 0.09,
-                    self.block_z as f64 * 0.09,
+        if self.temp_key_c != self.xz_counter || self.temp_key_bi != bi {
+            let mut f = self.temps[bi];
+            if self.frozen.get(bi).copied().unwrap_or(false) {
+                // FROZEN modifier
+                let fx = self.block_x as f64 * 0.05;
+                let fz = self.block_z as f64 * 0.05;
+                let d1 = self.temps_noises.frozen.value(fx, fz, false) * 7.0;
+                let d2 = self.temps_noises.biome_info.value(
+                    self.block_x as f64 * 0.2,
+                    self.block_z as f64 * 0.2,
                     false,
-                ) < 0.8
-            {
-                f = 0.2f32;
+                );
+                if d1 + d2 < 0.3
+                    && self.temps_noises.biome_info.value(
+                        self.block_x as f64 * 0.09,
+                        self.block_z as f64 * 0.09,
+                        false,
+                    ) < 0.8
+                {
+                    f = 0.2f32;
+                }
             }
+            self.temp_base = f;
+            self.temp_key_c = self.xz_counter;
+            self.temp_key_bi = bi;
         }
+        let mut f = self.temp_base;
         let sea = self.cfg.sea_level;
         let i = sea + 17;
         if y > i {
             // all f32 arithmetic (javap: fadd/fsub/fmul/fdiv)
-            let tx = (self.block_x as f32) / 8.0f32;
-            let tz = (self.block_z as f32) / 8.0f32;
-            let n = self.temps_noises.temperature.value(tx as f64, tz as f64, false);
-            let n8 = (n * 8.0f64) as f32;
+            if self.temp_n_last != self.xz_counter {
+                let tx = (self.block_x as f32) / 8.0f32;
+                let tz = (self.block_z as f32) / 8.0f32;
+                self.temp_n = self
+                    .temps_noises
+                    .temperature
+                    .value(tx as f64, tz as f64, false);
+                self.temp_n_last = self.xz_counter;
+            }
+            let n8 = (self.temp_n * 8.0f64) as f32;
             let adj = ((n8 + y as f32) - i as f32) * 0.05f32 / 40.0f32;
             f -= adj;
         }
@@ -358,34 +481,59 @@ impl<'a> ColWalk<'a> {
                 !self.test(i)
             }
             _ => {
-                // lazily cached per site (vanilla LazyXZ/LazyY semantics)
-                let is_y_lazy = matches!(
-                    &conds[ci],
-                    SrCond::Biome { .. }
-                        | SrCond::StoneDepth { .. }
-                        | SrCond::Water { .. }
-                        | SrCond::YAbove { .. }
-                        | SrCond::VerticalGradient { .. }
-                        | SrCond::Temperature
-                        | SrCond::AbovePreliminary
-                );
-                let counter = if is_y_lazy { self.y_counter } else { self.xz_counter };
-                let cached = {
-                    let cache: &Vec<(u64, bool)> = if is_y_lazy { &self.y_cache } else { &self.xz_cache };
-                    let (last, cached) = cache[ci];
-                    if last == counter {
-                        Some(cached)
-                    } else {
-                        None
+                // lazily cached per site (vanilla LazyXZ/LazyY semantics;
+                // granularity precomputed at parse time — was a 7-arm
+                // matches! per call). Biome conds use the quart cache.
+                let kind = self.cfg.cond_cache[ci];
+                let cached = match kind {
+                    2 => {
+                        let (last, v) = self.q_cache[ci];
+                        (last == self.q_counter).then_some(v)
+                    }
+                    1 => {
+                        let (last, v) = self.y_cache[ci];
+                        (last == self.y_counter).then_some(v)
+                    }
+                    _ => {
+                        let (last, v) = self.xz_cache[ci];
+                        (last == self.xz_counter).then_some(v)
                     }
                 };
                 if let Some(v) = cached {
                     return v;
                 }
+                if sr_on() {
+                    SR_TEST_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                let ct0 = if sr_on() {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
                 let v = self.compute(ci);
-                {
-                    let cache: &mut Vec<(u64, bool)> = if is_y_lazy { &mut self.y_cache } else { &mut self.xz_cache };
-                    cache[ci] = (counter, v);
+                if sr_on() {
+                    use SrCond::*;
+                    let ctr = match &self.cfg.conds[ci] {
+                        Biome { .. } => &SR_C_BIOME,
+                        NoiseThreshold { .. } => &SR_C_NOISE_THR,
+                        StoneDepth { .. } => &SR_C_STONE_DEPTH,
+                        Water { .. } => &SR_C_WATER,
+                        YAbove { .. } => &SR_C_YABOVE,
+                        VerticalGradient { .. } => &SR_C_VGRAD,
+                        Temperature | AbovePreliminary | Hole | Steep | Not(_) => &SR_C_TEMP,
+                    };
+                    ctr.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                if let Some(t0) = ct0 {
+                    SR_COMPUTE_NS.fetch_add(
+                        t0.elapsed().as_nanos() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+                match kind {
+                    2 => self.q_cache[ci] = (self.q_counter, v),
+                    1 => self.y_cache[ci] = (self.y_counter, v),
+                    _ => self.xz_cache[ci] = (self.xz_counter, v),
                 }
                 if let Some((tx, ty, tz)) = trace_pos() {
                     if tx == self.block_x && tz == self.block_z {
@@ -427,7 +575,9 @@ impl<'a> ColWalk<'a> {
                     return cached.1;
                 }
                 let bi = self.biome_idx_at(self.block_x, self.block_y, self.block_z);
-                let v = set.contains(&(bi as u32));
+                let m = &self.cfg.biome_masks[ci];
+                let v = (m[bi >> 6] >> (bi & 63)) & 1 == 1;
+                let _ = set;
                 self.biome_cache[ci] = (key, v);
                 v
             }
@@ -506,11 +656,18 @@ impl<'a> ColWalk<'a> {
                     return false;
                 }
                 let d = mth_map(y as f64, *true_y as f64, *false_y as f64, 1.0, 0.0);
-                // vanilla: randomState.getOrCreateRandomFactory(name) =
-                //   random.fromHashOf(name).forkPositional(); the gradient
-                // samples THAT factory at the block position.
-                let mut gf = self.factory.from_hash_of(name).fork_positional();
-                let mut r: XoroshiroRandomSource = gf.at(self.block_x, self.block_y, self.block_z);
+                // vanilla getOrCreateRandomFactory(name) is CACHED per name on
+                // RandomState — the fork is deterministic, so cache per name
+                // (was: md5 + fork on every block eval).
+                let fork = match self.grad_cache.get(name) {
+                    Some(g) => g.clone(),
+                    None => {
+                        let f = self.factory.from_hash_of(name).fork_positional();
+                        self.grad_cache.insert(name.clone(), f.clone());
+                        f
+                    }
+                };
+                let mut r: XoroshiroRandomSource = fork.at(self.block_x, self.block_y, self.block_z);
                 return (r.next_f32() as f64) < d;
             }
             SrCond::AbovePreliminary => self.block_y >= self.min_surface_level(),
@@ -519,72 +676,154 @@ impl<'a> ColWalk<'a> {
 
     // -- rule application ------------------------------------------------------
 
-    fn try_apply(&mut self, ri: usize) -> Option<u16> {
-        match &self.cfg.rules[ri] {
-            SrRule::Sequence(kids) => {
-                for k in kids {
-                    if let Some(s) = self.try_apply(*k) {
-                        return Some(s);
-                    }
-                }
-                None
+    /// Flat VM walk over a compiled rule program. Bit-exact control-flow
+    /// replacement of the recursive try_apply: Test-false and failed
+    /// then-chains resume at the rule's fail-exit, Block/Bandlands/OreVein
+    /// terminate, Halt = no match. `prog` is borrowed from cfg (not self) so
+    /// the loop can still call &mut self methods. Programs are
+    /// Halt-terminated per entry point (root program in cfg.prog; the
+    /// deep-zone subtree gets its own compile — see deep_fast).
+    fn try_apply(&mut self, prog: &[super::surface::SrOp]) -> Option<u16> {
+        let mut pc: usize = 0;
+        loop {
+            let op = prog[pc];
+            if sr_on() {
+                SR_WALK_STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            SrRule::IfTrue { cond, then } => {
-                let c = *cond;
-                if self.test(c) {
-                    self.try_apply(*then)
-                } else {
-                    None
-                }
-            }
-            SrRule::Block { state } => Some(self.cfg.ids[*state as usize]),
-            SrRule::Bandlands => {
-                // getBand(x, y, z): bands[(y + round(offset*4) + 192) % 192]
-                let off_n = noise_at(self.env, self.noise_handles[2]);
-                let v = off_n.get_value(self.block_x as f64, 0.0, self.block_z as f64) * 4.0;
-                // Math.round(f64): floor(v + 0.5) semantics
-                let r = (v + 0.5).floor() as i64;
-                let y = self.block_y as i64;
-                let idx = ((y + r + 192) % 192) as usize;
-                let st = self.cfg.bandlands.get(idx).copied().unwrap_or(self.cfg.terracotta[0]);
-                Some(self.cfg.ids[st as usize])
-            }
-            SrRule::OreVein { ore, raw, filler, raw_chance, density_df, richness_df, gap_df } => {
-                // 26.3 OreVeinRule.apply: density<=0 -> null; rng.at(x,y,z);
-                // nextFloat>density -> null; richness/gap decide ore vs filler
-                let pt = crate::density::Pt { x: self.block_x, y: self.block_y, z: self.block_z };
-                self.memo.next_serial();
-                let density = self
-                    .env
-                    .eval(self.compiled, *density_df, pt, Mode::Direct, self.interp, Some(self.memo))
-                    as f32;
-                if density <= 0.0 {
-                    return None;
-                }
-                let mut rnd = self.ore_factory.at(self.block_x, self.block_y, self.block_z);
-                if rnd.next_f32() > density {
-                    return None;
-                }
-                self.memo.next_serial();
-                let richness = self
-                    .env
-                    .eval(self.compiled, *richness_df, pt, Mode::Direct, self.interp, Some(self.memo))
-                    as f32;
-                self.memo.next_serial();
-                let gap = self
-                    .env
-                    .eval(self.compiled, *gap_df, pt, Mode::Direct, self.interp, Some(self.memo))
-                    as f32;
-                if (rnd.next_f32() as f64) < richness as f64 && gap < 0.0 {
-                    if rnd.next_f32() < *raw_chance {
-                        Some(self.cfg.ids[*raw as usize])
+            match op {
+                super::surface::SrOp::Test { ci, false_pc } => {
+                    let civ = ci as usize;
+                    // Inline the cache fast-path (test() full path only on
+                    // miss): no fn call, no Not re-match on the hot hit path.
+                    // Semantics identical to test() — including the Not arm,
+                    // which never caches and recurses.
+                    let v = if self.cfg.cond_is_not[civ] {
+                        self.test(civ)
                     } else {
-                        Some(self.cfg.ids[*ore as usize])
+                        match self.cfg.cond_cache[civ] {
+                            2 => {
+                                let (last, hv) = self.q_cache[civ];
+                                if last == self.q_counter {
+                                    hv
+                                } else {
+                                    let v = self.test(civ);
+                                    self.q_cache[civ] = (self.q_counter, v);
+                                    v
+                                }
+                            }
+                            1 => {
+                                let (last, hv) = self.y_cache[civ];
+                                if last == self.y_counter {
+                                    hv
+                                } else {
+                                    let v = self.test(civ);
+                                    self.y_cache[civ] = (self.y_counter, v);
+                                    v
+                                }
+                            }
+                            _ => {
+                                let (last, hv) = self.xz_cache[civ];
+                                if last == self.xz_counter {
+                                    hv
+                                } else {
+                                    let v = self.test(civ);
+                                    self.xz_cache[civ] = (self.xz_counter, v);
+                                    v
+                                }
+                            }
+                        }
+                    };
+                    if v {
+                        pc += 1;
+                    } else {
+                        pc = false_pc as usize;
                     }
-                } else {
-                    Some(self.cfg.ids[*filler as usize])
                 }
+                super::surface::SrOp::Block { id } => return Some(id),
+                super::surface::SrOp::Bandlands => return Some(self.bandlands_state()),
+                super::surface::SrOp::OreVein {
+                    ore,
+                    raw,
+                    filler,
+                    raw_chance,
+                    density_df,
+                    richness_df,
+                    gap_df,
+                } => {
+                    return self.ore_vein(ore, raw, filler, raw_chance, density_df, richness_df, gap_df)
+                }
+                super::surface::SrOp::Halt => return None,
             }
+        }
+    }
+
+    /// Bandlands band lookup — getBand(x,y,z) =
+    /// bands[(y + round(clay_bands_offset*4) + 192) % 192]; the offset noise
+    /// is (x,z)-bound, cached per column (was a NormalNoise eval per block).
+    fn bandlands_state(&mut self) -> u16 {
+        if self.band_last != self.xz_counter {
+            let off_n = noise_at(self.env, self.noise_handles[2]);
+            let v = off_n.get_value(self.block_x as f64, 0.0, self.block_z as f64) * 4.0;
+            // Math.round(f64): floor(v + 0.5) semantics
+            self.band_off = (v + 0.5).floor() as i64;
+            self.band_last = self.xz_counter;
+        }
+        let r = self.band_off;
+        let y = self.block_y as i64;
+        let idx = ((y + r + 192) % 192) as usize;
+        let st = self
+            .cfg
+            .bandlands
+            .get(idx)
+            .copied()
+            .unwrap_or(self.cfg.terracotta[0]);
+        self.cfg.ids[st as usize]
+    }
+
+    /// 26.3 OreVeinRule.apply: density<=0 -> null; rng.at(x,y,z);
+    /// nextFloat>density -> null; richness/gap decide ore vs filler.
+    #[allow(clippy::too_many_arguments)]
+    fn ore_vein(
+        &mut self,
+        ore: u32,
+        raw: u32,
+        filler: u32,
+        raw_chance: f32,
+        density_df: u32,
+        richness_df: u32,
+        gap_df: u32,
+    ) -> Option<u16> {
+        let pt = crate::density::Pt { x: self.block_x, y: self.block_y, z: self.block_z };
+        self.memo.next_serial();
+        let density = self
+            .env
+            .eval(self.compiled, density_df, pt, Mode::Direct, self.interp, Some(self.memo))
+            as f32;
+        if density <= 0.0 {
+            return None;
+        }
+        let mut rnd = self.ore_factory.at(self.block_x, self.block_y, self.block_z);
+        if rnd.next_f32() > density {
+            return None;
+        }
+        self.memo.next_serial();
+        let richness = self
+            .env
+            .eval(self.compiled, richness_df, pt, Mode::Direct, self.interp, Some(self.memo))
+            as f32;
+        self.memo.next_serial();
+        let gap = self
+            .env
+            .eval(self.compiled, gap_df, pt, Mode::Direct, self.interp, Some(self.memo))
+            as f32;
+        if (rnd.next_f32() as f64) < richness as f64 && gap < 0.0 {
+            if rnd.next_f32() < raw_chance {
+                Some(self.cfg.ids[raw as usize])
+            } else {
+                Some(self.cfg.ids[ore as usize])
+            }
+        } else {
+            Some(self.cfg.ids[filler as usize])
         }
     }
 }
@@ -612,7 +851,9 @@ struct DeepFast {
     ds_true: i32,
     ds_false: i32,
     ds_state: u16,
-    deep_then: usize,
+    /// kid[2]'s deep rules compiled as a Halt-terminated VM program (the
+    /// flat try_apply executes only this subtree).
+    deep_prog: Vec<super::surface::SrOp>,
     /// kid[2]'s first cond — a Biome cond (guarded): pure function of
     /// (column, quartY), so the gate is resolved once per quart instead of
     /// per block. u32::MAX when the structure differs (no gate).
@@ -678,7 +919,7 @@ fn deep_fast(cfg: &super::surface::SurfaceConfig) -> Option<DeepFast> {
         ds_true: *dt,
         ds_false: *df,
         ds_state,
-        deep_then: *t2,
+        deep_prog: super::surface::compile_program_from(&cfg.rules, *t2, cfg),
         gate_cond,
     })
 }
@@ -702,6 +943,11 @@ pub fn apply_surface(
     let height = env.wg.height as usize;
     let min_y = env.wg.min_y;
     let sections = height / 16;
+    let st0 = if sr_on() {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
     // fallback biome grid (should not happen when BiomeSwap is active)
     let mut fb_grid: Vec<i32> = Vec::new();
     let grid: &[i32] = match biome_grid {
@@ -763,6 +1009,7 @@ pub fn apply_surface(
         temps, frozen, names, cond_count, &hm, &noise_handles, ore_factory,
     );
     let default_id = cfg.default_id;
+    let prog: &[super::surface::SrOp] = &cfg.prog;
     // (CRUS_SF_NOWALK / CRUS_SF_NOSCAN: diagnostic skips — timing only)
     let sf_nowalk = std::env::var("CRUS_SF_NOWALK").ok().as_deref() == Some("1");
     let sf_noscan = std::env::var("CRUS_SF_NOSCAN").ok().as_deref() == Some("1");
@@ -822,7 +1069,7 @@ pub fn apply_surface(
                         let st = if let Some(fp) = &fast {
                             if y >= walk.min_surface_probe() {
                                 // surface band — full rule tree
-                                walk.try_apply(cfg.root)
+                                walk.try_apply(prog)
                             } else {
                                 // deep zone: kid[0] bedrock gradient, kid[2]
                                 // small deep rules (always-true branch),
@@ -854,10 +1101,10 @@ pub fn apply_surface(
                                             v
                                         };
                                         if gate {
-                                            st2 = walk.try_apply(fp.deep_then);
+                                            st2 = walk.try_apply(&fp.deep_prog);
                                         }
                                     } else {
-                                        st2 = walk.try_apply(fp.deep_then);
+                                        st2 = walk.try_apply(&fp.deep_prog);
                                     }
                                     st = st2;
                                     if st.is_none() {
@@ -873,7 +1120,7 @@ pub fn apply_surface(
                                 st
                             }
                         } else {
-                            walk.try_apply(cfg.root)
+                            walk.try_apply(prog)
                         };
                         if let Some(st) = st {
                             if let Some((tx, ty, tz)) = trace_pos() {
@@ -897,5 +1144,11 @@ pub fn apply_surface(
                 y -= 1;
             }
         }
+    }
+    if let Some(t0) = st0 {
+        SR_TOTAL_NS.fetch_add(
+            t0.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 }

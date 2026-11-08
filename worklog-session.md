@@ -7257,3 +7257,58 @@ Stage Summary:
 
 Stage Summary:
 - HEAD = c4802117. CI-гейты канонически зелёные; статик-оракул (блоки+марки) — постоянный гейт.
+
+---
+## cont-130 (2026-11-09) — pack-fill surface engine: flat VM + bitsets + quart caches (6.42 -> 5.5ms p50)
+
+Agent: Super Z (main)
+Task: «продолжи ещё жёстче оптимизировать с аритметиками и вообще всем» — пак-филл ChunkGen/DEnv
+(фронт из cont-129: Gen263-оптимизации на пак-путь не действуют).
+
+Work Log:
+- РЕСИНК: локальная ветка была на cont-41 (старая база); работа, сделанная в старой базе
+  (7.07->6.0ms), отброшена как дубль (backup/surface-v1), перенесена ДЕЛЬТОЙ на origin/main
+  (c4802117..14867319, +330 коммитов, cont-129).
+- Порт на текущую базу (весь путь ChunkGen/DEnv c.surface, бит-точность сохранена):
+  * ПЛОСКАЯ VM правил (SrOp-программа, compile_program в surface_assign_ids на ОБЕХ ветках
+    1.21.8/26.3): Test/Block/Bandlands/OreVein/Halt с jump-таргетами fail-exit; per-block
+    обход — PC-цикл вместо рекурсии. OreVein — терминальный оп с телом из рекурсивной версии.
+    Deep-zone deep_then компилируется в СВОЮ Halt-терминированную программу
+    (compile_program_from) — вход в середину корневого прогона пробил бы sibling-контекст.
+  * ИНЛАЙН кэш-фастпат в Test-опе VM: hit-путь без вызова test() (kind 0/1/2 таблица
+    cond_cache, precompute в build(); Not-условия всегда через test()).
+  * BITSET для Biome-условий (было set.contains по 30+-биомным сетам; biome-компьюты —
+    крупнейший класс: 90k/чанк на старой базе, 27k на текущей с deep-zone).
+  * QUART-кэш Biome-тестов на уровне VM (q_cache/q_counter): биом константен в 4-блочном
+    кварте — бит-точный пер-квартальный ключ; доп. слой поверх compute-уровня biome_cache
+    (cont-126). ПОДВОХ: q_counter бампится и в update_xz (иначе протечка кэша между
+    колонками; был пойман sfcmp-дивергенцией на первой итерации порта).
+  * КОЛОНОЧНАЯ таблица биомов по квартам (col_bq, заполняется в update_xz): biome_idx_at —
+    одно чтение массива вместо полной grid-математики.
+  * vertical_gradient: fork-фабрики кэшируются по имени (grad_cache) — было md5+fork на
+    каждый вызов (gradient_at + cond); vanilla getOrCreateRandomFactory кэширует по имени.
+  * temperature: колоночные кэши base (FROZEN-модификатор — 3 simplex-вызова, xz-bound) и
+    (x/8,z/8)-нойза; пер-y остаётся только f32-поправка.
+  * bandlands: clay_bands_offset кэш на колонку (было NormalNoise на каждый блок).
+  * SF_TRACE — OnceLock (было env::var на каждый шаг prelim-скана).
+- Инструменты: dpperf (изолированный пак-филл бенч + CRUS_SPROF поверхностный профіль:
+  walk_steps/test/compute per-kind), dpanatomy (пер-слот тайминги плоскостей + инвентарь
+  дерева: y-variant узлы/нойзы/сплайны, col-bypass). Слоты 1-7 копеечные (8-23us/плоскость),
+  slot 0 = 577us из 675us (85%) — 24 y-variant нойза, ВСЕ уже на col-пути (col_bypass пуст),
+  splines yv=7 — slice у структурного пола.
+- БИСЕКТ-сессия паритета: sfcmp против ЛОКАЛЬНЫХ oracle_surface_out дампов давал 218 wrong
+  на КАЖДОЙ конфигурации (вкл. все дельты выключенными per-switch и ЧИСТУЮ origin/main) —
+  локальные дампы устарели (докионт-эра); дивергенции = известный pre-existing класс 0.461%
+  (ocean-floor sand<->water y~22 + seagrass deco-order, открыт в cont-129). Свитчи удалены
+  (HashMap-lookup в горячем пути стоил ~1ms; найдено по регрессии dpperf 5.5->6.5).
+- Валидация: cargo test 86/86 (release+debug); fill263golden HARD GATE (блоки+165 марок,
+  4 оракул-чанка) = BIT-EXACT локально; v263-ветка surface_assign_ids тоже компилирует prog.
+- Замер (2-core shared, dpperf n=128, реальный merged-сет 01+02 + overlay.datapack):
+  до 6.42ms p50 (min 5.67) -> после 5.51ms p50 (min 5.02-5.38) = -14%; в шумный период
+  min-of-runs 5.26-5.62. Честная сравнительная планка — CI dptbench.
+
+Stage Summary:
+- Пак-филл (ChunkGen/DEnv) — surface-хвост ужат: VM+кэши; slice-фаза у пола (все y-variant
+  нойзы на col-пути). fill263golden остался BIT-EXACT (Gen263 не тронут по значению).
+- Следующие фронты пак-пути: material-фаза (~0.6ms), y-walk механика (~0.8ms), перенос
+  Gen263-ядровых оптимизаций в пак-движок (per cont-129), deco-фронт (wrapper-v2).

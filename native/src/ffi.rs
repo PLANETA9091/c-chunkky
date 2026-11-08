@@ -1676,6 +1676,8 @@ pub fn surface_assign_ids(id: i64, ids: &[u16]) -> Result<(), String> {
         s.cfg.ids = ids.to_vec();
         let factory = crate::surface::root_factory(s.env.seed);
         s.cfg.bandlands = crate::surface::generate_bands(&s.cfg, &factory);
+        // flat rule program for the per-block VM walk (needs ids + bandlands)
+        s.cfg.prog = crate::surface::compile_program(&s.cfg);
         return Ok(());
     }
     let st = c.v263.as_mut().ok_or_else(|| "no surface".to_string())?;
@@ -1688,6 +1690,8 @@ pub fn surface_assign_ids(id: i64, ids: &[u16]) -> Result<(), String> {
     s.cfg.ids = ids.to_vec();
     let factory = crate::surface::root_factory(st.g.seed);
     s.cfg.bandlands = crate::surface::generate_bands(&s.cfg, &factory);
+    // flat rule program for the per-block VM walk (needs ids + bandlands)
+    s.cfg.prog = crate::surface::compile_program(&s.cfg);
     Ok(())
 }
 

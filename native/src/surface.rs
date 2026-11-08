@@ -79,6 +79,33 @@ pub enum SrRule {
     },
 }
 
+/// Flat rule program op (compiled from SrRule — see compile_program).
+/// The per-block walk is a PC loop over this Vec: no recursion, no
+/// enum-of-enum matching, contiguous memory. OreVein is a terminal op whose
+/// body needs memo/env/interp access — it delegates to ColWalk::ore_vein.
+#[derive(Clone, Copy)]
+pub enum SrOp {
+    /// evaluate condition ci; false jumps to false_pc (the rule's fail-exit:
+    /// the caller's next sibling / continuation point).
+    Test { ci: u32, false_pc: u32 },
+    /// terminal: produce this material id (ids[state] precomputed).
+    Block { id: u16 },
+    /// terminal: bandlands band lookup.
+    Bandlands,
+    /// terminal: MC 26.3 ore-vein material rule (fields carried verbatim).
+    OreVein {
+        ore: u32,
+        raw: u32,
+        filler: u32,
+        raw_chance: f32,
+        density_df: u32,
+        richness_df: u32,
+        gap_df: u32,
+    },
+    /// terminal: no match (return None).
+    Halt,
+}
+
 pub enum SrCond {
     Biome { set: Vec<u32> },
     NoiseThreshold {
@@ -103,6 +130,20 @@ pub enum SrCond {
 pub struct SurfaceConfig {
     pub rules: Vec<SrRule>,
     pub conds: Vec<SrCond>,
+    /// Precomputed per-condition cache granularity (vanilla LazyY vs LazyXZ
+    /// wrapper, refined):
+    ///   0 = column-cached (LazyXZ), 1 = per-y cached (LazyY),
+    ///   2 = per-QUART cached — Biome conds only: the biome index is constant
+    ///       across the 4-block quart, so the per-y vanilla cache value is
+    ///       provably identical across those y — bit-exact, 4x fewer computes.
+    /// 26.3 NoiseThreshold(is3d) samples at the block pos -> per-y (1).
+    pub cond_cache: Vec<u8>,
+    /// Per-condition "is Not" flag (Not conds never cache — they recurse).
+    pub cond_is_not: Vec<bool>,
+    /// Bitset per condition (indexed by cond idx; empty for non-Biome conds).
+    /// Biome set membership is the hottest surface test — replaces the
+    /// linear Vec::contains (sets reach 30+ biomes) with one bit test.
+    pub biome_masks: Vec<Vec<u64>>,
     pub root: usize,
     /// Distinct block state strings in first-appearance order. Material ids
     /// are assigned by the JVM (setSurfaceIds) into `ids` (same order).
@@ -113,6 +154,8 @@ pub struct SurfaceConfig {
     pub terracotta: [u32; 7],
     /// 192 band entries as state indexes (filled at ids-set time).
     pub bandlands: Vec<u32>,
+    /// Flat rule program (compiled in surface_assign_ids once ids exist).
+    pub prog: Vec<SrOp>,
     pub sea_level: i32,
     /// native default-block material id (STONE = 1)
     pub default_id: u16,
@@ -858,14 +901,49 @@ pub fn build(
     for (i, name) in TERRACOTTA_IDS.iter().enumerate() {
         terracotta[i] = p.cfg.state(name.to_string());
     }
+    let cond_cache = p
+        .cfg
+        .conds
+        .iter()
+        .map(|c| match c {
+            SrCond::Biome { .. } => 2u8,
+            SrCond::StoneDepth { .. }
+            | SrCond::Water { .. }
+            | SrCond::YAbove { .. }
+            | SrCond::VerticalGradient { .. }
+            | SrCond::Temperature
+            | SrCond::AbovePreliminary => 1u8,
+            SrCond::NoiseThreshold { is_3d, .. } => {
+                if *is_3d {
+                    // 3D sampler at the block pos — per-y value
+                    1u8
+                } else {
+                    // legacy 2D at y=0 — (x,z)-bound
+                    0u8
+                }
+            }
+            _ => 0u8,
+        })
+        .collect();
+    let cond_is_not = p
+        .cfg
+        .conds
+        .iter()
+        .map(|c| matches!(c, SrCond::Not(_)))
+        .collect();
+    let masks = biome_masks(&p.cfg.conds);
     let cfg = SurfaceConfig {
         rules: p.cfg.rules,
         conds: p.cfg.conds,
+        cond_cache,
+        cond_is_not,
+        biome_masks: masks,
         root,
         states: p.cfg.states,
         ids: Vec::new(),
         terracotta,
         bandlands: Vec::new(),
+        prog: Vec::new(),
         sea_level: wg.sea_level as i32,
         default_id,
         min_y: wg.min_y,
@@ -925,6 +1003,115 @@ pub fn generate_bands(
         pos += rng.next_int_bound(16) + 4;
     }
     bands
+}
+
+/// Biome-membership bitsets, one per condition (width = max biome idx + 1).
+fn biome_masks(conds: &[SrCond]) -> Vec<Vec<u64>> {
+    let width = conds
+        .iter()
+        .map(|c| match c {
+            SrCond::Biome { set } => set.iter().copied().max().unwrap_or(0) as usize + 1,
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0);
+    let words = ((width + 63) / 64).max(1);
+    conds
+        .iter()
+        .map(|c| match c {
+            SrCond::Biome { set } => {
+                let mut m = vec![0u64; words];
+                for &b in set {
+                    m[(b as usize) >> 6] |= 1u64 << ((b as usize) & 63);
+                }
+                m
+            }
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+/// Compile the SrRule tree into a flat SrOp program (control-flow preserving).
+/// Invariant: a rule's ops occupy a contiguous slice and its single fail-exit
+/// is the op index right after that slice — every false branch (cond false,
+/// or an IfTrue's then-chain that produced nothing) resumes there, which is
+/// exactly where the vanilla recursive try_apply returns None.
+/// Requires cfg.ids (call after surface_assign_ids).
+pub fn compile_program(cfg: &SurfaceConfig) -> Vec<SrOp> {
+    let mut prog = Vec::with_capacity(cfg.rules.len() * 2 + 8);
+    let _exit = compile_rule(&cfg.rules, cfg.root, &mut prog, cfg);
+    prog.push(SrOp::Halt);
+    prog
+}
+
+/// Compile a SUBTREE as its own Halt-terminated entry program (the deep-zone
+/// fast path executes only the deep rules kid — entering the root program at
+/// a mid-tree op would run past the subtree into sibling context).
+pub fn compile_program_from(rules: &[SrRule], ri: usize, cfg: &SurfaceConfig) -> Vec<SrOp> {
+    let mut prog = Vec::with_capacity(64);
+    let _exit = compile_rule(rules, ri, &mut prog, cfg);
+    prog.push(SrOp::Halt);
+    prog
+}
+
+fn compile_rule(rules: &[SrRule], ri: usize, prog: &mut Vec<SrOp>, cfg: &SurfaceConfig) -> u32 {
+    match &rules[ri] {
+        SrRule::Block { state } => {
+            let id = cfg.ids.get(*state as usize).copied().unwrap_or(0);
+            prog.push(SrOp::Block { id });
+            prog.len() as u32
+        }
+        SrRule::Bandlands => {
+            prog.push(SrOp::Bandlands);
+            prog.len() as u32
+        }
+        SrRule::OreVein {
+            ore,
+            raw,
+            filler,
+            raw_chance,
+            density_df,
+            richness_df,
+            gap_df,
+        } => {
+            prog.push(SrOp::OreVein {
+                ore: *ore,
+                raw: *raw,
+                filler: *filler,
+                raw_chance: *raw_chance,
+                density_df: *density_df,
+                richness_df: *richness_df,
+                gap_df: *gap_df,
+            });
+            prog.len() as u32
+        }
+        SrRule::IfTrue { cond, then } => {
+            let ti = prog.len();
+            prog.push(SrOp::Test {
+                ci: *cond as u32,
+                false_pc: u32::MAX, // patched below
+            });
+            // compile the then-chain; its exit is both "then failed" and
+            // "cond false" continuation (vanilla returns None in both).
+            let exit = compile_rule(rules, *then, prog, cfg);
+            prog[ti] = SrOp::Test {
+                ci: *cond as u32,
+                false_pc: exit,
+            };
+            exit
+        }
+        SrRule::Sequence(kids) => {
+            // kids appended contiguously: each kid's fail-exit (== its
+            // compile exit) is the next kid's start; the last kid's exit is
+            // this rule's exit. IfTrue kids self-patch their cond-false
+            // branch to their own exit, which equals the next sibling.
+            for k in 0..kids.len() {
+                let kid_exit = compile_rule(rules, kids[k], prog, cfg);
+                debug_assert_eq!(kid_exit as usize, prog.len());
+            }
+            prog.len() as u32
+        }
+    }
 }
 
 fn make_bands(rng: &mut XoroshiroRandomSource, bands: &mut [u32], size: i32, state: u32) {
