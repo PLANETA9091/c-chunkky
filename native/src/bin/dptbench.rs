@@ -158,6 +158,13 @@ fn main() {
 
     // biome-grid (fillBiomes) cost alone
     let mut bio_samples: Vec<u128> = Vec::with_capacity(n);
+    // cont-129: optional fill-stage prof (the vanilla fillprof125 view over
+    // the pack graph — where do the extra ~2ms vs vanilla live).
+    let prof = std::env::var("CRUS_FILL263_PROF").ok().as_deref() == Some("1");
+    if prof {
+        crussty_chunkgen::df263::PROF_ON_263.store(true, std::sync::atomic::Ordering::Relaxed);
+        crussty_chunkgen::df263::prof263_reset();
+    }
     for k in 0..n {
         let cx = 32 + (k % 16) as i32;
         let cz = 32 + ((k / 16) % 16) as i32;
@@ -199,6 +206,9 @@ fn main() {
         bio_samples[bio_samples.len() / 2],
         bio_samples[bio_samples.len() * 9 / 10]
     );
+    if prof {
+        println!("prof263: {}", crussty_chunkgen::df263::prof263_snapshot());
+    }
     println!("jni_prof: {}", crussty_chunkgen::nochunk::jni_prof_snapshot());
 
     // ---- deep-zone fast-path bit-parity self-check vs full walk ----------

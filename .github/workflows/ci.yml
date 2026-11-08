@@ -53,8 +53,8 @@ jobs:
           # identical to the native fill263. The cont-126 "330 oracle-only
           # mark lines" observation class (mark drift invisible to block
           # gates) is closed here: any block OR mark divergence fails CI.
-          FILL263_GOLDEN_OUT=oracle263_fill_native_ci.txt cargo run --release --bin fill263golden 2>/dev/null
-          python3 harness/diff_fill263.py reference/oracle263_fill.txt oracle263_fill_native_ci.txt
+          FILL263_GOLDEN_OUT=../oracle263_fill_native_ci.txt cargo run --release --bin fill263golden 2>/dev/null
+          python3 ../harness/diff_fill263.py ../reference/oracle263_fill.txt ../oracle263_fill_native_ci.txt
           # Noise control on the shared 2-core runner: neighbor VMs inject
           # additive-only noise into a chunk time, so the MIN of repeated
           # p50s is the honest noise-free estimate (p50 alone swings ~15%).
