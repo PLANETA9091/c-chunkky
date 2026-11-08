@@ -34,6 +34,11 @@ fn main() {
         marks.clear();
     }
     let dt = t0.elapsed();
-    std::fs::write("/home/z/my-project/c-faster/reference/oracle263_fill_native.txt", &s).unwrap();
+    // cont-129: the output path is overridable (FILL263_GOLDEN_OUT) so the
+    // CI static-oracle gate can diff without touching the canonical local
+    // reference copy.
+    let out_path = std::env::var("FILL263_GOLDEN_OUT")
+        .unwrap_or_else(|_| "/home/z/my-project/c-faster/reference/oracle263_fill_native.txt".into());
+    std::fs::write(&out_path, &s).unwrap();
     eprintln!("fill263golden done: {} bytes, 4 chunks, {:?}", s.len(), dt);
 }

@@ -918,8 +918,19 @@ impl Loader<'_> {
                 self.push(DfNode::ShiftedNoise { noise, xz_scale, y_scale, shift_x, shift_y, shift_z })
             }
             "minecraft:shift_a" | "minecraft:shift_b" => {
-                // "argument" is a noise-params id, not a density function.
-                let noise = self.noise_source(req_field(v, "argument", ty), ty);
+                // Noise-params id, not a density function. Three accepted
+                // shapes (cont-129): 26.3 field "noise" (the embedded vanilla
+                // shift_x/shift_z assets carry {"noise": "minecraft:offset"});
+                // 1.21.8 legacy field "argument"; and NEITHER — 1.21.2+ packs
+                // may omit the field entirely, vanilla semantics then pin the
+                // noise to minecraft:offset (the 24w40a field removal).
+                const DEFAULT_OFFSET: &str = "minecraft:offset";
+                let noise = self.noise_source(
+                    v.get("noise")
+                        .or_else(|| v.get("argument"))
+                        .unwrap_or(&Json::Str(DEFAULT_OFFSET.to_string())),
+                    ty,
+                );
                 if ty == "minecraft:shift_a" {
                     self.push(DfNode::ShiftA { noise })
                 } else {
@@ -1473,6 +1484,68 @@ mod tests {
         }
         for c in wg.df_arena[idx].children() {
             collect(wg, c, out, seen);
+        }
+    }
+
+    /// cont-129 pack-path revival: shift_a/shift_b must accept all three
+    /// field shapes — 26.3 "noise" (the embedded vanilla shift_x/shift_z
+    /// assets), 1.21.8 legacy "argument", and NEITHER (1.21.2+ packs omit
+    /// it; vanilla semantic pins minecraft:offset). Tectonic+Terralith
+    /// reference vanilla shift_x/shift_z ids, so the old argument-only
+    /// parser panicked at ctx build and the whole world fell back to
+    /// CHIMERA MODE (vanilla terrain under pack biomes).
+    #[test]
+    fn shift_ab_accepts_all_field_shapes() {
+        let forms: &[(&str, &str, bool)] = &[
+            // (json body, expected debug label, expect ShiftA)
+            (
+                r#"{"type":"minecraft:shift_a","noise":"minecraft:offset"}"#,
+                "shift_a minecraft:offset",
+                true,
+            ),
+            (
+                r#"{"type":"minecraft:shift_b","argument":"minecraft:offset"}"#,
+                "shift_b minecraft:offset",
+                false,
+            ),
+            (
+                r#"{"type":"minecraft:shift_a"}"#,
+                "shift_a minecraft:offset",
+                true,
+            ),
+        ];
+        for (i, (body, label, is_a)) in forms.iter().enumerate() {
+            let mut assets = Assets::new();
+            assets.insert(
+                "test/worldgen/density_function/df/shift_form.json",
+                body.as_bytes().to_vec(),
+            );
+            assets.insert(
+                "test/worldgen/noise_settings/overworld.json",
+                br#"{
+                    "sea_level": 63,
+                    "noise": {"min_y": -64, "height": 384},
+                    "noise_router": {"final_density": "test:df/shift_form"}
+                }"#
+                .to_vec(),
+            );
+            let wg = WorldGen::load_with_assets(
+                &assets,
+                "test/worldgen/noise_settings/overworld.json",
+            );
+            let root = *wg.root_indices.get("test:df/shift_form").unwrap_or_else(|| {
+                panic!("form #{i}: shift_form root missing (have {:?})", wg.root_indices.keys())
+            });
+            let shape = wg.tree_shape(root, 2);
+            assert!(
+                shape.contains(label),
+                "form #{i}: expected '{label}' in tree shape, got: {shape}"
+            );
+            assert_eq!(
+                *is_a,
+                matches!(wg.df_arena[root], DfNode::ShiftA { .. }),
+                "form #{i}: wrong node kind"
+            );
         }
     }
 }

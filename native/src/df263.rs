@@ -803,7 +803,9 @@ fn pack_corner_pos(x: i32, y: i32, z: i32) -> Option<i64> {
 
 #[inline]
 fn corner_key0(gen: u64, ptr: u64) -> u64 {
-    debug_assert!(gen < (1 << 16));
+    // u64::MAX = the test/bench sentinel (forced engagement) — it folds to
+    // gen&0xFFFF == 0xFFFF in the key and must not trip the debug bound.
+    debug_assert!(gen == u64::MAX || gen < (1 << 16));
     debug_assert!(ptr < (1 << 48));
     ((gen & 0xFFFF) << 48) | ptr
 }
