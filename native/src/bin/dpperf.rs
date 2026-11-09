@@ -138,6 +138,10 @@ fn main() {
     let mut buf = vec![0u16; OUT_LEN];
 
     let sprof = std::env::var("CRUS_SPROF").is_ok();
+    if std::env::var("CRUS_DPROF").as_deref() == Ok("1") {
+        crussty_chunkgen::density::PROF_ON
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     if sprof {
         crussty_chunkgen::surface_fill::SR_PROF_ON
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -197,6 +201,25 @@ fn main() {
         *samples.last().unwrap(),
         sink as f64 * 0.0
     );
+    if std::env::var("CRUS_DPROF").as_deref() == Ok("1") {
+        use crussty_chunkgen::density as d;
+        let g = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed);
+        println!(
+            "dprof: noise {:.2}ms/{} calls | blend {:.2}ms/{} calls | col hit/miss {}/{}",
+            g(&d::PROF_NOISE_NS) as f64 / 1e6,
+            g(&d::PROF_NOISE_CALLS),
+            g(&d::PROF_BLEND_NS) as f64 / 1e6,
+            g(&d::PROF_BLEND_CALLS),
+            g(&d::COL_HITS),
+            g(&d::COL_MISSES),
+        );
+    }
+    if std::env::var("CRUS_PROFILE").as_deref() == Ok("1") {
+        println!(
+            "{}",
+            crussty_chunkgen::nochunk::jni_prof_snapshot()
+        );
+    }
     if sprof {
         use crussty_chunkgen::surface_fill as sf;
         let g = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed);
@@ -225,3 +248,5 @@ fn main() {
         );
     }
 }
+
+// --- sub-phase probe: eval-only timing of slot0 plane (CRUS_EVALPROF=1) ---

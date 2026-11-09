@@ -144,6 +144,36 @@ fn main() {
         }
         noise_names.sort();
         noise_names.dedup();
+        // octave inventory of the slot-0 subtree's noise nodes
+        let mut oct_inv: Vec<(String, usize, usize)> = Vec::new();
+        {
+            let mut visit_oct = |idx: u32, st: &mut std::collections::HashSet<u32>, out: &mut Vec<(String, usize, usize)>| {
+                // iterative walk
+                let mut stack = vec![idx];
+                while let Some(i) = stack.pop() {
+                    if !st.insert(i) { continue; }
+                    match &c.arena[i as usize] {
+                        WKind::Noise { noise_id, .. } | WKind::ShiftedNoise { noise_id, .. } => {
+                            let nidx = c.noise_resolved[*noise_id as usize] as usize;
+                            let n = &env.noise.list[nidx];
+                            let oct = n.first.noise_levels.iter().filter(|x| x.is_some()).count()
+                                + n.second.noise_levels.iter().filter(|x| x.is_some()).count();
+                            out.push((c.noise_ids.get(*noise_id as usize).cloned().unwrap_or_default(), oct, nidx));
+                        }
+                        _ => {}
+                        _ => {}
+                    }
+                    for ch in c.arena[i as usize].children() {
+                        stack.push(ch);
+                    }
+                }
+            };
+            let mut seen = std::collections::HashSet::new();
+            visit_oct(c.interp_children[0], &mut seen, &mut oct_inv);
+            oct_inv.sort();
+            oct_inv.dedup();
+        }
+        println!("slot0 noise octave inventory: {:?}", oct_inv);
         println!(
             "slot0 subtree: y-variant nodes {n_yv} (col-cached {n_col}) | noise: col {n_noise_col}, yv {n_noise_yv} {:?} | splines yv {n_spline_yv}",
             noise_names

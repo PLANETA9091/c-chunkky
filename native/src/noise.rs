@@ -226,11 +226,75 @@ pub struct ImprovedNoise {
     pub yo: f64,
     pub zo: f64,
     pub p: [u8; 256],
+    /// Dword-expanded copy of `p` for AVX-512 gather walks (perm_d[i] ==
+    /// p[i] as i32; kept in lockstep by the constructors below). Gather
+    /// indices are masked to 0..255 by the kernel, mirroring p()'s & 255.
+    pub perm_d: [i32; 256],
     /// Unique per construction; indexes the per-thread lattice-cell memo.
     /// Clones share the id (identical p/xo/yo/zo -> identical pure function,
     /// so memo semantics carry over safely).
     pub id: u32,
 }
+
+/// Flat per-component gradient tables for gather-based grad matrix builds
+/// (gx = GX16[g & 15]; same rows as GRADIENT).
+pub const GX16: [i32; 16] = {
+    let mut t = [0i32; 16];
+    let mut i = 0;
+    while i < 16 {
+        t[i] = GRADIENT[i][0];
+        i += 1;
+    }
+    t
+};
+pub const GY16: [i32; 16] = {
+    let mut t = [0i32; 16];
+    let mut i = 0;
+    while i < 16 {
+        t[i] = GRADIENT[i][1];
+        i += 1;
+    }
+    t
+};
+pub const GZ16: [i32; 16] = {
+    let mut t = [0i32; 16];
+    let mut i = 0;
+    while i < 16 {
+        t[i] = GRADIENT[i][2];
+        i += 1;
+    }
+    t
+};
+
+/// 256-entry per-component gradient tables: G256X[g] == GRADIENT[g & 15][0].
+/// Lets the gather kernel skip the & 15 masking step.
+pub const G256X: [i32; 256] = {
+    let mut t = [0i32; 256];
+    let mut i = 0;
+    while i < 256 {
+        t[i] = GRADIENT[i & 15][0];
+        i += 1;
+    }
+    t
+};
+pub const G256Y: [i32; 256] = {
+    let mut t = [0i32; 256];
+    let mut i = 0;
+    while i < 256 {
+        t[i] = GRADIENT[i & 15][1];
+        i += 1;
+    }
+    t
+};
+pub const G256Z: [i32; 256] = {
+    let mut t = [0i32; 256];
+    let mut i = 0;
+    while i < 256 {
+        t[i] = GRADIENT[i & 15][2];
+        i += 1;
+    }
+    t
+};
 
 // ---- per-octave lattice-cell memo (bit-exact pure-function cache) ----
 // The 8-corner permutation walk depends only on (p-table, xi, yi, zi).
@@ -553,6 +617,11 @@ impl ImprovedNoise {
     /// batch; per lane only the Y dot term and the lerp3 run. Lane-identical
     /// to noise_col4_same_avx2 (same op order, no FMA, no reassociation).
     #[cfg(target_arch = "x86_64")]
+    pub fn noise_col8_same_pub(&self, st: &OctColState, dy: &[f64; 8]) -> [f64; 8] {
+        unsafe { self.noise_col8_same_avx512(st, dy) }
+    }
+
+    #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx512f")]
     unsafe fn noise_col8_same_avx512(&self, st: &OctColState, dy: &[f64; 8]) -> [f64; 8] {
         use std::arch::x86_64::*;
@@ -571,6 +640,134 @@ impl ImprovedNoise {
                 _mm512_add_pd(_mm512_set1_pd(st.t0[c]), t1),
                 _mm512_set1_pd(st.t2[c]),
             );
+        }
+        let r0 = lerp_v512(fxv, vc[0], vc[1]);
+        let r1 = lerp_v512(fxv, vc[2], vc[3]);
+        let r01 = lerp_v512(fy, r0, r1);
+        let r2 = lerp_v512(fxv, vc[4], vc[5]);
+        let r3 = lerp_v512(fxv, vc[6], vc[7]);
+        let r23 = lerp_v512(fy, r2, r3);
+        let res = lerp_v512(fzv, r01, r23);
+        let mut out = [0f64; 8];
+        _mm512_storeu_pd(out.as_mut_ptr(), res);
+        out
+    }
+
+    /// 8-lane column eval with AVX-512-vectorized y prep (wrap/floor/frac
+    /// hoisted into the vector unit). Bit-exact vs noise_col8: every lane op
+    /// is the same IEEE operation as the scalar prep (wrap_v512 mirrors the
+    /// scalar wrap, floorpd mirrors mth_floor's f64 floor, the i32 narrowing
+    /// happens on the ALREADY-integral floor value), and the dispatch +
+    /// value kernels are the very same functions. Caller must ensure
+    /// avx512_selected(); gated by CRUS_NN_VEC=0.
+    #[cfg(target_arch = "x86_64")]
+    pub fn noise_col8_vec(&self, st: &mut OctColState, wy: &[f64; 8]) -> [f64; 8] {
+        unsafe { self.noise_col8_vec_avx512(st, wy) }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f")]
+    unsafe fn noise_col8_vec_avx512(&self, st: &mut OctColState, wy: &[f64; 8]) -> [f64; 8] {
+        use std::arch::x86_64::*;
+        let yv = _mm512_add_pd(_mm512_loadu_pd(wy.as_ptr()), _mm512_set1_pd(self.yo));
+        let bv = _mm512_roundscale_pd::<{ _MM_FROUND_TO_NEG_INF }>(yv);
+        let dyv = _mm512_sub_pd(yv, bv);
+        let mut b = [0f64; 8];
+        let mut dy = [0f64; 8];
+        _mm512_storeu_pd(b.as_mut_ptr(), bv);
+        _mm512_storeu_pd(dy.as_mut_ptr(), dyv);
+        let mut yi = [0i32; 8];
+        for l in 0..8 {
+            yi[l] = b[l] as i32;
+        }
+        let same = yi[0] == yi[1]
+            && yi[1] == yi[2]
+            && yi[2] == yi[3]
+            && yi[3] == yi[4]
+            && yi[4] == yi[5]
+            && yi[5] == yi[6]
+            && yi[6] == yi[7];
+        if same {
+            if yi[0] != st.cell_yi {
+                self.col_walk(st, yi[0]);
+            }
+            unsafe {
+                return self.noise_col8_same_avx512(st, &dy);
+            }
+        }
+        st.cell_yi = i32::MIN;
+        if mixed_gather_enabled() {
+            unsafe { return self.noise_col8_mixed_v(st, &yi, &dy) };
+        }
+        unsafe { self.noise_col8_mixed_avx512(st, &yi, &dy) }
+    }
+
+    /// cont-130: gather-based mixed-y path. Replaces the per-lane scalar
+    /// perm walks + the scalar 64-lookup gradient-matrix build with AVX-512
+    /// gathers (perm_d rows and 256-wide gradient tables). Bit-exact: every
+    /// gathered value is the same pure lookup the scalar walk produces; the
+    /// dot/lerp math below is op-for-op the mixed kernel. Kill-switch
+    /// CRUS_MIXGATHER=0.
+    #[cfg(target_arch = "x86_64")]
+    pub fn noise_col8_mixed_v(&self, st: &OctColState, yi: &[i32; 8], dy: &[f64; 8]) -> [f64; 8] {
+        unsafe { self.noise_col8_mixed_v_avx512(st, yi, dy) }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f")]
+    unsafe fn noise_col8_mixed_v_avx512(
+        &self,
+        st: &OctColState,
+        yi: &[i32; 8],
+        dy: &[f64; 8],
+    ) -> [f64; 8] {
+        use std::arch::x86_64::*;
+        // ---- gather the per-lane perm rows (p(): index & 255) ----
+        let yi_v = _mm256_loadu_si256(yi.as_ptr() as *const __m256i);
+        let m255 = _mm256_set1_epi32(255);
+        let yim = _mm256_and_si256(yi_v, m255);
+        let p0v = _mm256_set1_epi32(st.p0);
+        let p1v = _mm256_set1_epi32(st.p1);
+        let onev = _mm256_set1_epi32(1);
+        let base = self.perm_d.as_ptr();
+        let i0v = _mm256_i32gather_epi32(base, _mm256_and_si256(_mm256_add_epi32(p0v, yim), m255), 4);
+        let i1v = _mm256_i32gather_epi32(base, _mm256_and_si256(_mm256_add_epi32(_mm256_add_epi32(p0v, yim), onev), m255), 4);
+        let j0v = _mm256_i32gather_epi32(base, _mm256_and_si256(_mm256_add_epi32(p1v, yim), m255), 4);
+        let j1v = _mm256_i32gather_epi32(base, _mm256_and_si256(_mm256_add_epi32(_mm256_add_epi32(p1v, yim), onev), m255), 4);
+        // ---- per-corner gradient gathers ----
+        // grads[c] = perm_d[bases[c & 3] + zbit] with bases [i0+zc, j0+zc,
+        // i1+zc, j1+zc]; static row select by c & 3, zbit = c >> 2.
+        let zcv = _mm256_set1_epi32(st.zi);
+        let b0 = _mm256_add_epi32(i0v, zcv);
+        let b1 = _mm256_add_epi32(j0v, zcv);
+        let b2 = _mm256_add_epi32(i1v, zcv);
+        let b3 = _mm256_add_epi32(j1v, zcv);
+        let dyv = _mm512_loadu_pd(dy.as_ptr());
+        let fy = smoothstep_v512(dyv); // RAW dy (smear quirk: corner uses wdy)
+        let fxv = _mm512_set1_pd(st.fx);
+        let fzv = _mm512_set1_pd(st.fz);
+        let dxv = _mm512_set1_pd(st.dx);
+        let dzv = _mm512_set1_pd(st.dz);
+        let one = _mm512_set1_pd(1.0);
+        let mut vc = [_mm512_setzero_pd(); 8];
+        for c in 0..8usize {
+            let rows = [b0, b1, b2, b3];
+            let gz_add = (c >> 2) as i32;
+            let gidx = _mm256_add_epi32(rows[c & 3], _mm256_set1_epi32(gz_add));
+            let g = _mm256_and_si256(_mm256_i32gather_epi32(base, _mm256_and_si256(gidx, m255), 4), m255);
+            let gxp = G256X.as_ptr();
+            let gyp = G256Y.as_ptr();
+            let gzp = G256Z.as_ptr();
+            let gx = _mm512_cvtepi32_pd(_mm256_i32gather_epi32(gxp, g, 4));
+            let gy = _mm512_cvtepi32_pd(_mm256_i32gather_epi32(gyp, g, 4));
+            let gz = _mm512_cvtepi32_pd(_mm256_i32gather_epi32(gzp, g, 4));
+            let xv = if c & 1 != 0 { _mm512_sub_pd(dxv, one) } else { dxv };
+            let yv = if c & 2 != 0 { _mm512_sub_pd(dyv, one) } else { dyv };
+            let zv = if c & 4 != 0 { _mm512_sub_pd(dzv, one) } else { dzv };
+            let t0 = _mm512_mul_pd(gx, xv);
+            let t1 = _mm512_mul_pd(gy, yv);
+            let t2 = _mm512_mul_pd(gz, zv);
+            vc[c] = _mm512_add_pd(_mm512_add_pd(t0, t1), t2);
         }
         let r0 = lerp_v512(fxv, vc[0], vc[1]);
         let r1 = lerp_v512(fxv, vc[2], vc[3]);
@@ -654,9 +851,11 @@ impl ImprovedNoise {
             yo: 0.0,
             zo: 0.0,
             p: [0; 256],
+            perm_d: [0; 256],
             id: NEXT_NOISE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         };
         s.init(rng);
+        s.sync_perm_d();
         s
     }
 
@@ -666,10 +865,19 @@ impl ImprovedNoise {
             yo: 0.0,
             zo: 0.0,
             p: [0; 256],
+            perm_d: [0; 256],
             id: NEXT_NOISE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         };
         s.init_legacy(rng);
+        s.sync_perm_d();
         s
+    }
+
+    /// Keep the gather table in lockstep with the byte permutation.
+    pub fn sync_perm_d(&mut self) {
+        for i in 0..256 {
+            self.perm_d[i] = self.p[i] as i32;
+        }
     }
 
     fn init(&mut self, rng: &mut XoroshiroRandomSource) {
@@ -1411,6 +1619,34 @@ impl ImprovedNoise {
     /// 8-lane column variant of noise_5_batch_col (see it for the semantics).
     /// Dispatches to the AVX-512 8-wide kernel when selected, else 2x 4-wide
     /// (bit-identical per lane either way).
+    /// Scalar y prep shared by the vectorized entry (exact original loop).
+    fn noise_5_prep_scalar(
+        &self,
+        _st: &mut OctColState,
+        wy: &[f64; 8],
+        y_scale: f64,
+        y_max: &[f64; 8],
+        yi: &mut [i32; 8],
+        dy: &mut [f64; 8],
+        wdy: &mut [f64; 8],
+    ) {
+        for l in 0..8 {
+            let yv = wy[l] + self.yo;
+            let b = mth_floor(yv);
+            yi[l] = b;
+            let d = yv - b as f64;
+            dy[l] = d;
+            if y_scale != 0.0 {
+                let ym = y_max[l];
+                let d6 = if ym >= 0.0 && ym < d { ym } else { d };
+                let d7 = (d6 / y_scale + 1.0000000116860974e-07).floor() * y_scale;
+                wdy[l] = d - d7;
+            } else {
+                wdy[l] = d;
+            }
+        }
+    }
+
     pub fn noise_5_batch_col8(
         &self,
         st: &mut OctColState,
@@ -1431,24 +1667,55 @@ impl ImprovedNoise {
         let mut yi = [0i32; 8];
         let mut dy = [0f64; 8];
         let mut wdy = [0f64; 8];
-        for l in 0..8 {
-            let yv = wy[l] + self.yo;
-            let b = mth_floor(yv);
-            yi[l] = b;
-            let d = yv - b as f64;
-            dy[l] = d;
-            if y_scale != 0.0 {
-                let ym = y_max[l];
-                let d6 = if ym >= 0.0 && ym < d { ym } else { d };
-                let d7 = (d6 / y_scale + 1.0000000116860974e-07).floor() * y_scale;
-                wdy[l] = d - d7;
-            } else {
-                wdy[l] = d;
+        #[cfg(target_arch = "x86_64")]
+        if crate::noise::avx512_selected() && blend_veccol_enabled() {
+            // cont-130: AVX-512 y prep (floor/frac/quantize). Every op is
+            // the same lane-wise IEEE operation as the scalar loop below
+            // (div by the broadcast y_scale is the same per-lane division;
+            // roundscale-to-neg-inf == f64::floor on our ranges).
+            unsafe {
+                use std::arch::x86_64::*;
+                let yv = _mm512_add_pd(_mm512_loadu_pd(wy.as_ptr()), _mm512_set1_pd(self.yo));
+                let bv = _mm512_roundscale_pd::<{ _MM_FROUND_TO_NEG_INF }>(yv);
+                let dyv = _mm512_sub_pd(yv, bv);
+                _mm512_storeu_pd(dy.as_mut_ptr(), dyv);
+                let mut b = [0f64; 8];
+                _mm512_storeu_pd(b.as_mut_ptr(), bv);
+                for l in 0..8 {
+                    yi[l] = b[l] as i32;
+                }
+                if y_scale != 0.0 {
+                    let ymv = _mm512_loadu_pd(y_max.as_ptr());
+                    let zero = _mm512_setzero_pd();
+                    // d6 = (ym >= 0 && ym < d) ? ym : d
+                    let ge0 = _mm512_cmp_pd_mask(ymv, zero, _CMP_GE_OQ);
+                    let ltd = _mm512_cmp_pd_mask(ymv, dyv, _CMP_LT_OQ);
+                    let sel = ge0 & ltd;
+                    let d6 = _mm512_mask_mov_pd(dyv, sel, ymv);
+                    let d7 = _mm512_mul_pd(
+                        _mm512_roundscale_pd::<{ _MM_FROUND_TO_NEG_INF }>(_mm512_add_pd(
+                            _mm512_div_pd(d6, _mm512_set1_pd(y_scale)),
+                            _mm512_set1_pd(1.0000000116860974e-07),
+                        )),
+                        _mm512_set1_pd(y_scale),
+                    );
+                    let wdyv = _mm512_sub_pd(dyv, d7);
+                    _mm512_storeu_pd(wdy.as_mut_ptr(), wdyv);
+                } else {
+                    _mm512_storeu_pd(wdy.as_mut_ptr(), dyv);
+                }
             }
+        } else {
+            self.noise_5_prep_scalar(st, wy, y_scale, y_max, &mut yi, &mut dy, &mut wdy);
         }
+        #[cfg(not(target_arch = "x86_64"))]
+        self.noise_5_prep_scalar(st, wy, y_scale, y_max, &mut yi, &mut dy, &mut wdy);
         #[cfg(target_arch = "x86_64")]
         {
             if crate::noise::avx512_selected() {
+                if blend_gather_enabled() {
+                    unsafe { return self.noise_5_col8_gather(st, &yi, &dy, &wdy) };
+                }
                 unsafe { return self.noise_5_col8_avx512(st, &yi, &dy, &wdy) };
             }
         }
@@ -1476,6 +1743,90 @@ impl ImprovedNoise {
     /// noise_5_col_avx2 (same op order, no FMA, no reassociation).
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx512f")]
+    /// cont-130: gather-based noise_5 col8 (blend path). Same contract as
+    /// noise_5_col8_avx512; the per-lane scalar walks + 64-lookup gradient
+    /// matrix are replaced by AVX-512 gathers on perm_d / G256 tables.
+    /// Bit-exact: gathered values == walked values (pure lookups), dot/lerp
+    /// math op-for-op identical. Kill-switch CRUS_BLENDGATHER=0.
+    #[cfg(target_arch = "x86_64")]
+    pub fn noise_5_col8_gather(
+        &self,
+        st: &OctColState,
+        yi: &[i32; 8],
+        dy: &[f64; 8],
+        wdy: &[f64; 8],
+    ) -> [f64; 8] {
+        unsafe { self.noise_5_col8_gather_avx512(st, yi, dy, wdy) }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f")]
+    unsafe fn noise_5_col8_gather_avx512(
+        &self,
+        st: &OctColState,
+        yi: &[i32; 8],
+        dy: &[f64; 8],
+        wdy: &[f64; 8],
+    ) -> [f64; 8] {
+        use std::arch::x86_64::*;
+        let yi_v = _mm256_loadu_si256(yi.as_ptr() as *const __m256i);
+        let m255 = _mm256_set1_epi32(255);
+        let yim = _mm256_and_si256(yi_v, m255);
+        let p0v = _mm256_set1_epi32(st.p0);
+        let p1v = _mm256_set1_epi32(st.p1);
+        let onev = _mm256_set1_epi32(1);
+        let base = self.perm_d.as_ptr();
+        let i0v = _mm256_i32gather_epi32(base, _mm256_and_si256(_mm256_add_epi32(p0v, yim), m255), 4);
+        let i1v = _mm256_i32gather_epi32(base, _mm256_and_si256(_mm256_add_epi32(_mm256_add_epi32(p0v, yim), onev), m255), 4);
+        let j0v = _mm256_i32gather_epi32(base, _mm256_and_si256(_mm256_add_epi32(p1v, yim), m255), 4);
+        let j1v = _mm256_i32gather_epi32(base, _mm256_and_si256(_mm256_add_epi32(_mm256_add_epi32(p1v, yim), onev), m255), 4);
+        let zcv = _mm256_set1_epi32(st.zi);
+        let b0 = _mm256_add_epi32(i0v, zcv);
+        let b1 = _mm256_add_epi32(j0v, zcv);
+        let b2 = _mm256_add_epi32(i1v, zcv);
+        let b3 = _mm256_add_epi32(j1v, zcv);
+        let dyv = _mm512_loadu_pd(dy.as_ptr());
+        let wdyv = _mm512_loadu_pd(wdy.as_ptr());
+        let fy = smoothstep_v512(dyv); // RAW dy (smear quirk: corner uses wdy)
+        let fxv = _mm512_set1_pd(st.fx);
+        let fzv = _mm512_set1_pd(st.fz);
+        let dxv = _mm512_set1_pd(st.dx);
+        let dzv = _mm512_set1_pd(st.dz);
+        let one = _mm512_set1_pd(1.0);
+        let mut vc = [_mm512_setzero_pd(); 8];
+        for c in 0..8usize {
+            let rows = [b0, b1, b2, b3];
+            let gz_add = (c >> 2) as i32;
+            let gidx = _mm256_add_epi32(rows[c & 3], _mm256_set1_epi32(gz_add));
+            let g = _mm256_and_si256(_mm256_i32gather_epi32(base, _mm256_and_si256(gidx, m255), 4), m255);
+            let gxp = G256X.as_ptr();
+            let gyp = G256Y.as_ptr();
+            let gzp = G256Z.as_ptr();
+            let gx = _mm512_cvtepi32_pd(_mm256_i32gather_epi32(gxp, g, 4));
+            let gy = _mm512_cvtepi32_pd(_mm256_i32gather_epi32(gyp, g, 4));
+            let gz = _mm512_cvtepi32_pd(_mm256_i32gather_epi32(gzp, g, 4));
+            let xv = if c & 1 != 0 { _mm512_sub_pd(dxv, one) } else { dxv };
+            // noise_5 quirk: the corner y term uses WDY (the weird-dy), the
+            // smoothstep interpolant uses RAW dy.
+            let yv = if c & 2 != 0 { _mm512_sub_pd(wdyv, one) } else { wdyv };
+            let zv = if c & 4 != 0 { _mm512_sub_pd(dzv, one) } else { dzv };
+            let t0 = _mm512_mul_pd(gx, xv);
+            let t1 = _mm512_mul_pd(gy, yv);
+            let t2 = _mm512_mul_pd(gz, zv);
+            vc[c] = _mm512_add_pd(_mm512_add_pd(t0, t1), t2);
+        }
+        let r0 = lerp_v512(fxv, vc[0], vc[1]);
+        let r1 = lerp_v512(fxv, vc[2], vc[3]);
+        let r01 = lerp_v512(fy, r0, r1);
+        let r2 = lerp_v512(fxv, vc[4], vc[5]);
+        let r3 = lerp_v512(fxv, vc[6], vc[7]);
+        let r23 = lerp_v512(fy, r2, r3);
+        let res = lerp_v512(fzv, r01, r23);
+        let mut out = [0f64; 8];
+        _mm512_storeu_pd(out.as_mut_ptr(), res);
+        out
+    }
+
     unsafe fn noise_5_col8_avx512(
         &self,
         st: &OctColState,
@@ -1651,7 +2002,7 @@ pub struct PerlinNoise {
     pub max_value: f64,
 }
 
-fn wrap(d: f64) -> f64 {
+pub fn wrap(d: f64) -> f64 {
     d - (d / 33554432.0 + 0.5).floor() * 33554432.0
 }
 
@@ -1669,6 +2020,23 @@ unsafe fn wrap_v(d: std::arch::x86_64::__m256d) -> std::arch::x86_64::__m256d {
     );
     let f = _mm256_floor_pd(q);
     _mm256_sub_pd(d, _mm256_mul_pd(f, _mm256_set1_pd(33554432.0)))
+}
+
+/// 8-wide lane-exact wrap (see wrap_v for the bit-exactness argument:
+/// 1/2^25 is an exact power of two, so mul replaces div lane-identically).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx512f")]
+unsafe fn wrap_v512(d: std::arch::x86_64::__m512d) -> std::arch::x86_64::__m512d {
+    use std::arch::x86_64::*;
+    let q = _mm512_add_pd(
+        _mm512_mul_pd(d, _mm512_set1_pd(2.98023223876953125e-8)),
+        _mm512_set1_pd(0.5),
+    );
+    // floorpd = roundscale to -inf (identical rounding, no -0.0 wrinkle for
+    // our ranges: q > -2^31 everywhere here, matches scalar f64::floor).
+    let f = _mm512_roundscale_pd::<{ _MM_FROUND_TO_NEG_INF }>(q);
+    _mm512_sub_pd(d, _mm512_mul_pd(f, _mm512_set1_pd(33554432.0)))
 }
 
 /// A/B switch for the octave-walk pairing (perf experiment; default on,
@@ -1905,6 +2273,40 @@ impl PerlinNoise {
                     let use8 = crate::noise::avx512_selected();
                     #[cfg(not(target_arch = "x86_64"))]
                     let use8 = false;
+                    if use8 && N == 8 && nn_vec_prep_enabled() {
+                        // cont-130: AVX-512-vectorized y prep (wrap/floor/
+                        // frac in the vector unit; the wrap by an exact
+                        // power-of-two factor and the floor are lane-wise
+                        // the same IEEE ops as the scalar loop above).
+                        // Bit-exact: covered by nn_col_vec_parity tests.
+                        #[cfg(target_arch = "x86_64")]
+                        {
+                            let yv: std::arch::x86_64::__m512d = unsafe {
+                                wrap_v512(_mm512_mul_pd(
+                                    _mm512_loadu_pd(y.as_ptr()),
+                                    _mm512_set1_pd(input_factor),
+                                ))
+                            };
+                            let mut wy8 = [0f64; 8];
+                            unsafe { _mm512_storeu_pd(wy8.as_mut_ptr(), yv) };
+
+                            let r = nl.noise_col8_vec(st, &wy8);
+                            v.copy_from_slice(&r);
+                            // d[l] += amplitude * v * value_factor (same
+                            // left-assoc order as the scalar accumulate).
+                            let out = unsafe {
+                                let g8 = _mm512_set1_pd(self.amplitudes[i]);
+                                let f8 = _mm512_set1_pd(value_factor);
+                                let rv = _mm512_loadu_pd(r.as_ptr());
+                                let dv = _mm512_loadu_pd(d.as_ptr());
+                                _mm512_add_pd(dv, _mm512_mul_pd(_mm512_mul_pd(g8, rv), f8))
+                            };
+                            unsafe { _mm512_storeu_pd(d.as_mut_ptr(), out) };
+                        }
+                        input_factor *= 2.0;
+                        value_factor /= 2.0;
+                        continue;
+                    }
                     if use8 {
                         let mut g = 0;
                         while g < N {
@@ -1981,7 +2383,58 @@ pub struct NormalNoise {
 // pre-image), so a hit returns bit-identical bytes by construction. The
 // per-thread storage needs no locks and no API plumbing (the uniformity
 // check is done inside get_value_batch).
+
+// Path-selection counters (CRUS_NPROF): generic vs column perlin paths.
+pub static NN_COL_ENGAGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static NN_COL_BLOCKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static NNPROF_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub const COL_MAX_OCTAVES: usize = 20;
+
+/// cont-130 A/B: vectorized per-octave y prep on the NormalNoise column
+/// path (default on; CRUS_NN_VEC=0 restores the scalar prep).
+fn nn_vec_prep_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("CRUS_NN_VEC").as_deref() != Ok("0"))
+}
+
+/// cont-130 A/B: gather-based mixed-y cell walk (default on; CRUS_MIXGATHER=0
+/// restores the scalar per-lane walks).
+fn mixed_gather_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("CRUS_MIXGATHER").as_deref() != Ok("0"))
+}
+
+/// cont-130 A/B: gather-based noise_5 col8 on the blend path (default on;
+/// CRUS_BLENDGATHER=0 restores the scalar walk kernel).
+fn blend_gather_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("CRUS_BLENDGATHER").as_deref() != Ok("0"))
+}
+
+/// cont-130 A/B: column-state memo for the blend MAIN octaves on the 512
+/// path (default on; CRUS_BLEND_MAINCOL=0 restores the generic kernel).
+fn blend_maincol_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("CRUS_BLEND_MAINCOL").as_deref() != Ok("0"))
+}
+
+/// cont-130 honest NEGATIVE: AVX-512 vectorized y prep inside
+/// noise_5_batch_col8 measured SLOWER than the scalar prep (the per-lane
+/// div-quantize pipelines better in scalar; vector div throughput loses).
+/// Default OFF; CRUS_BLEND_VECCOL=1 forces the vector variant (bit-exact,
+/// kept for CI A/B).
+fn blend_veccol_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("CRUS_BLEND_VECCOL").as_deref() == Ok("1"))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(unused_imports)]
+use std::arch::x86_64::{
+    _mm512_add_pd, _mm512_loadu_pd, _mm512_mul_pd, _mm512_set1_pd, _mm512_storeu_pd,
+    _mm512_sub_pd, _MM_FROUND_TO_NEG_INF,
+};
 
 static NEXT_NORMAL_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -3277,26 +3730,42 @@ impl BlendedNoise {
         }
 
         // main noise loop, octaves 0..8 (REVERSED lookup [7-i]); x/z are
-        // column-constant, y is per lane: generic 8-wide kernel.
+        // column-CONSTANT, so the per-octave lattice state memoizes in the
+        // same TLS slots the 4-wide path uses (col_base+32..40) — cont-130:
+        // the 512 path previously re-walked the x/z lattice on EVERY call
+        // (generic kernel), while the 4-wide path memoized; the col kernel
+        // is lane-identical to the generic one (blended_col8 parity tests).
         let mut d10 = [0f64; 8];
         let mut amp = 1.0f64;
-        for i in 0..8usize {
-            if let Some(oct) = self.main_noise.get_octave_noise(i) {
-                let mut wy = [0f64; 8];
-                let mut ymax = [0f64; 8];
-                for l in 0..8 {
-                    wy[l] = wrap(d4[l] * amp);
-                    ymax[l] = d4[l] * amp;
-                }
-                let wx = wrap(d3 * amp);
-                let wz = wrap(d5 * amp);
-                let v = oct.noise_5_batch8(&[wx; 8], &wy, &[wz; 8], d7 * amp, &ymax);
-                for l in 0..8 {
-                    d10[l] += v[l] / amp;
-                }
+        BLEND_COL_CACHE.with(|m| {
+            let mut m = m.borrow_mut();
+            let need = col_base + BLEND_COL_STRIDE;
+            if m.len() < need {
+                m.resize(need, OctColState::INVALID);
             }
-            amp /= 2.0;
-        }
+            for i in 0..8usize {
+                if let Some(oct) = self.main_noise.get_octave_noise(i) {
+                    let mut wy = [0f64; 8];
+                    let mut ymax = [0f64; 8];
+                    for l in 0..8 {
+                        wy[l] = wrap(d4[l] * amp);
+                        ymax[l] = d4[l] * amp;
+                    }
+                    let wx = wrap(d3 * amp);
+                    let wz = wrap(d5 * amp);
+                    let st = &mut m[col_base + 32 + i];
+                    let v = if blend_maincol_enabled() {
+                        oct.noise_5_batch_col8(st, wx, wz, &wy, d7 * amp, &ymax)
+                    } else {
+                        oct.noise_5_batch8(&[wx; 8], &wy, &[wz; 8], d7 * amp, &ymax)
+                    };
+                    for l in 0..8 {
+                        d10[l] += v[l] / amp;
+                    }
+                }
+                amp /= 2.0;
+            }
+        });
         let mut d11b = [0f64; 8];
         let mut skip_min = [false; 8];
         let mut skip_max = [false; 8];
