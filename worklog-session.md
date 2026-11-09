@@ -7317,3 +7317,50 @@ Stage Summary:
   A/B surface/carvers/biome/orebase/ore все bit-equal, e2e пар4 22.8ms/ч, пар6, 48x48 окно
   21.69ms/ч — в бэнде cont-129 20.84-21.91, Gen263-путь не изменился по значению/таймингам).
   Пак-филл (наш фронт): локальный dpperf 6.42 -> 5.51ms p50 (-14%).
+
+---
+## cont-131 (2026-11-09): ПАК-ПУТЬ — арифметический проход по ядрам шума: gather-walk, blend col-state, векторный prep
+Agent: Super Z (main)
+Task: «продолжи ещё жощще оптимизировать с аритметиками и вообщем всем» — пак-филл (ChunkGen/DEnv)
+после revival (cont-129): p50 5.65ms; цель e2e <= 6ms с terralife+tectonic.
+
+Work Log:
+- ИНСТРУМЕНТЫ: scripts/merge_dpx.py (точная реплика прод-мержа пак-ов из CrusstyChunkGenerator:
+  pack.mcmeta top-level overlays.entries по pack_format, later-pack-overrides; merged-сет 2195 файлов
+  workdir/dpx); bench_dpnoise (микробенч ядер на реалистичном slice-паттерне 49 углов/z-ряд); yiprobe,
+  cal (калибровка: VM ~3.56GHz); dpperf + CRUS_PROFILE (jni_prof фазы) + CRUS_DPROF (density noise/blend).
+- ДИАГНОСТИКА: jni_prof: slice 2.45ms (64%), material 0.70, cellfill 0.34, select 0.08; surface-хвост
+  = fill_wall - engine ≈ 2.0ms (93k compute-вызовов/чанк: stone_depth 39.5k, biome 27k, vgrad 14.5k,
+  temp 9.6k). dprof: noise 1.50ms/чанк (3849 8-lane вызовов ≈ 47.5ns/lane/узел), blend 1.14ms/чанк
+  (244 вызова × 8 лейн = 583ns/pt — vanilla-инхерентно ~40 октав). col-путь engaged 99.7% (было
+  подозрение на generic — снято счётчиками). slot-0 = 740ns/pt: noise ~380 + blend ~292 + interp ~60.
+- КЛЮЧЕВЫЕ ИЗМЕРЕНИЯ: same-cell ядро 15.8ns/call (2ns/pt) vs mixed 174.3ns/call (23.5ns/pt) —
+  при corner-pitch 8 и octave-step >= 0.25 ПОЧТИ ВСЕ octave-calls идут в mixed (same-cell почти
+  мёртв). walk_y_cell ~2-8 скалярных perm-прогулок/группу + 64-lookup градиентная матрица = жир.
+- РЕАЛИЗАЦИЯ (всё бит-точно, sinks identical): (1) perm_d [i32;256] в ImprovedNoise (dword-расширение
+  perm для gather) + G256X/Y/Z (256-широкие градиентные таблицы, skip &15); (2) noise_col8_mixed_v —
+  AVX-512 gather mixed-ядро: 4 row-gathers + 8 corner-grad gathers + 24 gradient gathers вместо
+  скалярных прогулок; 174.3 -> 95.9ns/call (-45%); (3) noise_5_col8_gather — то же для blend
+  min/max; (4) blend compute_batch8_col512 MAIN-октавы получили col-state (слоты col_base+32..40,
+  как в 4-wide пути — на AVX-512 машинах main шёл generic full-perlin каждый вызов!); (5)
+  get_value_batch_col N=8 — векторный y-prep (wrap_v512 + roundscale-floor + векторный аккумулятор,
+  lane-идентичные IEEE-опы). Kill-switches: CRUS_MIXGATHER/CRUS_BLENDGATHER/CRUS_BLEND_MAINCOL/
+  CRUS_NN_VEC (все =0 откатывают), CRUS_BLEND_VECCOL (honest-negative, дефолт OFF: векторный
+  div-quantize медленнее скалярного — scalar div пайплайнится лучше).
+- ЛОВУШКА ПРОБЫ: probe_avx512_width на шумной VM выбирает разную ширину G (8 vs 4) между ранами —
+  call-countы скачут 1.84x, бенчи несравнимы. Честные A/B только с пиннедом CRUS_AVX512.
+- ЗАМЕР (CRUS_AVX512=1 пиннед, n=96): OLD-ядра 6.76ms p50 -> NEW 5.95-5.99 (-12%); old-4wide
+  5.91 — на 4-wide выигрыша нет (там пер-октавный оверхед не доминирует).
+- ВЕРИФИКАЦИЯ: cargo test --lib 86/86; fill263golden md5 569ae81b1801005ef66cc44dc084fa6d
+  ИДЕНТИЧЕН; df263goldens OK (432 points, 7882 volume); коммит c1a0e9bd запушен, CI-гейты
+  должны подтвердить на гриде.
+
+Stage Summary:
+- Пак-филл 5.96ms p50 (2-core dev VM, pinned-512): slice 2.45 + material 0.70 + cellfill 0.34 +
+  surface ~2.0 + select 0.08. Ядра шума теперь на gather-пути (mixed -45% iso), blend main на
+  col-state.
+- СЛЕДУЮЩИЕ ФРОНТЫ (экономика от cont-131): (1) ROW-MAJOR slice walk — обработка целого z-ряда
+  (49-154 углов) за один вызов узла: амортизация TLS/key/prep 7x, gather-цепочки 7x, monotonic
+  cell-advance; оценка noise 380 -> ~120ns/pt, slice 2.45 -> ~1.1ms; (2) surface-хвост ~2.0ms
+  (93k вычислений — свежий per-kind NS-профиль); (3) material 0.70/cellfill 0.34; (4) deco-фронт
+  wrapper-v2 (Java-половина e2e, 15ms на CI-раннерах) — крупнейший резерв для цели e2e<=6ms.
