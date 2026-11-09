@@ -48,6 +48,14 @@ pub static SR_HEIGHTMAP_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 pub static SR_NOISE_EVALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static SR_TEST_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static SR_C_BIOME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+// cont-131: per-kind compute NS (CRUS_SPROF); reported by dpperf sprof kinds.
+pub static SR_NS_BIOME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_NS_NOISE_THR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_NS_STONE_DEPTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_NS_WATER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_NS_YABOVE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_NS_VGRAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SR_NS_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static SR_C_NOISE_THR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static SR_C_STONE_DEPTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static SR_C_WATER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -525,10 +533,19 @@ impl<'a> ColWalk<'a> {
                     ctr.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 if let Some(t0) = ct0 {
-                    SR_COMPUTE_NS.fetch_add(
-                        t0.elapsed().as_nanos() as u64,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
+                    let dt = t0.elapsed().as_nanos() as u64;
+                    SR_COMPUTE_NS.fetch_add(dt, std::sync::atomic::Ordering::Relaxed);
+                    use SrCond::*;
+                    let nstr = match &self.cfg.conds[ci] {
+                        Biome { .. } => &SR_NS_BIOME,
+                        NoiseThreshold { .. } => &SR_NS_NOISE_THR,
+                        StoneDepth { .. } => &SR_NS_STONE_DEPTH,
+                        Water { .. } => &SR_NS_WATER,
+                        YAbove { .. } => &SR_NS_YABOVE,
+                        VerticalGradient { .. } => &SR_NS_VGRAD,
+                        Temperature | AbovePreliminary | Hole | Steep | Not(_) => &SR_NS_TEMP,
+                    };
+                    nstr.fetch_add(dt, std::sync::atomic::Ordering::Relaxed);
                 }
                 match kind {
                     2 => self.q_cache[ci] = (self.q_counter, v),

@@ -7364,3 +7364,13 @@ Stage Summary:
   cell-advance; оценка noise 380 -> ~120ns/pt, slice 2.45 -> ~1.1ms; (2) surface-хвост ~2.0ms
   (93k вычислений — свежий per-kind NS-профиль); (3) material 0.70/cellfill 0.34; (4) deco-фронт
   wrapper-v2 (Java-половина e2e, 15ms на CI-раннерах) — крупнейший резерв для цели e2e<=6ms.
+
+## cont-131 доп. (surface per-kind NS + геометрия)
+- Геометрия пак-движка (CRUS_GEOM): cell 4x4, cell_count 4x96, plane = 5 z-рядов x 97 y-углов = 485
+  pts. ROW-MAJOR план: N=128 (паддинг 97), амортизация TLS/key/prep/gathers 97/8 ≈ 12x.
+- Surface-хвост per-kind NS (дпперф CRUS_SPROF, счётчики SR_NS_*; Instant-инфляция ~+40% в
+  профиле): stone_depth ~0.8ms/чанк (39.5k computes, 41%), biome ~0.6ms (27k, 30% — q_cache
+  даёт ~9 computes на кварт-селлу: подозрение на гранулярность q_counter или множественные
+  biome-conds в цепочках), vgrad ~0.32ms (14.5k), temp ~0.2ms (9.5k). Итог ~2.0ms реального
+  хвоста. СЛЕДУЮЩИЙ ШАГ: разбор biome-пересчётов на кварт (возможен x3 срез кэшем) и
+  stone_depth per-column depth-count memo.

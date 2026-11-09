@@ -1980,6 +1980,26 @@ impl<'e> ChunkGen<'e> {
     }
 
     /// Vanilla NoiseBasedChunkGenerator.doFill.
+    /// Diagnostic geometry dump (CRUS_GEOM=1 in dpperf): cell grid + slice
+    /// batch shape for the row-major planning work.
+    pub fn geom_dump(&self) -> String {
+        format!(
+            "geom: cell_width {} cell_height {} cell_count_xz {} cell_count_y {} cell_noise_min_y {} min_y {} sea {} slots {} slice_lanes {} | plane pts {} (z-rows {} x y-corners {})",
+            self.cell_width,
+            self.cell_height,
+            self.cell_count_xz,
+            self.cell_count_y,
+            self.cell_noise_min_y,
+            self.min_y,
+            self.sea_level,
+            self.interp_children.len(),
+            self.slice_lanes,
+            (self.cell_count_xz + 1) * (self.cell_count_y + 1),
+            self.cell_count_xz + 1,
+            self.cell_count_y + 1,
+        )
+    }
+
     pub fn fill(&mut self, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
         // Gap-adaptive prefetch gate: measure the inter-fill gap (Java-side
         // layout/beard/SURFACE time). Plane work (~0.33ms per plane serial)

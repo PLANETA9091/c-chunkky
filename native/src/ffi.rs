@@ -650,6 +650,13 @@ pub fn v263_fill_tail(
     }
 }
 
+/// Diagnostic: geometry dump of a ctx's pack engine (CRUS_GEOM in dpperf).
+pub fn geom_dump_of(id: i64) -> Option<String> {
+    let map_guard = sessions_lock();
+    let map = map_guard.as_ref().expect("sessions map");
+    map.get(&id).map(|ctx| ctx.gen.geom_dump())
+}
+
 pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
     // RAW-BORROW INVARIANT (stage B-263 perf fix): the pointer is taken under
     // the sessions lock and the fill runs WITHOUT it. Safety:

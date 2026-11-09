@@ -123,6 +123,14 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if std::env::var("CRUS_GEOM").as_deref() == Ok("1") {
+        // reach into the ctx gen through a fresh fill id: the geom dump is
+        // exposed via the sessions map accessor in ffi.
+        if let Some(txt) = crussty_chunkgen::ffi::geom_dump_of(id) {
+            println!("{txt}");
+        }
+        return;
+    }
     let states = match surface_states_of(id) {
         Some(s) => s,
         None => {
@@ -173,6 +181,13 @@ fn main() {
             &sf::SR_C_VGRAD,
             &sf::SR_C_TEMP,
             &sf::SR_C_OTHER,
+            &sf::SR_NS_BIOME,
+            &sf::SR_NS_NOISE_THR,
+            &sf::SR_NS_STONE_DEPTH,
+            &sf::SR_NS_WATER,
+            &sf::SR_NS_YABOVE,
+            &sf::SR_NS_VGRAD,
+            &sf::SR_NS_TEMP,
         ] {
             c.store(0, std::sync::atomic::Ordering::Relaxed);
         }
@@ -245,6 +260,17 @@ fn main() {
             pern(g(&sf::SR_C_YABOVE)),
             pern(g(&sf::SR_C_VGRAD)),
             pern(g(&sf::SR_C_TEMP) + g(&sf::SR_C_OTHER)),
+        );
+        let ns = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6;
+        println!(
+            "sprof kind-ns/chunk: biome {:.2} nthr {:.2} stone_depth {:.2} water {:.2} y_above {:.2} vgrad {:.2} temp/other {:.2} (ms)",
+            ns(&sf::SR_NS_BIOME),
+            ns(&sf::SR_NS_NOISE_THR),
+            ns(&sf::SR_NS_STONE_DEPTH),
+            ns(&sf::SR_NS_WATER),
+            ns(&sf::SR_NS_YABOVE),
+            ns(&sf::SR_NS_VGRAD),
+            ns(&sf::SR_NS_TEMP),
         );
     }
 }
