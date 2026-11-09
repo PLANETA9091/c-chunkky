@@ -68,21 +68,60 @@ fn main() {
     crussty_chunkgen::density::PROF_NOISE_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
     crussty_chunkgen::density::PROF_BLEND_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
     gen.prof.reset_phases();
-    let n = 16i32;
+    let n: i32 = std::env::var("CRUS_PHASES_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16);
+    let fill_diag = std::env::var("CRUS_FILL_DIAG").is_ok();
+    let mut ftimes: Vec<f64> = Vec::with_capacity(n as usize);
     let t0 = std::time::Instant::now();
     for i in 0..n {
+        let tf = std::time::Instant::now();
         gen.fill((i % 4) - 2, (i / 4) - 2, &mut out);
+        ftimes.push(tf.elapsed().as_secs_f64() * 1e3);
     }
     let wall = t0.elapsed().as_nanos() as f64 / n as f64 / 1e6;
+    if fill_diag {
+        let mut s = ftimes.clone();
+        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pick = |q: f64| s[((s.len() as f64 - 1.0) * q) as usize];
+        eprintln!(
+            "[perf] n={} min={:.3} p10={:.3} p50={:.3} p90={:.3} max={:.3}",
+            n,
+            s[0],
+            pick(0.1),
+            pick(0.5),
+            pick(0.9),
+            s[s.len() - 1]
+        );
+    }
+    if std::env::var("CRUS_CELL_STATS").is_ok() {
+        use crussty_chunkgen::nochunk::{
+            CELL_V1_AIR, CELL_V1_CELLMAT, CELL_V1_FALLBACK, CELL_V1_LAVA, CELL_V2_FALLBACK,
+            CELL_V2_STONE, CELL_V_MIXED,
+        };
+        let r = |a: &std::sync::atomic::AtomicU64| a.load(std::sync::atomic::Ordering::Relaxed) / n as u64;
+        println!(
+            "cells/chunk: mixed {} | v1: lava {} air {} cellmat {} fallback {} | v2: stone {} fallback {}",
+            r(&CELL_V_MIXED),
+            r(&CELL_V1_LAVA),
+            r(&CELL_V1_AIR),
+            r(&CELL_V1_CELLMAT),
+            r(&CELL_V1_FALLBACK),
+            r(&CELL_V2_STONE),
+            r(&CELL_V2_FALLBACK)
+        );
+    }
     let p = gen.prof;
     let f = |v: u64| v as f64 / n as f64 / 1e6;
     println!(
-        "wall {:.2} ms | slice {:.2} | cellfill {:.2} | material {:.2} | other {:.2}",
+        "wall {:.2} ms | slice {:.2} | cellfill {:.2} | material {:.2} | other {:.2} | select {:.2}",
         wall,
         f(p.fill_slice_ns),
         f(p.cellfill_ns),
         f(p.material_ns),
         wall - f(p.fill_slice_ns) - f(p.cellfill_ns) - f(p.material_ns),
+        f(p.select_ns),
     );
     println!(
         "blocks: subst+ {} subst- {} ore_reached {} aquifer_air {}",

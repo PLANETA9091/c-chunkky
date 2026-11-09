@@ -408,6 +408,9 @@ pub struct ChunkGen<'e> {
     plane_cache_x: i64,
     plane_cache_z: i32,
     plane_cache: Vec<f64>,
+    /// Spare pre-allocated plane buffers recycled across fills (parallel
+    /// graph path): avoids a 31KB alloc+zero per plane evaluation.
+    plane_pool: Vec<Vec<f64>>,
     aquifer: std::sync::Arc<AquiferState>,
     /// Per-point DAG memo (see MemoCtx). Every evaluation context (corner
     /// point / block / probe) bumps the serial; shared subtrees then evaluate
@@ -596,6 +599,7 @@ impl Prof {
 /// merged output is bit-identical to the serial fill.
 struct FillGraph<'a, 'e> {
     store: &'a Mutex<Vec<Option<std::sync::Arc<Vec<f64>>>>>,
+    plane_pool: &'a Mutex<Vec<Vec<f64>>>,
     plane_ready: &'a AtomicU32,
     next_plane: &'a AtomicUsize,
     next_strip: &'a AtomicUsize,
@@ -680,7 +684,12 @@ impl<'a, 'e> FillGraph<'a, 'e> {
                     continue;
                 }
                 let t0 = std::time::Instant::now();
-                let mut buf = vec![0f64; self.plane_len];
+                let mut buf = self
+                    .plane_pool
+                    .lock()
+                    .unwrap()
+                    .pop()
+                    .unwrap_or_else(|| vec![0f64; self.plane_len]);
                 ChunkGen::eval_plane_into(
                     self.env,
                     self.compiled,
@@ -892,6 +901,7 @@ impl<'e> ChunkGen<'e> {
             plane_cache_x: i64::MIN,
             plane_cache_z: i32::MIN,
             plane_cache: Vec::new(),
+            plane_pool: Vec::new(),
             aquifer: std::sync::Arc::new(AquiferState::new(env.wg.min_y, env.wg.height)),
             memo: MemoCtx::new(compiled.arena.len()),
             env,
@@ -1533,6 +1543,36 @@ impl PrefetchWorker {
 // upper-y constant (slot 0 above the top slide at y>=256)
 pub static SLOT0_CONST_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Cell-verdict distribution counters (CRUS_CELL_STATS=1): quantify the
+/// direct-cell gates over a run. All counters are process-global, opt-in —
+/// a OnceLock check per cell, atomic adds only when enabled.
+pub static CELL_V_MIXED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static CELL_V1_FALLBACK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static CELL_V1_LAVA: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static CELL_V1_AIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static CELL_V1_CELLMAT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static CELL_V2_STONE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static CELL_V2_FALLBACK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn cell_stats_on() -> bool {
+    static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *S.get_or_init(|| std::env::var("CRUS_CELL_STATS").is_ok())
+}
+
+/// A/B kill-switch for the cell-level material fast path (water-band AllNeg
+/// cells with all-covered cached-uniform summaries). NEVER set in production.
+pub fn cell_mat_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("CRUS_NO_CELLMAT").as_deref() != Ok("1"))
+}
+
+#[inline]
+fn cell_stat(c: &std::sync::atomic::AtomicU64) {
+    if cell_stats_on() {
+        c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 pub fn yconst_off() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| std::env::var("CRUS_NO_YCONST").ok().as_deref() == Some("1"))
@@ -1668,6 +1708,7 @@ impl<'e> ChunkGen<'e> {
             plane_cache_x: i64::MIN,
             plane_cache_z: i32::MIN,
             plane_cache: Vec::new(),
+            plane_pool: Vec::new(),
             aquifer: std::sync::Arc::clone(&self.aquifer),
             memo: MemoCtx::new(self.compiled.arena.len()),
             prof: Prof {
@@ -1758,10 +1799,17 @@ impl<'e> ChunkGen<'e> {
         let cache_hit = self.plane_cache_x == (first_cell_x * cw) as i64
             && self.plane_cache_z == first_cell_z
             && self.plane_cache.len() == plane_len;
+        // Plane buffer recycling: the pool (Mutex — plane tasks run on both
+        // graph threads) travels through the graph and is restored to self at
+        // the end of the fill. Buffers in the store are reclaimed via
+        // Arc::try_unwrap once every strip consumed them.
+        let plane_pool = Mutex::new(std::mem::take(&mut self.plane_pool));
         let mut planes: Vec<Vec<f64>> = Vec::with_capacity(ccx + 1);
         if cache_hit {
             p.plane_hits += 1;
-            planes.push(self.plane_cache.clone());
+            // move the cache vec into the graph; the final plane takes its
+            // place at the end of the fill (see below) — zero copies.
+            planes.push(std::mem::take(&mut self.plane_cache));
         } else {
             self.fill_slice(first_cell_x, first_cell_z, true);
             planes.push(self.interp.slice0.clone());
@@ -1852,6 +1900,7 @@ impl<'e> ChunkGen<'e> {
             let strips_done = AtomicUsize::new(0);
             let graph = FillGraph {
                 store: &store,
+                plane_pool: &plane_pool,
                 plane_ready: &plane_ready,
                 next_plane: &next_plane,
                 next_strip: &next_strip,
@@ -1920,12 +1969,35 @@ impl<'e> ChunkGen<'e> {
             p.par_planes_ns += plane_ns_total.load(Ordering::Relaxed);
             p.par_strips_ns += strip_ns_total.load(Ordering::Relaxed);
 
-            // save the final plane for the next fill's plane-0 cache
+            // save the final plane for the next fill's plane-0 cache, and
+            // recycle every store buffer back into the pool (strips are all
+            // done here, so Arc::try_unwrap reclaims them; a still-shared Arc
+            // falls back to a fresh alloc on the next fill — harmless).
             let last = store.lock().unwrap()[ccx].clone().expect("final plane");
             self.plane_cache.clear();
             self.plane_cache.extend_from_slice(&last);
             self.plane_cache_x = ((first_cell_x + ccx as i32) * cw) as i64;
         self.plane_cache_z = first_cell_z;
+        {
+            let mut st = store.lock().unwrap();
+            let mut pool = plane_pool.lock().unwrap();
+            for slot in st.iter_mut() {
+                if let Some(arc) = slot.take() {
+                    match std::sync::Arc::try_unwrap(arc) {
+                        Ok(v) => {
+                            // keep len == plane_len: eval_plane_batched writes
+                            // every element, but indexes [base..base+G] which
+                            // requires the full length up front.
+                            pool.push(v);
+                        }
+                        Err(_arc) => {
+                            // still shared (late reader) — drop, pool refills lazily
+                        }
+                    }
+                }
+            }
+        }
+        self.plane_pool = plane_pool.into_inner().unwrap();
 
         // Hand the NEXT chunk's planes to the prefetch worker: it evaluates
         // them during the Java-side gap (layout / beard / SURFACE) so the
@@ -2576,23 +2648,23 @@ impl<'e> ChunkGen<'e> {
                         || cell_start_block_y > 50
                         || cell_start_block_y + (self.cell_height as i32 - 1) < -60;
                     let y_top = cell_start_block_y + (self.cell_height as i32 - 1);
+                    let y0_above_lava = cell_start_block_y > lava_line;
                     // All base aquifer cells covered by this 4x8x4 material
                     // cell (gx/gz span at most 2, gy at most 2) must have a
-                    // cached all-same summary for the AIR direct write.
+                    // cached all-same summary for the AIR direct write. The
+                    // same enumeration serves the cell-level material branch
+                    // below, so the six grid bounds are hoisted here.
+                    let gx0 = floor_div(cell_start_block_x - 5, 16);
+                    let gx1 = floor_div(cell_start_block_x + self.cell_width as i32 - 1 - 5, 16);
+                    let gy0 = floor_div(cell_start_block_y + 1, 12);
+                    let gy1 = floor_div(y_top + 1, 12);
+                    let gz0 = floor_div(cell_start_block_z - 5, 16);
+                    let gz1 = floor_div(cell_start_block_z + self.cell_width as i32 - 1 - 5, 16);
                     let air_zone_safe = cell_start_block_y >= 64 && {
                         let mut ok = true;
-                        'scan: for gx in [
-                            floor_div(cell_start_block_x - 5, 16),
-                            floor_div(cell_start_block_x + self.cell_width as i32 - 1 - 5, 16),
-                        ] {
-                            for gy in [
-                                floor_div(cell_start_block_y + 1, 12),
-                                floor_div(y_top + 1, 12),
-                            ] {
-                                for gz in [
-                                    floor_div(cell_start_block_z - 5, 16),
-                                    floor_div(cell_start_block_z + self.cell_width as i32 - 1 - 5, 16),
-                                ] {
+                        'scan: for gx in [gx0, gx1] {
+                            for gy in [gy0, gy1] {
+                                for gz in [gz0, gz1] {
                                     let base = self.aquifer.index(gx, gy, gz);
                                     let sv = self.aquifer.summary[base].0.load(Ordering::Relaxed);
                                     if sv == 0 {
@@ -2615,6 +2687,96 @@ impl<'e> ChunkGen<'e> {
                         2 if ore_free => Some(STONE),
                         _ => None,
                     };
+                    if cell_stats_on() {
+                        match verdict {
+                            0 => cell_stat(&CELL_V_MIXED),
+                            1 => {
+                                if y_top < lava_line {
+                                    cell_stat(&CELL_V1_LAVA);
+                                } else if air_zone_safe {
+                                    cell_stat(&CELL_V1_AIR);
+                                }
+                                // cellmat / fallback counted in the branch below
+                            }
+                            2 => {
+                                if ore_free {
+                                    cell_stat(&CELL_V2_STONE);
+                                } else {
+                                    cell_stat(&CELL_V2_FALLBACK);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Cell-level material fast path (water band): AllNeg cells
+                    // between the lava line and the AIR zone. When every
+                    // covered base aquifer cell carries a cached all-same
+                    // summary and all share ONE status s, the vanilla
+                    // per-block result provably collapses to status.at(y) per
+                    // y-row with sched=false: the pressure machinery needs a
+                    // status DIFFERENCE, and the water-above-lava scan at
+                    // y == lava_line is excluded by the y0 > lava_line guard
+                    // (every block y satisfies y-1 >= lava_line -> global
+                    // fluid is not LAVA). Bit-exact: identical formula to
+                    // material_row4's uniform path, invoked once per cell
+                    // instead of 16 times, and the exact cellfill (substance
+                    // values) is never consulted on this path.
+                    if direct.is_none() && verdict == 1 && cell_mat_enabled() && y0_above_lava {
+                        let mut st: Option<FluidStatus> = None;
+                        'cellmat: for gx in [gx0, gx1] {
+                            for gy in [gy0, gy1] {
+                                for gz in [gz0, gz1] {
+                                    let base = self.aquifer.index(gx, gy, gz);
+                                    let sv = self.aquifer.summary[base].0.load(Ordering::Relaxed);
+                                    if sv == 0 {
+                                        break 'cellmat;
+                                    }
+                                    let (same, s) = unpack_summary(sv);
+                                    if !same {
+                                        break 'cellmat;
+                                    }
+                                    match st {
+                                        None => st = Some(s),
+                                        Some(p) if p == s => {}
+                                        Some(_) => break 'cellmat,
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(s) = st {
+                            let ch_us = self.cell_height as usize;
+                            let mut rows = [AIR; 16];
+                            for (iy2, r) in rows.iter_mut().enumerate().take(ch_us) {
+                                *r = aquifer_at(s, cell_start_block_y + iy2 as i32);
+                            }
+                            if rows[..ch_us].iter().any(|&b| b != AIR) {
+                                for (iy2, &b) in rows.iter().enumerate().take(ch_us) {
+                                    if b == AIR {
+                                        continue;
+                                    }
+                                    let row_base = (((cell_start_block_y + iy2 as i32 - self.min_y)
+                                        * 256
+                                        + (cell_start_block_z - min_block_z) * 16
+                                        + (cell_start_block_x - min_block_x)))
+                                        as usize;
+                                    for iz2 in 0..self.cell_width as usize {
+                                        let rr = row_base + iz2 * 16;
+                                        for ix2 in 0..self.cell_width as usize {
+                                            out[rr + ix2] = b;
+                                        }
+                                    }
+                                }
+                            }
+                            if self.prof.enabled {
+                                let cell_blocks =
+                                    (self.cell_width * self.cell_width * self.cell_height) as u64;
+                                self.prof.blocks_subst_neg += cell_blocks;
+                            }
+                            cell_stat(&CELL_V1_CELLMAT);
+                            continue;
+                        }
+                        cell_stat(&CELL_V1_FALLBACK);
+                    }
                     // AllNeg cells that fall back keep their exact values:
                     // only AllPos cells take the poison fill (the +1.0 value
                     // is never read beyond the subst>0 gates).
