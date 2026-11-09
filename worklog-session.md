@@ -7381,3 +7381,43 @@ Stage Summary:
 - Ожидаемые гейты: biome/surface/carvers/orebase бит-точность, статик fill-оракул (блоки+марки),
   SIMD-парити, judge vanilla/datapack. Локально всё уже зелёное: 86/86, fill263golden md5
   569ae81b, df263goldens OK.
+
+---
+Task ID: cont-132 (2026-11-09, cell-level material + plane pool; rebase on cont-131)
+Agent: Super Z (main)
+Task: «ещё жоще арифметика и математики, чтобы сразу 1ms, перестраивать можно полностью, оутпут такой же»
+
+Work Log:
+- Срезан Rust-тулчейн песочницы, переустановлен (rustup 1.99.1); git rebase на origin/main
+  (remote ушёл на cont-131: 26.3-retarget, pack-path arithmetic pass 6.42->5.51 in-server).
+- Анатомия на dptt (ДО rebase, изолированный serial): wall 1.85 = blend 0.55 (213 col-вызовов,
+  ~40 октав/точка) + NN 0.25 (892 4-lane вызова/плоскость) + cellfill 0.34 (интервалы+AVX2/512
+  row-hoist) + material 0.45 (row4 ~24k рядов) + other 0.24 (проф-таймеры ~0.1 + вердикт-гейт
+  ~0.08). Ядра на полу: noisemicro8 17.3ns/сэмпл (8-wide AVX-512) vs 17.8 (4-wide AVX2) —
+  ширина не помогает, обходы пермутаций доминируют. lanes=8 хуже 4 подтверждён третий раз.
+- CELL-LEVEL MATERIAL (CRUS_NO_CELLMAT kill-switch): AllNeg-ячейки водной полосы
+  (lava_line < y0, verdict 1, все покрытые base-ячейки aquifer кэшированы-uniform-ОДИН статус)
+  сворачиваются к status.at(y) построчно, sched=false: 4 константных ряда, БЕЗ точного cellfill
+  и всех 16 row4. Бит-точность: та же формула, что uniform-путь material_row4; гард
+  y0 > lava_line исключает water-above-lava скан на y == lava_line. Статистика (CRUS_CELL_STATS):
+  до rebase 264 ячейки/чанк direct; на 26.3-дереве 656 direct / 690 air / 123 fallback / 450 mixed.
+- PLANE BUFFER POOL (параллельный граф): переиспользование Vec<f64> буферов плоскостей через
+  Mutex-пул + Arc::try_unwrap возврат; plane0 cache-hit теперь MOVE (финальная плоскость занимает
+  место кэша) — ноль 31KB клонов/аллокаций на филл. Ловушка: v.clear() при возврате ломал
+  eval_plane_batched (индексация полного диапaзона) — поймано 2t-smoke, исправлено.
+- ВЕРИФИКАЦИЯ: filldump бит-паритет dptt — мой коммит == родитель (8 чанков x serial/2t/2t-lanes8
+  ДО rebase; 3 чанка x 2 режима ПОСЛЕ rebase); cargo test 86/86; СТАРЫЙ golden_check.sh 32/32
+  FAIL и на чистом origin/main — устарел после 26.3-retarget (валидный гейт теперь CI-judge).
+- ПЕРФ на 26.3-дереве: serial wall 4.21 (ON) vs 4.30 (OFF) — ветка даёт -0.09ms (cellfill
+  0.25 vs 0.33, material 0.58 vs 0.62). Pool — суб-шум локально, эффект ожидается под
+  контенцией (ноль аллокаций в hot-пути филла).
+
+Stage Summary:
+- Коммит 425456c2 запушен поверх cont-131; CI запустит judge-гейты (fill-уровень бит-идентичен
+  родителю — гейты должны остаться зелёными).
+- Оценка 1ms (честно): ядра шума на архитектурном полу (обходы пермутаций, не FP), cellfill на
+  интервалах+SIMD, material теперь с cell-уровнем. На 26.3-дереве slice ~2.9 — главный объём;
+  следующие фронты: (а) spread main-noise blend на col-состояние уже сделан cont-130, остался
+  NN col-path (~0.03), (б) row4 микрокосты (hoist summary по 4 iy-рядам ~0.05), (в) merge OR
+  -> прямые disjoint-записи (~0.03 wall), (г) нативный surface для 26.3 (remote уже в пути,
+  stone_depth 41% поверхностного хвоста).
