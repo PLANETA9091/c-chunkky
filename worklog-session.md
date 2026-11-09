@@ -7421,3 +7421,37 @@ Stage Summary:
   NN col-path (~0.03), (б) row4 микрокосты (hoist summary по 4 iy-рядам ~0.05), (в) merge OR
   -> прямые disjoint-записи (~0.03 wall), (г) нативный surface для 26.3 (remote уже в пути,
   stone_depth 41% поверхностного хвоста).
+
+---
+Task ID: cont-133 (2026-11-10, RESYNC устаревшей песочницы: независимая stage D сходимость + CI-полл)
+Agent: Super Z (main)
+Task: «продолжи» — сессия стартовала в протухшей песочнице (git на 848b2b6 = merge-base, 338 коммитов позади remote).
+
+Work Log:
+- ПЕСОЧНИЦА ПРОТУХЛА: локальный git стоял на 848b2b6 (cont-41-эра), remote ушёл на 338 коммитов
+  (cont-42..cont-132: stage D ship, 26.3-retarget, pack-path revival, surface counters, cell-level
+  material). Судейские референсы judge_final/ потеряны, dpext/merged пуст.
+- НЕЗАВИСИМАЯ СХОДИМОСТЬ STAGE D (четвёртая, до обнаружения remote-прогресса): в отставшем дереве
+  доведён до бит-паритета полный height-сервис: column_heights (WS NOT_AIR / OF MOTION_BLOCKING),
+  FFI columnHeights, plugin getBaseHeight takeover (hcache, CRUS_HEIGHTS kill-switch), oracle
+  HEIGHTS-секции в walk-дампах, бины heightcmp/heightoracle, packload multi-root. Валидация:
+  cargo 17/17; heightcmp vanilla+assets 1792/1792; heightoracle 1024/1024 WS + 1024/1024 OF
+  (бит-паритет vs vanilla delegate на реальных Terralith+Tectonic); e2e-окно 98.32 (stageC2
+  99.38, шум). ЛОЖНАЯ ТРЕВОГА прошлой сессии закрыта: «другой рельеф walk-мира» — артефакт
+  потерянного judge_final-файла; walk == judge ref == minijudge бит-в-бит; реальная причина
+  старого OF 0/1024 = протухший dpext/merged overlay-политик — РОВНО их ЛОВУШКА 2 (четвёртая
+  сходимость того же урока).
+- РЕСИНК по паттерну cont-44: мои дубли сохранены локально (branch local/stageD-independent,
+  3 коммита), НЕ пушены; main fast-forward на origin/main (f0908b81, cont-132); cargo test на
+  merged-дереве 86/86; rebuild .so OK.
+- CI-ПОЛЛ (задолженность cont-131): 42539884024 (c1a0e9b ядра) SUCCESS, 42539936474 (d970213a
+  ворклог) SUCCESS, 42540793686 (7c7f2faa surface NS + geom) SUCCESS; плюс cont-132: 42583059436
+  (425456c2 cell-level material + plane pool) SUCCESS, 42583068867 (f0908b81 docs) SUCCESS.
+  Все гейты зелёные, карта cont-132 подтверждена CI.
+
+Stage Summary:
+- Кампания синхронизирована с cont-132, CI полностью зелёный. Независимая stage D-сходимость
+  записана в evidence base (путь fill-based heightsCtx в проде подтверждён третьей стороной).
+- Следующие фронты (из cont-131/132, незанятые): surface-хвост ~2.0ms — biome-пересчёты на кварт
+  (q_cache гранулярность, возможен x3 срез на 0.6ms) и stone_depth per-column depth-count memo
+  (0.8ms, 41%); микро: NN col-path ~0.03, row4 hoist ~0.05, merge OR disjoint ~0.03.
