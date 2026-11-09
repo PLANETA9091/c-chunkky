@@ -7374,3 +7374,10 @@ Stage Summary:
   biome-conds в цепочках), vgrad ~0.32ms (14.5k), temp ~0.2ms (9.5k). Итог ~2.0ms реального
   хвоста. СЛЕДУЮЩИЙ ШАГ: разбор biome-пересчётов на кварт (возможен x3 срез кэшем) и
   stone_depth per-column depth-count memo.
+
+## cont-131 CI-СТАТУС (на момент конца сессии)
+- В полёте (poll в следующей сессии): 42539884024 (c1a0e9bd — ядра), 42539936474 (d970213a —
+  ворклог), 42540793686 (7c7f2faa — surface NS counters + geom). База 75e24569: SUCCESS.
+- Ожидаемые гейты: biome/surface/carvers/orebase бит-точность, статик fill-оракул (блоки+марки),
+  SIMD-парити, judge vanilla/datapack. Локально всё уже зелёное: 86/86, fill263golden md5
+  569ae81b, df263goldens OK.
