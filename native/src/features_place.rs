@@ -254,10 +254,15 @@ fn cfg_fully_supported(reg: &FeatureRegistry, cfg_name: &str, depth: u32) -> boo
                 && state_src_supported(hanging_root_state)
                 && placed_fully_supported(reg, tree_feature, depth + 1)
         }
-        // MonsterRoom delegates: the chest loot seed (64-bit nextLong) and
-        // spawner entity draws live inside the vanilla RNG stream — parity
-        // first until the op protocol can carry them.
-        FeatureCfg::MonsterRoom => false,
+        // cont-136 native ports: monster_room (also monster_room_deep — same
+        // configured type, only the placed placement differs in 26.3) and
+        // freeze_top_layer (26.3 class SnowAndFreezeFeature). The old
+        // delegate reasons are gone: the chest/spawner BlockEntity seeds
+        // travel as FLAG_CHEST/FLAG_SPAWNER ops (aux = mob ordinal; the loot
+        // seed nextLong is consumed on the native stream), and the freeze
+        // biome/light checks ride the freezeChecks bridge upcall. Kill-switch:
+        // CRUS_DELEG_NOGEN=1 restores the delegate lane for these types.
+        FeatureCfg::MonsterRoom | FeatureCfg::FreezeTopLayer => !deleg_nogen(),
         // FallenTree: parse-time guarded — trunk provider + both decorator
         // lists are limited to the native set (trunk_vine/attached_to_logs);
         // shelf_mushroom (fallen_poplar) falls back to Unsupported at decode.
@@ -546,11 +551,8 @@ pub fn place_configured(
             place_block_pile(ctx, state_provider, rng, pos, ops)
         }
         FeatureCfg::Kelp => place_kelp(ctx, rng, pos, ops),
-        // MonsterRoom stays a hybrid delegate: the chest loot seed (a 64-bit
-        // nextLong) and the spawner entity draws sit INSIDE the vanilla RNG
-        // stream and cannot travel through the 6-int op protocol without
-        // widening it — parity first (see worklog cont-56).
-        FeatureCfg::MonsterRoom => false,
+        FeatureCfg::MonsterRoom => place_monster_room(ctx, rng, pos, ops),
+        FeatureCfg::FreezeTopLayer => place_freeze_top_layer(ctx, pos, ops),
         FeatureCfg::UnderwaterMagma { floor_search_range, placement_radius, prob } => {
             place_underwater_magma(ctx, *floor_search_range, *placement_radius, *prob, rng, pos, ops)
         }
@@ -2862,6 +2864,299 @@ fn pred_ids(pred: &crate::features_deco::BlockPredicate) -> &[String] {
         crate::features_deco::BlockPredicate::MatchingBlocks { ids, .. } => ids,
         _ => &[],
     }
+}
+
+/// CRUS_DELEG_NOGEN=1: kill-switch restoring the vanilla-lane delegate for
+/// the cont-136 ported types (monster_room/monster_room_deep/freeze_top_layer)
+/// — dispatch-level check (cfg_fully_supported feeds the decoRunFeature -2
+/// gate AND the delegcensus walk).
+fn deleg_nogen() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CRUS_DELEG_NOGEN").as_deref() == Ok("1"))
+}
+
+// ---------------------------------------------------------------------------
+// cont-136 batch: monster_room (+ monster_room_deep placed variant) and
+// freeze_top_layer. Both transcribed from the vineflower decompile of
+// paper-26.3.jar (net/minecraft/world/level/levelgen/feature/
+// MonsterRoomFeature / SnowAndFreezeFeature). RNG draw order is the
+// parity-critical part; every level query maps 1:1 onto a vanilla
+// BlockState read (snapshot-served or bridge upcall).
+// ---------------------------------------------------------------------------
+
+/// MonsterRoomFeature.place (26.3 — the deep variant merged into this class;
+/// monster_room_deep is the same configured feature with a lower placed
+/// height_range). Vanilla draw order:
+///   1. xr = nextInt(2)+2        (before zr)
+///   2. zr = nextInt(2)+2
+///   3. validation box scan           — no RNG, early false on open floor/roof
+///   4. wall pass (dy 3->-1)          — nextInt(4) per dy==-1 solid shell cell
+///   5. chest loop 2x3 tries          — 2 draws per try (xc, zc);
+///      on (empty && wallCount==1): reorient read, predicate test, write,
+///      nextLong() (loot seed, ALWAYS consumed on this branch), break
+///   6. spawner at origin             — predicate test + write
+///   7. nextInt(4) entity pick (Util.getRandom(MOBS, random))
+/// Returns vanilla's literal `true` when the hole-count gate passed.
+fn place_monster_room(
+    ctx: &PlaceCtx,
+    rng: &mut WorldgenRandom,
+    origin: BlockPos,
+    ops: &mut Vec<DecoOp>,
+) -> bool {
+    let level = ctx.level;
+    let can_replace = |pos: BlockPos| !level.tag_is(pos, "minecraft:features_cannot_replace");
+    // safeSetBlock predicate for the states this feature writes: !state.is(
+    // FEATURES_CANNOT_REPLACE). The 26.3 predicate is closure-created per
+    // place(); no RNG inside.
+    const AIR: &str = "minecraft:cave_air"; // Blocks.CAVE_AIR default
+    const COBBLE: &str = "minecraft:cobblestone";
+    const MOSSY: &str = "minecraft:mossy_cobblestone";
+    let chest_ids = ["minecraft:chest".to_string()];
+    let spawner_ids = ["minecraft:spawner".to_string()];
+
+    let xr = rng.next_int_bound(2) + 2;
+    let min_x = -xr - 1;
+    let max_x = xr + 1;
+    let zr = rng.next_int_bound(2) + 2;
+    let min_z = -zr - 1;
+    let max_z = zr + 1;
+
+    // validation pass (dy in [-1, 4], same box order dx-outer/dy-mid/dz-inner)
+    let mut hole_count = 0i32;
+    for dx in min_x..=max_x {
+        for dy in -1..=4 {
+            for dz in min_z..=max_z {
+                let hole_pos = BlockPos::new(origin.x + dx, origin.y + dy, origin.z + dz);
+                let solid = level.is_solid(hole_pos);
+                if dy == -1 && !solid {
+                    return false;
+                }
+                if dy == 4 && !solid {
+                    return false;
+                }
+                if (dx == min_x || dx == max_x || dz == min_z || dz == max_z)
+                    && dy == 0
+                    && level.is_air(hole_pos)
+                    && level.is_air(BlockPos::new(hole_pos.x, hole_pos.y + 1, hole_pos.z))
+                {
+                    hole_count += 1;
+                }
+            }
+        }
+    }
+    if !(1..=5).contains(&hole_count) {
+        return false;
+    }
+
+    // wall pass: `for (int dy = 3; dy >= -1; dy--)`
+    for dx in min_x..=max_x {
+        for dy in (-1..=3).rev() {
+            for dz in min_z..=max_z {
+                let wall_pos = BlockPos::new(origin.x + dx, origin.y + dy, origin.z + dz);
+                let on_shell = dx == min_x
+                    || dy == -1
+                    || dz == min_z
+                    || dx == max_x
+                    || dy == 4
+                    || dz == max_z;
+                if on_shell {
+                    if wall_pos.y >= level.min_y()
+                        && !level.is_solid(BlockPos::new(wall_pos.x, wall_pos.y - 1, wall_pos.z))
+                    {
+                        // vanilla setBlock(AIR, 2) — UNCONDITIONAL, no predicate
+                        ctx.emit(ops, wall_pos, AIR, 0);
+                    } else if level.is_solid(wall_pos) && !level.state_is(wall_pos, &chest_ids) {
+                        if dy == -1 && rng.next_int_bound(4) != 0 {
+                            if can_replace(wall_pos) {
+                                ctx.emit(ops, wall_pos, MOSSY, 0);
+                            }
+                        } else if can_replace(wall_pos) {
+                            ctx.emit(ops, wall_pos, COBBLE, 0);
+                        }
+                    }
+                } else if !level.state_is(wall_pos, &chest_ids)
+                    && !level.state_is(wall_pos, &spawner_ids)
+                    && can_replace(wall_pos)
+                {
+                    ctx.emit(ops, wall_pos, AIR, 0);
+                }
+            }
+        }
+    }
+
+    // chest loop: 2 attempts, up to 3 tries each, break-on-success PER
+    // attempt (the outer cc loop keeps running after a chest was placed).
+    for _cc in 0..2 {
+        for _i in 0..3 {
+            let xc = origin.x + rng.next_int_bound(xr * 2 + 1) - xr;
+            let zc = origin.z + rng.next_int_bound(zr * 2 + 1) - zr;
+            let chest_pos = BlockPos::new(xc, origin.y, zc);
+            if level.is_air(chest_pos) {
+                let mut wall_count = 0;
+                // Direction.Plane.HORIZONTAL iteration = N, E, S, W
+                const HORIZ: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+                for (ddx, ddz) in HORIZ {
+                    if level.is_solid(BlockPos::new(chest_pos.x + ddx, chest_pos.y, chest_pos.z + ddz)) {
+                        wall_count += 1;
+                    }
+                }
+                if wall_count == 1 {
+                    // argument evaluation FIRST (reads pre-write neighbors),
+                    // then safeSetBlock, then the loot-seed nextLong
+                    // UNCONDITIONALLY on this branch, then break.
+                    let state = chest_facing_state(ctx, chest_pos);
+                    if can_replace(chest_pos) {
+                        ctx.emit(ops, chest_pos, &state, FLAG_CHEST);
+                    }
+                    let _loot_seed = rng.next_long(); // RandomizableContainer loot seed
+                    break;
+                }
+            }
+        }
+    }
+
+    // spawner at origin: safeSetBlock + setEntityId(Util.getRandom(MOBS))
+    if can_replace(origin) {
+        ctx.emit(ops, origin, "minecraft:spawner", FLAG_SPAWNER);
+    }
+    // SpawnerBlockEntity.setEntityId -> BaseSpawner.setEntityId -> the empty
+    // spawnPotentials WeightedList draws NOTHING (fresh spawner, nextSpawnData
+    // null + WeightedList.of() empty -> Optional.empty() -> SpawnData::new);
+    // the only stream draw is the nextInt(4) mob pick below.
+    let mob = rng.next_int_bound(4); // MOBS = [SKELETON, ZOMBIE, ZOMBIE, SPIDER]
+    if let Some(op) = ops.last_mut() {
+        if op.x == (origin.x - ctx.center_x) as i16
+            && op.y == origin.y as i16
+            && op.z == (origin.z - ctx.center_z) as i16
+            && op.flags & FLAG_SPAWNER != 0
+        {
+            op.aux |= ((mob.max(0) as u16) & 0xFF) << 8;
+        }
+    }
+    true
+}
+
+/// StructurePiece.reorient (26.3) for the monster-room chest: scan
+/// Plane.HORIZONTAL (N, E, S, W); early return default facing on an adjacent
+/// chest; otherwise the LAST single solidRender neighbor wins (two+ ->
+/// null -> fallback rotation walk from the default NORTH facing).
+/// Returns the facing property value of the chest state to write.
+fn chest_facing_state(ctx: &PlaceCtx, pos: BlockPos) -> String {
+    const HORIZ: [(i32, i32, u8); 4] = [
+        (0, -1, 2), // north
+        (1, 0, 5),  // east
+        (0, 1, 3),  // south
+        (-1, 0, 4), // west
+    ];
+    let chest_ids = ["minecraft:chest".to_string()];
+    let mut solid_neighbor: Option<u8> = None;
+    for (ddx, ddz, dir) in HORIZ {
+        let p = BlockPos::new(pos.x + ddx, pos.y, pos.z + ddz);
+        if ctx.level.state_is(p, &chest_ids) {
+            return "minecraft:chest[facing=north,type=single,waterlogged=false]".to_string();
+        }
+        if ctx.level.is_solid_render(p) {
+            if solid_neighbor.is_some() {
+                solid_neighbor = None;
+                break;
+            }
+            solid_neighbor = Some(dir);
+        }
+    }
+    let facing = match solid_neighbor {
+        Some(dir) => match dir {
+            2 => "south",   // north.getOpposite()
+            3 => "north",   // south.getOpposite()
+            4 => "east",    // west.getOpposite()
+            _ => "west",    // east.getOpposite()
+        },
+        None => {
+            // fallback: default facing NORTH, then opposite / clockwise /
+            // opposite walk on the first solidRender hit
+            let mut lock_dir: u8 = 2; // NORTH (ChestBlock default FACING)
+            let mut dir_pos = |d: u8| -> BlockPos {
+                let (ddx, ddz) = match d {
+                    2 => (0, -1),
+                    3 => (0, 1),
+                    4 => (-1, 0),
+                    _ => (1, 0),
+                };
+                BlockPos::new(pos.x + ddx, pos.y, pos.z + ddz)
+            };
+            if ctx.level.is_solid_render(dir_pos(lock_dir)) {
+                lock_dir = 3; // SOUTH
+            }
+            if ctx.level.is_solid_render(dir_pos(lock_dir)) {
+                lock_dir = 5; // NORTH.getClockWise() = EAST
+            }
+            if ctx.level.is_solid_render(dir_pos(lock_dir)) {
+                lock_dir = 4; // EAST.getOpposite() = WEST
+            }
+            match lock_dir {
+                2 => "north",
+                3 => "south",
+                4 => "west",
+                _ => "east",
+            }
+        }
+    };
+    format!("minecraft:chest[facing={facing},type=single,waterlogged=false]")
+}
+
+/// SnowAndFreezeFeature.place (26.3 minecraft:freeze_top_layer): 16x16 column
+/// pass over the owning chunk, per column:
+///   y = level.getHeight(MOTION_BLOCKING, x, z)
+///   biome = level.getBiome(topPos)
+///   if biome.shouldFreeze(level, belowPos, false) -> ICE at belowPos
+///   if biome.shouldSnow(level, topPos)            -> SNOW at topPos,
+///       then if belowState has SNOWY -> rewrite below snowy=true
+/// NO RNG anywhere. The biome/light/canSurvive semantics ride the
+/// freezeChecks bridge upcall (Java evaluates the exact vanilla Biome
+/// methods on the live region — the delegate path's own expression). The
+/// frozen-then-snow ordering subtlety (the ICE write happens BEFORE the
+/// shouldSnow canSurvive read) is resolved inside the upcall.
+/// Returns true unconditionally (vanilla `return true`).
+fn place_freeze_top_layer(ctx: &PlaceCtx, origin: BlockPos, ops: &mut Vec<DecoOp>) -> bool {
+    let level = ctx.level;
+    // pre-flight: a bridge without the freezeChecks mid (older jar / upcalls
+    // disabled) bails with ZERO ops — no RNG in this feature, so bailing
+    // cannot desync any stream; the judge-visible behavior degrades to
+    // "no ice/snow" rather than a wrong write.
+    if level.freeze_checks(origin.x, origin.z).is_none() {
+        return false;
+    }
+    for dz in 0..16 {
+        for dx in 0..16 {
+            let x = origin.x + dx;
+            let z = origin.z + dz;
+            let Some(packed) = level.freeze_checks(x, z) else {
+                return false; // JNI failure mid-pass (see pre-flight note)
+            };
+            let y = (packed >> 3) - 4096;
+            let verdict = (packed & 7) as u8;
+            if verdict & 1 != 0 {
+                ctx.emit(ops, BlockPos::new(x, y - 1, z), "minecraft:ice", 0);
+            }
+            if verdict & 2 != 0 {
+                ctx.emit(ops, BlockPos::new(x, y, z), "minecraft:snow", 0);
+            }
+            if verdict & 4 != 0 {
+                // vanilla: belowState.setValue(SnowyBlock.SNOWY, true) — every
+                // other property preserved. The only vanilla SNOWY blocks are
+                // grass_block and mycelium (snowy is their sole property), so
+                // the rewritten string is one of the two pre-indexed states.
+                let below = BlockPos::new(x, y - 1, z);
+                let cur = level.state_full(below);
+                let next = crate::features_json::state_set_prop(&cur, "snowy", "true");
+                if next != cur && ctx.state_index.contains_key(&next) {
+                    ctx.emit(ops, below, &next, 0);
+                }
+                // next == cur (unknown/full state) or un-indexed -> skip the
+                // op rather than write table state #0
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]

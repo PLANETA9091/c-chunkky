@@ -5,18 +5,34 @@
   "updated": "2026-11-10T14:40:00+08:00",
   "baseline": {
     "source": "cont-135 reference/prof_session_deco263_q13.txt (MINE windows; tree 9a4d6272 = cont-134)",
-    "e2e_windows_ms": [95.0, 86.6, 106.8],
+    "e2e_windows_ms": [
+      95.0,
+      86.6,
+      106.8
+    ],
     "mean": 96.1,
     "loaded_split_ms_per_chunk": {
       "native_fill": 34.0,
       "native_fill_idle_p50": 5.7,
       "deco_wall": 18.4,
-      "deco_phases": {"plan": 0.30, "struct": 5.24, "run": 8.23, "apply": 0.30, "deleg": 3.55},
+      "deco_phases": {
+        "plan": 0.3,
+        "struct": 5.24,
+        "run": 8.23,
+        "apply": 0.3,
+        "deleg": 3.55
+      },
       "carver_driver": "4.3 on CI deco=1 lanes (partly ctx-wait, cont-102: 9.77 pure wait)",
       "java_rest": "light ~1 (starlight), drain 2.0, stagnation ~8, ramp/status-chain ~6.1",
       "note": "native fill inflates 6x idle->loaded (thread oversubscription: 2 fill threads + 2 chunk workers + main on 2 logical cores)"
     },
-    "jni_counts_per_chunk": {"upcalls": 64.6, "features": 55.4, "ops": 1377.5, "snap_sec": 92.8, "crossings_all": 258}
+    "jni_counts_per_chunk": {
+      "upcalls": 64.6,
+      "features": 55.4,
+      "ops": 1377.5,
+      "snap_sec": 92.8,
+      "crossings_all": 258
+    }
   },
   "hypotheses": [
     {
@@ -65,7 +81,8 @@
       "id": "H8",
       "text": "Fill loaded 29.5ms vs idle 5.7ms = 80% scheduling loss (4+ runnable threads / 2 cores); thread-config matrix (FILL_THREADS x worker-threads) may recover several ms without any code change",
       "test": "clean A/B: wipe + same coords + back-to-back runs",
-      "status": "in_progress"
+      "status": "CONFIRMED x2: E2 worker-threads=1+FILL=2 => 87.7; E6 +disable.watchdog=true (JFR found 3-4 watchdog thread dumps INSIDE windows at 16:57:27/32/46 — safepoint storms hitting native fills) => 82.3 mean (77.8/77.7/91.5), fill wall 17.5-18.6. SerialGC E4 neutral (90.9, 673ms serial pauses). fill=3 E5 neutral.",
+      "result": "-18.4 ms/ch config-only total"
     }
   ],
   "log": [
@@ -88,6 +105,14 @@
     {
       "t": "2026-11-10T15:25+08:00",
       "event": "E1 CRUS_FILL_THREADS=1: 113.5/109.7 — INVALID (region hit jungle biome: trees_jungle 1468ms, struct 8.51 vs 3.07). Lesson: same-region-only comparisons; A/B protocol = wipe world + identical coords (deterministic per seed). loaded fill wall 37ms @1 thread ~= 35ms @2 threads => our thread count is NOT the contention driver; server threads are."
+    },
+    {
+      "t": "2026-11-10T17:10+08:00",
+      "event": "E2/E3 thread matrix (clean wipe A/B): worker-threads=1+FILL=2 mean 87.7 (-6.8 vs control 94.5, -13% vs orig baseline 100.8). worker=1 serializes Paper Java stages, frees core for fill threads. Config now default in run263_baseline.sh (WORKER_THREADS=1). server263_up.sh (CI) unchanged — 4-core optimum TBD on CI."
+    },
+    {
+      "t": "2026-11-10T17:35+08:00",
+      "event": "JFR window-phase analysis (settings=profile, 79s = exact measured phase): gen-worker buckets features 19.2%, JNI_fill 12.5%, biomes 11.2%, serialization 10.6% (NOT 0 as cont-134 audit said — recheck on 26.3), light 6.0%, sched/wait 2.7%. Whale: Paper Watchdog Thread 1404 exec records vs gen-worker 206 — 3-4 'has not responded for 10-15s' dumps INSIDE windows (main thread stall between chunk batches) => each dump safepoints all threads incl. native fill. E6 -Ddisable.watchdog=true => mean 82.3 (-5.4 vs E2). HttpClient/JLine/io/RCON native samples = parked epoll (not CPU)."
     }
   ],
   "ab_protocol": "wipe server263/world* before each config; coords RX1=2000 RZ1=2000, WX=500 WZ=500; NW=2..3; report window means + crusgenstats p50/p99; never compare across different regions",

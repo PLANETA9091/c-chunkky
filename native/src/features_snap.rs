@@ -1151,6 +1151,9 @@ impl DecoLevelExt for ChunkLevel<'_> {
     fn env_col_scan(&self) -> Option<&dyn crate::features_deco::EnvColScan> {
         Some(self)
     }
+    fn freeze_checks(&self, x: i32, z: i32) -> Option<i32> {
+        self.inner.freeze_checks(x, z)
+    }
 }
 
 /// Snapshot-level tests: parse + decode round-trip.

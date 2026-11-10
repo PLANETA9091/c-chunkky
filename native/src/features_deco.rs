@@ -373,6 +373,17 @@ pub trait DecoLevelExt: DecoLevel {
         let _ = pos;
         false
     }
+    /// freeze_top_layer per-column verdict (native FreezeTopLayerFeature).
+    /// (x, z) = the column; the bridge resolves y = getHeight(MOTION_BLOCKING)
+    /// and evaluates the exact vanilla biome.shouldFreeze/shouldSnow checks.
+    /// Packed return: (verdict & 7) | ((y + 4096) << 3) — bit0 = freeze below
+    /// (ICE), bit1 = snow top, bit2 = below is a SNOWY-property block to
+    /// rewrite snowy=true. None = bridge cannot answer (old jar / upcalls
+    /// disabled) — the native place bails with zero ops (no RNG in this
+    /// feature, so bailing can never desync a stream).
+    fn freeze_checks(&self, _x: i32, _z: i32) -> Option<i32> {
+        None
+    }
     /// The EnvScan column fastpath backend (ChunkLevel only — the snapshot
     /// palette + the overlay column index). Default None = generic loop.
     fn env_col_scan(&self) -> Option<&dyn EnvColScan> {
@@ -574,6 +585,11 @@ impl DecoLevelExt for OverlayLevel<'_> {
             return st.clone();
         }
         self.inner.state_name(pos)
+    }
+    fn freeze_checks(&self, x: i32, z: i32) -> Option<i32> {
+        // freeze_top_layer writes never feed its own verdicts (no self-read),
+        // so the raw inner bridge view is exact
+        self.inner.freeze_checks(x, z)
     }
 }
 

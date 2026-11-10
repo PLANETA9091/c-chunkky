@@ -199,6 +199,10 @@ pub enum FeatureCfg {
     },
     Kelp,
     MonsterRoom,
+    /// minecraft:freeze_top_layer (26.3 class SnowAndFreezeFeature) — 16x16
+    /// column pass over the owning chunk: ice-on-water + snow-on-top with the
+    /// grass_block/mycelium snowy=true rewrite. NO RNG.
+    FreezeTopLayer,
     UnderwaterMagma {
         floor_search_range: i32,
         placement_radius: i32,
@@ -1550,6 +1554,7 @@ pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry
         }
         "minecraft:kelp" => FeatureCfg::Kelp,
         "minecraft:monster_room" => FeatureCfg::MonsterRoom,
+        "minecraft:freeze_top_layer" => FeatureCfg::FreezeTopLayer,
         "minecraft:underwater_magma" => FeatureCfg::UnderwaterMagma {
             floor_search_range: cfg.get("floor_search_range").and_then(|v| v.as_i64()).unwrap_or(5) as i32,
             placement_radius: cfg.get("placement_radius_around_floor").and_then(|v| v.as_i64()).unwrap_or(1) as i32,

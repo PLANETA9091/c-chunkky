@@ -169,6 +169,11 @@ struct BridgeMids {
     /// tagMembers only degrades to the per-cell tagIs bridge (None), the
     /// hard-resolved mids above still gate JniLevel::new.
     tag_members: jni_sys::jmethodID,
+    /// SOFT resolve (not in the ok[] gate): freeze_top_layer verdict upcall
+    /// (native FreezeTopLayerFeature). An older jar without freezeChecks
+    /// degrades the feature to bailing-with-zero-ops at place time (no RNG
+    /// consumed — safe), every other feature keeps running.
+    freeze_checks: jni_sys::jmethodID,
 }
 
 pub struct JniLevel<'a> {
@@ -264,6 +269,7 @@ impl<'a> JniLevel<'a> {
                             deco_snap_section_range: mid("decoSnapSectionRange", "(IIII)[B"),
                             deco_heightmaps: mid("decoHeightmaps", "(II)[I"),
                             tag_members: mid("tagMembers", "(Ljava/lang/String;)[Ljava/lang/String;"),
+                            freeze_checks: mid("freezeChecks", "(II)I"),
                         };
                         let ok = [
                             mids.is_air,
@@ -688,6 +694,30 @@ impl<'a> DecoLevelExt for JniLevel<'a> {
         PROF_SOLIDR_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         PROF_SOLIDR_NS.fetch_add(prof_now() - t0, std::sync::atomic::Ordering::Relaxed);
         r
+    }
+
+    /// freeze_top_layer per-column verdict (DecoDriver.freezeChecks): the
+    /// packed y + shouldFreeze/shouldSnow/snowy-rewrite bitmask, evaluated by
+    /// Java with the exact vanilla Biome methods on the live region.
+    fn freeze_checks(&self, x: i32, z: i32) -> Option<i32> {
+        if self.noup() || self.mids.freeze_checks.is_null() {
+            return None;
+        }
+        let tbl = unsafe { *self.env };
+        unsafe {
+            let ivals = [Self::val_i(x), Self::val_i(z)];
+            let r = ((*tbl).v1_1.CallIntMethodA)(
+                self.env,
+                self.obj,
+                self.mids.freeze_checks,
+                ivals.as_ptr(),
+            );
+            if ((*tbl).v1_2.ExceptionCheck)(self.env) {
+                ((*tbl).v1_1.ExceptionClear)(self.env);
+                return None;
+            }
+            Some(r)
+        }
     }
 
     /// Debug upcall: block registry key at pos (trace-only).

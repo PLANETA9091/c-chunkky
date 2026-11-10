@@ -10,7 +10,12 @@ RX1=${RX1:-2000}; RZ1=${RZ1:-2000}
 WX=${WX:-500}; WZ=${WZ:-500}
 NW=${NW:-2}
 FILL_THREADS=${FILL_THREADS:-2}
+WORKER_THREADS=${WORKER_THREADS:-1}
 EXTRA_ENV=${EXTRA_ENV:-}
+# cont-136 E2/E3: on 2 cores, chunk-system worker-threads=1 + native fill
+# threads=2 is the optimum (87.7 vs 94.5 control mean; E3 fill=1 worse at
+# window level 93.2 despite equal fill wall — parallel fill overlaps Java).
+sed -i -E "s/^([[:space:]]*)worker-threads:.*$/\1worker-threads: ${WORKER_THREADS}/" config/paper-global.yml
 # WIPE=1: rm world dirs first — REQUIRED for same-region config A/B
 # (fresh generation is deterministic per seed+coords, saved-chunk reload is not)
 if [ "${WIPE:-0}" = "1" ]; then
@@ -34,9 +39,23 @@ rm -f run.in; mkfifo run.in
 echo $! > fifo.pid
 
 HEAP="-Xms2G -Xmx3G"
-echo "booting with CRUS_NATIVE_DECO=1 CRUS_NATIVE_CARVERS=1 CRUS_FILL_THREADS=$FILL_THREADS $EXTRA_ENV"
+# CRUS_SERIAL_GC=1: judge-mode GC (no parallel GC threads stealing cores on 2c)
+GC_FLAGS=""
+if [ "${CRUS_SERIAL_GC:-0}" = "1" ]; then
+  GC_FLAGS="-XX:CICompilerCount=2 -XX:+UseSerialGC"
+fi
+if [ "${CRUS_JFR:-0}" = "1" ]; then
+  GC_FLAGS="$GC_FLAGS -XX:StartFlightRecording=filename=/tmp/jfr_rec.jfr,settings=profile,dumponexit=true,maxsize=200m"
+fi
+# cont-136 JFR finding: watchdog fires 3-4 thread dumps DURING windows (main
+# thread stall >10s between chunk batches) — each dump safepoints ALL threads
+# incl. native fill JNI threads. disable.watchdog=true removes the storms.
+if [ "${CRUS_NO_WATCHDOG:-0}" = "1" ]; then
+  GC_FLAGS="$GC_FLAGS -Ddisable.watchdog=true"
+fi
+echo "booting with CRUS_NATIVE_DECO=1 CRUS_NATIVE_CARVERS=1 CRUS_FILL_THREADS=$FILL_THREADS WT=$WORKER_THREADS $EXTRA_ENV $GC_FLAGS"
 env CRUS_NATIVE_DECO=1 CRUS_NATIVE_CARVERS=1 CRUS_FILL_THREADS="$FILL_THREADS" $EXTRA_ENV \
-  setsid $JAVA $HEAP \
+  setsid $JAVA $HEAP $GC_FLAGS \
   -Djava.library.path="$ROOT/native/target/release" \
   -jar paper-26.3-222.jar nogui < run.in > run.out 2>&1 &
 SPID=$!
