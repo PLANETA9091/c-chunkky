@@ -7739,3 +7739,17 @@ Stage Summary:
 - ПУТЬ К 5ms: (1) H6 fill 5.7→~3 (агент жив, density.rs cache); (2) pipelining maxconc=2
   при низком CPU (перетест после H6); (3) struct margin walls (Q6); (4) paper-side — нужен
   новый фронт (idle 25-28 — единственный крупнейший остаток после CPU-порезов).
+
+---
+Task ID: cont-139 (2026-11-11 ~05:00-08:00 +08). Agent: Super Z (main), 4 sub-agent launches (3 streams died mid-session, code survived in worktrees; orchestrator takeover per protocol).
+
+Work Log:
+- H9 SyncGen MEASURED NO-WIN (harness/syncgen_ab.sh A|B, same rect 2100,2000 wipe-paired): syncgen 64.28/61.94 ms/ch vs pipeline honest 63.34; sync native fill WORSE loaded (31.8 vs 22.9 p50, main thread joins contention). Floor evidence min 2.93-3.13 ms/ch (warm chunk, ready neighbors) — 5ms goal needs CPU cuts, not architecture swap. Convergent with parallel session's independent refutation.
+- 3 sub-agents (S1 crossings, H7 ore, H6 fill) — all adopted lost-session WIP; all streams died post-implementation; I took over builds/fixes/verification per protocol. H7: parallel session merged their independent fix of the SAME WIP (bb2e0ccd, 91/91) — my wt_h7b redundant, dropped. H6: mine completed (91/91 + filldump parity 4/4) but paired honest A/B showed NO WIN (T 59.15/60.30 vs C 53.94/58.70) — REVERTED; branch kept with diag tooling. Probable regression mechanism: pv [[f32;16];34] memset per spline y-group. KEY: cont-132 slice attribution partially wrong — named noises are NOT the 2.9ms.
+- S1 (H4): compiled agent code (write_meta casts, Hash import), production-buffer op stream byte-identical + final state digest equal (92/92; artificial tiny-cap regime documented divergent — unreachable, deco ops ~10-20k << 65536 cap). Merged 36c253a8. CI 42917746223 SUCCESS (plugin/native/integration judge parity). Default-ON flip pushed f24f6878 (CRUS_S1_SUBBATCH=0 restores old) — CI to judge the batched lane; smoke default-ON e2e 56.37, batch=3382/25466 => crossings 55.4->6.6/ch (-88%).
+- FILL DECOMPOSITION MEASURED (CRUS_PROFILE=1): fill 4.04 = slice 2.60 + material 0.75 + cellfill 0.25 + select 0.08 ms/ch. cont140-slice agent (worktree wt_slice2, report live) delivered per-WKind split: Blend ~1.4-1.5ms (247.5 batch8 calls x 5.87us, ALREADY avx2), slots-1-7 scalar corner loops ~1.2-2.0ms (NEW WHALE — production bit-identical batched path exists: eval_plane_batched), splines REFUTED (0.06-0.17ms), noise kernels already avx2/avx512+col-memoized. Agent now: batch slots-1-7 on the serial path.
+- Ops hygiene lessons: OOM at boot (4GB box, dying JVM race — check free>2.5G first); disk 9.9G ~90% (agents must build --lib + specific bins, clean intermediates); rg -r flag rewrites output (cost me a red herring); macros are hygienic (closure tuples over macro_rules); Task-tool stream timeouts do NOT mean agent death — files/worktrees/commits survive and agents occasionally wake up and commit.
+
+Stage Summary:
+- Honest e2e today: 53.9-63.3 (noise +-15%); campaign best 50.97 (cont-138 quiet-box). S1 crossings -88% shipped (sub-noise wall delta, as projected). H6 reverted honestly. Slice whale localized for cont-140 (slots-1-7 batching). CI green through it all; kill-switches: CRUS_S1_SUBBATCH=0, CRUS_DELEG_NOGEN, CRUS_DECO_SHARED_POOL, CRUS_LIGHT_DIVERT, disable.watchdog.
+- Next: (1) CI verdict on default-ON (f24f6878) — judge batched lane; (2) cont140-slice slots-1-7 batching + dpperf A/B; (3) pipelining re-test at lower CPU; (4) paper-side idle 25-28ms front; (5) worklog cont-42 "1.21.8" -> "26.3" wording fix on next docs commit.
