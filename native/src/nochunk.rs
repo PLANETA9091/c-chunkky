@@ -903,7 +903,7 @@ impl<'e> ChunkGen<'e> {
             plane_cache: Vec::new(),
             plane_pool: Vec::new(),
             aquifer: std::sync::Arc::new(AquiferState::new(env.wg.min_y, env.wg.height)),
-            memo: MemoCtx::new(compiled.arena.len()).with_cols(compiled.col_count as usize),
+            memo: MemoCtx::new(compiled.arena.len()),
             env,
             compiled,
             prof: Prof::from_env(),
@@ -3226,54 +3226,42 @@ impl<'e> ChunkGen<'e> {
     ) {
         let mut memo = BatchMemo::<G>::new(compiled.arena.len()).with_cols(compiled.col_count as usize);
         let mut pts = [Pt { x: 0, y: 0, z: 0 }; G];
-        // H6 row-local grouping: batch WITHIN one (z-row, y-run) so every
-        // group is lane-uniform in (x, z) — the per-column caches (Cache2d,
-        // 2D noises, shift noises) hit on 100% of groups instead of losing
-        // the whole group on the ~1-in-6 z-row straddle of the old flat walk
-        // (49 % G == 1 for both G=4 and G=8). Corners are pure functions of
-        // (x, y, z) and the out layout is the same flat p index, so values
-        // and output are bit-identical; only the group composition changed.
         let mut p = lo;
         while p < hi {
-            let i = p / ny;
-            let row0 = i * ny;
-            let hend = hi.min(row0 + ny); // row end clipped by the range end
-            let mut y = p - row0;
-            while y < hend - row0 {
-                let n = (hend - row0 - y).min(G);
-                for k in 0..G {
-                    let yy = y + (n - 1).min(k);
-                    pts[k] = Pt {
-                        x: corner_x,
-                        y: (yy as i32 + cell_noise_min_y) * ch,
-                        z: (first_cell_z + i as i32) * cw,
-                    };
-                }
-                // slot-0 upper-y constant (top slide: y >= 256 -> -0.078125).
-                // Groups are row-local now, so corner ys rise monotonically
-                // through the group; the all-lane gate (tail lanes duplicate
-                // the last real corner) stays exact — a group fully above y0
-                // fills the constant, mixed groups evaluate normally.
-                if let Some((y0, YUpperConst::Val(v))) =
-                    compiled.node_y_upper_const[child0 as usize]
-                {
-                    if !yconst_off() && pts[..n].iter().all(|pt| (pt.y as f64) >= y0) {
-                        SLOT0_CONST_HITS.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
-                        let base = row0 + y - lo;
-                        for k in 0..n {
-                            out[base + k] = v;
-                        }
-                        y += G;
-                        continue;
-                    }
-                }
-                // G-wide batch: lane-identical arithmetic (bit-exact)
-                let v = env.eval_batch::<G>(compiled, child0, &pts, Mode::Slice, interp, &memo);
-                let base = row0 + y - lo;
-                out[base..base + n].copy_from_slice(&v[..n]);
-                y += G;
+            let n = (hi - p).min(G);
+            for k in 0..G {
+                let pp = p + (n - 1).min(k);
+                let i = pp / ny;
+                let y = pp % ny;
+                pts[k] = Pt {
+                    x: corner_x,
+                    y: (y as i32 + cell_noise_min_y) * ch,
+                    z: (first_cell_z + i as i32) * cw,
+                };
             }
-            p = hend;
+            // slot-0 upper-y constant (top slide: y >= 256 -> -0.078125).
+            // Groups advance over the FLAT p index (i = p/ny, y = p%ny), so a
+            // group can straddle a z-row restart (ny=49 is not a multiple of
+            // G): later lanes can DROP back to the world bottom. The const
+            // region is upward-closed, so the fill is valid only when EVERY
+            // real lane (tail lanes duplicate the last corner) is >= y0 — a
+            // first-corner-only rule poisoned bottom corners with -0.078125
+            // (judge diff 0.151%, fixed by checking all lanes).
+            if let Some((y0, YUpperConst::Val(v))) =
+                compiled.node_y_upper_const[child0 as usize]
+            {
+                if !yconst_off() && pts[..n].iter().all(|pt| (pt.y as f64) >= y0) {
+                    SLOT0_CONST_HITS.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    for k in 0..n {
+                        out[p - lo + k] = v;
+                    }
+                    p += G;
+                    continue;
+                }
+            }
+            let v = env.eval_batch::<G>(compiled, child0, &pts, Mode::Slice, interp, &memo);
+            out[p - lo..p - lo + n].copy_from_slice(&v[..n]);
+            p += G;
         }
     }
 
@@ -3334,11 +3322,7 @@ impl<'e> ChunkGen<'e> {
                     }
                     let hi = (lo + per).min(total);
                     s.spawn(move || {
-                        // H6: col-armed per-thread memo — slots 1..N pick up
-                        // the per-column caches for 2D noises/shift leaves
-                        // (bit-identical pure-function reuse, disjoint rows).
-                        let mut memo = MemoCtx::new(compiled.arena.len())
-                            .with_cols(compiled.col_count as usize);
+                        let mut memo = MemoCtx::new(compiled.arena.len());
                         // slot 0 in groups of G corners (tail-padded duplicates)
                         match lanes {
                             8 => Self::slice_slot0::<8>(
