@@ -106,6 +106,10 @@
   ],
   "log": [
     {
+      "t": "2026-11-11T05:58+08:00",
+      "event": "SESSION CLOSE (cont-138): honest e2e 96.1(cont-135) -> 82.3(cont-136 E2E6) -> 50.97 (H10 quiet-box, BEST). H10 carver vanilla-setBlockState apply = biggest cut (carver 9.92->3.13 quiet, apply 5.50->0.00). H9 inline-delivery REFUTED by measurement. H7 merged (91/91, perf verdict deferred to CI/quiet). Physics locked: CFS 2x mutual, GC exonerated, worker=1~2 at current CPU, light-divert parked, rings boot-resolved. Agents: H6 alive (density.rs cache building), S1/Q5b sessions stalled. Next fronts ranked: H6 fill -> pipelining re-test -> struct margin walls -> NEW paper-side idle front (25-28ms)."
+    },
+    {
       "t": "2026-11-11T05:35+08:00",
       "event": "H7 MERGED to main (bb2e0ccd): agent 2-c zombie takeover — their 866-line implementation (per-section palette classification w/ tri-state eval + SecCls lazy tables, fused is_air_or_water dripstone scan) had 5 test-compile errors (lifetimes + arg types) and a wrong hardcoded expectation; fixed all (fn-item closures, copied() iteration, fast==exact invariant test via rule_test_matches oracle, local-y palette coords), 89/89 on branch -> 91/91 on merged main (Q5's 2 + H7's 3 + 86 base). fill parity 16/16 (8 dptt coords x 2 seeds) vs main reference. Server A/B (CRUS_H7_OFF flip) INCONCLUSIVE — box load 3.5 from resurrected H6 agent build (tgt_h6b); parked until quiet box. H6 agent ALIVE (was zombie ~2h, now building) — left to work."
     },

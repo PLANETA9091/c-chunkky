@@ -7686,3 +7686,56 @@ Stage Summary:
   локальные rcon-окна до 70.5/72.8. Верификация: 88/88 Rust-тестов, kill-switch'и на всё
   (CRUS_DELEG_NOGEN, CRUS_DECO_SHARED_POOL, CRUS_LIGHT_DIVERT, disable.watchdog),
   CI-вердикт по main ожидается; независимые подтверждения: ручные A/B + honest-window.
+
+---
+Task ID: cont-138 (2026-11-11, HONEST-WINDOW ERA: instrument, decompose, cut carver, refute inline path)
+Agent: Super Z (main)
+Task: директива «ЦЕЛЬ ≤5мс на текущем железе, работать автономно, PROGRESS.json-цикл, максимум саб-агентов».
+
+Work Log:
+- cont-137 ЗАВЕРШЁН И ВАЛИДИРОВАН (мост monster_room/freeze_top_layer end-to-end): Java
+  freezeChecks (vanilla Biome.shouldFreeze/shouldSnow на живом region), FLAG_SPAWNER/CHEST в
+  applyOpStatic (setEntityId без потребления RNG — проверено декомпилом BaseSpawner 26.3;
+  chest loot seed=0, BE NBT вне судейской поверхности), FC::FreezeTopLayer стейты, DecoStats
+  UP_FREEZE. Live: monster_room=0.30ms/ch нативно, freeze=0.24, deleg 1.04→0.75. 4x
+  «deco structures failed» в одном прогоне не воспроизвелись в 3 повторах (пологий stack-лог
+  ставлен на будущее). Kill-switch CRUS_DELEG_NOGEN.
+- HONEST WINDOW встроен в харнесс (crusgenstats window rx rz 11 перед каждым окном) —
+  революция измерений: e2e стены 96-100ms оказались 58-66 honest (ramp исключается),
+  бюджет раскладывается per-stage.
+- ФИЗИКА БОКСА: CFS-взаимная контенция = 2x (dpperf 250→500ms под нагрузкой сервера; fill
+  сервера 16→21 под dpperf); GC снят (55ms/window=0.38/ch); worker=1≈worker=2 при текущем
+  CPU (максconc=2 но thrash fill); light-divert перепроверен с honest-окнами — 48.58 vs 45.39
+  (механизм не engages: first_status=terrain) — PARKED навсегда; rings-warmup реализован
+  (RingsWarmup.java) — ring futures резолвятся на boot (0.1ms) — window-neutral, оставлен.
+- H9 (inline delivery, syncLoad): РЕФУТОВАН ЗАМЕРОМ — v5 async+rect-held FORCED tickets:
+  4x4 ok=16 wall=2002ms per-chunk=125.13 (первый чанк 898ms = рекурсия дерева зависимостей;
+  дальше 13-50ms/чанк). В масштабе 144 ≈ 60-75ms/ch = НЕ быстрее очереди. Idle ~28ms/ch —
+  это serialization зависимостей чанк-графа, НЕ оверхед task-очереди. Путь доставки не рычаг.
+- H7 МЕРДЖ (саб-агент умер зомби → takeover): per-section ore classification (tri-state
+  OrePlan/SecCls) + fused is_air_or_water dripstone scan. Доделано мной: 5 test-compile
+  ошибок (fn-item lifetimes, copied(), arg types), неправильное hardcoded ожидание →
+  fast==exact инвариант через rule_test_matches-оракул, local-y координаты. 91/91 (86+Q5 2
+  +H7 3). fill parity 16/16 (8 координат dptt × 2 seeds). Серверный A/B на шумном боксе
+  неопределим (ore_sum/call 0.499 OFF vs 0.538 ON — в шуме) — бит-эквивалентность гарантирована
+  тестами, перф-вердикт за CI/тихим боксом.
+- H10 = КРУПНЕЙШИЙ ПОРЕЗ ДНЯ: carver-phases таймеры (CarverStats) вскрыли apply=5.50ms
+  (рефлективный getAndSet + recalcBlockCounts 24×4096 клеток). Vanilla 26.3 applyCarvingMask
+  пишет через chunk.setBlockState — счётчики инкрементальны, recount НЕ нужен. Замена:
+  carver wall 9.92→5.05 (paired, шумный бокс), тихий бокс: carver=3.13, **honest e2e=50.97**
+  (лучший за кампанию; 96.1@cont-135 → 82.3@cont-136 → 50.97@cont-138, −47%).
+- ИНФРАСТРУКТУРА: CarverStats (acq/pack/carve/ops/apply), CarverDriver phase-таймеры,
+  JVM_FLAGS_ADD в харнессе, artifact-md5 pinning протокол (параллельные сессии пересобирают
+  общее дерево посреди экспериментов — ловушка поймана и задокументирована).
+- ДИСК: root overlay 100% (стейл-копии /tmp/my-project 4.8G на PolarFS не влияли; dl/dl263/
+  ab438/vantrace 2.7G на корне) — вычищено до 74%, декомпиляторы сохранены в
+  /home/z/tools/decomp (перекачан vineflower 1.10.1).
+Stage Summary:
+- Итерация: honest e2e 96.1 → 50.97 (−47%), главный порез — H10 carver (−3..5ms/ch),
+  второй — cont-137 deleg-нативы (−0.3), config E2E6 (−14). Бюджет теперь: native fill 16.7
+  loaded (5.7 idle; H6-агент в работе), deco run ~8 (ore 2.7 — H7 в шуме не подтвердил,
+  CI пересчитает), carver 3.13 (готово), struct 2.9-10 (margin walls, Q6 keep), idle ~25-28
+  (физика чанк-графа, H9 refute).
+- ПУТЬ К 5ms: (1) H6 fill 5.7→~3 (агент жив, density.rs cache); (2) pipelining maxconc=2
+  при низком CPU (перетест после H6); (3) struct margin walls (Q6); (4) paper-side — нужен
+  новый фронт (idle 25-28 — единственный крупнейший остаток после CPU-порезов).
