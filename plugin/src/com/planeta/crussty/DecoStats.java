@@ -87,6 +87,7 @@ public final class DecoStats {
     static final AtomicLong UP_STATE_IS = new AtomicLong();
     static final AtomicLong UP_FLUID_IS = new AtomicLong();
     static final AtomicLong UP_IS_AIR = new AtomicLong();
+    static final AtomicLong UP_FREEZE = new AtomicLong();
     static final AtomicLong UP_CAN_SURVIVE = new AtomicLong();
     static final AtomicLong UP_OTHER = new AtomicLong();
     static final AtomicLong BIOMECHK_LOG = new AtomicLong();
@@ -153,7 +154,7 @@ public final class DecoStats {
         long p99 = copy[(int) Math.min(n - 1, (long) (n * 0.99))];
         long cnt = Math.max(1, COUNT.get());
         long upcalls = UP_HEIGHT.get() + UP_STATE_IS.get() + UP_FLUID_IS.get()
-                + UP_IS_AIR.get() + UP_CAN_SURVIVE.get() + UP_OTHER.get();
+                + UP_IS_AIR.get() + UP_CAN_SURVIVE.get() + UP_OTHER.get() + UP_FREEZE.get();
         return String.format(
                 "native deco stage: chunks=%d  mean=%.1fus  min=%.1fus  p50=%.1fus  p99=%.1fus  max=%.1fus"
                         + "  [plan=%.2fms struct=%.2fms run=%.2fms apply=%.2fms deleg=%.2fms]"

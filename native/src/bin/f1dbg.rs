@@ -229,6 +229,7 @@ fn main() {
                     crussty_chunkgen::features_json::FeatureCfg::BlockPile { .. } => "BlockPile".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::Kelp => "Kelp".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::MonsterRoom => "MonsterRoom".to_string(),
+                    crussty_chunkgen::features_json::FeatureCfg::FreezeTopLayer => "FreezeTopLayer".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::UnderwaterMagma { .. } => "UnderwaterMagma".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::Vines => "Vines".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::MultifaceGrowth { .. } => "MultifaceGrowth".to_string(),

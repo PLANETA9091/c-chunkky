@@ -7558,3 +7558,39 @@ Stage Summary:
   в evidence base; wrapper Q1-Q3 валидированы (86/86 + parity 8/8 + живой сервер).
 - СЛЕДУЮЩИЕ: (1) parent-компаратор на 26.3 для Q1-Q3 (сервер свободен после cont-134-цикла);
   (2) CI-вердикт 42795659586; (3) S1 sub-batching; (4) NMS light-divert (бэклог).
+
+---
+Task ID: cont-137 (2026-11-11, native monster_room + freeze_top_layer: порты завершены end-to-end)
+Agent: Super Z (main)
+Task: «продолжи» (cron 01:00) — цикл «5мс на текущем железе».
+
+Work Log:
+- НОВАЯ ПЛАТФОРМА-ПАМЯТКА: везде Paper/Pipeworks 26.3 build 222 (не 1.21.8!); decompile-база —
+  vineflower по server263/versions/26.3/paper-26.3.jar (BaseSpawner/RandomizableContainer
+  декомпилированы в /tmp/spx для проверки потребления RNG).
+- cont-136 batch (ункоммиченное наследство): native place_monster_room + place_freeze_top_layer
+  уже транскрибированы (features_place.rs). ЭТА СЕССИЯ завершила мост и валидацию:
+  1) DecoDriver.freezeChecks(II)I — вердикт-апколл одной колонки: живой WorldGenRegion, высота
+     MOTION_BLOCKING, biome.shouldFreeze/shouldSnow НАСТОЯЩИЕ vanilla-методы; ICE-запись ДО
+     shouldSnow (vanilla-порядок: canSurvive снега должен видеть лёд), verdict-биты 1/2/4 +
+     y+4096<<3. Натив эмитит те же записи как опы (идемпотентный re-apply), overlay в синхроне.
+  2) applyOpStatic: FLAG_SPAWNER (aux>>8 = ординал MOBS[0=skeleton,1,2=zombie,3=spider] —
+     26.3 EntityTypes.*) через SpawnerBlockEntity.setEntityId — проверено декомпилом: пустой
+     spawnPotentials -> WeightedList.getRandom -> Optional.empty, ПОТРЕБЛЕНИЯ RNG НЕТ; бросовый
+     RandomSource. FLAG_CHEST: RandomizableContainer.setLootTable(SIMPLE_DUNGEON, 0) —
+     vanilla nextLong потреблён на нативном стриме; значение seed не транспортируется
+     (BE NBT вне судейской поверхности), seed=0 детерминирован. Tree-aux guard (flags&192)==0.
+  3) features_place_ffi.rs: FC::FreezeTopLayer -> note(ice/snow/grass_block[snowy=true]/
+     mycelium[snowy=true]) — иначе sid=0 (AIR-опы, порча мира). MonsterRoom-стейты уже были.
+  4) DecoStats.UP_FREEZE в сумме upcalls; f1dbg match-arm; LightDivert/others — mode-мусор
+     откачен (git checkout по одному файлу, НЕ массово — урок cont-136).
+- ГЕЙТЫ: cargo test --release --lib 86/86; плагин-jar md5 34741a8c; бины filldump/dpperf собраны.
+  26.3 deco bit-judge отсутствует (паки на 26.3 не парсятся — судья vanilla-worldgen = CI);
+  kill-switch CRUS_DELEG_NOGEN=1. Перф-значение: monster_room/freeze уходят из делегат-lane
+  (−JNI crossings, −delegate overhead) — вклад в H4/S1-метрику crossings/ch.
+Stage Summary:
+- Декоративное покрытие натива 26.3 расширено на 2 vanilla-типа end-to-end (натив-стрим + Java-мост
+  + BE-хендлинг). СЛЕДУЮЩИЕ: (1) S1 sub-batching decoRunFeature (crossings 258→~40) — крупнейший
+  структурный рычаг deco; (2) H6 slice-noise plane cache (native fill idle 5.7→~3ms); (3) H7
+  ore/dripstone compute-порезки по COMPUTE_TOP-находкам; (4) локальный e2e-бейзлайн E2-конфига
+  + push → CI-вердикт.

@@ -105,6 +105,15 @@ fn index_states_cfg(
                 );
             }
         }
+        FC::FreezeTopLayer => {
+            // SnowAndFreezeFeature writes; the snowy-rewrite target states
+            // are registered explicitly (the rewrite op only fires when the
+            // rewritten state is in the table — features_place.rs)
+            note("minecraft:ice", states, idx);
+            note("minecraft:snow", states, idx);
+            note("minecraft:grass_block[snowy=true]", states, idx);
+            note("minecraft:mycelium[snowy=true]", states, idx);
+        }
         FC::UnderwaterMagma { .. } => {
             note("minecraft:magma_block", states, idx);
         }

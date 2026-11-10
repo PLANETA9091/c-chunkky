@@ -87,6 +87,10 @@
   ],
   "log": [
     {
+      "t": "2026-11-11T01:15+08:00",
+      "event": "cont-137: native monster_room (+monster_room_deep) + freeze_top_layer (26.3 SnowAndFreezeFeature) ports completed end-to-end: native place fns (features_place.rs, RNG draw order transcribed from vineflower decompile of paper-26.3.jar: chest loot nextLong + spawner nextInt(4) MOBS pick consumed on the native stream), Java bridge completed this session — DecoDriver.freezeChecks(II)I upcall (vanilla Biome.shouldFreeze/shouldSnow on the live region, ICE write ordered BEFORE shouldSnow per vanilla), applyOpStatic FLAG_SPAWNER (aux bits8-15 mob ordinal -> EntityTypes.SKELETON/ZOMBIE/SPIDER via setEntityId, zero RNG confirmed from decompile: empty WeightedList draws nothing) + FLAG_CHEST (SIMPLE_DUNGEON loot table, seed not transported: BE NBT outside judged surface, seed=0 deterministic), tree-aux guard for flags 64/128, FreezeTopLayer state registration (ice/snow/grass_block[snowy=true]/mycelium[snowy=true]) in features_place_ffi.rs seal(). Gates: cargo 86/86 (release), plugin jar md5 34741a8c, f1dbg arm. Kill-switch CRUS_DELEG_NOGEN=1 restores delegate lane. 26.3 deco bit-judge still open — CI judge pending push."
+    },
+    {
       "t": "2026-11-10T16:45+08:00",
       "event": "LIGHT-DIVERT (CRUS_LIGHT_DIVERT) implemented per /tmp/lightdivert/PLAN.md: LightDivert.java NMS populator registered LAST, setLightCorrect+persistedStatus=LIGHT during decorate. Corrections vs audit: (1) real status during decorate = minecraft:terrain (BELOW features — [FEATURES,LIGHT) guard diverted 0/1153, fixed to skip-only->=LIGHT), (2) TWO flags required. diverted=1144/1144, fail=0. A/B: divert 83.4/96.2/109.1 (mean 96.2) vs adjacent control 86.6/88.1/108.8 (mean 94.5) => INCONCLUSIVE (+1.7, noise; mechanism: dropped INIT_LIGHT barrier adds 2-core contention, may help on 4c CI). DEFAULT OFF. GIT LESSON: git checkout -- plugin/ wiped uncommitted source edits twice; never checkout while carrying edits."
     },

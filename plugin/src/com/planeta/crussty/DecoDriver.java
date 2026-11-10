@@ -4,14 +4,22 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.Holder;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.world.RandomizableContainer;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.WorldGenRegion;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.RotatedPillarBlock;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.SpawnerBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.storage.loot.BuiltInLootTables;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.LevelChunkSection;
@@ -649,7 +657,7 @@ public final class DecoDriver extends BlockPopulator {
                 // state without an axis property: trySetValue is a no-op anyway
             }
         }
-        if ((flags & 2) == 0 && aux != 0) {
+        if ((flags & 2) == 0 && (flags & 192) == 0 && aux != 0) {
             // tree aux: bits 0-3 = leaf distance override (1..7), bit 4 =
             // waterlogged=true (vanilla LeavesBlock/roots fluid override) —
             // trySetValue is a no-op when the state lacks the property
@@ -679,6 +687,43 @@ public final class DecoDriver extends BlockPopulator {
             return true;
         }
         region.setBlock(pos, st, 2);
+        if ((flags & 64) != 0) {
+            // FLAG_SPAWNER (monster_room): aux bits 8-15 = mob ordinal
+            // (MOBS = skeleton/zombie/zombie/spider). Vanilla setEntityId
+            // consumes NOTHING (fresh nextSpawnData + empty spawnPotentials
+            // -> WeightedList.getRandom -> Optional.empty, no draw) — the
+            // native stream already consumed exactly nextInt(4); pass a
+            // throwaway RandomSource, never the chunk stream.
+            try {
+                BlockEntity be = region.getBlockEntity(pos);
+                if (be instanceof SpawnerBlockEntity sbe) {
+                    EntityType<?> mob = switch ((aux >> 8) & 0xFF) {
+                        case 0 -> EntityTypes.SKELETON;
+                        case 1, 2 -> EntityTypes.ZOMBIE;
+                        case 3 -> EntityTypes.SPIDER;
+                        default -> null;
+                    };
+                    if (mob != null) {
+                        sbe.setEntityId(mob, RandomSource.create());
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if ((flags & 128) != 0) {
+            // FLAG_CHEST (monster_room): vanilla attaches the SIMPLE_DUNGEON
+            // loot table + a random.nextLong() seed. The draw is consumed on
+            // the NATIVE stream (RNG parity); the seed value itself is not
+            // transported (BlockEntity NBT is outside the judged surface —
+            // sections/palette only), seed 0 keeps the chest deterministic.
+            try {
+                BlockEntity be = region.getBlockEntity(pos);
+                if (be instanceof RandomizableContainer cont) {
+                    cont.setLootTable(BuiltInLootTables.SIMPLE_DUNGEON, 0L);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
         if ((flags & 1) != 0) { // FLAG_TICK
             region.scheduleTick(pos, st.getBlock(), 0);
         }
@@ -867,6 +912,43 @@ public final class DecoDriver extends BlockPopulator {
             }
         }
         return bottom;
+    }
+
+    /**
+     * freeze_top_layer verdict upcall (native SnowAndFreezeFeature port):
+     * one column of the 16x16 pass, evaluated with the EXACT vanilla Biome
+     * methods on the live WorldGenRegion. Also performs the ICE/SNOW/
+     * snowy-rewrite writes in vanilla order (ICE write BEFORE shouldSnow —
+     * the snow canSurvive read must observe the ice), while the native side
+     * records the same writes as ops (idempotent re-apply through applyOp)
+     * so its overlay stays in sync for later features.
+     * Packed return: (verdict & 7) | ((y + 4096) << 3); bit0 = ICE at y-1,
+     * bit1 = SNOW at y, bit2 = below rewritten snowy=true. The +4096 bias
+     * keeps the packed value positive for any worldgen y (min build y is
+     * far above -4096 in practice; native unpacks as (packed>>3)-4096).
+     */
+    public int freezeChecks(int x, int z) {
+        DecoStats.UP_FREEZE.incrementAndGet();
+        WorldGenRegion region = reg();
+        int y = region.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z);
+        BlockPos top = new BlockPos(x, y, z);
+        BlockPos below = top.below();
+        Biome biome = region.getBiome(top).value();
+        int verdict = 0;
+        if (biome.shouldFreeze(region, below, false)) {
+            region.setBlock(below, Blocks.ICE.defaultBlockState(), 2);
+            verdict |= 1;
+        }
+        if (biome.shouldSnow(region, top)) {
+            region.setBlock(top, Blocks.SNOW.defaultBlockState(), 2);
+            verdict |= 2;
+            BlockState belowState = region.getBlockState(below);
+            if (belowState.hasProperty(BlockStateProperties.SNOWY)) {
+                region.setBlock(below, belowState.setValue(BlockStateProperties.SNOWY, Boolean.TRUE), 2);
+                verdict |= 4;
+            }
+        }
+        return verdict | ((y + 4096) << 3);
     }
 
     public boolean stateIs(int x, int y, int z, String[] names) {
