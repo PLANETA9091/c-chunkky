@@ -210,11 +210,29 @@ impl<'a> JniLevel<'a> {
         let no_upcall = *NOUPCALL_ON.get_or_init(|| {
             std::env::var("CRUS_DECO_NOUPCALL").ok().as_deref() == Some("1")
         });
-        // Fast path: table built on an earlier call — no JNI, no allocs.
-        let bc = match BRIDGE_CACHE.get() {
-            Some(Some(bc)) => bc,
-            _ => {
-                let built: Option<BridgeCache> = unsafe {
+        // Fast path: table built on an earlier call — no JNI resolves, one
+        // IsSameObject identity guard (plugin reload swaps classloaders:
+        // same method names, DIFFERENT Class objects — stale jmethodIDs
+        // would be UB; on mismatch the table is rebuilt and the stale
+        // global ref dropped so the old classloader can be collected).
+        let bc = 'build: {
+            if let Some(Some(bc)) = BRIDGE_CACHE.get() {
+                let cur = ((*tbl).v1_1.GetObjectClass)(env, obj);
+                let same = !cur.is_null()
+                    && ((*tbl).v1_1.IsSameObject)(
+                        env,
+                        cur as jni_sys::jobject,
+                        bc.class as jni_sys::jobject,
+                    ) == jni_sys::JNI_TRUE;
+                if !cur.is_null() {
+                    ((*tbl).v1_1.DeleteLocalRef)(env, cur as jni_sys::jobject);
+                }
+                if same {
+                    break 'build bc;
+                }
+                ((*tbl).v1_1.DeleteGlobalRef)(env, bc.class as jni_sys::jobject);
+            }
+            let built: Option<BridgeCache> = unsafe {
                     let class = ((*tbl).v1_1.GetObjectClass)(env, obj);
                     if class.is_null() {
                         None
@@ -278,13 +296,14 @@ impl<'a> JniLevel<'a> {
                 };
                 // A None (old jar / broken env) is cached too — the same
                 // class resolves the same way on every call, so a per-call
-                // retry cannot produce a different answer.
+                // retry cannot produce a different answer. (Exception: a
+                // plugin RELOAD yields a different Class — caught by the
+                // IsSameObject guard above, which forces a rebuild.)
                 let _ = BRIDGE_CACHE.set(built);
                 match BRIDGE_CACHE.get() {
                     Some(Some(bc)) => bc,
                     _ => return None,
                 }
-            }
         };
         let mids = bc.mids;
         Some(JniLevel {
