@@ -130,6 +130,23 @@ public final class DecoDriver extends BlockPopulator {
     private static final ThreadLocal<int[]> DROP_BUF = new ThreadLocal<>();
     /** cont-135 (Q2): per-thread reusable plan-runs buffer (PLAN_TOTAL*2+16). */
     private static final ThreadLocal<int[]> RUNS_BUF = new ThreadLocal<>();
+    /** cont139 (S1): per-thread per-run op counts for the batched lane. */
+    private static final ThreadLocal<int[]> PER_RUN_BUF = new ThreadLocal<>();
+    /** cont139 (S1): per-thread batch meta buffer [completed, kind, opsWritten]. */
+    private static final ThreadLocal<int[]> META_BUF = new ThreadLocal<>();
+
+    /**
+     * S1 sub-batch kill-switch (cont139, H4): CRUS_S1_SUBBATCH=1 enables the
+     * batched deco lane — ONE decoRunBatch JNI crossing expands consecutive
+     * runs between flush boundaries (vanilla delegates, native
+     * freeze_top_layer, ops-buffer full) instead of one crossing per feature.
+     * DEFAULT OFF = the exact pre-cont139 per-feature protocol (decoRunFeature
+     * per run). Every behavior change of the ON lane is gated here.
+     */
+    private static final boolean S1_SUBBATCH = "1".equals(System.getenv("CRUS_S1_SUBBATCH"));
+    /** Set when the batch lane proves unusable at runtime (old .so without
+     *  decoRunBatch / UnsatisfiedLinkError): the session stays per-feature. */
+    private static volatile boolean S1_BATCH_BROKEN = false;
 
     /** Delegate holder cache (parse+registry walk once per placed name).
      * Concurrent populate threads: CHM + Set are the safe scope. */
@@ -361,9 +378,30 @@ public final class DecoDriver extends BlockPopulator {
         long ts0 = System.nanoTime();
         runStructures(l, cx, cz);
         DecoStats.STRUCT_TOTAL.addAndGet(System.nanoTime() - ts0);
+        if (S1_SUBBATCH && !S1_BATCH_BROKEN) {
+            totalOps = runChunkBatched(ctx, l, ox, oy, oz, maxY, runsBuf, runs, ops, drops, first);
+        } else {
+            totalOps = runPerFeature(ctx, l, ox, oy, oz, maxY, runsBuf, runs, 0, ops, drops, first);
+        }
+        DecoStats.OPS_TOTAL.addAndGet(totalOps);
+        if (first) {
+            LOG.info("[deco-dbg] totalOps=" + totalOps);
+        }
+    }
+
+    /**
+     * The pre-S1 per-feature protocol (one decoRunFeature crossing per run):
+     * the kill-switch OFF lane AND the fallback for runs[from..runs) after a
+     * native batch failure. Bit-identical to the pre-cont139 master loop.
+     * Returns the total ops applied (drop counting matches the old loop).
+     */
+    private int runPerFeature(long ctx, long l, int ox, int oy, int oz, int maxY,
+                              int[] runsBuf, int runs, int from,
+                              int[] ops, int[] drops, boolean first) {
+        int totalOps = 0;
         long tr = 0;
         long ta = 0;
-        for (int k = 0; k < runs; k++) {
+        for (int k = from; k < runs; k++) {
             int step = runsBuf[k * 2];
             int gid = runsBuf[k * 2 + 1];
             if (step < 0) {
@@ -405,7 +443,7 @@ public final class DecoDriver extends BlockPopulator {
             long ta0 = System.nanoTime();
             int ndrop = 0;
             for (int i = 0; i < n; i++) {
-                if (!applyOp(limited, ox, oz, ops, i * 6)) {
+                if (!applyOpStatic(reg(), ox, oz, ops, i * 6)) {
                     // dropped: (x,y,z) triple for the native overlay sync
                     if (ndrop * 3 + 2 >= drops.length) {
                         drops = java.util.Arrays.copyOf(drops, drops.length * 2);
@@ -423,10 +461,141 @@ public final class DecoDriver extends BlockPopulator {
         }
         DecoStats.RUN_TOTAL.addAndGet(tr);
         DecoStats.APPLY_TOTAL.addAndGet(ta);
-        DecoStats.OPS_TOTAL.addAndGet(totalOps);
-        if (first) {
-            LOG.info("[deco-dbg] totalOps=" + totalOps);
+        return totalOps;
+    }
+
+    /**
+     * S1 sub-batch lane (CRUS_S1_SUBBATCH=1): ONE decoRunBatch JNI crossing
+     * expands consecutive runs between flush boundaries (vanilla delegates,
+     * native freeze_top_layer, ops-buffer full). Ops are applied per run
+     * segment so the per-run drop sync stays exact; delegates + snapshot
+     * marks happen at the boundaries exactly like the per-feature lane. Any
+     * native failure falls back to {@link #runPerFeature} for the remaining
+     * runs of this chunk.
+     */
+    private int runChunkBatched(long ctx, long l, int ox, int oy, int oz, int maxY,
+                                int[] runsBuf, int runs, int[] ops, int[] drops, boolean first) {
+        int totalOps = 0;
+        long tr = 0;
+        long ta = 0;
+        int[] perRun = PER_RUN_BUF.get();
+        if (perRun == null || perRun.length < runs) {
+            perRun = new int[Math.max(runs, 64)];
+            PER_RUN_BUF.set(perRun);
         }
+        int[] meta = META_BUF.get();
+        if (meta == null) {
+            meta = new int[3];
+            META_BUF.set(meta);
+        }
+        int i = 0;
+        while (i < runs) {
+            long tb0 = System.nanoTime();
+            int n;
+            try {
+                n = ChunkGenNative.decoRunBatch(ctx, l, -1L, ox, oy, oz, maxY,
+                        runsBuf, runs, i, this, ops, perRun, meta);
+            } catch (Throwable t) {
+                // old .so without decoRunBatch / broken env: park the lane for
+                // the session, finish THIS chunk on the per-feature protocol
+                // (nothing was applied for runs[i..) yet)
+                S1_BATCH_BROKEN = true;
+                LOG.warning("deco: decoRunBatch unavailable, S1 lane off for this session: " + t);
+                break;
+            }
+            long runNs = System.nanoTime() - tb0;
+            int done = meta[0];
+            int kind = meta[1];
+            int valid = meta[2];
+            if (n == -1 || done < 0 || done > runs - i || valid < 0) {
+                // hard failure before any op of this call was applied
+                LOG.warning("deco: decoRunBatch hard failure (n=" + n + " done=" + done
+                        + ") — per-feature fallback at run " + i);
+                break;
+            }
+            tr += runNs;
+            DecoStats.S1_BATCHES.incrementAndGet();
+            DecoStats.S1_BATCH_RUNS.addAndGet(done);
+            // apply the batch ops per run segment (stats + per-run drop sync)
+            long ta0 = System.nanoTime();
+            int off = 0;
+            // carry-drain continuation: done==0 with valid>0 ops means the ops
+            // are the (partial) drain of run i's overflowed feature — apply
+            // them as one segment attributed to run i (no i advance; the run
+            // completes on a later call)
+            boolean partialDrain = done == 0 && valid > 0;
+            int segCount = partialDrain ? 1 : done;
+            for (int k = 0; k < segCount; k++) {
+                int runIdx = i + k;
+                int step = runsBuf[runIdx * 2];
+                int gid = runsBuf[runIdx * 2 + 1];
+                int c = partialDrain ? valid : perRun[k];
+                DecoStats.FEATURES_TOTAL.incrementAndGet();
+                // cont-77 per-feature split: batch wall shared across the runs
+                DecoStats.RUN_BY_NAME.merge(PLAN[step][gid],
+                        new long[]{segCount > 0 ? runNs / segCount : 0L, 1L},
+                        (a, b) -> {
+                            a[0] += b[0];
+                            a[1] += b[1];
+                            return a;
+                        });
+                if (first && runIdx == 0) {
+                    LOG.info("[deco-dbg] batch run 0 step=" + step + " gid=" + gid
+                            + " -> n=" + c + " (S1 lane)");
+                }
+                int ndrop = 0;
+                for (int q = 0; q < c; q++) {
+                    if (!applyOpStatic(reg(), ox, oz, ops, (off + q) * 6)) {
+                        // dropped: (x,y,z) triple for the native overlay sync
+                        if (ndrop * 3 + 2 >= drops.length) {
+                            drops = java.util.Arrays.copyOf(drops, drops.length * 2);
+                        }
+                        drops[ndrop * 3] = ops[(off + q) * 6];
+                        drops[ndrop * 3 + 1] = ops[(off + q) * 6 + 1];
+                        drops[ndrop * 3 + 2] = ops[(off + q) * 6 + 2];
+                        ndrop++;
+                    }
+                }
+                if (ndrop > 0) {
+                    ChunkGenNative.decoOpsDropped(ctx, drops, ndrop);
+                }
+                off += c;
+            }
+            ta += System.nanoTime() - ta0;
+            totalOps += valid;
+            i += done;
+            if (kind == 1) {
+                // the run at i is a vanilla delegate: vanilla lane + mark, then
+                // the batch resumes after it (the mark invalidates the native
+                // overlay/snapshot exactly like the per-feature lane)
+                long td0 = System.nanoTime();
+                int step = runsBuf[i * 2];
+                int gid = runsBuf[i * 2 + 1];
+                delegateVanilla(PLAN[step][gid], step, gid, l, ox, oy, oz);
+                ChunkGenNative.decoDelegateMark(ctx);
+                DecoStats.DELEGATE_TOTAL.addAndGet(System.nanoTime() - td0);
+                DecoStats.DELEGATE_COUNT.incrementAndGet();
+                DecoStats.DELEGATE_NAMES.merge(PLAN[step][gid], 1L, Long::sum);
+                i++;
+            } else if (kind == 4) {
+                // native panic: the run at i was consumed but failed — skip it
+                // (the per-feature lane skips a panicked run the same way)
+                LOG.warning("deco: batch panic at run " + i + " — skipped, batch continues");
+                i++;
+            }
+            if (done == 0 && (kind == 0 || (kind == 3 && valid == 0))) {
+                // no progress and nothing applied: protocol stall guard
+                LOG.warning("deco: S1 batch stall (done=" + done + " kind=" + kind
+                        + ") — per-feature fallback at run " + i);
+                break;
+            }
+        }
+        DecoStats.RUN_TOTAL.addAndGet(tr);
+        DecoStats.APPLY_TOTAL.addAndGet(ta);
+        if (i < runs) {
+            totalOps += runPerFeature(ctx, l, ox, oy, oz, maxY, runsBuf, runs, i, ops, drops, first);
+        }
+        return totalOps;
     }
 
     /**
@@ -613,19 +782,12 @@ public final class DecoDriver extends BlockPopulator {
         return n;
     }
 
-    /** Apply one op; false = DROPPED (no block write happened) — the caller
-     *  syncs the drop to the native overlay (a chunk-scoped overlay entry for
-     *  a dropped op is a phantom that would serve stale answers all chunk). */
-    private boolean applyOp(LimitedRegion limited,
-                         int ox, int oz, int[] ops, int o) {
-        return applyOpStatic(reg(), ox, oz, ops, o);
-    }
-
     /** Static op applier: `region` replaces reg() so the ore hook (which
      *  holds the decorate WorldGenRegion, not a Bukkit populate callback)
      *  applies ops with the exact same semantics (FLAG_RAW section write,
      *  FLAG_POSTPROC marks, rotation/tick flags). The `limited` parameter
-     *  of the instance path was never used by the body. */
+     *  of the pre-cont139 instance path was never used by the body; both the
+     *  per-feature and the S1 batched apply loops call this directly. */
     static boolean applyOpStatic(WorldGenRegion region,
                          int ox, int oz, int[] ops, int o) {
         int rx = ops[o];

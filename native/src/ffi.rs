@@ -2076,3 +2076,275 @@ mod q5_deco_ctx_parity {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// S1 (cont139) — sub-batch deco JNI crossings parity. The batch core
+// (features_master::run_batch_core) must produce a byte-identical op stream
+// to the per-feature protocol (decoRunFeature semantics) over the whole
+// embedded-26.3 plan, INCLUDING the flush boundaries: vanilla delegates
+// (overlay clear + snapshot epoch bump between runs), native freeze_top_layer
+// (flush-before so its live-region freezeChecks upcalls see the flushed
+// region) and ops-buffer overflow (carry drain). Two buffers: the real
+// 65536-op one (End/Delegate/Freeze boundaries) and a tiny one that forces
+// Full/carry splits — the concatenated streams must both match the old lane.
+// NOTE on scope: the batch JNI layer creates one ChunkLevel per call (fresh
+// tag memo); the live tag memo is only populated from snapshot sections,
+// which the stone mock has none of — the memo-scope difference is therefore
+// not observable here and stays pinned by the CI judge on the real server.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod s1_batch_parity {
+    use super::*;
+
+    /// Stone-world level mock (q5 shape): every query deterministic, so any
+    /// op divergence between the two protocols is a batching bug, not a level
+    /// answer difference.
+    struct Mock;
+    impl crate::features_deco::DecoLevelExt for Mock {
+        fn state_is(&self, _: crate::features_placement::BlockPos, _: &[String]) -> bool {
+            false
+        }
+        fn fluid_is(&self, _: crate::features_placement::BlockPos, _: &[String]) -> bool {
+            false
+        }
+        fn tag_is(&self, _: crate::features_placement::BlockPos, _: &str) -> bool {
+            true
+        }
+    }
+    impl crate::features_deco::DecoLevel for Mock {
+        fn min_y(&self) -> i32 {
+            -64
+        }
+        fn max_y(&self) -> i32 {
+            320
+        }
+        fn height(&self, _: crate::features_deco::HeightmapTy, _: i32, _: i32) -> i32 {
+            200
+        }
+        fn state(&self, _: crate::features_placement::BlockPos) -> u32 {
+            1 // stone
+        }
+        fn is_air(&self, _: crate::features_placement::BlockPos) -> bool {
+            false
+        }
+        fn fluid(&self, _: crate::features_placement::BlockPos) -> u32 {
+            0
+        }
+        fn biome_has_feature(&self, _: crate::features_placement::BlockPos, _: u32) -> bool {
+            true
+        }
+        fn can_survive(&self, _: &str, _: crate::features_placement::BlockPos) -> bool {
+            true
+        }
+        fn is_replaceable(&self, _: crate::features_placement::BlockPos) -> bool {
+            false
+        }
+        fn is_solid(&self, _: crate::features_placement::BlockPos) -> bool {
+            true
+        }
+        fn has_sturdy_face(&self, _: crate::features_placement::BlockPos, _: u8) -> bool {
+            true
+        }
+        fn is_outside_build_height(&self, y: i32) -> bool {
+            y < -64 || y >= 320
+        }
+    }
+
+    /// Chunk-scoped native state (DecoCtx.chunk_* equivalents): the overlay
+    /// + snapshot grid + heightmap cache live across the whole chunk deco in
+    /// BOTH protocols; a vanilla delegate mark clears them (Java:
+    /// decoDelegateMark).
+    struct ChunkScope {
+        ov: std::cell::RefCell<crate::features_snap::OvMap>,
+        ov_cols: std::cell::RefCell<HashMap<(i32, i32), Vec<i32>>>,
+        snap: std::cell::RefCell<crate::features_snap::SnapRegion>,
+        hms: std::cell::RefCell<
+            HashMap<(i32, i32), Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>>>,
+        >,
+    }
+
+    impl ChunkScope {
+        fn new() -> Self {
+            ChunkScope {
+                ov: std::cell::RefCell::new(crate::features_snap::OvMap::with_hasher(
+                    std::hash::BuildHasherDefault::<crate::features_snap::OvHasher>::default(),
+                )),
+                ov_cols: std::cell::RefCell::new(HashMap::new()),
+                snap: std::cell::RefCell::new(crate::features_snap::SnapRegion::new(0, 0, -1024, 26)),
+                hms: std::cell::RefCell::new(HashMap::new()),
+            }
+        }
+
+        fn delegate_mark(&self) {
+            self.ov.borrow_mut().clear();
+            self.ov_cols.borrow_mut().clear();
+            self.snap.borrow().bump_epoch();
+            self.hms.borrow_mut().clear();
+        }
+
+        fn state_digest(&self) -> (usize, u64, u64) {
+            use std::hash::{BuildHasher, Hasher};
+            let ov = self.ov.borrow();
+            let mut h = std::hash::BuildHasherDefault::<std::collections::hash_map::DefaultHasher>::default();
+            // deterministic digest: count + order-independent hash of entries
+            let mut hasher = h.build_hasher();
+            let mut entries: Vec<(&(i32, i32, i32), &String)> = ov.iter().collect();
+            entries.sort_by_cached_key(|(k, _)| **k);
+            for (k, v) in &entries {
+                k.hash(&mut hasher);
+                v.hash(&mut hasher);
+            }
+            (ov.len(), hasher.finish(), self.snap.borrow().epoch.get())
+        }
+    }
+
+    fn batch_level<'a>(mock: &'a Mock, scope: &'a ChunkScope) -> crate::features_snap::ChunkLevel<'a> {
+        let loader = |_cx: i32, _cz: i32, _sy: i32| -> Option<crate::features_snap::SnapSection> { None };
+        let hml = |_cx: i32, _cz: i32| -> Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>> { None };
+        let stf = |_n: &str| -> Option<u8> { None };
+        crate::features_snap::ChunkLevel::new(
+            mock,
+            &scope.ov,
+            &scope.ov_cols,
+            &scope.snap,
+            &loader,
+            &hml,
+            &[],
+            0,
+            &stf,
+        )
+    }
+
+    fn full_plan_runs(plan: &crate::features_master::DecoPlan) -> Vec<(usize, usize)> {
+        let mut runs = Vec::new();
+        for (s, names) in plan.steps.iter().enumerate() {
+            for gid in 0..names.len() {
+                runs.push((s, gid));
+            }
+        }
+        runs
+    }
+
+    /// The OLD protocol: one JNI crossing per run (decoRunFeature), a fresh
+    /// ChunkLevel per feature, delegates handled Java-side with a mark.
+    /// Returns (recorded ops, max ops of any single feature) — the max sizes
+    /// the tiny-buffer batch run below (carry splits without truncation).
+    fn run_old(
+        state: &crate::features_place_ffi::DecoState,
+        plan: &crate::features_master::DecoPlan,
+        scope: &ChunkScope,
+        mock: &Mock,
+        runs: &[(usize, usize)],
+        origin: crate::features_placement::BlockPos,
+        seed: i64,
+        out: &mut [i32],
+    ) -> (Vec<i32>, usize) {
+        let mut recorded = Vec::new();
+        let mut max_n = 0usize;
+        for &(step, gid) in runs {
+            let name = &plan.steps[step][gid];
+            if !crate::features_place::placed_fully_supported(&state.reg, name, 0) {
+                scope.delegate_mark();
+                continue;
+            }
+            let level = batch_level(mock, scope);
+            let n = crate::features_master::run_feature_master(
+                state, &level, seed, None, origin, name, step, gid, out,
+            );
+            max_n = max_n.max(n);
+            recorded.extend_from_slice(&out[..n * 6]);
+            // (Java applies the ops here — the mock world is static)
+        }
+        (recorded, max_n)
+    }
+
+    /// The S1 protocol: decoRunBatch crossings via run_batch_core until End.
+    fn run_batched(
+        state: &crate::features_place_ffi::DecoState,
+        plan: &crate::features_master::DecoPlan,
+        scope: &ChunkScope,
+        mock: &Mock,
+        runs: &[(usize, usize)],
+        origin: crate::features_placement::BlockPos,
+        seed: i64,
+        out: &mut [i32],
+    ) -> Vec<i32> {
+        let mut recorded = Vec::new();
+        let mut carry: Vec<crate::features_place::DecoOp> = Vec::new();
+        let level = batch_level(mock, scope);
+        let progress = std::cell::Cell::new((0usize, 0usize));
+        let clock = || 0u64;
+        let mut i = 0usize;
+        let mut guards = 0usize;
+        while i < runs.len() {
+            guards += 1;
+            assert!(guards < 1_000_000, "batch loop stall at run {i}");
+            let mut per_run = vec![0i32; runs.len() + 1];
+            let res = crate::features_master::run_batch_core(
+                state, &level, seed, None, origin, plan, runs, i, out,
+                &mut per_run, &mut carry, &clock, &progress,
+            );
+            recorded.extend_from_slice(&out[..res.ops_written * 6]);
+            i += res.completed;
+            match res.boundary {
+                crate::features_master::BatchBoundary::Delegate => {
+                    scope.delegate_mark();
+                    i += 1;
+                }
+                _ => {}
+            }
+            if res.completed == 0
+                && res.ops_written == 0
+                && res.boundary == crate::features_master::BatchBoundary::End
+            {
+                break; // nothing left to expand
+            }
+        }
+        assert!(carry.is_empty(), "batch carry must drain before End");
+        recorded
+    }
+
+    /// Op-stream parity old-vs-batch over the FULL embedded-26.3 plan with the
+    /// production buffer size, plus a tiny buffer that forces Full/carry
+    /// splits, plus identical final overlay/epoch state.
+    #[test]
+    fn s1_batch_op_stream_identical_to_per_feature() {
+        let assets = embedded263_assets();
+        let src = crate::biomes::BiomeSourceData::from_params263(include_str!(
+            "params263_overworld.json"
+        ))
+        .expect("263 biome source");
+        let ctx = crate::features_master::build_deco_ctx_src(&assets, &src)
+            .expect("deco ctx");
+        let runs = full_plan_runs(&ctx.plan);
+        assert!(runs.len() >= 20, "vanilla plan run count");
+        let origin = crate::features_placement::BlockPos::new(48, -64, 112);
+        let seed = crate::features_master::decoration_seed(18014, 48, 112);
+        let mock = Mock;
+
+        // production buffer
+        let mut out_a = vec![0i32; 6 * 65536];
+        let scope_a = ChunkScope::new();
+        let (old, max_n) = run_old(&ctx.state, &ctx.plan, &scope_a, &mock, &runs, origin, seed, &mut out_a);
+
+        let mut out_b = vec![0i32; 6 * 65536];
+        let scope_b = ChunkScope::new();
+        let bat = run_batched(&ctx.state, &ctx.plan, &scope_b, &mock, &runs, origin, seed, &mut out_b);
+        assert_eq!(old.len(), bat.len(), "op stream length (production buffer)");
+        assert_eq!(old, bat, "op stream bytes (production buffer)");
+
+        // tiny buffer sized to the largest single feature: any feature fits an
+        // empty buffer (no truncation) but two consecutive non-empty features
+        // never fit together — forces Full boundaries + carry drains mid-plan
+        assert!(max_n >= 1, "the mock plan must produce ops");
+        let mut out_c = vec![0i32; 6 * max_n];
+        let scope_c = ChunkScope::new();
+        let tiny = run_batched(&ctx.state, &ctx.plan, &scope_c, &mock, &runs, origin, seed, &mut out_c);
+        assert_eq!(old, tiny, "op stream bytes (tiny buffer, carry splits)");
+
+        // final native state must match too (overlay entries + snapshot epoch)
+        assert_eq!(scope_a.state_digest(), scope_b.state_digest(), "final overlay state (production buffer)");
+        assert_eq!(scope_a.state_digest(), scope_c.state_digest(), "final overlay state (tiny buffer)");
+        assert!(!old.is_empty(), "the mock plan must produce ops (nonempty stream)");
+    }
+}

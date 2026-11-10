@@ -1297,6 +1297,256 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
     n as jint
 }
 
+/// decoRunBatch(ctx, decoSeed, paperSeed, originX, originY, originZ, maxY,
+/// int[] runs, int nRuns, int startRun, bridge, int[] ops, int[] perRun,
+/// int[] meta) -> int opsWritten.
+///
+/// S1 sub-batch (cont139, H4; kill-switch CRUS_S1_SUBBATCH is JAVA-side — this
+/// entry exists unconditionally and is called only when the switch is ON):
+/// expands CONSECUTIVE (step, gid) runs of the chunk plan in ONE JNI crossing
+/// with the exact per-feature protocol (run_feature_staged = the
+/// run_feature_master body; same seeding, same overlay evolution), writing all
+/// ops into the shared pinned buffer. Stops at flush boundaries (meta[1]):
+///   0 END      — all requested runs expanded
+///   1 DELEGATE — runs[startRun+completed] is a vanilla delegate: Java applies
+///                the batch, runs delegateVanilla + decoDelegateMark, resumes
+///                at +1
+///   2 FREEZE   — runs[startRun+completed] is freeze_top_layer with ops
+///                pending: flush first; the feature runs at the NEXT call
+///                start (opsWritten == 0 there) so its freezeChecks live-region
+///                upcalls see the flushed region exactly like the old protocol
+///   3 FULL     — ops buffer would overflow: the staged ops carry over in
+///                DecoCtx.batch_carry (they are already in the overlay and
+///                MUST be applied) and drain first on the next call
+/// meta = [completedRuns, boundaryKind, opsWritten]; perRun[k] = ops of run
+/// startRun+k (completed entries). Return: opsWritten, or -1 when the ctx /
+/// arrays / bridge are unusable (Java falls back to the per-feature loop),
+/// or -2 when a feature PANICKED mid-batch (meta carries the valid prefix;
+/// Java applies it, skips the panicked run and continues).
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunBatch(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jlong,
+    deco_seed: jlong,
+    paper_seed: jlong,
+    origin_x: jint,
+    origin_y: jint,
+    origin_z: jint,
+    max_y: jint,
+    runs: jni_sys::jintArray,
+    n_runs: jint,
+    start_run: jint,
+    bridge: jobject,
+    out: jni_sys::jintArray,
+    per_run: jni_sys::jintArray,
+    meta: jni_sys::jintArray,
+) -> jint {
+    if bridge.is_null() || out.is_null() || runs.is_null() || per_run.is_null() || meta.is_null() {
+        return -1;
+    }
+    if n_runs <= 0 || start_run < 0 || start_run >= n_runs {
+        return -1;
+    }
+    let tbl = *env;
+    let guard = sessions_lock();
+    let Some(d) = guard.as_ref().and_then(|m| m.get(&(ctx as i64)))
+        .and_then(|c| c.deco.as_ref()) else {
+        return -1;
+    };
+    // ---- read the requested (step, gid) run pairs -------------------------
+    let run_pairs: Vec<(usize, usize)> = unsafe {
+        let rlen = ((*tbl).v1_1.GetArrayLength)(env, runs as jni_sys::jarray) as usize;
+        let want_end = (n_runs as usize).min(rlen / 2);
+        if (start_run as usize) >= want_end {
+            return -1;
+        }
+        let rp = ((*tbl).v1_2.GetPrimitiveArrayCritical)(env, runs as jni_sys::jarray, std::ptr::null_mut());
+        if rp.is_null() {
+            return -1;
+        }
+        let slice = std::slice::from_raw_parts(rp as *const i32, rlen);
+        let mut v = Vec::with_capacity(want_end - start_run as usize);
+        for k in start_run as usize..want_end {
+            v.push((*slice.get_unchecked(k * 2) as usize, *slice.get_unchecked(k * 2 + 1) as usize));
+        }
+        ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, runs as jni_sys::jarray, rp, 0);
+        v
+    };
+    // ---- pin the output arrays -------------------------------------------
+    let olen = ((*tbl).v1_1.GetArrayLength)(env, out as jni_sys::jarray) as usize;
+    if olen < 6 {
+        return -1;
+    }
+    let plen = ((*tbl).v1_1.GetArrayLength)(env, per_run as jni_sys::jarray) as usize;
+    let mlen = ((*tbl).v1_1.GetArrayLength)(env, meta as jni_sys::jarray) as usize;
+    if mlen < 3 {
+        return -1;
+    }
+    let write_meta = |meta_ptr: *mut i32, completed: usize, kind: i32, written: usize| {
+        *meta_ptr.add(0) = completed as i32;
+        *meta_ptr.add(1) = kind;
+        *meta_ptr.add(2) = written as i32;
+    };
+    // NOTE: env may be attached to a worker thread; direct upcalls only.
+    let Some(level) = JniLevel::new(env, bridge, &d.uid_names, origin_y, max_y) else {
+        return -1;
+    };
+    // Chunk-scoped level shared by the WHOLE batch (the old path re-created it
+    // per feature): ov/snap/hms live in DecoCtx across the chunk either way —
+    // the only per-feature state was the tag memo, whose (slot, paletteIdx)
+    // keys stay valid across features of one batch (no epoch bumps and no
+    // section reloads can happen inside a batch: delegates/freezes are
+    // boundaries and the live region is frozen while ops are pending).
+    let ov: &std::cell::RefCell<crate::features_snap::OvMap> = &d.chunk_ov;
+    let ov_cols: &std::cell::RefCell<std::collections::HashMap<(i32, i32), Vec<i32>>> =
+        &d.chunk_ov_cols;
+    let snap: &std::cell::RefCell<crate::features_snap::SnapRegion> = &d.chunk_snap;
+    let hms: &std::cell::RefCell<
+        std::collections::HashMap<
+            (i32, i32),
+            Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>>,
+        >,
+    > = &d.chunk_hms;
+    let zoom_seed = d.chunk_zoom_seed.get();
+    let level_ref = &level;
+    let run_loader: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    let loader = |cx: i32, cz: i32, sec_y: i32| -> Option<crate::features_snap::SnapSection> {
+        let t0 = prof_now();
+        PROF_LOADER_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let p0 = prof_now();
+        let parsed = level_ref.snap_section(cx, cz, sec_y);
+        PROF_PARSE_NS.fetch_add(prof_now() - p0, std::sync::atomic::Ordering::Relaxed);
+        run_loader.set(run_loader.get() + (prof_now() - t0));
+        parsed
+    };
+    let hm_loader = |cx: i32, cz: i32| -> Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>> {
+        if let Some(cached) = hms.borrow().get(&(cx, cz)) {
+            return cached.clone();
+        }
+        let loaded = level_ref
+            .heightmaps(cx, cz)
+            .map(|v| std::sync::Arc::new(std::sync::Mutex::new(v)));
+        if loaded.is_none() {
+            static LOGGED: std::sync::atomic::AtomicU32 =
+                std::sync::atomic::AtomicU32::new(0);
+            let n = LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 3 {
+                crate::ffi::log_warn(&format!(
+                    "[deco-hm] heightmaps handshake failed cx={cx} cz={cz} (fallback to per-column JNI)"
+                ));
+            }
+        }
+        hms.borrow_mut().insert((cx, cz), loaded.clone());
+        loaded
+    };
+    let st_flags = |name: &str| -> Option<u8> {
+        let idx = *d.state.state_index.get(name)?;
+        d.state.state_flags.lock().unwrap().get(idx as usize).copied()
+    };
+    let chunk_level = crate::features_snap::ChunkLevel::new(
+        level_ref,
+        ov,
+        ov_cols,
+        snap,
+        &loader,
+        &hm_loader,
+        &d.uid_names,
+        zoom_seed,
+        &st_flags,
+    );
+    // ---- pin ops + per_run for the whole batch ---------------------------
+    let ptr = ((*tbl).v1_2.GetPrimitiveArrayCritical)(env, out as jni_sys::jarray, std::ptr::null_mut());
+    if ptr.is_null() {
+        return -1;
+    }
+    let pr_ptr = ((*tbl).v1_2.GetPrimitiveArrayCritical)(env, per_run as jni_sys::jarray, std::ptr::null_mut());
+    if pr_ptr.is_null() {
+        ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
+        return -1;
+    }
+    let mt_ptr = ((*tbl).v1_2.GetPrimitiveArrayCritical)(env, meta as jni_sys::jarray, std::ptr::null_mut());
+    if mt_ptr.is_null() {
+        ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, per_run as jni_sys::jarray, pr_ptr, 0);
+        ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
+        return -1;
+    }
+    let slice = std::slice::from_raw_parts_mut(ptr as *mut i32, olen);
+    let per_slice = std::slice::from_raw_parts_mut(pr_ptr as *mut i32, plen.min(run_pairs.len()));
+    let t_run = prof_now();
+    let progress: std::cell::Cell<(usize, usize)> = std::cell::Cell::new((0, 0));
+    // cont-93 panic discipline (same as decoRunFeature): a panic must not
+    // unwind across the extern "system" boundary — catch inside, release the
+    // pins, report the valid prefix (-2) so Java applies it, skips the
+    // panicked run and continues.
+    let run_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut carry = d.batch_carry.borrow_mut();
+        crate::features_master::run_batch_core(
+            &d.state,
+            &chunk_level,
+            deco_seed as i64,
+            if paper_seed == -1 { None } else { Some(paper_seed as i64) },
+            crate::features_placement::BlockPos::new(origin_x as i32, origin_y as i32, origin_z as i32),
+            &d.plan,
+            &run_pairs,
+            0usize,
+            slice,
+            per_slice,
+            &mut carry,
+            &prof_now,
+            &progress,
+        )
+    }));
+    let res = match run_res {
+        Ok(r) => r,
+        Err(p) => {
+            let (completed, written) = progress.get();
+            write_meta(mt_ptr, completed, 4, written);
+            ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, meta as jni_sys::jarray, mt_ptr, 0);
+            ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, per_run as jni_sys::jarray, pr_ptr, 0);
+            ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
+            crate::ffi::log_warn(&format!(
+                "deco: run_batch PANIC after {completed} runs / {written} ops (prefix valid, run skipped): {}",
+                panic_msg(&p)
+            ));
+            return -2;
+        }
+    };
+    // per-run op counts were written into per_slice by the core as each run
+    // completed (panic-consistent with meta[0]); meta carries the batch result
+    write_meta(mt_ptr, res.completed, res.boundary as i32, res.ops_written);
+    ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, meta as jni_sys::jarray, mt_ptr, 0);
+    ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, per_run as jni_sys::jarray, pr_ptr, 0);
+    ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
+    let t_run_ns = prof_now() - t_run;
+    PROF_RUNS.fetch_add(res.completed as u64, std::sync::atomic::Ordering::Relaxed);
+    let rl = run_loader.get();
+    PROF_LOADER_NS.fetch_add(rl, std::sync::atomic::Ordering::Relaxed);
+    PROF_NATIVE_NS.fetch_add(
+        t_run_ns.saturating_sub(rl),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    // per-feature native wall attribution (same granularity as decoRunFeature)
+    {
+        let mut ridx = start_run as usize;
+        if let Ok(mut m) = PROF_FEAT.lock() {
+            for (ops_n, ns) in res.per_run.iter() {
+                if let Some(&(step, gid)) = run_pairs.get(ridx - start_run as usize) {
+                    if let Some(name) = d.plan.steps.get(step).and_then(|v| v.get(gid)) {
+                        let e = m.entry(name.clone()).or_insert((0, 0));
+                        e.0 += *ns;
+                        e.1 += 1;
+                    }
+                }
+                let _ = ops_n;
+                ridx += 1;
+            }
+        }
+    }
+    res.ops_written as jint
+}
+
 /// decoDecoSeed(levelSeed, originX, originZ) -> long — the vanilla chunk
 /// decoration seed `l` (computed once per chunk; every feature re-seeds from it).
 #[no_mangle]
@@ -1334,6 +1584,10 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoChunkB
         d.chunk_snap.borrow_mut().reset(cx, cz, min_sec_y);
         d.chunk_hms.borrow_mut().clear();
         d.chunk_zoom_seed.set(zoom_seed);
+        // S1 batch carry never outlives its chunk (a batch sequence aborted
+        // mid-way — server stop / lane fallback — must not leak ops into the
+        // next chunk's overlay bookkeeping)
+        d.batch_carry.borrow_mut().clear();
     }
 }
 

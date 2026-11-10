@@ -155,6 +155,37 @@ public final class ChunkGenNative {
             int originX, int originY, int originZ, int maxY, int step, int gid,
             Object bridge, int[] ops);
 
+    /**
+     * decoRunBatch(ctx, decoSeed, paperSeed, originX, originY, originZ, maxY,
+     * runs, nRuns, startRun, bridge, ops, perRun, meta) -> int opsWritten.
+     *
+     * S1 sub-batch (cont139 H4; kill-switch CRUS_S1_SUBBATCH=1 in DecoDriver
+     * decides whether this entry is called at all — default OFF runs the
+     * per-feature decoRunFeature protocol): expands CONSECUTIVE (step, gid)
+     * runs of the chunk plan in ONE JNI crossing with the exact per-feature
+     * protocol, writing all ops into `ops` (6 i32 per op, same layout).
+     * Stops at flush boundaries, reported in meta:
+     *   meta[0] = completedRuns (runs whose ops are in ops this call),
+     *   meta[1] = boundary kind: 0 END, 1 DELEGATE (run startRun+completed is
+     *             a vanilla delegate — Java applies the batch, runs
+     *             delegateVanilla + decoDelegateMark, resumes at +1),
+     *             2 FREEZE (run startRun+completed is freeze_top_layer with
+     *             ops pending — apply the batch; the feature runs at the next
+     *             call start so its live-region upcalls see the flushed
+     *             region), 3 FULL (ops buffer would overflow — the staged ops
+     *             carry over native-side and drain first on the next call).
+     *   meta[2] = opsWritten (== return value when >= 0; valid prefix on -2).
+     * perRun[k] = ops of run startRun+k for the completed runs.
+     * Return: opsWritten >= 0; -1 = ctx/env failure (caller falls back to the
+     * per-feature protocol for the remaining runs); -2 = a feature PANICKED
+     * mid-batch (meta[0]/meta[2] carry the valid prefix; caller applies it,
+     * skips the panicked run and continues).
+     */
+    public static native int decoRunBatch(long ctx, long decoSeed, long paperSeed,
+            int originX, int originY, int originZ, int maxY,
+            int[] runs, int nRuns, int startRun,
+            Object bridge, int[] ops, int[] perRun, int[] meta);
+
     /** decoDecoSeed(levelSeed, originX, originZ) -> long — the vanilla chunk
      *  decoration seed `l` (setDecorationSeed; every feature re-seeds from it). */
     public static native long decoDecoSeed(long levelSeed, int originX, int originZ);

@@ -60,6 +60,12 @@ pub struct DecoCtx {
         std::cell::RefCell<HashMap<(i32, i32), Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>>>>,
     /// BiomeManager.obfuscateSeed(world seed) — the biome zoom fiddle seed
     pub chunk_zoom_seed: std::cell::Cell<i64>,
+    /// S1 sub-batch (cont139): ops of a feature that overflowed the pinned ops
+    /// buffer mid-batch. They were already written into the chunk overlay
+    /// (write_overlay at op production) and MUST be applied — the next
+    /// decoRunBatch call drains them first. Empty outside a batch sequence;
+    /// cleared by decoChunkBegin (a carry never outlives its chunk).
+    pub batch_carry: std::cell::RefCell<Vec<DecoOp>>,
 }
 
 impl DecoCtx {
@@ -235,6 +241,7 @@ pub fn build_deco_ctx_src(
         chunk_snap: std::cell::RefCell::new(crate::features_snap::SnapRegion::new(0, 0, -1024, 26)),
         chunk_hms: std::cell::RefCell::new(HashMap::new()),
         chunk_zoom_seed: std::cell::Cell::new(0),
+        batch_carry: std::cell::RefCell::new(Vec::new()),
     })
 }
 
@@ -366,10 +373,11 @@ pub fn chunk_plan(
     runs
 }
 
-/// One master-loop feature run (vanilla body of the inner i2 loop):
-/// Paper featureSeeds override -> setFeatureSeed -> placeWithBiomeCheck.
-/// `out` layout: 5 i32 per op [x, y(abs), z, stateIdx, flags]. Returns ops.
-pub fn run_feature_master(
+/// One master-loop feature run, STAGED: the exact seeding + placement body of
+/// run_feature_master, returning the ops instead of serializing them. The S1
+/// batch core reuses this so the batch path and the per-feature path share ONE
+/// expansion implementation (bit-parity by construction).
+pub fn run_feature_staged(
     state: &crate::features_place_ffi::DecoState,
     level: &dyn crate::features_deco::DecoLevelExt,
     deco_seed: i64,
@@ -378,8 +386,7 @@ pub fn run_feature_master(
     name: &str,
     step: usize,
     index: usize,
-    out: &mut [i32],
-) -> usize {
+) -> Vec<DecoOp> {
     let mut rng = WorldgenRandom::new();
     let pop_seed = match paper_seed {
         Some(cfg) => rng.set_decoration_seed(cfg, origin.x, origin.z),
@@ -396,20 +403,214 @@ pub fn run_feature_master(
     };
     let mut ops: Vec<DecoOp> = Vec::new();
     place_placed(&ctx, name, &mut rng, origin, &mut ops, 0);
+    ops
+}
+
+/// Serialize staged ops into `out` starting at op slot `base` with the exact
+/// run_feature_master bounds guard (n*6+5 >= out.len()). Returns ops written.
+#[inline]
+fn serialize_ops(ops: &[DecoOp], out: &mut [i32], base: usize) -> usize {
     let mut n = 0;
-    for op in &ops {
-        if n * 6 + 5 >= out.len() {
+    for op in ops {
+        if (base + n) * 6 + 5 >= out.len() {
             break;
         }
-        out[n * 6] = op.x as i32;
-        out[n * 6 + 1] = op.y as i32;
-        out[n * 6 + 2] = op.z as i32;
-        out[n * 6 + 3] = op.state as i32;
-        out[n * 6 + 4] = op.flags as i32;
-        out[n * 6 + 5] = op.aux as i32;
+        out[(base + n) * 6] = op.x as i32;
+        out[(base + n) * 6 + 1] = op.y as i32;
+        out[(base + n) * 6 + 2] = op.z as i32;
+        out[(base + n) * 6 + 3] = op.state as i32;
+        out[(base + n) * 6 + 4] = op.flags as i32;
+        out[(base + n) * 6 + 5] = op.aux as i32;
         n += 1;
     }
     n
+}
+
+/// One master-loop feature run (vanilla body of the inner i2 loop):
+/// Paper featureSeeds override -> setFeatureSeed -> placeWithBiomeCheck.
+/// `out` layout: 6 i32 per op [x, y(abs), z, stateIdx, flags, aux]. Returns ops.
+pub fn run_feature_master(
+    state: &crate::features_place_ffi::DecoState,
+    level: &dyn crate::features_deco::DecoLevelExt,
+    deco_seed: i64,
+    paper_seed: Option<i64>,
+    origin: BlockPos,
+    name: &str,
+    step: usize,
+    index: usize,
+    out: &mut [i32],
+) -> usize {
+    let ops = run_feature_staged(state, level, deco_seed, paper_seed, origin, name, step, index);
+    serialize_ops(&ops, out, 0)
+}
+
+// ---------------------------------------------------------------------------
+// S1 sub-batch (cont139, H4): expand CONSECUTIVE (step, gid) runs in one JNI
+// crossing. Legal because the chunk overlay (write_overlay at op production)
+// + the WG heightmap emulation already make the native read path independent
+// of the Java apply timing; the only live-region readers are the freezeChecks
+// upcall (native freeze_top_layer) and the vanilla delegates — both are flush
+// boundaries here. Bit-parity: same per-feature seeding/placement body
+// (run_feature_staged), same op order, same overlay evolution.
+// ---------------------------------------------------------------------------
+
+/// Batch stop reason reported to Java (meta[1]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BatchBoundary {
+    /// all runs expanded
+    End = 0,
+    /// run `start + completed` is a vanilla delegate (Java runs it + marks)
+    Delegate = 1,
+    /// run `start + completed` is freeze_top_layer with ops pending — flush
+    /// first; the feature itself runs at the next call start (written == 0),
+    /// so its live-region freezeChecks upcalls see the flushed state
+    Freeze = 2,
+    /// the ops buffer cannot hold the next feature's ops — they carry over in
+    /// DecoCtx.batch_carry and are drained first on the next call
+    Full = 3,
+}
+
+/// Result of one batch expansion.
+pub struct BatchResult {
+    /// runs whose ops are in the output buffer (a drained carry counts as 1)
+    pub completed: usize,
+    /// total ops written to the output buffer this call
+    pub ops_written: usize,
+    /// why the batch stopped
+    pub boundary: BatchBoundary,
+    /// (ops, nanos) per completed run — Java stats + native PROF_FEAT feed
+    pub per_run: Vec<(usize, u64)>,
+}
+
+/// freeze_top_layer is the only native feature whose placement READS/WRITES
+/// the live region through the bridge (freezeChecks upcall per 16x16 column:
+/// region.getHeight(MOTION_BLOCKING) + region.setBlock ice/snow). It must run
+/// at a flush boundary so the live region matches the old per-feature timing.
+#[inline]
+pub fn is_freeze_like(name: &str) -> bool {
+    name == "minecraft:freeze_top_layer"
+}
+
+/// S1 batch core: expand runs[start..] until a boundary. `carry` holds the ops
+/// of the feature that overflowed the PREVIOUS call (drained first, attributed
+/// to run `start`); on a Full boundary it receives the current feature's ops.
+/// `per_run_out[k]` is written as each run completes (a panic mid-batch leaves
+/// the written prefix consistent with `progress`). `clock` timestamps each
+/// staged feature (native per-run wall for PROF_FEAT; pass a no-op clock in
+/// tests). `progress` is updated after every completed feature so a panic
+/// mid-batch still reports the valid prefix.
+pub fn run_batch_core(
+    state: &crate::features_place_ffi::DecoState,
+    level: &dyn crate::features_deco::DecoLevelExt,
+    deco_seed: i64,
+    paper_seed: Option<i64>,
+    origin: BlockPos,
+    plan: &DecoPlan,
+    runs: &[(usize, usize)],
+    start: usize,
+    out: &mut [i32],
+    per_run_out: &mut [i32],
+    carry: &mut Vec<DecoOp>,
+    clock: &dyn Fn() -> u64,
+    progress: &std::cell::Cell<(usize, usize)>,
+) -> BatchResult {
+    let mut completed = 0usize;
+    let mut written = 0usize;
+    let mut per_run: Vec<(usize, u64)> = Vec::new();
+    let mut boundary = BatchBoundary::End;
+    let mut r = start;
+
+    // 1. drain the carry: ops of run `start` staged by the previous call (the
+    // buffer was full then). They are already in the overlay — apply as-is.
+    // A carry larger than the whole buffer (pathological >cap feature) drains
+    // across several calls: report Full with completed=0 until it is empty.
+    if !carry.is_empty() {
+        let drained = serialize_ops(carry, out, written);
+        written += drained;
+        if 0 < per_run_out.len() {
+            per_run_out[0] = drained as i32;
+        }
+        per_run.push((drained, 0));
+        carry.drain(..drained);
+        if carry.is_empty() {
+            completed = 1;
+            r = start + 1;
+        } else {
+            progress.set((completed, written));
+            return BatchResult {
+                completed,
+                ops_written: written,
+                boundary: BatchBoundary::Full,
+                per_run,
+            };
+        }
+        progress.set((completed, written));
+    }
+
+    while r < runs.len() {
+        let (step, gid) = runs[r];
+        let Some(name) = plan.steps.get(step).and_then(|v| v.get(gid)) else {
+            boundary = BatchBoundary::End;
+            break;
+        };
+        // delegate gate BEFORE running (same check + order as decoRunFeature)
+        if !crate::features_place::placed_fully_supported(&state.reg, name, 0) {
+            boundary = BatchBoundary::Delegate;
+            break;
+        }
+        // freeze gate: the feature itself still runs at the NEXT call start
+        // (written == 0 there), seeing the flushed live region like the old
+        // per-feature protocol
+        if is_freeze_like(name) && written > 0 {
+            boundary = BatchBoundary::Freeze;
+            break;
+        }
+        let t0 = clock();
+        let staged = run_feature_staged(state, level, deco_seed, paper_seed, origin, name, step, gid);
+        let dt = clock().saturating_sub(t0);
+        // serialize with the exact run_feature_master bounds guard; a partial
+        // serialize means the buffer filled mid-feature:
+        //   written > 0 — the tail carries over (it is already in the overlay
+        //                 and MUST be applied — never dropped); this call ends
+        //                 with a Full boundary, the next one drains first.
+        //   written == 0 — the feature alone exceeds the buffer (>65535 ops,
+        //                 pathological): the tail is DROPPED — the exact
+        //                 pre-cont139 truncation semantics (old serialized
+        //                 with the same guard into the same buffer).
+        let n = serialize_ops(&staged, out, written);
+        if n < staged.len() {
+            if written > 0 {
+                carry.extend_from_slice(&staged[n..]);
+            }
+            written += n;
+            per_run.push((n, dt));
+            let k = completed;
+            if k < per_run_out.len() {
+                per_run_out[k] = n as i32;
+            }
+            completed += 1;
+            r += 1;
+            progress.set((completed, written));
+            boundary = BatchBoundary::Full;
+            break;
+        }
+        written += n;
+        let k = completed;
+        if k < per_run_out.len() {
+            per_run_out[k] = n as i32;
+        }
+        per_run.push((n, dt));
+        completed += 1;
+        r += 1;
+        progress.set((completed, written));
+    }
+
+    BatchResult {
+        completed,
+        ops_written: written,
+        boundary,
+        per_run,
+    }
 }
 
 /// Decoration seed `l` for the chunk (vanilla line:
