@@ -63,6 +63,20 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             Runtime.getRuntime().availableProcessors());
 
     /**
+     * Q5 (cont-136): dedicated deco ctx pool size. CarverDriver/DecoDriver
+     * populate acquisitions are served from 2 ctxs created at setup next to
+     * the fill pool, so they no longer WAIT on native FILLS holding fill-pool
+     * ctxs 5-12ms (cont-102: carver=9.77ms/ch pure ctx-wait on the ore leg;
+     * ~4ms/ch expected on deco=1 lanes). Kill-switch:
+     * CRUS_DECO_SHARED_POOL=1 restores the shared-pool behavior (decoAcquire
+     * serves the fill pool, pre-Q5).
+     */
+    private static final int DECO_POOL_SIZE = 2;
+    /** A/B kill-switch: serve decoAcquire from the shared fill pool (pre-Q5). */
+    private static final boolean DECO_SHARED_POOL =
+            "1".equals(System.getenv("CRUS_DECO_SHARED_POOL"));
+
+    /**
      * Pool of independent native contexts for one world. Paper generates
      * chunks on several worker threads; each worker acquires a free ctx so
      * fills run in parallel (contexts share nothing mutable). Acquisition
@@ -74,6 +88,17 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         private final ReentrantLock[] locks;
         private final java.util.concurrent.atomic.AtomicInteger rr =
                 new java.util.concurrent.atomic.AtomicInteger();
+
+        // Q5: creation inputs kept so the dedicated deco pool can spawn from
+        // the SAME seed/sea/pack assets (identical deco tables by construction).
+        private final long seed;
+        private final int minY, height, sea;
+        private final PackData packs;
+
+        /** The dedicated deco ctx pool (Q5), lazily created by {@link
+         *  #decoPool}. Owned HERE so freeAll() frees it with the fill pool
+         *  (native sessions otherwise leak per world). */
+        private CtxPool decoPool;
 
         /**
          * Dedicated context for getBaseHeight (stage D): created exactly like
@@ -93,6 +118,19 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         }
 
         CtxPool(int n, long seed, int minY, int height, int sea, PackData packs) {
+            this(n, seed, minY, height, sea, packs, true);
+        }
+
+        /** withHeights=false (Q5 deco pool): NO heights ctx — the deco/carver
+         *  populators never serve getBaseHeight, and a heights ctx would be a
+         *  wasted native session. */
+        CtxPool(int n, long seed, int minY, int height, int sea, PackData packs,
+                boolean withHeights) {
+            this.seed = seed;
+            this.minY = minY;
+            this.height = height;
+            this.sea = sea;
+            this.packs = packs;
             this.ctxs = new long[n];
             this.locks = new ReentrantLock[n];
             for (int i = 0; i < n; i++) {
@@ -126,26 +164,46 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             }
             // heights ctx: same creation path, but kept OUT of the fill
             // rotation and never surface-initialized (see field doc).
-            long hctx;
-            if (packs != null) {
-                hctx = ChunkGenNative.newCtxAssets(seed, sea, packs.paths(), packs.blobs());
-            } else {
-                hctx = 0;
-            }
-            if (hctx == 0) {
-                hctx = ChunkGenNative.newCtx(seed, minY, height, sea);
-            }
-            if (hctx == 0) {
-                for (int j = 0; j < n; j++) {
-                    ChunkGenNative.freeCtx(ctxs[j]);
+            // Q5 deco pool: withHeights=false skips it entirely.
+            if (withHeights) {
+                long hctx;
+                if (packs != null) {
+                    hctx = ChunkGenNative.newCtxAssets(seed, sea, packs.paths(), packs.blobs());
+                } else {
+                    hctx = 0;
                 }
-                throw new IllegalStateException(
-                        "crussty_chunkgen heights ctx_new failed for seed " + seed);
+                if (hctx == 0) {
+                    hctx = ChunkGenNative.newCtx(seed, minY, height, sea);
+                }
+                if (hctx == 0) {
+                    for (int j = 0; j < n; j++) {
+                        ChunkGenNative.freeCtx(ctxs[j]);
+                    }
+                    throw new IllegalStateException(
+                            "crussty_chunkgen heights ctx_new failed for seed " + seed);
+                }
+                this.heightsCtx = hctx;
+                synchronized (CTX) {
+                    CTX.add(hctx);
+                }
+            } else {
+                this.heightsCtx = 0;
             }
-            this.heightsCtx = hctx;
-            synchronized (CTX) {
-                CTX.add(hctx);
+        }
+
+        /**
+         * Q5 (cont-136): the dedicated deco ctx pool — created ONCE from the
+         * same creation inputs as this fill pool (the deco tables parse
+         * deterministically from the same assets; setup additionally verifies
+         * deepEquals against ctx0 and falls back to the shared pool on any
+         * mismatch). Runs under setup (world-load thread); synchronized only
+         * guards the theoretical two-worlds-same-WorldKey setup race.
+         */
+        synchronized CtxPool decoPool(int n) {
+            if (decoPool == null) {
+                decoPool = new CtxPool(n, seed, minY, height, sea, packs, false);
             }
+            return decoPool;
         }
 
         long firstCtx() {
@@ -182,7 +240,13 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             for (long ctx : ctxs) {
                 ChunkGenNative.freeCtx(ctx);
             }
-            ChunkGenNative.freeCtx(heightsCtx);
+            if (heightsCtx != 0) {
+                ChunkGenNative.freeCtx(heightsCtx);
+            }
+            if (decoPool != null) {
+                decoPool.freeAll();
+                decoPool = null;
+            }
         }
     }
 
@@ -251,6 +315,13 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static volatile CtxPool DECO_POOL;
 
     /** Populator-side ctx acquisition (same pool protocol as fills).
+     *  Q5 (cont-136): serves the DEDICATED deco ctx pool (2 ctxs created at
+     *  setup next to the fill pool) so populate stops waiting on fill-held
+     *  ctxs; CRUS_DECO_SHARED_POOL=1 restores the shared fill pool. The
+     *  dedicated ctxs are byte-compatible: identical deco tables (verified
+     *  at setup), chunk-scoped scratch reset by decoChunkBegin, and the
+     *  state-flags handshake lands on every deco-capable ctx (native
+     *  decoSetFlags fan-out).
      *  cont-97: the cont-95 world-pool fallback (carvers in deco=0 too) is
      *  REVERTED. Cont-95 run 41447324352 proved the carver section-pack
      *  snapshot tears WHENEVER the chunk was written by the vanilla decorate
@@ -2100,6 +2171,9 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         CTX.clear();
         LOCKS.clear();
         SEA_CACHE.clear();
+        // Q5: freed ctxs must not be served after disable (re-setup on the
+        // next world load repopulates the pool).
+        DECO_POOL = null;
     }
 
     // ------------------------------------------------------------------
@@ -2538,7 +2612,19 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 Logger.getLogger("CrusstyGen").warning(
                         "native deco: NMS generator unavailable (hybrid delegate off): " + t);
             }
-            DECO_POOL = pool;
+            // Q5 (cont-136): default = DEDICATED deco ctx pool (2 ctxs spawned
+            // at setup from the same inputs, verified against ctx0 below) so
+            // populate acquisitions stop waiting on fill-held ctxs (fills hold
+            // pool ctxs 5-12ms). CRUS_DECO_SHARED_POOL=1 restores the shared
+            // fill pool (pre-Q5 behavior). Both modes log a run.out marker
+            // for A/B lane attribution.
+            if (DECO_SHARED_POOL) {
+                Logger.getLogger("CrusstyGen").warning(
+                        "deco ctx pool: shared fill pool (CRUS_DECO_SHARED_POOL=1, pre-Q5)");
+                DECO_POOL = pool;
+            } else {
+                DECO_POOL = dedicatedDecoPool(pool, states, plan);
+            }
             Class<?> drv = Class.forName("com.planeta.crussty.DecoDriver");
             drv.getMethod("setup", org.bukkit.World.class, String[].class,
                             String[][].class, java.util.Map.class, java.util.Set.class,
@@ -2558,6 +2644,47 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             }
             Logger.getLogger("CrusstyGen").warning(
                     "native deco setup failed; vanilla decorations stay: " + c);
+        }
+    }
+
+    /**
+     * Q5 (cont-136): the dedicated deco ctx pool — 2 fresh native ctxs
+     * spawned from the SAME creation inputs as the fill pool. Parity
+     * rationale: the deco tables (decoStates/decoPlan/uid space) parse
+     * deterministically from the same pack assets, so the dedicated ctxs are
+     * interchangeable with the fill-pool ctxs the deco path used to borrow;
+     * this is verified HERE (deepEquals against ctx0, once at setup) with a
+     * fallback to the shared pool on any mismatch or failure. The remaining
+     * per-ctx deco state is chunk-scoped scratch (overlay/snapshot/heightmap
+     * caches) reset by decoChunkBegin before every chunk, and the WG
+     * heightmap state-flags now fan out to every deco-capable ctx (native
+     * decoSetFlags).
+     */
+    private static CtxPool dedicatedDecoPool(CtxPool fill,
+            String[] states, String[][] plan) {
+        try {
+            CtxPool dp = fill.decoPool(DECO_POOL_SIZE);
+            long dctx = dp.firstCtx();
+            String[] ds = ChunkGenNative.decoStates(dctx);
+            String[][] dpl = ChunkGenNative.decoPlan(dctx);
+            if (ds == null || dpl == null
+                    || !java.util.Arrays.deepEquals(ds, states)
+                    || !java.util.Arrays.deepEquals(dpl, plan)) {
+                Logger.getLogger("CrusstyGen").warning(
+                        "deco ctx pool: dedicated ctx deco tables diverge from the fill pool"
+                        + " — sharing the fill pool (CRUS_DECO_SHARED_POOL behavior)");
+                return fill;
+            }
+            Logger.getLogger("CrusstyGen").warning(
+                    "deco ctx pool: dedicated pool active (" + DECO_POOL_SIZE
+                    + " ctxs, deco tables verified against the fill pool)"
+                    + " — CRUS_DECO_SHARED_POOL=1 restores the shared pool");
+            return dp;
+        } catch (Throwable t) {
+            Logger.getLogger("CrusstyGen").warning(
+                    "deco ctx pool: dedicated pool creation failed (" + t
+                    + ") — sharing the fill pool");
+            return fill;
         }
     }
 
@@ -2584,12 +2711,21 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             // the native plan (biome-union placed names) drives the registry
             // walk: every hooked configured feature is natively known
             String[][] plan = ChunkGenNative.decoPlan(ctx0);
-            // the hook acquires fill-ctxs per ore call; in deco=0 mode
-            // setupDeco never ran, so DECO_POOL stays null and EVERY ore
-            // call falls back on decoAcquire==0 — the A/B gate would be
-            // vacuous (CI 41491819685 forensics: 8+ "fallback (ctx)" lines,
-            // ab_on degenerated to pure vanilla)
-            DECO_POOL = pool;
+            // the hook acquires ctxs per ore call via decoAcquire; in deco=0
+            // mode setupDeco never ran, so DECO_POOL must be set HERE or
+            // EVERY ore call falls back on decoAcquire==0 — the A/B gate
+            // would be vacuous (CI 41491819685 forensics: 8+ "fallback (ctx)"
+            // lines, ab_on degenerated to pure vanilla). Q5: dedicated deco
+            // pool by default; CRUS_DECO_SHARED_POOL=1 shares the fill pool
+            // (pre-Q5 behavior — note the ore leg was the measured worst
+            // case of the shared-pool ctx wait, cont-102 carver=9.77ms/ch).
+            if (DECO_SHARED_POOL) {
+                Logger.getLogger("CrusstyGen").warning(
+                        "deco ctx pool: shared fill pool (CRUS_DECO_SHARED_POOL=1, pre-Q5)");
+                DECO_POOL = pool;
+            } else {
+                DECO_POOL = dedicatedDecoPool(pool, states, plan);
+            }
             Class.forName("com.planeta.crussty.OreHook")
                     .getMethod("setup", org.bukkit.World.class, String[].class, String[][].class)
                     .invoke(null, w, states, plan);

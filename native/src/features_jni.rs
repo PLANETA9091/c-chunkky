@@ -1692,6 +1692,18 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoDelega
 /// decoSetFlags(ctx, byte[] flags) — the decoStates handshake tail: one flag
 /// byte per state string (bit0=isAir, bit1=blocksMotion), computed Java-side
 /// from the resolved BlockStates. Feeds the WG heightmap update-on-write.
+///
+/// Q5 (cont-136): the flags FAN OUT to every ctx with a deco engine, not
+/// just the addressed one. Pre-Q5 only the ctx that happened to run the
+/// first chunk deco received the handshake (DecoDriver FLAGS_SENT one-shot)
+/// — every other pool ctx kept all-zero flags, a latent ctx-dependent
+/// divergence in the WG heightmap update-on-write (only observable for
+/// air/blocksMotion writes landing exactly at top-1, which is why the A/B
+/// judges never caught it). The dedicated deco pool (Q5) — and equally the
+/// shared-pool kill-switch — requires all deco-capable ctxs to initialize
+/// identically, so the handshake is world-global now. Ctxs with a different
+/// states-table length (other worlds, other packs) are skipped; each world's
+/// own first populate re-sends its own table before any of its deco runs.
 #[no_mangle]
 pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoSetFlags(
     env: *mut jni_sys::JNIEnv,
@@ -1700,20 +1712,26 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoSetFla
     flags: jni_sys::jbyteArray,
 ) {
     let tbl = *env;
+    let len = ((*tbl).v1_1.GetArrayLength)(env, flags as jni_sys::jarray) as usize;
     let guard = sessions_lock();
-    let Some(d) = guard
+    // addressed-ctx length check first (pre-existing warn keyed on the caller's ctx)
+    if let Some(d) = guard
         .as_ref()
         .and_then(|m| m.get(&(ctx as i64)))
         .and_then(|c| c.deco.as_ref())
-    else {
+    {
+        if len != d.state.states.len() {
+            crate::ffi::log_warn(&format!(
+                "[deco-flags] length mismatch: got {len}, want {} (flags ignored)",
+                d.state.states.len()
+            ));
+            return;
+        }
+    }
+    let Some(map) = guard.as_ref() else {
         return;
     };
-    let len = ((*tbl).v1_1.GetArrayLength)(env, flags as jni_sys::jarray) as usize;
-    if len != d.state.states.len() {
-        crate::ffi::log_warn(&format!(
-            "[deco-flags] length mismatch: got {len}, want {} (flags ignored)",
-            d.state.states.len()
-        ));
+    if len == 0 {
         return;
     }
     let p = ((*tbl).v1_1.GetByteArrayElements)(env, flags as jni_sys::jarray, std::ptr::null_mut());
@@ -1721,7 +1739,15 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoSetFla
         return;
     }
     let bytes = std::slice::from_raw_parts(p as *const u8, len);
-    d.state.state_flags.lock().unwrap().copy_from_slice(bytes);
+    for c in map.values() {
+        let Some(d) = c.deco.as_ref() else {
+            continue;
+        };
+        if d.state.states.len() != len {
+            continue;
+        }
+        d.state.state_flags.lock().unwrap().copy_from_slice(bytes);
+    }
     ((*tbl).v1_1.ReleaseByteArrayElements)(
         env,
         flags as jni_sys::jarray,
