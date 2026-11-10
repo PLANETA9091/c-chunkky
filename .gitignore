@@ -68,3 +68,4 @@ server263/region*.txt
 server263/surface263_*.txt
 ab263_out/
 reference/dumps/
+agent-scratch/
