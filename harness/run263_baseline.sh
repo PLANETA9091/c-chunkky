@@ -53,6 +53,10 @@ fi
 if [ "${CRUS_NO_WATCHDOG:-0}" = "1" ]; then
   GC_FLAGS="$GC_FLAGS -Ddisable.watchdog=true"
 fi
+# cont-138: generic JVM flag injection (GC logs, diag) — EXPA ded passes raw args
+JVM_FLAGS=""
+if [ -n "${JVM_FLAGS:-}" ]; then :; fi
+GC_FLAGS="$GC_FLAGS ${JVM_FLAGS_ADD:-}"
 echo "booting with CRUS_NATIVE_DECO=1 CRUS_NATIVE_CARVERS=1 CRUS_FILL_THREADS=$FILL_THREADS WT=$WORKER_THREADS $EXTRA_ENV $GC_FLAGS"
 env CRUS_NATIVE_DECO=1 CRUS_NATIVE_CARVERS=1 CRUS_FILL_THREADS="$FILL_THREADS" $EXTRA_ENV \
   setsid $JAVA $HEAP $GC_FLAGS \

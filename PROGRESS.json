@@ -51,7 +51,7 @@
       "id": "H3",
       "text": "Q5 (audit): deco/carver ctx contention — fills hold pool ctxs 5-12ms so populate waits; dedicated deco ctx pool or tryLock-fallback-to-fresh-ctx gives up to ~4ms/ch on deco=1 lanes",
       "test": "impl + A/B + filldump bit-parity (dptt set, serial+2t) + cargo 86/86",
-      "status": "pending"
+      "status": "CONFIRMED (agent cont136-q5b, merged b6569f47): dedicated 2-ctx deco pool, 88/88 tests (2 new Rust parity tests: ctx tables byte-identical + full-plan op streams identical), latent decoSetFlags fan-out bug fixed. A/B pending-poll-noise; honest-window instrument armed."
     },
     {
       "id": "H4",
@@ -81,7 +81,7 @@
       "id": "H8",
       "text": "Fill loaded 29.5ms vs idle 5.7ms = 80% scheduling loss (4+ runnable threads / 2 cores); thread-config matrix (FILL_THREADS x worker-threads) may recover several ms without any code change",
       "test": "clean A/B: wipe + same coords + back-to-back runs",
-      "status": "CONFIRMED x2: E2 worker-threads=1+FILL=2 => 87.7; E6 +disable.watchdog=true (JFR found 3-4 watchdog thread dumps INSIDE windows at 16:57:27/32/46 — safepoint storms hitting native fills) => 82.3 mean (77.8/77.7/91.5), fill wall 17.5-18.6. SerialGC E4 neutral (90.9, 673ms serial pauses). fill=3 E5 neutral.",
+      "status": "SUPERSEDED by E7 matrix: with Q5 pool + ports, worker=2 pipelines better (maxconc=2, cover 37.8%) => honest e2e 59.67 vs worker=1 69.61. FILL=2 > FILL=1 (62.49). Final config: worker=2, FILL=2, no-watchdog, Q5 pool, deleg ports.",
       "result": "-18.4 ms/ch config-only total"
     }
   ],
@@ -129,6 +129,10 @@
     {
       "t": "2026-11-10T18:40+08:00 (clock note: times are +08 approx, UTC-8h off)",
       "event": "A4 ports A/B (same coords 2000/2100, back-to-back, E6 config, .so 8c6e38a3 + jar d32342a7): ON 70.5/75.3 vs OFF(CRUS_DELEG_NOGEN=1) 72.8/78.4 => -2.7 ms/ch windows. Deco phases ON struct=2.88 run=4.99 deleg=0.96 vs OFF struct=3.46 run=5.35 deleg=1.19 (-1.2ms/ch). deleg-names ON: monster_room x2 + freeze_top_layer GONE (native). Kill-switch verified. CORRECTNESS SIGNAL: 1x 'Tried to load a DUMMY block entity ... Block{minecraft:air}' — A4 BE path writes BE before block; block-level judge should pass, runtime-only; CI judge is the gate. Pushing branch to CI."
+    },
+    {
+      "t": "2026-11-10T20:35+08:00",
+      "event": "HONEST-WINDOW instrument (GenStats windowSnapshot, server-side span e2e — much less noise than rcon polls): worker=1 69.61 (carver=14.93 ctx-wait! cover=24.6% maxconc=1) vs worker=2 59.67 (maxconc=2 cover=37.8%) vs worker=2+fill=1 62.49. E2's worker=1 win was a pre-Q5 regime effect (slow populate made serialization cheap); once Q5+ports landed, worker=2 pipelines. Remaining whales: carver bucket 15.6-17.8 loaded (native carver compute + waits), deco run 7.1-7.5 (ores ~2.5-3), fill 24.9-26.1 loaded (CPU 5.7x2), cover still ~62% idle."
     }
   ],
   "ab_protocol": "wipe server263/world* before each config; coords RX1=2000 RZ1=2000, WX=500 WZ=500; NW=2..3; report window means + crusgenstats p50/p99; never compare across different regions",
