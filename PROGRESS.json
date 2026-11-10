@@ -2,7 +2,7 @@
   "goal": "e2e <= 5 ms/chunk on the noisy 2-core sandbox, Paper 26.3 build 222, vanilla worldgen + native engine (deco=1, carvers=1)",
   "metric": "harness/e2e263.sh: forceload fresh 12x12 window, wall ms/chunk; report 3 windows + crusgenstats (p50/p99, phase split)",
   "platform": "Paper 26.3 build 222 sha256 f649771a..., JDK Temurin 25.0.5+8, seed 3257840388504953787, NO datapacks (26.3 pack restore is a separate task)",
-  "updated": "2026-11-10T14:40:00+08:00",
+  "updated": "2026-11-11T05:08:00+08:00",
   "baseline": {
     "source": "cont-135 reference/prof_session_deco263_q13.txt (MINE windows; tree 9a4d6272 = cont-134)",
     "e2e_windows_ms": [
@@ -75,7 +75,13 @@
       "id": "H7",
       "text": "Ore-family native compute ~5.5ms/ch (8 types) + dripstone ~0.9ms/ch = per-cell overlay query cost inside deco run phase (8.5ms loaded)",
       "test": "agent-2 COMPUTE_TOP.md findings -> targeted native cuts + filldump bit-parity",
-      "status": "in_progress (agent 2)"
+      "status": "IMPLEMENTED (agent-2-c work finished by main after agent stream died): per-section palette classification (OrePlan/RCls tri-state eval, SecCls lazy tables per section slot+epoch) + H7c fused is_air_or_water dripstone column scan; 3 new tests (fast==exact verdict invariant, ore+dripstone op-stream killswitch equality) => 89/89; branch h7-ore-b commit; server A/B pending (single .so, CRUS_H7_OFF flips)"
+    },
+    {
+      "id": "H9",
+      "text": "cont-138 SyncGen (sync main-thread status-chain, bypass moonrise queue) kills the ~62% pipeline idle => big e2e win",
+      "test": "harness/syncgen_ab.sh A|B: same rect 2100,2000 12x12, wipe per phase, worker=2/FILL=2/no-watchdog, jar 50f0edc0 + so ae9d434b",
+      "status": "MEASURED-NO-WIN (cont-139): syncgen 64.28/61.94 ms/ch (rect1/rect2, min 3.13/2.93, max 960/1204) vs pipeline honest 63.34 (cover 37.1%). Sync = 100% serial: native fill p50 WORSE loaded (31.8 vs 22.9, main thread joins the contention). Queue latency is NOT the whale under this load; total CPU under 2-core CFS is. FLOOR EVIDENCE: min 2.93-3.13 ms/ch proves a warm chunk with ready neighbors completes the FULL chain (fill+deco+carver+light) in ~3ms — the 5ms/chunk goal is reachable purely via CPU cuts + warm path, no architecture change needed. SyncGen kept as diagnostic tool (crussyncgen cmd), NOT the delivery path."
     },
     {
       "id": "H8",
@@ -90,9 +96,19 @@
       "test": "SyncGen.java v2 (deployed jar 2db56104) — needs ticket-held rect variant",
       "status": "REFUTED (measured, cont-138)",
       "result": "v5 async+rect-held FORCED tickets (jar 66bd2078): 4x4 rect ok=16 wall=2002ms per-chunk=125.13 min=13.39 max=897.98. First chunk 898ms = inline recursion over the whole dependency tree (3x3 statuses + margins); subsequent chunks 13-50ms (margins amortized via held tickets). Extrapolated at 144 chunks: ~60-75ms/ch = SAME as the async pipeline (58-66 honest). The task-queue idle is NOT delivery overhead — it is dependency/margin serialization inherent to the chunk graph. Delivery-path replacement does NOT pay; the levers remain total-CPU reduction (H6/H7/S1/Q5) + pipelining (maxconc=2) at low CPU. HONEST impossibility proof for one axis of the 'replace the runtime' mandate."
+    },
+    {
+      "id": "H10",
+      "text": "Carver native compute: with the Q5 dedicated deco pool, CarverDriver waits should be ~0 — honest carver=5.88-6.30 floor is NATIVE carve compute (carver263.rs 3D noise sampling per cell, same NormalNoise machinery as fill density). Plane/coarse-cell caching (the H6 agent's infra) applied to carver samplers is the expected cut; target carver 5.9 -> ~2ms/ch",
+      "test": "SPROF-style profile of native carve + reuse H6 cache infra + carve A/B honest window + carver bit-parity (carveMarks ops)",
+      "status": "identified (owner: main agent, after H6 lands)"
     }
   ],
   "log": [
+    {
+      "t": "2026-11-11T05:08+08:00",
+      "event": "cont-139 PHASE A/B DONE (fresh tree 0091c8ea, jar 50f0edc0, so ae9d434b): (A) honest window 2100,2000: e2e=63.34 (span 9120.94, ramp 108), gen=26.94 native=26.29 carver=17.89 busy=23.5 cover=37.1% maxconc=2, deco plan .37/struct 6.07/run 7.43/apply .42/deleg 1.62; run-top = ores (gravel 402ms, dirt 375, iron 337, spring_water 336, granite 318, tuff 311, dripstone 305, andesite 294, diorite 278, coal 251+206, lush 151 per 739 chunks) — H7 confirmed top. (B) SyncGen 64.28/61.94 => H9 no-win (see H9). 3 sub-agents launched (cont139-S1 crossings 258->~205, cont139-H7 ore per-section classification + fused dripstone pred, cont139-H6 fill L1 batch-spline + L2 row-local groups + L3 col-cache ShiftA/B) — all 3 adopted their lost-session WIP, code written, awaiting BUILD_OK. Note: OOM twice during reboots (4GB box, 3G heap + dying JVM race) — future boots must verify no java + free>2.5G first."
+    },
     {
       "t": "2026-11-11T05:00+08:00",
       "event": "CAMPAIGN BASELINE (cont-138 era, .so ae9d434b post-Q5, jar 2db56104 = rings+syncgen): honest e2e=65.72 (raw 77.9/84.2 noisy period), gen=16.89 (native=16.04) carver=12.39(!) deco_tail=778ms cover=25.7% maxconc=1. Honest w1 e2e across the day: 58.3-65.7 (noise +-15%). CAMPAIGN TRAJECTORY: cont-135 baseline 96.1 mean -> cont-136 E2+E6 config 82.3 -> cont-138 honest-window metric ~58-66 (ramp excluded). CI green on 0091c8ea (rings) + parallel commits. Agents h6-plane-b/h7-ore-b mid-work (density.rs+h6probe / features_snap+place classification). Fronts ranked: (1) agents CPU cuts, (2) H9 inline delivery (needs rect-held ticket), (3) carver variance 5.9-12.4 needs stable-box re-measure, (4) worker=2 re-test after CPU drops."
@@ -176,6 +192,12 @@
   ],
   "goal_status": {
     "best_honest_e2e_ms": 59.67,
+    "today_honest_ms": 63.34,
+    "syncgen_ms": [
+      64.28,
+      61.94
+    ],
+    "chunk_floor_ms": 2.93,
     "best_rcon_window_ms": [
       70.5,
       75.3
