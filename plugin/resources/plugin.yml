@@ -10,6 +10,10 @@ commands:
     description: Native noise-stage generation stats (mean/p50/p99/max)
     usage: /crusgenstats
     permission: crussty.genstats
+  crussyncgen:
+    description: cont-138 experiment - synchronous FULL-chunk generation of an n x n rect (bypasses the moonrise task queue)
+    usage: /crussyncgen <cx> <cz> <n>
+    permission: crussty.genstats
 permissions:
   crussty.genstats:
     description: Allows viewing generation stats

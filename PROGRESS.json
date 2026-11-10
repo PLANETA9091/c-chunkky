@@ -83,9 +83,19 @@
       "test": "clean A/B: wipe + same coords + back-to-back runs",
       "status": "SUPERSEDED by E7 matrix: with Q5 pool + ports, worker=2 pipelines better (maxconc=2, cover 37.8%) => honest e2e 59.67 vs worker=1 69.61. FILL=2 > FILL=1 (62.49). Final config: worker=2, FILL=2, no-watchdog, Q5 pool, deleg ports.",
       "result": "-18.4 ms/ch config-only total"
+    },
+    {
+      "id": "H9",
+      "text": "Inline delivery path (syncLoad): the 28-30ms/ch honest-window idle is moonrise task-queue latency (worker parks on chunk-future deps between status tasks); ServerChunkCache.getChunk(FULL,true) runs the SAME status chain inline. Two-phase priming (TERRAIN rect+margin then FULL) still throws 'Requested chunk unavailable during world generation' — syncLoad releases the per-chunk ticket after completion, so previously-generated neighbors get demoted/unloaded before chunk k's WorldGenRegion needs them. NEXT: hold a TICKET over the whole rect during the pass (moonrise addTicket/ticket-level, or ChunkTaskScheduler.scheduleChunkLoad(x,z,FULL,load=true,Priority,consumer) per chunk with the rect ticket held), then release; alternatively time-box via the spawn-prep path (boot does full-area sync gen successfully — replicate its ticket setup). Payoff if it works: e2e floor = sum of CPU/ch (~16-20ms today, ~8-10 after H6/H7/Q5) with ZERO queue idle",
+      "test": "SyncGen.java v2 (deployed jar 2db56104) — needs ticket-held rect variant",
+      "status": "implemented-inconclusive (parked)"
     }
   ],
   "log": [
+    {
+      "t": "2026-11-11T04:40+08:00",
+      "event": "DISK-full incident + syncgen probe: root overlay hit 100% (stale /tmp/my-project 4.8G on PolarFS + dl/dl263/ab438/vantrace on root); purged 3G+ (root 74%), saved vineflower/cfr to /home/z/tools/decomp. SyncGen.java (crussyncgen command) — inline status-chain experiment: v1 isolated FULL throws 'Requested chunk unavailable'; v2 two-phase TERRAIN-primed still throws (ticket released per-chunk => neighbors demoted). H9 parked with next steps (rect-held ticket). Rings-warmup deployed earlier: ring futures resolve at boot (0.1ms) — window-neutral, kept."
+    },
     {
       "t": "2026-11-11T04:05+08:00",
       "event": "RINGS-WARMUP (cont-138) implemented+deployed: RingsWarmup.java NMS companion (ChunkMap.chunkGeneratorState via reflection, all ConcentricRingsStructurePlacement sets -> getRingPositionsFor at WorldLoadEvent, bit-identical positions, timing-only). Result: 128 positions precomputed in 0.1ms => ring futures were ALREADY resolved at world init (spawn-area gen) — the JFR 1.6s worker park on getRingPositionsFor happened during BOOT, not the window; window impact ~0 (58.31 honest vs 61.75 paired w1 = noise). KEPT (harmless boot-time warm, protects fresh-region windows that DO hit lazy ring gen). Honest-window w1 baseline now spans 58.3-63.2 across runs (noise +-10%) — single-window comparisons dead, paired back-to-back + pinned md5s are the protocol."

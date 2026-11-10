@@ -79,6 +79,31 @@ public final class CrusstyGenPlugin extends JavaPlugin {
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (command.getName().equals("crussyncgen")) {
+            // cont-138 experiment: inline status-chain generation (SyncGen NMS
+            // companion, reflective — absent on API-only builds)
+            if (args.length < 3) {
+                sender.sendMessage("usage: /crussyncgen <cx> <cz> <n>");
+                return true;
+            }
+            try {
+                int cx = Integer.parseInt(args[0]);
+                int cz = Integer.parseInt(args[1]);
+                int n = Integer.parseInt(args[2]);
+                Class<?> sg = Class.forName("com.planeta.crussty.SyncGen");
+                String r = (String) sg.getMethod("gen", org.bukkit.World.class,
+                        int.class, int.class, int.class)
+                        .invoke(null, getServer().getWorlds().get(0), cx, cz, n);
+                sender.sendMessage("[CrusstyGen] " + r);
+            } catch (Throwable t) {
+                Throwable c = t;
+                while (c.getCause() != null && c.getCause() != c) {
+                    c = c.getCause();
+                }
+                sender.sendMessage("[CrusstyGen] syncgen failed: " + c);
+            }
+            return true;
+        }
         if (command.getName().equals("crusgenstats")) {
             if (args.length >= 1 && args[0].equalsIgnoreCase("reset")) {
                 GenStats.reset();
