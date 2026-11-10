@@ -23,7 +23,7 @@ cat deployed263.md5
 
 rm -f run.in; mkfifo run.in
 ( sleep 28800 > run.in ) >/dev/null 2>&1 & echo $! > fifo.pid
-env CRUS_NATIVE_DECO=1 CRUS_NATIVE_CARVERS=1 CRUS_FILL_THREADS=2 \
+env CRUS_NATIVE_DECO=1 CRUS_NATIVE_CARVERS=1 CRUS_FILL_THREADS=2 ${EXTRA_ENV:-} \
   setsid $JAVA -Xms2G -Xmx3G -Ddisable.watchdog=true \
   -Djava.library.path="$ROOT/native/target/release" \
   -jar paper-26.3-222.jar nogui < run.in > run.out 2>&1 &

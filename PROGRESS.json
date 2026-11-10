@@ -2,7 +2,7 @@
   "goal": "e2e <= 5 ms/chunk on the noisy 2-core sandbox, Paper 26.3 build 222, vanilla worldgen + native engine (deco=1, carvers=1)",
   "metric": "harness/e2e263.sh: forceload fresh 12x12 window, wall ms/chunk; report 3 windows + crusgenstats (p50/p99, phase split)",
   "platform": "Paper 26.3 build 222 sha256 f649771a..., JDK Temurin 25.0.5+8, seed 3257840388504953787, NO datapacks (26.3 pack restore is a separate task)",
-  "updated": "2026-11-11T05:08:00+08:00",
+  "updated": "2026-11-11T06:45:00+08:00",
   "baseline": {
     "source": "cont-135 reference/prof_session_deco263_q13.txt (MINE windows; tree 9a4d6272 = cont-134)",
     "e2e_windows_ms": [
@@ -57,7 +57,7 @@
       "id": "H4",
       "text": "S1 (audit): sub-batch decoRunFeature between delegates, 258->~40 JNI crossings/ch, wrapper mass collapse (0.2-0.4ms idle, more loaded)",
       "test": "impl (Rust+DecoDriver.java) + ops-count equality probes + bit-parity + judge",
-      "status": "pending"
+      "status": "IMPLEMENTED (cont139-S1 agent + orchestrator takeover, merged 36c253a8): decoRunBatch collapses 55.4 decoRunFeature crossings/ch -> 6.5 batch calls/ch (-88%, counters batch=3364/25326 on 520ch). 92/92 tests (production-buffer op stream byte-identical + final state digest equal; artificial tiny-cap regime documented divergent, unreachable: per-chunk deco ops ~10-20k << 65536). Kill-switch CRUS_S1_SUBBATCH default OFF. Paired e2e ON(60.98,58.51) vs OFF(54.73,60.52): delta within +-15% box noise — the projected -0.2..-0.4ms is below today's noise floor. CI judge to validate block parity; then consider default-ON."
     },
     {
       "id": "H5",
@@ -69,7 +69,7 @@
       "id": "H6",
       "text": "Native fill idle 5.7 -> ~3ms: slice noise sampling ~2.9ms is the biggest native item (cont-132); plane cache + blended-noise call reduction",
       "test": "dpperf A/B p50 x3 rounds + filldump bit-parity",
-      "status": "pending"
+      "status": "REVERTED (cont-139): L1/L2/L3 implemented + parity-safe (filldump byte-identical 4/4, 91/91 tests) but MEASURED NO WIN: headless mins equal (P 5.6 vs M 5.8), paired honest e2e T(59.15,60.30) vs C(53.94,58.70) = treatment worse in both pairs. Probable mechanism: pv [[f32;16];34] ~2.2KB memset per spline y-group eval = MBs of stack traffic/chunk. KEY FINDING: cont-132's 'slice noise 2.9ms' was MISATTRIBUTED — named 2D noise kernels sum to only ~280us/ch (H6 diag table); the real slice cost lives in blended final-density (compute_batch8_col) + spline interpolation arithmetic. Branch cont139-h6 KEPT (diag tooling: h6probe/h6heights, col2d hit 84.8%). Next fill lever: blended-noise plane batching / slice-level memo of the final-density tree."
     },
     {
       "id": "H7",
@@ -105,6 +105,10 @@
     }
   ],
   "log": [
+    {
+      "t": "2026-11-11T06:45+08:00",
+      "event": "cont-139 SESSION NET: (1) H9 SyncGen measured NO-WIN (64.28/61.94 vs 63.34) — convergent with parallel session's refutation; floor evidence min 2.93ms/ch (warm chunk, ready neighbors). (2) H6 (fill plane cache) implemented w/ agents, parity-safe, REVERTED after paired A/B showed no win; misattribution finding redirects fill lever to blended final-density. (3) H4/S1 sub-batch implemented (agent takeover after stream death), merged, crossings -88%, e2e delta sub-noise, default OFF. (4) Parallel session (cont-138) independently merged H7 (91/91) + H10 carver (9.92->5.05) and closed at honest 50.97 — my numbers reproduce their regime (today's honest 53.9-63.3 band, noise +-15%). NEXT FRONTS: pipelining re-test at lower CPU; paper-side idle 25-28ms; blended final-density fill (real 2.9ms whale); S1 default-ON after CI judge; stable-box carver re-measure."
+    },
     {
       "t": "2026-11-11T05:58+08:00",
       "event": "SESSION CLOSE (cont-138): honest e2e 96.1(cont-135) -> 82.3(cont-136 E2E6) -> 50.97 (H10 quiet-box, BEST). H10 carver vanilla-setBlockState apply = biggest cut (carver 9.92->3.13 quiet, apply 5.50->0.00). H9 inline-delivery REFUTED by measurement. H7 merged (91/91, perf verdict deferred to CI/quiet). Physics locked: CFS 2x mutual, GC exonerated, worker=1~2 at current CPU, light-divert parked, rings boot-resolved. Agents: H6 alive (density.rs cache building), S1/Q5b sessions stalled. Next fronts ranked: H6 fill -> pipelining re-test -> struct margin walls -> NEW paper-side idle front (25-28ms)."
@@ -212,7 +216,7 @@
     ],
     "baseline_ms": 100.8,
     "target_ms": 5.0,
-    "tests": "88/88",
+    "tests": "92/92",
     "ci": "SUCCESS 42884625556"
   }
 }
