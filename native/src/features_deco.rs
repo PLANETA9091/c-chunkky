@@ -247,6 +247,211 @@ pub fn env_scan_column_fast(
 }
 
 // ---------------------------------------------------------------------------
+// H7: per-section target classification for the ore cell loop (place_ore).
+//
+// The per-cell target test (rule_test_matches -> tag_is/state_is) re-decodes
+// the snapshot palette cell and re-resolves tag membership for EVERY vein
+// candidate; the cont-115 tag memo already collapsed the registry work to a
+// per-run HashMap lookup, but the ov probe + decode + memo hash remain per
+// cell per target. When a feature tests many cells of one section against a
+// FIXED ruleset (the ore targets never change mid-run), each palette entry of
+// that section can be classified ONCE against the ruleset -> a tiny per-entry
+// verdict table; per-cell tests become a decode + O(1) index lookups.
+//
+// Bit-identity contract:
+// - plans are built ONLY for rng-free rulesets (RandomBlockMatch rejects the
+//   plan) — a Never/Always verdict therefore consumes zero RNG draws, and the
+//   exact path it replaces consumes draws only through RandomBlock, so draw
+//   order is preserved by construction.
+// - verdicts classify the SNAPSHOT palette only; the per-cell fast probe
+//   checks the chunk overlay FIRST and falls back to the exact per-cell chain
+//   on any overlay hit (overlay semantics differ from the snapshot: earlier
+//   features' writes answer via the live-name path).
+// - a verdict of Never means the exact path provably returns false for every
+//   cell in the section without consuming RNG; Always means provably true.
+//   Anything else (height boundaries crossing the section) is Mixed -> the
+//   exact per-cell path.
+// ---------------------------------------------------------------------------
+
+/// per-rule verdict codes (OrePlan section tables + cell_verdicts output)
+pub const VD_FALSE: u8 = 0;
+pub const VD_TRUE: u8 = 1;
+pub const VD_MIXED: u8 = 2;
+
+/// Compiled rng-free rule tree (RuleTest minus RandomBlock).
+#[derive(Clone, Debug)]
+pub enum RCls {
+    True,
+    /// constant-folded false
+    False,
+    /// RuleTest::BlockMatch — full registry key compared against the
+    /// snapshot palette name (state_is string-compare semantics)
+    Block(Box<str>),
+    /// RuleTest::TagMatch
+    Tag(Box<str>),
+    /// HeightMatch — tri-state per section ([sec*16, sec*16+15])
+    Height { lo: i32, hi: i32 },
+    Not(Box<RCls>),
+    All(Box<[RCls]>),
+    Any(Box<[RCls]>),
+}
+
+/// One classified section: verdict per (palette entry, rule).
+pub struct SecCls {
+    pub slot: usize,
+    pub epoch: u64,
+    /// table[entry * rules.len() + rule] = VD_*
+    pub table: Vec<u8>,
+}
+
+/// Per-feature fast verdict plan for the ore target ruleset. Lives on the
+/// place_ore call frame; the section tables are built lazily by the level's
+/// OreClassScan backend on first touch of each section.
+pub struct OrePlan {
+    pub rules: Vec<RCls>,
+    pub secs: Vec<SecCls>,
+    /// a classification prerequisite failed (exotic tag without a member-set
+    /// fetch) — stop attempting, exact path for the rest of the run
+    pub dead: bool,
+}
+
+impl OrePlan {
+    /// Compile a target ruleset. None = the fast path cannot serve it
+    /// (RandomBlockMatch anywhere — RNG draw order is parity-critical — or
+    /// more targets than the fixed verdict buffer).
+    pub fn build(targets: &[crate::features_json::RuleTest]) -> Option<OrePlan> {
+        if targets.len() > 8 {
+            return None;
+        }
+        let mut rules = Vec::with_capacity(targets.len());
+        for rt in targets {
+            rules.push(compile_rcls(rt)?);
+        }
+        Some(OrePlan { rules, secs: Vec::new(), dead: false })
+    }
+
+    /// place_ore shape: the (RuleTest, state) target list of an Ore cfg.
+    pub fn build_targets(targets: &[(crate::features_json::RuleTest, String)]) -> Option<OrePlan> {
+        if targets.len() > 8 {
+            return None;
+        }
+        let mut rules = Vec::with_capacity(targets.len());
+        for (rt, _) in targets {
+            rules.push(compile_rcls(rt)?);
+        }
+        Some(OrePlan { rules, secs: Vec::new(), dead: false })
+    }
+}
+
+/// Tri-state classification result for one (rule, palette entry) within one
+/// section: definite false / definite true / y-dependent (Mixed).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tri {
+    F,
+    T,
+    M,
+}
+
+/// Evaluate a compiled rng-free rule tree against a palette entry NAME with
+/// the section's y-range collapsed into a tri-state. Short-circuits like the
+/// vanilla AllOf/AnyOf streams; a definite outcome here is provably the exact
+/// per-cell outcome for EVERY cell of the section (the tree consumes no RNG —
+/// plans are rng-free by construction — and the tag answer fn resolves through
+/// the same chain the per-cell tag_is snapshot leg uses).
+pub fn eval_rcls(
+    cls: &RCls,
+    name: &str,
+    sec_lo: i32,
+    sec_hi: i32,
+    tag_ans: &dyn Fn(&str, &str) -> Option<bool>,
+) -> Option<Tri> {
+    Some(match cls {
+        RCls::True => Tri::T,
+        RCls::False => Tri::F,
+        RCls::Block(b) => {
+            if name == b.as_ref() {
+                Tri::T
+            } else {
+                Tri::F
+            }
+        }
+        RCls::Tag(t) => {
+            if tag_ans(t, name)? {
+                Tri::T
+            } else {
+                Tri::F
+            }
+        }
+        RCls::Height { lo, hi } => {
+            if sec_lo >= *lo && sec_hi <= *hi {
+                Tri::T
+            } else if sec_lo > *hi || sec_hi < *lo {
+                Tri::F
+            } else {
+                Tri::M
+            }
+        }
+        RCls::Not(inner) => match eval_rcls(inner, name, sec_lo, sec_hi, tag_ans)? {
+            Tri::F => Tri::T,
+            Tri::T => Tri::F,
+            Tri::M => Tri::M,
+        },
+        RCls::All(v) => {
+            let mut acc = Tri::T;
+            for c in v.iter() {
+                match eval_rcls(c, name, sec_lo, sec_hi, tag_ans)? {
+                    Tri::F => return Some(Tri::F),
+                    Tri::M => acc = Tri::M,
+                    Tri::T => {}
+                }
+            }
+            acc
+        }
+        RCls::Any(v) => {
+            let mut acc = Tri::F;
+            for c in v.iter() {
+                match eval_rcls(c, name, sec_lo, sec_hi, tag_ans)? {
+                    Tri::T => return Some(Tri::T),
+                    Tri::M => acc = Tri::M,
+                    Tri::F => {}
+                }
+            }
+            acc
+        }
+    })
+}
+
+fn compile_rcls(rt: &crate::features_json::RuleTest) -> Option<RCls> {
+    Some(match rt {
+        crate::features_json::RuleTest::True => RCls::True,
+        crate::features_json::RuleTest::BlockMatch(b) => RCls::Block(b.as_str().into()),
+        crate::features_json::RuleTest::TagMatch(t) => RCls::Tag(t.as_str().into()),
+        // RNG draw order is parity-critical: no plan for rng-bearing rules
+        crate::features_json::RuleTest::RandomBlock { .. } => return None,
+        crate::features_json::RuleTest::HeightMatch { lo, hi } => RCls::Height { lo: *lo, hi: *hi },
+        crate::features_json::RuleTest::Not(inner) => RCls::Not(Box::new(compile_rcls(inner)?)),
+        crate::features_json::RuleTest::AnyOf(v) => RCls::Any(
+            v.iter().map(compile_rcls).collect::<Option<Vec<_>>>()?.into_boxed_slice(),
+        ),
+        crate::features_json::RuleTest::AllOf(v) => RCls::All(
+            v.iter().map(compile_rcls).collect::<Option<Vec<_>>>()?.into_boxed_slice(),
+        ),
+    })
+}
+
+/// The snapshot-side half of the ore-class fastpath (implemented by
+/// ChunkLevel — the only level with a palette snapshot + chunk overlay).
+/// Default None on every other level = exact per-cell path.
+pub trait OreClassScan {
+    /// Fill `out[rule]` with VD_* for the ruleset `plan` was built from at
+    /// `pos`. true = verdicts are final for this cell (caller skips
+    /// rule_test_matches for VD_FALSE/VD_TRUE targets); false = exact per-cell
+    /// path (overlay hit, unsnapshotted/stale section, classification
+    /// impossible, kill-switch, mixed section).
+    fn cell_verdicts(&self, plan: &mut OrePlan, pos: BlockPos, out: &mut [u8]) -> bool;
+}
+
+// ---------------------------------------------------------------------------
 // Block predicates (blockpredicates package, subset by dptt census)
 // ---------------------------------------------------------------------------
 
@@ -388,6 +593,18 @@ pub trait DecoLevelExt: DecoLevel {
     /// palette + the overlay column index). Default None = generic loop.
     fn env_col_scan(&self) -> Option<&dyn EnvColScan> {
         None
+    }
+    /// H7 ore-class backend (ChunkLevel only). Default None = exact per-cell
+    /// target tests in place_ore.
+    fn ore_class(&self) -> Option<&dyn OreClassScan> {
+        None
+    }
+    /// Fused `is_air(pos) || fluid_is(pos, ["minecraft:water"])` — the
+    /// dripstone-family column-scan predicate. The default composes the two
+    /// DecoLevelExt calls verbatim (bit-identical on every level); ChunkLevel
+    /// fuses the overlay probe + palette decode into ONE query (H7c).
+    fn is_air_or_water(&self, pos: BlockPos) -> bool {
+        self.is_air(pos) || self.fluid_is(pos, &["minecraft:water".to_string()])
     }
 }
 

@@ -674,6 +674,21 @@ pub fn draw_trace_on() -> bool {
     *ON.get_or_init(|| std::env::var("CRUS_DRAW_TRACE").is_ok())
 }
 
+/// H7 kill-switch: CRUS_H7_OFF=1 restores the pre-H7 per-cell query path for
+/// the ore classification (H7a) and the fused dripstone empty_or_water
+/// predicate (H7c). H7_FORCE is a test/bench override (1 = fast path ON,
+/// 2 = OFF) evaluated FIRST so parity tests can pin both paths in one
+/// process; prod leaves it 0 and pays one OnceLock env read per process.
+pub static H7_FORCE: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(0);
+static H7_OFF_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+pub fn h7_off() -> bool {
+    match H7_FORCE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => *H7_OFF_ENV.get_or_init(|| std::env::var("CRUS_H7_OFF").ok().as_deref() == Some("1")),
+    }
+}
+
 /// isAdjacentToAir (vanilla OreFeature): any of the 6 neighbors is air.
 /// Result is neighbor-order independent (no RNG involved).
 fn is_adjacent_to_air(level: &dyn DecoLevelExt, pos: BlockPos) -> bool {
@@ -866,8 +881,13 @@ fn place_speleothem(
     let is_base = |p: BlockPos| -> bool {
         ctx.level.state_name(p) == base_block || ctx.level.tag_is(p, tag)
     };
+    let fused = !h7_off();
     let empty_or_water = |p: BlockPos| -> bool {
-        ctx.level.is_air(p) || ctx.level.fluid_is(p, &["minecraft:water".to_string()])
+        if fused {
+            ctx.level.is_air_or_water(p)
+        } else {
+            ctx.level.is_air(p) || ctx.level.fluid_is(p, &["minecraft:water".to_string()])
+        }
     };
     // placeBaseBlockIfPossible: ONLY the replaceable tag gates the write
     let mut place_base = |p: BlockPos, ops: &mut Vec<DecoOp>| -> bool {
@@ -1091,8 +1111,13 @@ fn place_large_dripstone(
     origin: BlockPos,
     ops: &mut Vec<DecoOp>,
 ) -> bool {
+    let fused = !h7_off();
     let empty_or_water = |p: BlockPos| -> bool {
-        ctx.level.is_air(p) || ctx.level.fluid_is(p, &["minecraft:water".to_string()])
+        if fused {
+            ctx.level.is_air_or_water(p)
+        } else {
+            ctx.level.is_air(p) || ctx.level.fluid_is(p, &["minecraft:water".to_string()])
+        }
     };
     let empty_or_water_or_lava = |p: BlockPos| -> bool {
         empty_or_water(p) || ctx.level.state_name(p) == "minecraft:lava"
@@ -1324,11 +1349,16 @@ fn place_speleothem_cluster(
     origin: BlockPos,
     ops: &mut Vec<DecoOp>,
 ) -> bool {
+    let fused = !h7_off();
     let empty_or_water = |p: BlockPos| -> bool {
-        ctx.level.is_air(p) || ctx.level.fluid_is(p, &["minecraft:water".to_string()])
+        if fused {
+            ctx.level.is_air_or_water(p)
+        } else {
+            ctx.level.is_air(p) || ctx.level.fluid_is(p, &["minecraft:water".to_string()])
+        }
     };
     let neither_empty_nor_water = |p: BlockPos| -> bool {
-        !(ctx.level.is_air(p) || ctx.level.fluid_is(p, &["minecraft:water".to_string()]))
+        !empty_or_water(p)
     };
     let is_lava = |p: BlockPos| -> bool { ctx.level.state_name(p) == "minecraft:lava" };
     let wetness_v = wetness.sample(rng);
@@ -2660,6 +2690,19 @@ fn place_ore(
         return false;
     }
 
+    // H7a: classify the target ruleset ONCE per vein (rng-free plans only —
+    // RandomBlockMatch rejects the plan and the whole vein keeps the exact
+    // per-cell path). The level builds a per-section verdict table lazily on
+    // first touch of each section; per-cell tests become decode + index
+    // lookups. Never/Always verdicts consume zero RNG (the plan is rng-free),
+    // so the draw stream is untouched by construction. The overlay interplay
+    // is preserved: overlay cells bail to the exact path per cell.
+    let mut plan = if !scattered && !h7_off() {
+        crate::features_deco::OrePlan::build_targets(targets)
+    } else {
+        None
+    };
+
     // vein node cloud (Mth.sin/cos = the 65536-entry f32 table)
     let pts: Vec<(f64, f64, f64, f64)> = ore_prof::measure(ore_prof::S_NODES, || {
         let mut pts: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(size as usize);
@@ -2749,9 +2792,26 @@ fn place_ore(
                     if !in_writable(rx as i32, rz as i32) {
                         continue;
                     }
-                    for (rt, st) in targets {
-                        let tag_hit =
-                            ore_prof::measure(ore_prof::S_TAG, || rule_test_matches(rt, ctx.level, pos, rng));
+                    // H7a per-cell verdicts (None => exact path for the cell):
+                    // overlay hit / unsnapshotted / Mixed section all bail.
+                    let mut vbuf = [0u8; 8];
+                    let mut fast = false;
+                    if let Some(plan) = plan.as_mut() {
+                        if let Some(ocs) = ctx.level.ore_class() {
+                            fast = ocs.cell_verdicts(plan, pos, &mut vbuf[..targets.len()]);
+                        }
+                    }
+                    for (ti, (rt, st)) in targets.iter().enumerate() {
+                        // H7a: VD_FALSE/VD_TRUE replace the exact per-cell test
+                        // (no queries, no draws — plans are rng-free);
+                        // VD_MIXED/unavailable => the exact chain below.
+                        let tag_hit = if fast && vbuf[ti] != crate::features_deco::VD_MIXED {
+                            vbuf[ti] == crate::features_deco::VD_TRUE
+                        } else {
+                            ore_prof::measure(ore_prof::S_TAG, || {
+                                rule_test_matches(rt, ctx.level, pos, rng)
+                            })
+                        };
                         // vanilla short-circuit: the discard draw happens ONLY
                         // when the target test matched, and isAdjacentToAir is
                         // evaluated ONLY when the discard draw says "check"
@@ -3683,5 +3743,434 @@ mod tests {
             Some(FeatureCfg::RandomPatch { inner, .. }) => assert_eq!(inner, "test:pf"),
             other => panic!("patch string-ref decode: {:?}", other),
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // H7: per-section ore target classification + fused dripstone predicate.
+    // The semantic referee: the op stream with the fast path forced ON must be
+    // IDENTICAL to the kill-switched (pre-H7) path on a synthetic snapshot
+    // level with a small palette.
+    // -------------------------------------------------------------------------
+
+    static H7_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Inner level under the ChunkLevel: serves the tag member sets the
+    /// classification + per-cell registry paths fetch, otherwise the exact
+    /// per-cell fallback for unsnapshotted cells.
+    struct SnapMock;
+    impl DecoLevelExt for SnapMock {
+        fn state_is(&self, _: BlockPos, _: &[String]) -> bool { false }
+        fn fluid_is(&self, _: BlockPos, _: &[String]) -> bool { false }
+        fn tag_is(&self, _: BlockPos, _: &str) -> bool { false }
+        fn state_name(&self, _: BlockPos) -> String { String::new() }
+        fn tag_members(&self, tag: &str) -> Option<Vec<String>> {
+            let fam: Vec<String> = [
+                "minecraft:stone",
+                "minecraft:granite",
+                "minecraft:diorite",
+                "minecraft:andesite",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            let set: Vec<String> = match tag {
+                "minecraft:height_specific_ore_replaceables" => fam.clone(),
+                "minecraft:base_stone_overworld" => {
+                    let mut v = fam.clone();
+                    v.push("minecraft:deepslate".to_string());
+                    v
+                }
+                "minecraft:dripstone_replaceables" => {
+                    let mut v = fam.clone();
+                    v.push("minecraft:deepslate".to_string());
+                    v.push("minecraft:dripstone_block".to_string());
+                    v
+                }
+                _ => return None,
+            };
+            Some(set)
+        }
+    }
+    impl DecoLevel for SnapMock {
+        fn min_y(&self) -> i32 { -64 }
+        fn max_y(&self) -> i32 { 320 }
+        fn height(&self, _: HeightmapTy, _: i32, _: i32) -> i32 { 200 }
+        fn state(&self, _: BlockPos) -> u32 { 0 }
+        fn is_air(&self, _: BlockPos) -> bool { false }
+        fn fluid(&self, _: BlockPos) -> u32 { 0 }
+        fn biome_has_feature(&self, _: BlockPos, _: u32) -> bool { true }
+        fn can_survive(&self, _: &str, _: BlockPos) -> bool { true }
+        fn is_replaceable(&self, _: BlockPos) -> bool { false }
+        fn is_solid(&self, _: BlockPos) -> bool { true }
+        fn has_sturdy_face(&self, _: BlockPos, _: u8) -> bool { true }
+        fn is_outside_build_height(&self, y: i32) -> bool { y < -64 || y >= 320 }
+    }
+
+    /// One synthetic section: palette [stone, deepslate, air, water], the cell
+    /// value picked by (x+z+y in-section) % 7 (0=air, 5=deepslate, 6=water,
+    /// else stone) — deterministic, mixes all four families.
+    fn h7_section(sec_y: i32) -> crate::features_snap::SnapSection {
+        use crate::features_snap::flags;
+        let names: Vec<Box<str>> = [
+            "minecraft:stone",
+            "minecraft:deepslate",
+            "minecraft:air",
+            "minecraft:water",
+        ]
+        .iter()
+        .map(|s| (*s).into())
+        .collect();
+        let pal: Vec<(u16, u16)> = vec![
+            (
+                0,
+                flags::SOLID | flags::BLOCKS_MOTION | flags::STURDY_UP | flags::STURDY_DOWN,
+            ),
+            (1, flags::SOLID | flags::BLOCKS_MOTION),
+            (2, flags::IS_AIR),
+            (3, flags::HAS_FLUID | flags::FLUID_WATER),
+        ];
+        let bits: u32 = 2;
+        let vpl = 64usize / bits as usize;
+        let mut raw = Vec::with_capacity(4096 / vpl);
+        for li in 0..4096 / vpl {
+            let mut l = 0u64;
+            for k in 0..vpl {
+                let idx = li * vpl + k;
+                let x = idx & 15;
+                let z = (idx >> 4) & 15;
+                let y = idx >> 8;
+                let v = match (x + z + y) % 7 {
+                    0 => 2usize,
+                    6 => 3,
+                    5 => 1,
+                    _ => 0,
+                };
+                l |= (v as u64) << (k * bits as usize);
+            }
+            raw.push(l);
+        }
+        crate::features_snap::SnapSection {
+            sec_y,
+            epoch: 0,
+            bits,
+            names,
+            pal,
+            raw,
+            bio_bits: 0,
+            bio_names: vec!["minecraft:plains".into()],
+            bio_pal: vec![0],
+            bio_raw: vec![],
+        }
+    }
+
+    /// Synthetic snapshot env: 3x3 region around chunk (0,0), y -64..320.
+    struct H7Env {
+        ov: std::cell::RefCell<crate::features_snap::OvMap>,
+        ov_cols: std::cell::RefCell<std::collections::HashMap<(i32, i32), Vec<i32>>>,
+        snap: std::cell::RefCell<crate::features_snap::SnapRegion>,
+        uid: Vec<String>,
+    }
+
+    fn h7_env() -> H7Env {
+        H7Env {
+            ov: std::cell::RefCell::new(crate::features_snap::OvMap::with_hasher(
+                std::hash::BuildHasherDefault::<crate::features_snap::OvHasher>::default(),
+            )),
+            ov_cols: std::cell::RefCell::new(std::collections::HashMap::new()),
+            snap: std::cell::RefCell::new(crate::features_snap::SnapRegion::new(0, 0, -4, 24)),
+            uid: Vec::new(),
+        }
+    }
+
+    fn h7_level<'a>(
+        inner: &'a SnapMock,
+        env: &'a H7Env,
+    ) -> crate::features_snap::ChunkLevel<'a> {
+        fn loader(cx: i32, cz: i32, sec_y: i32) -> Option<crate::features_snap::SnapSection> {
+            if !(-1..=1).contains(&cx) || !(-1..=1).contains(&cz) {
+                return None;
+            }
+            Some(h7_section(sec_y))
+        }
+        fn hm_loader(
+            _: i32,
+            _: i32,
+        ) -> Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>> {
+            None
+        }
+        fn st_flags(_: &str) -> Option<u8> {
+            None
+        }
+        crate::features_snap::ChunkLevel::new(
+            inner,
+            &env.ov,
+            &env.ov_cols,
+            &env.snap,
+            &loader,
+            &hm_loader,
+            &env.uid,
+            0,
+            &st_flags,
+        )
+    }
+
+    /// The 26.3 iron-ore target shape: stone-side + deepslate-side composite
+    /// (TagMatch(height_specific) x HeightMatch + Not/TagMatch legs).
+    fn h7_iron_targets() -> Vec<(crate::features_json::RuleTest, String)> {
+        use crate::features_json::RuleTest as RT;
+        let hspec = "minecraft:height_specific_ore_replaceables".to_string();
+        let stone_rep = "minecraft:stone_ore_replaceables".to_string();
+        let ds_rep = "minecraft:deepslate_ore_replaceables".to_string();
+        vec![
+            (
+                RT::AnyOf(vec![
+                    RT::AllOf(vec![
+                        RT::TagMatch(hspec.clone()),
+                        RT::HeightMatch { lo: 0, hi: 2031 },
+                    ]),
+                    RT::AllOf(vec![
+                        RT::Not(Box::new(RT::TagMatch(hspec.clone()))),
+                        RT::TagMatch(stone_rep),
+                    ]),
+                ]),
+                "minecraft:iron_ore".to_string(),
+            ),
+            (
+                RT::AnyOf(vec![
+                    RT::AllOf(vec![
+                        RT::TagMatch(hspec.clone()),
+                        RT::HeightMatch { lo: -2032, hi: 8 },
+                    ]),
+                    RT::AllOf(vec![
+                        RT::Not(Box::new(RT::TagMatch(hspec))),
+                        RT::TagMatch(ds_rep),
+                    ]),
+                ]),
+                "minecraft:deepslate_iron_ore".to_string(),
+            ),
+        ]
+    }
+
+    /// N regular veins over a synthetic snapshot level (origins span fast
+    /// sections, the y=8..15 height-boundary Mixed section, discard=0 (no
+    /// air draws) and discard=0.5 (air-scan draws)), plus overlay pre-writes
+    /// (earlier features' andesite inside every vein box).
+    fn h7_ore_run(force: i8) -> Vec<DecoOp> {
+        let _g = H7_TEST_LOCK.lock().unwrap();
+        H7_FORCE.store(force, std::sync::atomic::Ordering::SeqCst);
+        let reg = build_reg(
+            r#"{"type":"minecraft:simple_block","config":{"to_place":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:poppy"}}}}"#,
+            r#"{"feature":"test:cfg","placement":[]}"#,
+        );
+        let inner = SnapMock;
+        let env = h7_env();
+        let level = h7_level(&inner, &env);
+        let mut sidx: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
+        sidx.insert("minecraft:iron_ore".to_string(), 1);
+        sidx.insert("minecraft:deepslate_iron_ore".to_string(), 2);
+        let ctx = PlaceCtx {
+            reg: &reg,
+            level: &level,
+            center_x: 0,
+            center_z: 0,
+            state_index: &sidx,
+            uid_index: &EMPTY_U32,
+        };
+        let targets = h7_iron_targets();
+        let mut ops: Vec<DecoOp> = Vec::new();
+        let mut rng = WorldgenRandom::new();
+        let deco = rng.set_decoration_seed(20260214, 0, 0);
+        let origins = [
+            (8i32, 40i32, 8i32),
+            (-3, 40, 20),
+            (5, 10, -4),  // straddles the y=8..15 boundary section (Mixed leg)
+            (2, 200, 7),
+            (12, 33, 30),
+            (0, 90, 0),
+        ];
+        for (i, (ox, oy, oz)) in origins.iter().copied().enumerate() {
+            // earlier features' writes inside the vein box: the overlay must
+            // divert those cells to the exact per-cell chain in BOTH runs
+            for k in 0..3i32 {
+                level.write_overlay(BlockPos::new(ox + k, oy + k, oz), "minecraft:andesite");
+            }
+            rng.set_feature_seed(deco, i as i32, 0);
+            let discard = if i % 2 == 0 { 0.5 } else { 0.0 };
+            place_ore(
+                &ctx,
+                discard,
+                17,
+                &targets,
+                &mut rng,
+                BlockPos::new(ox, oy, oz),
+                &mut ops,
+                false,
+            );
+        }
+        H7_FORCE.store(0, std::sync::atomic::Ordering::SeqCst);
+        ops
+    }
+
+    /// Semantic referee: op stream with the per-section classification
+    /// forced ON == kill-switched exact per-cell stream.
+    #[test]
+    fn h7_ore_op_stream_identical_killswitch() {
+        let off = h7_ore_run(2);
+        let on = h7_ore_run(1);
+        assert!(!off.is_empty(), "ore harness must emit ops");
+        assert_eq!(off.len(), on.len(), "op count must match");
+        assert_eq!(off, on, "H7 fast path must produce the identical op stream");
+    }
+
+    /// Verdict-table correctness on the synthetic palette (stone/deepslate/
+    /// air/water) + overlay bail + Mixed boundary section.
+    #[test]
+    fn h7_cell_verdict_table() {
+        use crate::features_deco::{OrePlan, VD_FALSE, VD_TRUE};
+        let _g = H7_TEST_LOCK.lock().unwrap();
+        let inner = SnapMock;
+        let env = h7_env();
+        let level = h7_level(&inner, &env);
+        // section 2 (world y 32..47, fully inside 0..2031) — the palette
+        // pattern keys on LOCAL y (idx>>8 = y&15): local (x+z+y)%7 ->
+        // 0=air 5=deepslate 6=water else=stone. Cell coords chosen by
+        // LOCAL y: 43->11(4 stone) 44->12(5 deepslate) 39->7(0 air)
+        // 45->13(6 water).
+        let stone = BlockPos::new(0, 43, 0); // local y 11 -> 11%7=4 -> stone
+        let deep = BlockPos::new(0, 44, 0); // local y 12 -> 12%7=5 -> deepslate
+        let air = BlockPos::new(0, 39, 0); // local y 7 -> 0 -> air
+        let water = BlockPos::new(0, 45, 0); // local y 13 -> 6 -> water
+        let mut plan = OrePlan::build_targets(&h7_iron_targets()).unwrap();
+        let ocs = level.ore_class().expect("ChunkLevel serves OreClassScan");
+        let mut out = [0u8; 2];
+        // THE invariant: the classified fast verdict must equal the EXACT
+        // per-cell rule evaluation on the same cell (fast==exact by
+        // construction). Expected values are derived, not guessed — the
+        // previous hardcoded table misread height-band semantics AND the
+        // local-y palette pattern.
+        let targets = h7_iron_targets();
+        let mut oracle_rng = WorldgenRandom::new();
+        for (name, cell) in [
+            ("stone", stone),
+            ("deepslate", deep),
+            ("air", air),
+            ("water", water),
+        ] {
+            assert!(ocs.cell_verdicts(&mut plan, cell, &mut out), "{name}: fast verdict");
+            for (i, (rt, _)) in targets.iter().enumerate() {
+                let exact = rule_test_matches(rt, &level, cell, &mut oracle_rng);
+                assert_eq!(
+                    out[i] == VD_TRUE,
+                    exact,
+                    "{name} target#{i}: fast verdict must equal the exact per-cell path"
+                );
+            }
+        }
+        // boundary section (y 0..15 straddles the deepslate height 8):
+        // Mixed -> whole cell exact path
+        assert!(!ocs.cell_verdicts(&mut plan, BlockPos::new(0, 10, 0), &mut out));
+        // overlay bail: a written cell never takes the classified verdict
+        level.write_overlay(BlockPos::new(1, 43, 1), "minecraft:andesite");
+        assert!(!ocs.cell_verdicts(&mut plan, BlockPos::new(1, 43, 1), &mut out));
+        // exotic tag without a fetchable member set -> plan dead -> exact path
+        let plan2 = OrePlan::build(&[
+            crate::features_json::RuleTest::TagMatch("minecraft:no_such_tag".to_string()),
+        ])
+        .unwrap();
+        let mut p2 = plan2;
+        let mut out1 = [0u8; 1];
+        assert!(!ocs.cell_verdicts(&mut p2, stone, &mut out1));
+        assert!(p2.dead);
+        assert!(!ocs.cell_verdicts(&mut p2, BlockPos::new(2, 43, 2), &mut out1));
+    }
+
+    /// dripstone family: speleothem_cluster + speleothem op streams identical
+    /// with the fused empty_or_water predicate ON vs kill-switched OFF.
+    #[test]
+    fn h7_dripstone_op_stream_identical_killswitch() {
+        let off = h7_drip_run(2);
+        let on = h7_drip_run(1);
+        assert!(!off.is_empty(), "dripstone harness must emit ops");
+        assert_eq!(off, on, "fused empty_or_water must not change the op stream");
+    }
+
+    fn h7_drip_run(force: i8) -> Vec<DecoOp> {
+        use crate::features_placement::{FloatProv, HeightProvider as HP, IntProvider as IP};
+        let _g = H7_TEST_LOCK.lock().unwrap();
+        H7_FORCE.store(force, std::sync::atomic::Ordering::SeqCst);
+        let reg = build_reg(
+            r#"{"type":"minecraft:simple_block","config":{"to_place":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:poppy"}}}}"#,
+            r#"{"feature":"test:cfg","placement":[]}"#,
+        );
+        let inner = SnapMock;
+        let env = h7_env();
+        let level = h7_level(&inner, &env);
+        // full pointed_dripstone state space + pool water, indexed identically
+        // in both runs so op.state distinguishes the written states
+        let mut sidx: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
+        for (i, th) in ["base", "middle", "frustum", "tip"].iter().enumerate() {
+            for (j, dir) in ["down", "up"].iter().enumerate() {
+                for (k, wl) in ["true", "false"].iter().enumerate() {
+                    sidx.insert(
+                        format!("minecraft:pointed_dripstone[thickness={th},tip_direction={dir},waterlogged={wl}]"),
+                        (1 + i * 4 + j * 2 + k) as u16,
+                    );
+                }
+            }
+        }
+        sidx.insert("minecraft:water".to_string(), 20);
+        sidx.insert("minecraft:dripstone_block".to_string(), 21);
+        let ctx = PlaceCtx {
+            reg: &reg,
+            level: &level,
+            center_x: 0,
+            center_z: 0,
+            state_index: &sidx,
+            uid_index: &EMPTY_U32,
+        };
+        let mut ops: Vec<DecoOp> = Vec::new();
+        let mut rng = WorldgenRandom::new();
+        let deco = rng.set_decoration_seed(31415, 0, 0);
+        for i in 0..6i32 {
+            rng.set_feature_seed(deco, i, 0);
+            let origin = BlockPos::new(4 + i * 3, 30 + i * 7, 6 + i);
+            place_speleothem_cluster(
+                &ctx,
+                "minecraft:dripstone_block",
+                "minecraft:pointed_dripstone",
+                "minecraft:dripstone_replaceables",
+                18,
+                &IP::Uniform { lo: -7, hi: 7 },
+                &IP::Uniform { lo: 5, hi: 11 },
+                3,
+                2,
+                &IP::Uniform { lo: 1, hi: 2 },
+                &FloatProv::Uniform { lo: 0.0, hi: 0.2 },
+                &FloatProv::Uniform { lo: 0.0, hi: 0.5 },
+                0.5,
+                6,
+                2,
+                &mut rng,
+                origin,
+                &mut ops,
+            );
+        }
+        // single pointed_dripstone (speleothem) — same fused predicate
+        rng.set_feature_seed(deco, 9, 0);
+        place_speleothem(
+            &ctx,
+            "minecraft:dripstone_block",
+            "minecraft:pointed_dripstone",
+            "minecraft:dripstone_replaceables",
+            0.2,
+            0.5,
+            0.6,
+            0.2,
+            &mut rng,
+            BlockPos::new(8, 44, 8),
+            &mut ops,
+        );
+        H7_FORCE.store(0, std::sync::atomic::Ordering::SeqCst);
+        ops
     }
 }

@@ -1087,6 +1087,35 @@ impl DecoLevelExt for ChunkLevel<'_> {
         })
         .unwrap_or_else(|| self.inner.fluid_is(pos, ids))
     }
+    /// H7c: fused dripstone column-scan predicate. VERBATIM composition of
+    /// is_air + fluid_is(["minecraft:water"]) on this level: the overlay
+    /// branch keeps is_air's air-name set and fluid_is's "feature writes are
+    /// never fluids" answer; the snapshot branch is one decode of
+    /// (IS_AIR | FLUID_WATER); the bridge branch composes the two inner calls
+    /// exactly like the separate queries would.
+    fn is_air_or_water(&self, pos: BlockPos) -> bool {
+        let ov = self.ov.borrow();
+        if !ov.is_empty() {
+            if let Some(st) = ov.get(&(pos.x, pos.y, pos.z)) {
+                let name = crate::features_deco::state_block_name(st);
+                return name == "minecraft:air"
+                    || name == "minecraft:cave_air"
+                    || name == "minecraft:void_air";
+            }
+        }
+        drop(ov);
+        match self.with_snap(pos.x, pos.y, pos.z, |sec, v| {
+            let f = sec.pal.get(v)?.1;
+            Some(f & flags::IS_AIR != 0 || f & flags::FLUID_WATER != 0)
+        }) {
+            Some(b) => b,
+            // unsnapshotted: BOTH separate calls fall to the bridge
+            None => {
+                self.inner.is_air(pos)
+                    || self.inner.fluid_is(pos, &["minecraft:water".to_string()])
+            }
+        }
+    }
     fn tag_is(&self, pos: BlockPos, tag: &str) -> bool {
         {
             let ov = self.ov.borrow();
@@ -1151,8 +1180,156 @@ impl DecoLevelExt for ChunkLevel<'_> {
     fn env_col_scan(&self) -> Option<&dyn crate::features_deco::EnvColScan> {
         Some(self)
     }
+    fn ore_class(&self) -> Option<&dyn crate::features_deco::OreClassScan> {
+        Some(self)
+    }
     fn freeze_checks(&self, x: i32, z: i32) -> Option<i32> {
         self.inner.freeze_checks(x, z)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// H7: OreClassScan backend — per-section target classification.
+// ---------------------------------------------------------------------------
+
+impl ChunkLevel<'_> {
+    /// slot + fresh section for pos (loads lazily through ensure, epoch-aware).
+    /// The Ref keeps the snap borrow alive for the caller (classify reads the
+    /// section while the cell_verdicts frame runs).
+    fn section_of(&self, x: i32, y: i32, z: i32) -> Option<(usize, std::cell::Ref<'_, SnapSection>)> {
+        let sec_y = y >> 4;
+        let (cx, cz) = (x >> 4, z >> 4);
+        {
+            let s = self.snap.borrow();
+            if let Some(slot) = s.slot(cx, cz, sec_y) {
+                if let Some(sec) = s.secs[slot].as_ref() {
+                    if sec.epoch == s.epoch.get() {
+                        return Some((slot, std::cell::Ref::map(s, |r| {
+                            r.secs[slot].as_ref().unwrap()
+                        })));
+                    }
+                }
+            }
+        }
+        self.ensure(x, y, z);
+        let s = self.snap.borrow();
+        let slot = s.slot(cx, cz, sec_y)?;
+        let fresh = s
+            .secs
+            .get(slot)?
+            .as_ref()
+            .map(|sec| sec.epoch == s.epoch.get())
+            .unwrap_or(false);
+        if !fresh {
+            return None;
+        }
+        Some((slot, std::cell::Ref::map(s, |r| r.secs[slot].as_ref().unwrap())))
+    }
+
+    /// Classify every palette entry of one section against the plan's rules.
+    /// Tag answers resolve through the EXACT per-cell chain (tag_matches_name
+    /// -> tag_registry_is over inner.tag_members) — bit-identical to the
+    /// tag_is snapshot leg by construction. false = a prerequisite failed
+    /// (exotic tag with no fetchable member set): the plan goes dead and the
+    /// per-cell exact path takes over (pre-H7 semantics).
+    fn classify_section(
+        &self,
+        plan: &mut crate::features_deco::OrePlan,
+        slot: usize,
+        epoch: u64,
+        sec: &SnapSection,
+    ) -> bool {
+        use crate::features_deco::{VD_FALSE, VD_MIXED, VD_TRUE};
+        let nrules = plan.rules.len();
+        let pal_len = sec.pal.len();
+        let sec_lo = sec.sec_y * 16;
+        let sec_hi = sec_lo + 15;
+        let tag_ans = |tag: &str, name: &str| -> Option<bool> {
+            match tag_matches_name(tag, name) {
+                Some(b) => Some(b),
+                None => tag_registry_is(tag, name, |t| self.inner.tag_members(t)),
+            }
+        };
+        let mut table = vec![VD_MIXED; pal_len * nrules];
+        for (ri, cls) in plan.rules.iter().enumerate() {
+            for v in 0..pal_len {
+                let Some(&(ni, _)) = sec.pal.get(v) else { continue };
+                let Some(name) = sec.names.get(ni as usize).map(|s| s.as_ref()) else {
+                    continue; // stays Mixed -> exact path for cells on it
+                };
+                let tri = match crate::features_deco::eval_rcls(
+                    cls,
+                    name,
+                    sec_lo,
+                    sec_hi,
+                    &tag_ans,
+                ) {
+                    Some(t) => t,
+                    None => return false, // tag member fetch failed — plan dead
+                };
+                table[v * nrules + ri] = match tri {
+                    crate::features_deco::Tri::F => VD_FALSE,
+                    crate::features_deco::Tri::T => VD_TRUE,
+                    crate::features_deco::Tri::M => VD_MIXED,
+                };
+            }
+        }
+        plan.secs.push(crate::features_deco::SecCls { slot, epoch, table });
+        true
+    }
+}
+
+impl crate::features_deco::OreClassScan for ChunkLevel<'_> {
+    fn cell_verdicts(
+        &self,
+        plan: &mut crate::features_deco::OrePlan,
+        pos: BlockPos,
+        out: &mut [u8],
+    ) -> bool {
+        use crate::features_deco::VD_MIXED;
+        if plan.dead || plan.rules.is_empty() || out.len() != plan.rules.len() {
+            return false;
+        }
+        // overlay first: overlay cells answer through the live-name chain
+        // (tag_is/state_is overlay branches), which the snapshot palette
+        // classification cannot see — exact path for the whole cell.
+        {
+            let ov = self.ov.borrow();
+            if !ov.is_empty() && ov.contains_key(&(pos.x, pos.y, pos.z)) {
+                return false;
+            }
+        }
+        let Some((slot, sec)) = self.section_of(pos.x, pos.y, pos.z) else {
+            return false;
+        };
+        let idx =
+            ((pos.y & 15) as usize) << 8 | ((pos.z & 15) as usize) << 4 | (pos.x & 15) as usize;
+        let Some(v0) = unpack(&sec.bits, &sec.raw, idx) else {
+            return false;
+        };
+        let v = v0 as usize;
+        if v >= sec.pal.len() {
+            return false; // corrupt storage — exact path (matches block()'s bail)
+        }
+        let epoch = sec.epoch;
+        if !plan.secs.iter().any(|e| e.slot == slot && e.epoch == epoch) {
+            plan.secs.retain(|e| e.slot != slot);
+            if !self.classify_section(plan, slot, epoch, &sec) {
+                plan.dead = true;
+                return false;
+            }
+        }
+        let Some(entry) = plan.secs.iter().find(|e| e.slot == slot && e.epoch == epoch) else {
+            return false;
+        };
+        let nr = out.len();
+        for (ri, o) in out.iter_mut().enumerate() {
+            *o = entry.table[v * nr + ri];
+        }
+        if out.contains(&VD_MIXED) {
+            return false; // boundary section — whole cell takes the exact path
+        }
+        true
     }
 }
 
