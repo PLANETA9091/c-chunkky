@@ -88,7 +88,8 @@
       "id": "H9",
       "text": "Inline delivery path (syncLoad): the 28-30ms/ch honest-window idle is moonrise task-queue latency (worker parks on chunk-future deps between status tasks); ServerChunkCache.getChunk(FULL,true) runs the SAME status chain inline. Two-phase priming (TERRAIN rect+margin then FULL) still throws 'Requested chunk unavailable during world generation' — syncLoad releases the per-chunk ticket after completion, so previously-generated neighbors get demoted/unloaded before chunk k's WorldGenRegion needs them. NEXT: hold a TICKET over the whole rect during the pass (moonrise addTicket/ticket-level, or ChunkTaskScheduler.scheduleChunkLoad(x,z,FULL,load=true,Priority,consumer) per chunk with the rect ticket held), then release; alternatively time-box via the spawn-prep path (boot does full-area sync gen successfully — replicate its ticket setup). Payoff if it works: e2e floor = sum of CPU/ch (~16-20ms today, ~8-10 after H6/H7/Q5) with ZERO queue idle",
       "test": "SyncGen.java v2 (deployed jar 2db56104) — needs ticket-held rect variant",
-      "status": "implemented-inconclusive (parked)"
+      "status": "REFUTED (measured, cont-138)",
+      "result": "v5 async+rect-held FORCED tickets (jar 66bd2078): 4x4 rect ok=16 wall=2002ms per-chunk=125.13 min=13.39 max=897.98. First chunk 898ms = inline recursion over the whole dependency tree (3x3 statuses + margins); subsequent chunks 13-50ms (margins amortized via held tickets). Extrapolated at 144 chunks: ~60-75ms/ch = SAME as the async pipeline (58-66 honest). The task-queue idle is NOT delivery overhead — it is dependency/margin serialization inherent to the chunk graph. Delivery-path replacement does NOT pay; the levers remain total-CPU reduction (H6/H7/S1/Q5) + pipelining (maxconc=2) at low CPU. HONEST impossibility proof for one axis of the 'replace the runtime' mandate."
     }
   ],
   "log": [

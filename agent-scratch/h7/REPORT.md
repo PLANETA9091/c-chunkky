@@ -71,3 +71,32 @@ stone/deepslate/granite... + air caves + water/lava). Per-feature ns+ops per chu
 ## Artifacts
 - branch: cont139-h7 (commit TBD)
 - .so md5: TBD
+
+## Step 2b — h7bench design notes (flushed pre-build)
+
+- Entry = `run_feature_master` (the PRODUCTION features_jni decoRunFeature call), NOT
+  run_feature: run_feature wraps the level in `OverlayLevel`, and OverlayLevel does NOT
+  forward `ore_class()`/`env_col_scan()` (trait defaults None) — through that wrapper the
+  H7 fast path would never engage. Production deco (decoRunFeature) and the ore hook
+  (oreRunConfigured) both construct the ChunkLevel and pass it UNWRAPPED, so ore_class()
+  engages live. (Discovered latent cont-60 hazard for any future run_feature user — noted,
+  not fixed: prod path unaffected.)
+- Level = ChunkLevel over a 3x3-region snapshot built from native fill() (frozen 22-id
+  palette; air caves/water/lava + base stones = the real per-cell mix for ore targets).
+  `SnapSection` gained #[derive(Clone)] (additive, plain data) so the bench loader can
+  serve cached sections.
+- BiomeFilter: one dummy biome passes everything (upper-bound dripstone counts; identical
+  for both A/B paths — parity unaffected; live ratio comes from honest-window numbers).
+- Bridge mock supplies the REAL 26.3 tag member sets (hspec=[tuff], ds_rep=[deepslate],
+  stone_rep=4 stones, base_stone_overworld=6, dripstone_replaceable_blocks=6).
+- Parity protocol: same binary, two env settings (default=FAST vs CRUS_H7_OFF=1=parent
+  semantics), `--dump` framed op streams byte-compared via agent-scratch/h7/diff_dump.py.
+- A/B commands (after BUILD_OK):
+  `cd /home/z/wt_h7b/native && CARGO_TARGET_DIR=/home/z/tgt_h7b cargo build --release && CARGO_TARGET_DIR=/home/z/tgt_h7b cargo test --release`
+  `R1=/home/z/my-project/c-faster/workdir/dpext/01; R2=/home/z/my-project/c-faster/workdir/dpext/02`
+  `CRUS_H7_OFF=1 ./h7bench $R1 $R2 -- 64 2100 2000 --rounds 3 --dump off.bin`
+  `./h7bench $R1 $R2 -- 64 2100 2000 --rounds 3 --dump fast.bin`
+  `python3 .../diff_dump.py off.bin fast.bin`
+  fill parity vs pinned parent .so: `filldump $R1 $R2 -- cx cz seed out` parent-vs-mine,
+  byte-compare (fill untouched by H7 — regression guard).
+

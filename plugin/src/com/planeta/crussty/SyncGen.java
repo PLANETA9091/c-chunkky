@@ -1,6 +1,7 @@
 package com.planeta.crussty;
 
 import net.minecraft.server.level.ServerChunkCache;
+import net.minecraft.server.level.TicketType;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 
 import java.lang.reflect.Method;
@@ -36,17 +37,22 @@ public final class SyncGen {
      * FULL on the main thread. Returns a timing report line (ms/chunk).
      */
     public static String gen(org.bukkit.World world, int cx, int cz, int n) throws Exception {
-        CompletableFuture<String> done = new CompletableFuture<>();
+        // ASYNC fire-and-forget: the inline pass holds the MAIN thread for
+        // the whole rect (minutes at 12x12) — the rcon reply would time out
+        // and the caller cannot poll; the result lands in the server log
+        // ([syncgen] line) instead. Returns "started" immediately.
+        final int fn = n;
         org.bukkit.Bukkit.getScheduler().runTask(
                 org.bukkit.Bukkit.getPluginManager().getPlugin("CrusstyGen"),
                 () -> {
                     try {
-                        done.complete(run(world, cx, cz, n));
+                        run(world, cx, cz, fn);
                     } catch (Throwable t) {
-                        done.completeExceptionally(t);
+                        LOG.warning("[syncgen] failed: " + t);
                     }
                 });
-        return done.get();
+        return "started rect[" + cx + ".." + (cx + fn) + "," + cz + ".." + (cz + fn)
+                + "] on main thread — result in server log [syncgen]";
     }
 
     private static String run(org.bukkit.World world, int cx, int cz, int n) throws Exception {
@@ -58,19 +64,24 @@ public final class SyncGen {
         long t0 = System.nanoTime();
         int ok = 0;
         long minNs = Long.MAX_VALUE, maxNs = 0;
-        // two-phase: prime the rect + 1-margin at TERRAIN first (every FULL
-        // gen's 3x3 WorldGenRegion then has neighbors above the FULL-step
-        // direct-dependency statuses — the isolated-chunk syncLoad threw
-        // "Requested chunk unavailable during world generation" without it),
-        // then FULL per chunk. Timing counts the FULL pass (the real work);
-        // the priming pass is measured separately (includes BIOMES+TERRAIN).
-        long p0 = System.nanoTime();
-        for (int dz = -1; dz <= n + 1; dz++) {
-            for (int dx = -1; dx <= n + 1; dx++) {
-                getChunk.invoke(chunkSource, cx + dx, cz + dz, ChunkStatus.TERRAIN, true);
+        // v4: FORCED tickets at level 31 (FULL) held over the WHOLE rect for
+        // the duration of the pass — syncLoad releases its implicit per-chunk
+        // ticket on completion, which let previously generated neighbors get
+        // demoted before chunk k's WorldGenRegion needed them ("Requested
+        // chunk unavailable during world generation"). With FORCED tickets
+        // every neighbor stays FULL while the inline pass runs. This is the
+        // forceload ticket semantics + INLINE status chains.
+        Method addT = chunkSource.getClass().getMethod("addTicketAtLevel",
+                TicketType.class, net.minecraft.world.level.ChunkPos.class, int.class);
+        Method remT = chunkSource.getClass().getMethod("removeTicketAtLevel",
+                TicketType.class, net.minecraft.world.level.ChunkPos.class, int.class);
+        int margin = 1;
+        for (int dz = -margin; dz <= n + margin; dz++) {
+            for (int dx = -margin; dx <= n + margin; dx++) {
+                addT.invoke(chunkSource, TicketType.FORCED,
+                        new net.minecraft.world.level.ChunkPos(cx + dx, cz + dz), 31);
             }
         }
-        long primeMs = (System.nanoTime() - p0) / 1_000_000L;
         for (int dz = 0; dz <= n; dz++) {
             for (int dx = 0; dx <= n; dx++) {
                 long c0 = System.nanoTime();
@@ -88,14 +99,19 @@ public final class SyncGen {
                 }
             }
         }
+        for (int dz = -margin; dz <= n + margin; dz++) {
+            for (int dx = -margin; dx <= n + margin; dx++) {
+                remT.invoke(chunkSource, TicketType.FORCED,
+                        new net.minecraft.world.level.ChunkPos(cx + dx, cz + dz), 31);
+            }
+        }
         long wall = (System.nanoTime() - t0) / 1_000_000L;
         int cnt = (n + 1) * (n + 1);
-        LOG.info("[syncgen] priming pass (n+3)^2 at TERRAIN: " + primeMs + "ms");
         double per = wall / (double) cnt;
         LOG.info(String.format("[syncgen] %s rect[%d..%d,%d..%d] ok=%d wall=%dms per-chunk=%.2fms min=%.2f max=%.2f",
                 world.getName(), cx, cx + n, cz, cz + n, ok, wall, per,
                 minNs / 1e6, maxNs / 1e6));
-        return String.format("syncgen ok=%d wall=%dms per-chunk=%.2fms min=%.2fms max=%.2fms (prime=%dms)",
-                ok, wall, per, minNs / 1e6, maxNs / 1e6, primeMs);
+        return String.format("syncgen ok=%d wall=%dms per-chunk=%.2fms min=%.2fms max=%.2fms",
+                ok, wall, per, minNs / 1e6, maxNs / 1e6);
     }
 }

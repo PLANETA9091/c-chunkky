@@ -64,10 +64,54 @@ Lever: fill idle 5.7 -> ~3 ms/ch. Biggest native item: slice noise sampling ~2.9
 
 ## 3. Fill profile decomposition (SPROF) — PENDING BUILD_OK
 
-## 4. Changes + measured deltas — PENDING
+## 4. Changes + measured deltas
+
+Patch written (not yet compiled — CPU gate). Worktree /home/z/wt_h6b, files: native/src/density.rs,
+native/src/nochunk.rs, native/src/bin/dpperf.rs (WIP diag), +2 bins (h6probe.rs WIP, h6heights.rs new).
+
+- **L1 batch-spline** (density.rs, batch `WKind::Spline` arm): the point VALUES are no longer
+  evaluated per-lane via `spline_apply(..., mem=None)`; instead each DISTINCT point-value node
+  needed by the group (<=2 per lane, deduped) is sampled ONCE via `eval_batch_uncached` over all
+  N lanes, then the per-lane f32 arithmetic replicates spline_apply op-for-op (same binary-search
+  interval, same f32 expression order incl. the i<0 / i==last linear-extend branches). Effect:
+  nested spline coordinate subtrees (the terrain offset/factor/jaggedness splines over
+  continents/erosion/ridges/temperature/vegetation) now flow through the batch memo -> stamps
+  dedupe shared refs within the group AND the Cache2d column cache serves the 2D coordinate
+  noises across the whole 245-corner plane (previously: 8 lanes x 49 y-groups, zero reuse).
+- **L2 row-local grouping** (nochunk.rs `slice_slot0`): groups are composed WITHIN a z-row
+  (y-run) instead of over the flat p index, so every batch is lane-uniform in (x,z). The old
+  flat walk straddled a z-row restart every row (49 % G == 1 for G=4 and G=8) and those groups
+  lost ALL column caching. Out layout + values bit-identical (pure corner functions, same flat
+  p indexing; tail lanes still duplicate the last real corner; the all-lane y-const gate kept).
+- **L3 plane/column cache extension**:
+  - compile (density.rs `compute_col_caches`): ShiftA/ShiftB earn column slots (they pass y=0.0
+    LITERALLY — pure f(x,z), caching bit-identical); y-invariant Noise(y_scale==0) and
+    ShiftedNoise(y_scale==0 + invariant shifts) earn slots too (sign-of-zero equivalence class —
+    the same one the production Cache2d column cache relies on; gates verify on real trees).
+  - batch arms: Noise/ShiftedNoise (2D), ShiftA/ShiftB get per-plane per-(x,z) column-cache
+    hit/store in `BatchMemo.col` (uniform-lane check kept — straddling groups fall back).
+  - scalar arms (MemoCtx-with-cols paths): same four leaves get 16-way `col_lookup4/col_store4`
+    caching; `ChunkGen.self.memo` and the parallel fill_slice per-thread memos are now col-armed
+    (slots 1..N scalar path picks up the caches). base_height's slots memo left col-less (its
+    slot-0 batch path gets the caches; allocs per 1-column query not worth it).
+- Parity reasoning: all memoization = pure-function value reuse; same doubles, same f32 order;
+  no RNG in the density path; draw order untouched. base_height shares slice_slot0 (covered by
+  the new heights dump gate below).
 
 ## 5. cargo test + parity — PENDING
 
 ## 6. Not verified (handed to orchestrator) — PENDING
 
 ## 7. Artifacts — PENDING
+
+## 8. Parity battery (planned)
+
+1. `filldump` (dpext 01+02 roots, dptt region chunks) parent binary vs my binary — byte-diff.
+2. heights: new `h6heights` bin (dump "x z world ocean" over a grid; format compatible with
+   ProbePlugin.crusbase/baseref) — parent build (throwaway worktree /home/z/wt_h6base at
+   0091c8ea + untracked bin, CARGO_TARGET_DIR=/home/z/tgt_h6base) vs my build — byte-diff.
+   Replaces the lost heightcmp 1792/1792 gate.
+3. `planecmp` (fill_slice vs eval_plane_into self-consistency) on my build.
+4. cargo test --release (88/88 expected).
+5. Orchestrator: CI judge on push (bit gate of record).
+
