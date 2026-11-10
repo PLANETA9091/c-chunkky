@@ -117,6 +117,10 @@
     {
       "t": "2026-11-10T17:35+08:00",
       "event": "JFR window-phase analysis (settings=profile, 79s = exact measured phase): gen-worker buckets features 19.2%, JNI_fill 12.5%, biomes 11.2%, serialization 10.6% (NOT 0 as cont-134 audit said — recheck on 26.3), light 6.0%, sched/wait 2.7%. Whale: Paper Watchdog Thread 1404 exec records vs gen-worker 206 — 3-4 'has not responded for 10-15s' dumps INSIDE windows (main thread stall between chunk batches) => each dump safepoints all threads incl. native fill. E6 -Ddisable.watchdog=true => mean 82.3 (-5.4 vs E2). HttpClient/JLine/io/RCON native samples = parked epoll (not CPU)."
+    },
+    {
+      "t": "2026-11-10T18:45+08:00",
+      "event": "Agent outcomes: A3 (light) delivered fully (FINDINGS+PLAN, cheap branch verified in jar). A4 (deleg-native) implemented MonsterRoom+FreezeTopLayer ports (features_place.rs +313, dispatch, kill-switch CRUS_DELEG_NOGEN) but stalled before validation — /tmp wiped its worktree+evidence; WIP survived via cc40dc50. I completed: f1dbg.rs + delegcensus.rs match arms (2x E0004), verified compile, cargo test 86/86. A4 notes: monster_room native despite BlockEntity seed caveat (spawner NBT seed default — block-level judge unaffected, runtime-only). A1 (Q5) + A2 (S1) artifacts LOST with /tmp — Q5 re-implemented by me; S1 design pending. LESSON: agents must write outputs under /home/z/my-project (git-ignored scratch), never /tmp."
     }
   ],
   "ab_protocol": "wipe server263/world* before each config; coords RX1=2000 RZ1=2000, WX=500 WZ=500; NW=2..3; report window means + crusgenstats p50/p99; never compare across different regions",

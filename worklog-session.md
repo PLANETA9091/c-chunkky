@@ -7594,3 +7594,56 @@ Stage Summary:
   структурный рычаг deco; (2) H6 slice-noise plane cache (native fill idle 5.7→~3ms); (3) H7
   ore/dripstone compute-порезки по COMPUTE_TOP-находкам; (4) локальный e2e-бейзлайн E2-конфига
   + push → CI-вердикт.
+
+---
+Task ID: cont-136 (2026-11-10, 5ms campaign: config matrix + light-divert + deleg-native ports)
+Agent: Super Z (main) + 4 subagents (A1 Q5 pool, A2 S1/compute, A3 light NMS, A4 deleg-native)
+
+Work Log:
+- РЕСИНК: песочница на 848b2b6 (cont-41); reset на origin/main fdbd8dbc (cont-134b);
+  rustup 1.99.1 + JDK 25.0.5+8 (adoptium, бит-в-бит) + paper-26.3-222.jar (sha f649771a)
+  восстановлены; patchonly; plugin build (JDK25 javac); PROGRESS.json заведён (H1-H8).
+- BASELINE (fd bd8dbc, .so 33a481ef): окна 98.5/94.6/109.4 (mean 100.8); native fill LOADED
+  35.2ms p50 30.1 (idle 5.7 — 6x инфляция контенцией); deco 18.1 (struct 3.07 run 9.15
+  deleg 4.51); upcalls 68.9/ч; snap-sec 100.6/ч. CPU-математика: ~25-35ms CPU/ч на окно
+  ~100мс => ~75% потерь на планирование, не на работу.
+- E-матрица (протокол: WIPE мира + те же координаты 2000/2100/2200 + back-to-back):
+  E1 FILL_THREADS=1 — НЕВАЛИДЕН (jungle-регион, деревья_jungle 1.47s) + урок: сравнивать
+  только одинаковые регионы. E2 worker-threads=1+FILL=2 => 79.3/86.2/97.6 (mean 87.7,
+  fill wall 29.5->20.4, -31%!). E3 FILL=1 => 93.2 хуже (параллельный филл перекрывает
+  Java-воркера). E4 SerialGC => 90.9 нейтрален (серийные паузы 673ms). E5 FILL=3 нейтрален.
+- JFR (settings=profile, окно = все 79s записи): gen-worker фичи 19.2% / JNI_fill 12.5% /
+  biomes 11.2% / serialization 10.6% (НЕ 0, как в аудите cont-134 — поправка) / light 6.0%.
+  КИТ: Paper Watchdog Thread 1404 exec-рекордов vs gen-worker 206; 3-4 "has not responded
+  for 10-15s" + thread dump ВНУТРИ окон (main-столл между батчами) — каждый dump бьёт
+  safepoint'ами ВСЕ потоки вкл. native fill. HttpClient/JLine/io/RCON native-сэмплы = парковка.
+- E6 -Ddisable.watchdog=true => 77.8/77.7/91.5 (mean 82.3, -18.4 от базовой!) 0 dumps.
+  ИТОГ КОНФИГА: 100.8 -> 82.3 на одном железе без изменения кода генерации.
+- LIGHT-DIVERT (A3 research + моя имплементация): LightDivert.java (NMS populator,
+  регистрируется ПОСЛЕДНИМ) ставит setLightCorrect(true)+persistedStatus=LIGHT в decorate;
+  ChunkLightTask 26.3 дешёвая ветка forceLoadInChunk+checkChunkEdges. Правки против аудита:
+  (1) реальный статус в decorate = minecraft:terrain (ниже FEATURES — [FEATURES,LIGHT)
+  гейт давал 0/1153 diverted; фикс = skip-only->=LIGHT), (2) нужны ОБА флага.
+  diverted=1144/1144 fail=0. A/B на 2-core 12x12: 96.2 vs 94.5 control и 93.9 vs 82.3 —
+  НЕОДНОЗНАЧНО (механизм: снятый INIT_LIGHT-барьер добавляет контенцию на 2c); DEFAULT OFF,
+  финальный вердикт на CI/48x48. Блочных изменений нет (только чанк-метаданные).
+- САБ-АГЕНТЫ: A3 light-divert — готов (FINDINGS+PLAN, ветка подтверждена декомпилом jar).
+  A4 deleg-native — MonsterRoom+FreezeTopLayer нативные порты (features_place.rs +313:
+  validation pass hole_count 1..=5, wall pass dy 3..-1, chest loop 2x3, RNG-порядок
+  из декомпила 26.3 MonsterRoomFeature/SnowAndFreeze; kill-switch CRUS_DELEG_NOGEN;
+  census-заметка: spawner BlockEntity seed остаётся дефолтным — runtime-only, судья блочный).
+  A4 застрял до валидации; /tmp вычищен (worktree A1, research A2, декомпил A4 — ПОТЕРЯНЫ;
+  WIP A4 уцелел в моём коммите cc40dc50 — add -A при живых агентах = ловушка). Доделал я:
+  f1dbg.rs + delegcensus.rs arms (2x E0004), компиляция OK, cargo test 86/86.
+- Запущено в CI: judge-гейты 26.3 (vanilla worldgen refs) — единственная бит-валидация
+  deco-портов локально невозможна (server deco ops dump требует живой сервер).
+
+Stage Summary:
+- e2e 2-core: 100.8 -> 82.3 mean (config+watchdog), при локальных окнах до 72.8.
+  Оценка добраться до 5мс: нативный CPU ~11мс (fill 5.7 + deco run 8.5 - см. ниже) —
+  нужны: S1 sub-batching (JNI 258->40), Q5 ctx-пул, compute-порты (ores 5.5ms/ч),
+  deleg-lane нативы (A4 продолжение: lake/geode), light на CI. Main-столл >10s между
+  батчами (причина watchdog-дампов) — отдельный фронт (forceload semantics).
+- Следующие: (1) CI-вердикт 86/86 + judge на порты A4; (2) Q5 пере-имплементация (мной,
+  дизайн из аудита: отдельный deco-пул ctx); (3) S1 sub-batching; (4) A/B портов A4
+  на 26.3 (deco wall + deleg counters); (5) 48x48 окно для paper-side дельт.

@@ -208,7 +208,8 @@ fn main() {
             | FeatureCfg::FallenTree { .. }
             | FeatureCfg::Speleothem { .. }
             | FeatureCfg::LargeDripstone { .. }
-            | FeatureCfg::SpeleothemCluster { .. } => None,
+            | FeatureCfg::SpeleothemCluster { .. }
+            | FeatureCfg::FreezeTopLayer => None,
             FeatureCfg::BlockColumn { layers, allowed, .. } => {
                 if matches!(allowed, BlockPredicate::Unsupported(_)) {
                     return Some("bc-allowed".into());
