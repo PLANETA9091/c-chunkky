@@ -106,6 +106,10 @@
   ],
   "log": [
     {
+      "t": "2026-11-11T05:35+08:00",
+      "event": "H7 MERGED to main (bb2e0ccd): agent 2-c zombie takeover — their 866-line implementation (per-section palette classification w/ tri-state eval + SecCls lazy tables, fused is_air_or_water dripstone scan) had 5 test-compile errors (lifetimes + arg types) and a wrong hardcoded expectation; fixed all (fn-item closures, copied() iteration, fast==exact invariant test via rule_test_matches oracle, local-y palette coords), 89/89 on branch -> 91/91 on merged main (Q5's 2 + H7's 3 + 86 base). fill parity 16/16 (8 dptt coords x 2 seeds) vs main reference. Server A/B (CRUS_H7_OFF flip) INCONCLUSIVE — box load 3.5 from resurrected H6 agent build (tgt_h6b); parked until quiet box. H6 agent ALIVE (was zombie ~2h, now building) — left to work."
+    },
+    {
       "t": "2026-11-11T05:08+08:00",
       "event": "cont-139 PHASE A/B DONE (fresh tree 0091c8ea, jar 50f0edc0, so ae9d434b): (A) honest window 2100,2000: e2e=63.34 (span 9120.94, ramp 108), gen=26.94 native=26.29 carver=17.89 busy=23.5 cover=37.1% maxconc=2, deco plan .37/struct 6.07/run 7.43/apply .42/deleg 1.62; run-top = ores (gravel 402ms, dirt 375, iron 337, spring_water 336, granite 318, tuff 311, dripstone 305, andesite 294, diorite 278, coal 251+206, lush 151 per 739 chunks) — H7 confirmed top. (B) SyncGen 64.28/61.94 => H9 no-win (see H9). 3 sub-agents launched (cont139-S1 crossings 258->~205, cont139-H7 ore per-section classification + fused dripstone pred, cont139-H6 fill L1 batch-spline + L2 row-local groups + L3 col-cache ShiftA/B) — all 3 adopted their lost-session WIP, code written, awaiting BUILD_OK. Note: OOM twice during reboots (4GB box, 3G heap + dying JVM race) — future boots must verify no java + free>2.5G first."
     },
