@@ -91,6 +91,11 @@ public final class DecoStats {
     static final AtomicLong UP_CAN_SURVIVE = new AtomicLong();
     static final AtomicLong UP_OTHER = new AtomicLong();
     static final AtomicLong BIOMECHK_LOG = new AtomicLong();
+    /** cont139 (S1): batched-lane crossing counters — batch calls / runs
+     *  expanded inside them (snapshot tail: batch=Calls/Runs; the per-chunk
+     *  decoRunFeature-crossing count collapses to ~batches). */
+    static final AtomicLong S1_BATCHES = new AtomicLong();
+    static final AtomicLong S1_BATCH_RUNS = new AtomicLong();
 
     private DecoStats() {
     }
@@ -131,6 +136,8 @@ public final class DecoStats {
         STRUCT_FUNC_NS.set(0);
         STRUCT_ITER.set(0);
         STRUCT_START_CALLS.set(0);
+        S1_BATCHES.set(0);
+        S1_BATCH_RUNS.set(0);
         java.util.Arrays.fill(NANOS, 0L);
     }
 
@@ -177,6 +184,8 @@ public final class DecoStats {
                 SNAP_SECTIONS.get(), SNAP_SECTION_NS.get() / 1e6,
                 SNAP_SECTION_BLOCKS.get(), SNAP_HM.get(),
                 PLAN_BIOMES.get() / 1e6))
+                .concat(String.format(" batch=%d/%d",
+                S1_BATCHES.get(), S1_BATCH_RUNS.get()))
                 .concat(String.format(" | [struct-split] starts=%.2fms place=%.2fms"
                         + " [gate=%.2fms setup=%.2fms loop=%.2fms func=%.2fms iters=%d startCalls=%d]",
                 STRUCT_STARTS_NS.get() / 1e6, STRUCT_PLACE_NS.get() / 1e6,
