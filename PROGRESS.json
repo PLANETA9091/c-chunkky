@@ -87,6 +87,10 @@
   ],
   "log": [
     {
+      "t": "2026-11-11T04:05+08:00",
+      "event": "RINGS-WARMUP (cont-138) implemented+deployed: RingsWarmup.java NMS companion (ChunkMap.chunkGeneratorState via reflection, all ConcentricRingsStructurePlacement sets -> getRingPositionsFor at WorldLoadEvent, bit-identical positions, timing-only). Result: 128 positions precomputed in 0.1ms => ring futures were ALREADY resolved at world init (spawn-area gen) — the JFR 1.6s worker park on getRingPositionsFor happened during BOOT, not the window; window impact ~0 (58.31 honest vs 61.75 paired w1 = noise). KEPT (harmless boot-time warm, protects fresh-region windows that DO hit lazy ring gen). Honest-window w1 baseline now spans 58.3-63.2 across runs (noise +-10%) — single-window comparisons dead, paired back-to-back + pinned md5s are the protocol."
+    },
+    {
       "t": "2026-11-11T03:55+08:00",
       "event": "CONTENTION TEST CONCLUSIVE (cont-138): headless dpperf (1 invocation = fill bench) quiet 244-255ms vs contended-during-server-window 470-520ms = 1.9-2.0x slowdown; server fill itself inflated 16->20.7 under dpperf load => MUTUAL CFS SHARING confirmed as the main 'loaded fill 16.8 vs idle 5.7' mechanism (~2x) + ~1.4x residual (JNI/transfer/GC/residual java stages). No scheduling fix exists under CFS/2-vCPU — the lever is TOTAL CPU (H6 fill->3, H7 ore, S1 crossings) then re-test worker=2 pipelining at low CPU. Also: PAIRED worker repro w/ pinned artifacts (so ae9d434b=post-Q5, jar 736adfd3): w1=61.75 (cover 28.0 maxconc=1 native=16.76 carver=5.88) vs w2=65.94 (cover 34.3 maxconc=2 native=25.20 carver=11.72) — worker=2 pipelines (maxconc=2) but thrashes fill at current CPU; INCONCLUSIVE vs parallel-session verdict (their w2=59.67 on quieter box) — RE-TEST after CPU drops. LESSON: parallel sessions rebuild the shared tree mid-experiment — every A/B pair must pin artifact md5s (logged now). Q5 merge (46d00d6f+67c555c0, 2 parity tests 88/88) landed from cont136-q5b session; carver 7.9->5.88 in w1 honest window (modest win)."
     },

@@ -52,6 +52,21 @@ public final class CrusstyGenPlugin extends JavaPlugin {
             @org.bukkit.event.EventHandler
             public void onWorldLoad(org.bukkit.event.world.WorldLoadEvent e) {
                 CrusstyChunkGenerator.onWorldLoad(e.getWorld());
+                // cont-138: pre-warm ConcentricRings ring positions at boot —
+                // the lazy per-window ForkJoin ring gen (Climate RTree biome
+                // sampling) parked the gen worker ~1.6s recording-wide and
+                // stole fill CPU inside the measured window. Same state
+                // instance => bit-identical positions, timing only.
+                if (e.getWorld().getEnvironment() == org.bukkit.World.Environment.NORMAL) {
+                    // reflective: RingsWarmup is an NMS companion (mojmap
+                    // paper jar pass) — absent when only paper-api compiled
+                    try {
+                        Class.forName("com.planeta.crussty.RingsWarmup")
+                                .getMethod("warm", org.bukkit.World.class)
+                                .invoke(null, e.getWorld());
+                    } catch (Throwable ignored) {
+                    }
+                }
             }
         };
     }
