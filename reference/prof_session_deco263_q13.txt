@@ -1,0 +1,62 @@
+# cont-135 evidence — FIRST 26.3-era deco=1 DecoStats artifact (2-core sandbox)
+
+Date: 2026-11-10. Measured by the FR2/Q1-Q3 session on the merged cont-134 tree
+(9a4d6272: inline surface arithmetic + deco wrapper Q1-Q3 + audit deltas), BEFORE
+any parent A/B — one-sided artifact (no parent comparator on this hardware yet;
+the same-session agent owns the 26.3 server at the time of capture).
+
+## Setup
+- Paper 26.3 build 222 (sha256 f649771a2190214306fb0cfba22c7b2cbac5df6308b1158309593603ed07d488),
+  JDK Temurin 25.0.5+8, -Xms2G -Xmx3G, gen-parallelism=false, worker-threads=2 (nproc).
+- NO datapacks (CI-identical vanilla worldgen + native engine; Terralith/Tectonic
+  1.21.8-era zips do NOT parse on 26.3 — 1146 registry errors when present; the
+  26.3 pack set is a separate restoration task).
+- CRUS_NATIVE_DECO=1 CRUS_NATIVE_CARVERS=1; bukkit.yml generator: CrusstyGen.
+- Boot -> JIT warmup 8x8 @ (500,500) -> 3 measured 12x12 windows @
+  (2000,2000) (2100,2000) (2200,2000), crusgenstats after window 3.
+- libcrussty_chunkgen.so md5 e280bd7daefa0823b6df6244844dab75;
+  CrusstyGen.jar md5 2e5020143836f2c6542025d8b09e8052.
+
+## e2e windows (harness/e2e263.sh, forceload 12x12)
+| window | ms/chunk |
+|---|---|
+| 1 (2000,2000) | 95.0 |
+| 2 (2100,2000) | 86.6 |
+| 3 (2200,2000) | 106.8 |
+mean ~96 ms/chunk on the noisy 2-core sandbox (noise +-20% class).
+
+## DecoStats (cumulative incl. warmup; chunks=1456 fills / 1168 deco)
+native fill: mean 33936us p50 28326us [native=32.99ms layout=0.63ms beard=0.08 marks=0.06]
+deco wall:   mean 18370us p50 9622us p99 107734us max 1046496us
+phase split per decorated chunk (window totals / 1168):
+  plan   = 0.30 ms   (regionBiomes + decoChunkPlan)
+  struct = 5.24 ms   (runStructures; struct-split func=6114ms, loop=2579ms —
+                      ~2/3 of func is margin-chunk exception walls, per audit A)
+  run    = 8.23 ms   (decoRunFeature JNI wall, native compute + upcalls + snapshots)
+  apply  = 0.30 ms   (34 ops/ch -> applyOpStatic)
+  deleg  = 3.55 ms   (vanilla lane for unsupported placed features)
+Sum ~17.6 ms/chunk (LOADED 2-core; audit A sandbox numbers were 3.2-4.9 idle).
+
+Counts per chunk: features=55.4, ops=1377.5, delegate=8.6, upcalls=64.6
+(h=0 stateis=0 fluidis=0 isair=0 survive=7.1 other=57.5),
+snap-sec=92.8 (387.14ms total = 0.33 ms/ch), snap-hm=11.9, planbio=0.21 ms.
+
+run-top (ns per 16-ch window units, native compute):
+  dripstone_cluster 1008.46ms(626), ore_dirt 752(1168), ore_gravel 750,
+  ore_iron_upper 717, ore_tuff 631, ore_andesite_lower 529, ore_granite_lower 525,
+  ore_diorite_lower 522, ore_coal_lower 404, spring_water 359, ore_coal_upper 350,
+  lush_caves_ceiling_vegetation 278(109).
+deleg-names: monster_room 1168, lake_lava_surface 1168, monster_room_deep 1168,
+  freeze_top_layer 1168, lake_lava_underground 1168, amethyst_geode 1168,
+  pointed_dripstone 626, kelp_cold 520, sculk_patch_deep_dark 402, ...
+
+## Notes vs the audit A cost model (reference/audit_deco_wrapper.md)
+- upcalls 64.6/ch here vs 105.8 in prod_deco1 (dptt packs) — vanilla feature set
+  is smaller; the h=0 WG-heightmap handshake holds on 26.3 (0 height upcalls).
+- snap-sec 92.8/ch vs 63 (prod_deco1) — same delegate->epoch invalidation shape;
+  Q3 removed the Java-side Arrays.copyOf per section (387ms total snap ns now
+  includes the parse-free native side).
+- struct=5.24ms LOADED is the biggest single deco phase on 2-core (was 0.82 idle
+  in prod_deco1) — contention amplifies the margin-chunk exception walls.
+- The dripstone_cluster + ore family dominate native compute (run-top), matching
+  the cont-98 finding; S1 sub-batching targets the 73->~9 crossing gap, NOT these.

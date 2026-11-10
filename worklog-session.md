@@ -7521,3 +7521,40 @@ Stage Summary:
   (2) deco A/B с CRUS_DECO_NOUPCALL floor + DecoStats на 26.3 (нет ни одного 26.3-era deco
   артефакта — gap из аудита); (3) S1 sub-batching decoRunFeature (крупнейший структурный);
   (4) биом-хвост 0.15ms: остаточные Not-обёрнутые biome/deep-gate — кандидат на тот же инлайн.
+
+---
+Task ID: cont-135 (2026-11-10, ВОССТАНОВЛЕНИЕ 26.3-рантайма + первые deco-артефакты 26.3 + wrapper Q1-Q3 валидация)
+Agent: Super Z (main, параллельный инстанс cont-134-цикла — сервер/server263 и A/B-артефакты общие)
+Task: «продолжи» (cron) в контексте директивы «5мс на текущем железе» + платформа 26.3.
+
+Work Log:
+- ВОССТАНОВЛЕНИЕ ПОТЕРЬ РЕЦИКЛА (server-рантайм — gitignored): paper-26.3-222.jar заново через
+  fill v3 (sha256 f649771a...07d488 — бит-в-бит с базой cont-118); JDK 25.0.5+8 = Temurin tarball
+  (adoptium API) в /home/z/tools/jdk-25.0.5+8 — ТОЧНО та же сборка, что была; paperclip patchonly
+  первым boot'ом → versions/26.3/paper-26.3.jar + libraries/ восстановлены из paperclip.
+- ЛОВУШКА ПАКОВ: server_datapacks/*.zip (tectonic 3.0.25 / terralith 2.5.13, mc=1.21.8) на 26.3
+  НЕ ПАРСЯТСЯ — 1146 registry-ошибок, мир ломается. CI-канонический протокол 26.3 — БЕЗ датапаков
+  (vanilla worldgen + нативный движок); 26.3-набор паков — отдельная задача восстановления.
+- ЛОВУШКА BOOT: stdin-paper сервера — только FIFO с холдером; /dev/zero ломает консоль, EOF =
+  graceful stop. Tool-сандбокс вычищает фоновые процессы на конце вызова (даже setsid) — весь
+  server-цикл (boot→Done→warmup→окна→stats) держать В ОДНОМ tool-call.
+- ВАЛИДАЦИЯ Q1-Q3 (мои правки wrapper'а, вошли в cont-134): cargo test 86/86; filldump бит-паритет
+  mine(9a4d6272) vs parent(d7b1b514, /tmp/parent_wt+/tmp/parent_tgt) — 8/8 чанков dptt-набора
+  (multi-root 01+02); плагин-jar пересобран с NMS-батчем против versions/26.3/paper-26.3.jar
+  (DecoDriver компилируется, md5 2e502014).
+- ПЕРВЫЕ 26.3-ERA DECO-АРТЕФАКТЫ (gap #1 аудита A): reference/prof_session_deco263_q13.txt —
+  e2e-окна 95.0/86.6/106.8 ms/ch (2-core шумные); deco-wall 17.6ms/ч LOADED (plan 0.30 + struct
+  5.24 + run 8.23 + apply 0.30 + deleg 3.55); upcalls 64.6/ч (h=0 — WG-handshake держится),
+  snap-sec 92.8/ч (0.33ms/ч), features 55.4/ч; run-top: dripstone_cluster + ore-семья. Контраст
+  с audit A: struct 5.24 LOADED vs 0.82 idle — контеншн усиливает margin-чанк exception-walls.
+- PARENT A/B на 26.3 НЕ ЗАВЕРШЁН мной: второй инстанс cont-134-цикла параллельно владеет
+  server263/ (его boot 10:10:19 перезаписал run.out, его crusgenstats ответил на мой poll —
+  chunks=17 + terralith-фичи). Мои MINE-окна (10:02-10:04) чистые — до его первого boot'а.
+- CI: 42795659586 (8a208bc8) in_progress на момент записи.
+
+Stage Summary:
+- 26.3-рантайм полностью восстановлен (paper 222 + JDK25 + patchonly-экстракция + bukkit.yml +
+  rcon 25576); deco=1 на 26.3 живой, DecoStats-счётчики каноничны. Первые deco-артефакты 26.3
+  в evidence base; wrapper Q1-Q3 валидированы (86/86 + parity 8/8 + живой сервер).
+- СЛЕДУЮЩИЕ: (1) parent-компаратор на 26.3 для Q1-Q3 (сервер свободен после cont-134-цикла);
+  (2) CI-вердикт 42795659586; (3) S1 sub-batching; (4) NMS light-divert (бэклог).
