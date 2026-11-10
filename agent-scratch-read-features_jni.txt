@@ -1,0 +1,1758 @@
+     1→//! Features JNI (stage F1): deco engine exports + JVM upcall bridge for the
+     2→//! 3x3 WorldGenRegion queries (states/heights/biomes/canSurvive).
+     3→//!
+     4→//! Java protocol (com.planeta.crussty.ChunkGenNative):
+     5→//!   decoStates(ctx) -> String[]
+     6→//!   decoPlan(ctx) -> String[][]      (steps x names, FeatureSorter order)
+     7→//!   decoChunkPlan(ctx, String[] regionBiomes, int[] out) -> int runs
+     8→//!       out[2*k] = step, out[2*k+1] = index-in-step (step-major, index-ascending)
+     9→//!   decoRunFeature(ctx, long decoSeed, long paperSeed, int originX, originY,
+    10→//!       originZ, int step, int gid, DecoLevelBridge bridge, int[] out) -> int ops
+    11→//!       out[6*k ..+6] = x, y(abs), z, stateIdx, flags, aux
+    12→//!   decoDecoSeed(long levelSeed, int originX, int originZ) -> long
+    13→//!
+    14→//! DecoLevelBridge upcalls (resolved per decoRunFeature call):
+    15→//!   int height(int ty, int x, int z)          — vanilla getHeight semantics
+    16→//!   boolean stateIs(int x, int y, int z, String[] names)
+    17→//!   boolean fluidIs(int x, int y, int z, String[] names)
+    18→//!   boolean isReplaceable(int x, int y, int z)
+    19→//!   boolean isSolid(int x, int y, int z)
+    20→//!   boolean hasSturdyFace(int x, int y, int z, int dir)
+    21→//!   boolean wouldSurvive(String state, int x, int y, int z)
+    22→//!   boolean biomeHasFeature(int x, int y, int z, String placed)
+    23→//!   boolean outsideBuildHeight(int y)
+    24→//!   String stateFull(int x, int y, int z)      — full "block[props]" read
+    25→//!   boolean isSolidRender(int x, int y, int z) — PlaceOnGround decorator
+    26→//!
+    27→//! NOTE: the bridge methods must NOT call back into ChunkGenNative natives —
+    28→//! SESSIONS is held for the duration of decoRunFeature (std Mutex is not
+    29→//! reentrant; see surface_assign_ids deadlock history).
+    30→
+    31→use crate::features_deco::{DecoLevel, DecoLevelExt, HeightmapTy};
+    32→use crate::features_master::{chunk_plan, decoration_seed, run_feature_master};
+    33→use crate::features_placement::BlockPos;
+    34→use jni_sys::{jint, jintArray, jlong, jobject, jobjectArray, jstring};
+    35→
+    36→// ---------------------------------------------------------------------------
+    37→// run-phase split profiler (CRUS_RUN_PROF=1): where does the decoRunFeature
+    38→// wall go — native compute vs the snapshot loader JNI (sections) vs the other
+    39→// bridge upcalls. Accumulated across calls; printed + reset at decoChunkBegin
+    40→// every PROF_EVERY chunks.
+    41→// ---------------------------------------------------------------------------
+    42→static PROF_LOADER_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    43→static PROF_LOADER_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    44→static PROF_PARSE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    45→static PROF_NATIVE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    46→static PROF_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    47→static PROF_STATE_FULL_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    48→static PROF_STATE_FULL_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    49→static PROF_SOLIDR_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    50→static PROF_SOLIDR_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    51→static PROF_CHUNKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    52→const PROF_EVERY: u64 = 16;
+    53→
+    54→static PROF_EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    55→
+    56→#[inline]
+    57→fn prof_now() -> u64 {
+    58→    PROF_EPOCH.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
+    59→}
+    60→
+    61→fn prof_chunk_tick() {
+    62→    let n = PROF_CHUNKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    63→    if n % PROF_EVERY != PROF_EVERY - 1 {
+    64→        return;
+    65→    }
+    66→    let l = PROF_LOADER_NS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    67→    let ln = PROF_LOADER_N.swap(0, std::sync::atomic::Ordering::Relaxed);
+    68→    let p = PROF_PARSE_NS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    69→    let nat = PROF_NATIVE_NS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    70→    let runs = PROF_RUNS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    71→    let sf = PROF_STATE_FULL_NS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    72→    let sfn = PROF_STATE_FULL_N.swap(0, std::sync::atomic::Ordering::Relaxed);
+    73→    let sr = PROF_SOLIDR_NS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    74→    let srn = PROF_SOLIDR_N.swap(0, std::sync::atomic::Ordering::Relaxed);
+    75→    crate::ffi::log_warn(&format!(
+    76→        "[run-prof] chunks=16 runs={} native={:.3}ms loader={:.3}ms/{}sec (jni={:.3} parse={:.3}) state_full={:.3}ms/{} solid_render={:.3}ms/{}",
+    77→        runs,
+    78→        nat as f64 / 16.0 / 1e6,
+    79→        l as f64 / 16.0 / 1e6,
+    80→        ln / 16,
+    81→        l.saturating_sub(p) as f64 / 16.0 / 1e6,
+    82→        p as f64 / 16.0 / 1e6,
+    83→        sf as f64 / 16.0 / 1e6,
+    84→        sfn / 16,
+    85→        sr as f64 / 16.0 / 1e6,
+    86→        srn / 16,
+    87→    ));
+    88→    // ore internals: where the place_ore work goes (exact call counts,
+    89→    // cont-118 — the old 1/8 Instant::now sampler distorted x~6 and was
+    90→    // JIT/CPU-dependent; wall attribution stays with [run-prof] native=)
+    91→    let ore = crate::features_place::ore_prof::drain();
+    92→    crate::ffi::log_warn(&format!(
+    93→        "[ore-prof] tag={} nodes={} hm={} air={} (calls/window, exact)",
+    94→        ore[0], ore[1], ore[2], ore[3],
+    95→    ));
+    96→    // top-10 features by accumulated native wall (window only)
+    97→    let mut top: Vec<(String, u64, u64)> = PROF_FEAT
+    98→        .lock()
+    99→        .unwrap()
+   100→        .iter()
+   101→        .map(|(k, v)| (k.clone(), v.0, v.1))
+   102→        .collect();
+   103→    top.sort_by(|a, b| b.1.cmp(&a.1));
+   104→    let mut s = String::from("[run-prof-top]");
+   105→    for (i, (name, ns, cnt)) in top.iter().take(10).enumerate() {
+   106→        if i > 0 {
+   107→            s.push(',');
+   108→        }
+   109→        s.push_str(&format!(" {}={:.1}us/{}", trim_name(name), *ns as f64 / 16.0 / 1e3, cnt / 16));
+   110→    }
+   111→    crate::ffi::log_warn(&s);
+   112→    PROF_FEAT.lock().unwrap().clear();
+   113→}
+   114→
+   115→fn trim_name(n: &str) -> String {
+   116→    let short = n.rsplit(':').next().unwrap_or(n);
+   117→    short.chars().take(24).collect()
+   118→}
+   119→
+   120→/// feature name -> (ns, calls) for the current prof window
+   121→static PROF_FEAT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, (u64, u64)>>> =
+   122→    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+   123→
+   124→/// CRUS_SNAP_RANGE=1 — the sy-1..sy+1 batch loader A/B (default OFF, see the
+   125→/// loader comment for the measured numbers).
+   126→static SNAP_RANGE_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+   127→
+   128→// ---------------------------------------------------------------------------
+   129→// JVM upcall bridge (DecoLevel impl over the real WorldGenRegion)
+   130→// ---------------------------------------------------------------------------
+   131→
+   132→// cont-135 (Q1, deco-wrapper audit): JniLevel::new resolved 19 method IDs +
+   133→// ~19 CString allocs + one std::env::var on EVERY decoRunFeature (~73/chunk)
+   134→// and oreRunConfigured (~250/chunk on the ore leg). The bridge class is
+   135→// process-stable (one plugin, one classloader, never unloaded), so the table
+   136→// is built ONCE into a global ref and reused. jmethodID/jclass are JVM
+   137→// process globals — safe to share across gen threads (holder is Send+Sync;
+   138→// JNI functions themselves take the caller's env per call).
+   139→struct BridgeCache {
+   140→    class: jni_sys::jclass, // global ref (kept alive for the mids)
+   141→    mids: BridgeMids,
+   142→}
+   143→unsafe impl Send for BridgeCache {}
+   144→unsafe impl Sync for BridgeCache {}
+   145→static BRIDGE_CACHE: std::sync::OnceLock<Option<BridgeCache>> = std::sync::OnceLock::new();
+   146→static NOUPCALL_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+   147→
+   148→#[derive(Clone, Copy)]
+   149→struct BridgeMids {
+   150→    is_air: jni_sys::jmethodID,
+   151→    tag_is: jni_sys::jmethodID,
+   152→    state_name: jni_sys::jmethodID,
+   153→    name_is_solid: jni_sys::jmethodID,
+   154→    height: jni_sys::jmethodID,
+   155→    state_is: jni_sys::jmethodID,
+   156→    fluid_is: jni_sys::jmethodID,
+   157→    is_replaceable: jni_sys::jmethodID,
+   158→    is_solid: jni_sys::jmethodID,
+   159→    has_sturdy_face: jni_sys::jmethodID,
+   160→    would_survive: jni_sys::jmethodID,
+   161→    biome_has_feature: jni_sys::jmethodID,
+   162→    outside_build_height: jni_sys::jmethodID,
+   163→    state_full: jni_sys::jmethodID,
+   164→    is_solid_render: jni_sys::jmethodID,
+   165→    deco_snap_section: jni_sys::jmethodID,
+   166→    deco_snap_section_range: jni_sys::jmethodID,
+   167→    deco_heightmaps: jni_sys::jmethodID,
+   168→    /// SOFT resolve (not in the ok[] gate): an older plugin jar without
+   169→    /// tagMembers only degrades to the per-cell tagIs bridge (None), the
+   170→    /// hard-resolved mids above still gate JniLevel::new.
+   171→    tag_members: jni_sys::jmethodID,
+   172→    /// SOFT resolve (not in the ok[] gate): freeze_top_layer verdict upcall
+   173→    /// (native FreezeTopLayerFeature). An older jar without freezeChecks
+   174→    /// degrades the feature to bailing-with-zero-ops at place time (no RNG
+   175→    /// consumed — safe), every other feature keeps running.
+   176→    freeze_checks: jni_sys::jmethodID,
+   177→}
+   178→
+   179→pub struct JniLevel<'a> {
+   180→    env: *mut jni_sys::JNIEnv,
+   181→    obj: jobject,
+   182→    mids: BridgeMids,
+   183→    /// uid -> placed name (BiomeFilter upcalls carry names)
+   184→    uid_names: &'a [String],
+   185→    min_y: i32,
+   186→    max_y: i32,
+   187→    trace: std::cell::Cell<u32>,
+   188→    /// CRUS_DECO_NOUPCALL=1: dummy every upcall (height->min_y, bools->false)
+   189→    /// — measures the native-only floor of decoRunFeature. Output garbage,
+   190→    /// timings honest.
+   191→    no_upcall: bool,
+   192→}
+   193→
+   194→impl<'a> JniLevel<'a> {
+   195→    fn trace_tick(&self) -> bool {
+   196→        let t = self.trace.get();
+   197→        self.trace.set(t + 1);
+   198→        t < 5
+   199→    }
+   200→    #[inline]
+   201→    fn noup(&self) -> bool {
+   202→        self.no_upcall
+   203→    }
+   204→}
+   205→
+   206→impl<'a> JniLevel<'a> {
+   207→    pub unsafe fn new(
+   208→        env: *mut jni_sys::JNIEnv,
+   209→        obj: jobject,
+   210→        uid_names: &'a [String],
+   211→        min_y: i32,
+   212→        max_y: i32,
+   213→    ) -> Option<Self> {
+   214→        let tbl = *env;
+   215→        let no_upcall = *NOUPCALL_ON.get_or_init(|| {
+   216→            std::env::var("CRUS_DECO_NOUPCALL").ok().as_deref() == Some("1")
+   217→        });
+   218→        // Fast path: table built on an earlier call — no JNI resolves, one
+   219→        // IsSameObject identity guard (plugin reload swaps classloaders:
+   220→        // same method names, DIFFERENT Class objects — stale jmethodIDs
+   221→        // would be UB; on mismatch the table is rebuilt and the stale
+   222→        // global ref dropped so the old classloader can be collected).
+   223→        let bc = 'build: {
+   224→            if let Some(Some(bc)) = BRIDGE_CACHE.get() {
+   225→                let cur = ((*tbl).v1_1.GetObjectClass)(env, obj);
+   226→                let same = !cur.is_null()
+   227→                    && ((*tbl).v1_1.IsSameObject)(
+   228→                        env,
+   229→                        cur as jni_sys::jobject,
+   230→                        bc.class as jni_sys::jobject,
+   231→                    ) == jni_sys::JNI_TRUE;
+   232→                if !cur.is_null() {
+   233→                    ((*tbl).v1_1.DeleteLocalRef)(env, cur as jni_sys::jobject);
+   234→                }
+   235→                if same {
+   236→                    break 'build bc;
+   237→                }
+   238→                ((*tbl).v1_1.DeleteGlobalRef)(env, bc.class as jni_sys::jobject);
+   239→            }
+   240→            let built: Option<BridgeCache> = unsafe {
+   241→                    let class = ((*tbl).v1_1.GetObjectClass)(env, obj);
+   242→                    if class.is_null() {
+   243→                        None
+   244→                    } else {
+   245→                        let gref = ((*tbl).v1_1.NewGlobalRef)(env, class);
+   246→                        ((*tbl).v1_1.DeleteLocalRef)(env, class);
+   247→                        let mid = |name: &str, sig: &str| -> jni_sys::jmethodID {
+   248→                            let n = std::ffi::CString::new(name).unwrap();
+   249→                            let s = std::ffi::CString::new(sig).unwrap();
+   250→                            ((*tbl).v1_1.GetMethodID)(env, gref, n.as_ptr(), s.as_ptr())
+   251→                        };
+   252→                        let mids = BridgeMids {
+   253→                            is_air: mid("isAir", "(III)Z"),
+   254→                            tag_is: mid("tagIs", "(IIILjava/lang/String;)Z"),
+   255→                            state_name: mid("stateName", "(III)Ljava/lang/String;"),
+   256→                            name_is_solid: mid("nameIsSolid", "(Ljava/lang/String;)Z"),
+   257→                            height: mid("height", "(III)I"),
+   258→                            state_is: mid("stateIs", "(III[Ljava/lang/String;)Z"),
+   259→                            fluid_is: mid("fluidIs", "(III[Ljava/lang/String;)Z"),
+   260→                            is_replaceable: mid("isReplaceable", "(III)Z"),
+   261→                            is_solid: mid("isSolid", "(III)Z"),
+   262→                            has_sturdy_face: mid("hasSturdyFace", "(IIII)Z"),
+   263→                            would_survive: mid("wouldSurvive", "(Ljava/lang/String;III)Z"),
+   264→                            biome_has_feature: mid("biomeHasFeature", "(IIILjava/lang/String;)Z"),
+   265→                            outside_build_height: mid("outsideBuildHeight", "(I)Z"),
+   266→                            state_full: mid("stateFull", "(III)Ljava/lang/String;"),
+   267→                            is_solid_render: mid("isSolidRender", "(III)Z"),
+   268→                            deco_snap_section: mid("decoSnapSection", "(III)[B"),
+   269→                            deco_snap_section_range: mid("decoSnapSectionRange", "(IIII)[B"),
+   270→                            deco_heightmaps: mid("decoHeightmaps", "(II)[I"),
+   271→                            tag_members: mid("tagMembers", "(Ljava/lang/String;)[Ljava/lang/String;"),
+   272→                            freeze_checks: mid("freezeChecks", "(II)I"),
+   273→                        };
+   274→                        let ok = [
+   275→                            mids.is_air,
+   276→                            mids.tag_is,
+   277→                            mids.state_name,
+   278→                            mids.name_is_solid,
+   279→                            mids.height,
+   280→                            mids.state_is,
+   281→                            mids.fluid_is,
+   282→                            mids.is_replaceable,
+   283→                            mids.is_solid,
+   284→                            mids.has_sturdy_face,
+   285→                            mids.would_survive,
+   286→                            mids.biome_has_feature,
+   287→                            mids.outside_build_height,
+   288→                            mids.state_full,
+   289→                            mids.is_solid_render,
+   290→                            mids.deco_snap_section,
+   291→                            mids.deco_snap_section_range,
+   292→                            mids.deco_heightmaps,
+   293→                        ]
+   294→                        .iter()
+   295→                        .all(|m| !m.is_null());
+   296→                        if ok && !gref.is_null() {
+   297→                            Some(BridgeCache { class: gref, mids })
+   298→                        } else {
+   299→                            None
+   300→                        }
+   301→                    }
+   302→                };
+   303→                // A None (old jar / broken env) is cached too — the same
+   304→                // class resolves the same way on every call, so a per-call
+   305→                // retry cannot produce a different answer. (Exception: a
+   306→                // plugin RELOAD yields a different Class — caught by the
+   307→                // IsSameObject guard above, which forces a rebuild.)
+   308→                let _ = BRIDGE_CACHE.set(built);
+   309→                match BRIDGE_CACHE.get() {
+   310→                    Some(Some(bc)) => bc,
+   311→                    _ => return None,
+   312→                }
+   313→        };
+   314→        let mids = bc.mids;
+   315→        Some(JniLevel {
+   316→            env,
+   317→            obj,
+   318→            mids,
+   319→            uid_names,
+   320→            min_y,
+   321→            max_y,
+   322→            trace: std::cell::Cell::new(0),
+   323→            no_upcall,
+   324→        })
+   325→    }
+   326→
+   327→    #[inline]
+   328→    fn z_call(&self, mid: jni_sys::jmethodID, args: &[jni_sys::jvalue]) -> bool {
+   329→        if self.noup() {
+   330→            return false;
+   331→        }
+   332→        let tbl = unsafe { *self.env };
+   333→        unsafe {
+   334→            // A-variant takes a jvalue* — the plain Call*Method is C-varargs
+   335→            // and a Rust slice would be read as a single jvalue (JVM crash).
+   336→            let r = ((*tbl).v1_1.CallBooleanMethodA)(self.env, self.obj, mid, args.as_ptr());
+   337→            if ((*tbl).v1_2.ExceptionCheck)(self.env) {
+   338→                ((*tbl).v1_1.ExceptionClear)(self.env);
+   339→                return false;
+   340→            }
+   341→            r
+   342→        }
+   343→    }
+   344→
+   345→    /// One section snapshot from the bridge (DecoDriver.decoSnapSection).
+   346→    /// cont-135 (Q3, deco-wrapper audit): Java now returns its REUSABLE
+   347→    /// serialize buffer (GetArrayLength = capacity >= payload; parse_section
+   348→    /// is strictly sequential and tolerates the trailing bytes), so both the
+   349→    /// Java-side Arrays.copyOf and the native-side to_vec() copy are gone.
+   350→    fn snap_section(&self, cx: i32, cz: i32, sec_y: i32) -> Option<crate::features_snap::SnapSection> {
+   351→        if self.noup() {
+   352→            return None;
+   353→        }
+   354→        let tbl = unsafe { *self.env };
+   355→        unsafe {
+   356→            let ivals = [
+   357→                Self::val_i(cx),
+   358→                Self::val_i(cz),
+   359→                Self::val_i(sec_y),
+   360→            ];
+   361→            let r = ((*tbl).v1_1.CallObjectMethodA)(
+   362→                self.env,
+   363→                self.obj,
+   364→                self.mids.deco_snap_section,
+   365→                ivals.as_ptr(),
+   366→            ) as jni_sys::jbyteArray;
+   367→            if ((*tbl).v1_2.ExceptionCheck)(self.env) {
+   368→                ((*tbl).v1_1.ExceptionClear)(self.env);
+   369→                return None;
+   370→            }
+   371→            if r.is_null() {
+   372→                return None;
+   373→            }
+   374→            let len = ((*tbl).v1_1.GetArrayLength)(self.env, r as jni_sys::jarray) as usize;
+   375→            if len == 0 {
+   376→                ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+   377→                return None;
+   378→            }
+   379→            let p = ((*tbl).v1_1.GetByteArrayElements)(self.env, r, std::ptr::null_mut());
+   380→            if p.is_null() {
+   381→                ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+   382→                return None;
+   383→            }
+   384→            let parsed = crate::features_snap::parse_section(std::slice::from_raw_parts(
+   385→                p as *const u8,
+   386→                len,
+   387→            ));
+   388→            ((*tbl).v1_2.ReleaseByteArrayElements)(
+   389→                self.env,
+   390→                r,
+   391→                p,
+   392→                jni_sys::JNI_ABORT,
+   393→            );
+   394→            ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+   395→            parsed
+   396→        }
+   397→    }
+   398→
+   399→    /// Batch variant: n consecutive sections of one chunk column, one JNI
+   400→    /// crossing (DecoDriver.decoSnapSectionRange; length-prefixed payloads).
+   401→    fn snap_section_range(&self, cx: i32, cz: i32, sec_y: i32, n: i32) -> Option<Vec<u8>> {
+   402→        if self.noup() {
+   403→            return None;
+   404→        }
+   405→        let tbl = unsafe { *self.env };
+   406→        unsafe {
+   407→            let ivals = [
+   408→                Self::val_i(cx),
+   409→                Self::val_i(cz),
+   410→                Self::val_i(sec_y),
+   411→                Self::val_i(n),
+   412→            ];
+   413→            let r = ((*tbl).v1_1.CallObjectMethodA)(
+   414→                self.env,
+   415→                self.obj,
+   416→                self.mids.deco_snap_section_range,
+   417→                ivals.as_ptr(),
+   418→            ) as jni_sys::jbyteArray;
+   419→            if ((*tbl).v1_2.ExceptionCheck)(self.env) {
+   420→                ((*tbl).v1_1.ExceptionClear)(self.env);
+   421→                return None;
+   422→            }
+   423→            if r.is_null() {
+   424→                return None;
+   425→            }
+   426→            let len = ((*tbl).v1_1.GetArrayLength)(self.env, r as jni_sys::jarray) as usize;
+   427→            if len == 0 {
+   428→                ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+   429→                return None;
+   430→            }
+   431→            let p = ((*tbl).v1_1.GetByteArrayElements)(self.env, r, std::ptr::null_mut());
+   432→            if p.is_null() {
+   433→                ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+   434→                return None;
+   435→            }
+   436→            let out = std::slice::from_raw_parts(p as *const u8, len).to_vec();
+   437→            ((*tbl).v1_2.ReleaseByteArrayElements)(
+   438→                self.env,
+   439→                r,
+   440→                p,
+   441→                jni_sys::JNI_ABORT,
+   442→            );
+   443→            ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+   444→            Some(out)
+   445→        }
+   446→    }
+   447→
+   448→    /// WG heightmap handshake: 512 i32 (WS_WG 256 + OF_WG 256, +1
+   449→    /// semantics) per region chunk — replaces the per-column height upcalls.
+   450→    fn heightmaps(&self, cx: i32, cz: i32) -> Option<Vec<i32>> {
+   451→        if self.noup() {
+   452→            return None;
+   453→        }
+   454→        let tbl = unsafe { *self.env };
+   455→        unsafe {
+   456→            let ivals = [Self::val_i(cx), Self::val_i(cz)];
+   457→            let r = ((*tbl).v1_1.CallObjectMethodA)(
+   458→                self.env,
+   459→                self.obj,
+   460→                self.mids.deco_heightmaps,
+   461→                ivals.as_ptr(),
+   462→            ) as jni_sys::jintArray;
+   463→            if ((*tbl).v1_2.ExceptionCheck)(self.env) {
+   464→                ((*tbl).v1_1.ExceptionClear)(self.env);
+   465→                return None;
+   466→            }
+   467→            if r.is_null() {
+   468→                return None;
+   469→            }
+   470→            let len = ((*tbl).v1_1.GetArrayLength)(self.env, r as jni_sys::jarray) as usize;
+   471→            if len < 512 {
+   472→                ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+   473→                return None;
+   474→            }
+   475→            let p = ((*tbl).v1_1.GetIntArrayElements)(self.env, r, std::ptr::null_mut());
+   476→            if p.is_null() {
+   477→                ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+   478→                return None;
+   479→            }
+   480→            let out = std::slice::from_raw_parts(p, 512).to_vec();
+   481→            ((*tbl).v1_2.ReleaseIntArrayElements)(
+   482→                self.env,
+   483→                r,
+   484→                p,
+   485→                jni_sys::JNI_ABORT,
+   486→            );
+   487→            ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+   488→            Some(out)
+   489→        }
+   490→    }
+   491→
+   492→    fn new_jstring(&self, s: &str) -> Option<jni_sys::jstring> {
+   493→        let tbl = unsafe { *self.env };
+   494→        let c = std::ffi::CString::new(s).ok()?;
+   495→        unsafe {
+   496→            let js = ((*tbl).v1_1.NewStringUTF)(self.env, c.as_ptr());
+   497→            if js.is_null() || ((*tbl).v1_2.ExceptionCheck)(self.env) {
+   498→                return None;
+   499→            }
+   500→            Some(js)
+   501→        }
+   502→    }
+   503→
+   504→    fn new_string_array(&self, items: &[String]) -> Option<jobjectArray> {
+   505→        let tbl = unsafe { *self.env };
+   506→        unsafe {
+   507→            let class = ((*tbl).v1_1.FindClass)(self.env, c"java/lang/String".as_ptr());
+   508→            if class.is_null() {
+   509→                return None;
+   510→            }
+   511→            let arr = ((*tbl).v1_1.NewObjectArray)(self.env, items.len() as jni_sys::jsize, class, std::ptr::null_mut());
+   512→            if arr.is_null() {
+   513→                return None;
+   514→            }
+   515→            for (i, s) in items.iter().enumerate() {
+   516→                let Some(js) = self.new_jstring(s) else { return None };
+   517→                ((*tbl).v1_1.SetObjectArrayElement)(self.env, arr, i as jni_sys::jsize, js);
+   518→            }
+   519→            Some(arr)
+   520→        }
+   521→    }
+   522→
+   523→    #[inline]
+   524→    fn val_i(v: i32) -> jni_sys::jvalue {
+   525→        jni_sys::jvalue { i: v }
+   526→    }
+   527→
+   528→    #[inline]
+   529→    fn val_l(v: jobject) -> jni_sys::jvalue {
+   530→        jni_sys::jvalue { l: v }
+   531→    }
+   532→}
+   533→
+   534→impl<'a> DecoLevel for JniLevel<'a> {
+   535→    fn min_y(&self) -> i32 {
+   536→        self.min_y
+   537→    }
+   538→    fn max_y(&self) -> i32 {
+   539→        self.max_y
+   540→    }
+   541→    fn height(&self, ty: HeightmapTy, x: i32, z: i32) -> i32 {
+   542→        if self.noup() {
+   543→            return self.min_y;
+   544→        }
+   545→        let tbl = unsafe { *self.env };
+   546→        unsafe {
+   547→            let ivals = [
+   548→                Self::val_i(ty as i32),
+   549→                Self::val_i(x),
+   550→                Self::val_i(z),
+   551→            ];
+   552→            let tr = self.trace_tick();
+   553→            let r = ((*tbl).v1_1.CallIntMethodA)(
+   554→                self.env,
+   555→                self.obj,
+   556→                self.mids.height,
+   557→                ivals.as_ptr(),
+   558→            );
+   559→            let exc = ((*tbl).v1_2.ExceptionCheck)(self.env);
+   560→            if tr {
+   561→                crate::ffi::log_warn(&format!(
+   562→                    "[jni-dbg] height ty={} x={x} z={z} -> {r} exc={exc}", ty as i32
+   563→                ));
+   564→            }
+   565→            if exc {
+   566→                ((*tbl).v1_1.ExceptionClear)(self.env);
+   567→                return self.min_y(); // heights below min disable heightmap moves
+   568→            }
+   569→            r
+   570→        }
+   571→    }
+   572→    fn state(&self, pos: BlockPos) -> u32 {
+   573→        // opaque id: encode the coords so downstream string comparisons go to
+   574→        // the bridge anyway; predicates always call state_is/state through
+   575→        // JniLevelExt paths that carry the real query.
+   576→        let _ = pos;
+   577→        0
+   578→    }
+   579→    fn fluid(&self, pos: BlockPos) -> u32 {
+   580→        let _ = pos;
+   581→        0
+   582→    }
+   583→    fn biome_has_feature(&self, pos: BlockPos, feature: u32) -> bool {
+   584→        let Some(name) = self.uid_names.get(feature as usize) else { return false };
+   585→        let Some(js) = self.new_jstring(name) else { return false };
+   586→        self.z_call(
+   587→            self.mids.biome_has_feature,
+   588→            &[
+   589→                Self::val_i(pos.x),
+   590→                Self::val_i(pos.y),
+   591→                Self::val_i(pos.z),
+   592→                Self::val_l(js),
+   593→            ],
+   594→        )
+   595→    }
+   596→    fn can_survive(&self, state: &str, pos: BlockPos) -> bool {
+   597→        let Some(js) = self.new_jstring(state) else { return false };
+   598→        self.z_call(
+   599→            self.mids.would_survive,
+   600→            &[
+   601→                Self::val_l(js),
+   602→                Self::val_i(pos.x),
+   603→                Self::val_i(pos.y),
+   604→                Self::val_i(pos.z),
+   605→            ],
+   606→        )
+   607→    }
+   608→    fn is_air(&self, pos: BlockPos) -> bool {
+   609→        self.z_call(
+   610→            self.mids.is_air,
+   611→            &[Self::val_i(pos.x), Self::val_i(pos.y), Self::val_i(pos.z)],
+   612→        )
+   613→    }
+   614→    fn is_replaceable(&self, pos: BlockPos) -> bool {
+   615→        self.z_call(
+   616→            self.mids.is_replaceable,
+   617→            &[Self::val_i(pos.x), Self::val_i(pos.y), Self::val_i(pos.z)],
+   618→        )
+   619→    }
+   620→    fn is_solid(&self, pos: BlockPos) -> bool {
+   621→        self.z_call(
+   622→            self.mids.is_solid,
+   623→            &[Self::val_i(pos.x), Self::val_i(pos.y), Self::val_i(pos.z)],
+   624→        )
+   625→    }
+   626→    fn has_sturdy_face(&self, pos: BlockPos, dir: u8) -> bool {
+   627→        self.z_call(
+   628→            self.mids.has_sturdy_face,
+   629→            &[
+   630→                Self::val_i(pos.x),
+   631→                Self::val_i(pos.y),
+   632→                Self::val_i(pos.z),
+   633→                Self::val_i(dir as i32),
+   634→            ],
+   635→        )
+   636→    }
+   637→    fn is_outside_build_height(&self, y: i32) -> bool {
+   638→        // The Java bridge computes `y < reg.getMinY() || y >= reg.getMaxY()`
+   639→        // (DecoDriver.outsideBuildHeight) — pure arithmetic over constants
+   640→        // that are ALREADY the min_y/max_y JNI args of this run (runChunk
+   641→        // passes oy=reg.getMinY(), maxY=reg.getMaxY()). Every env_scan step
+   642→        // calls this (pillar scans: up to 32+32 steps x ~1300 placements per
+   643→        // pillar placed-feature) — the JNI crossing was pure waste.
+   644→        y < self.min_y || y >= self.max_y
+   645→    }
+   646→}
+   647→
+   648→impl<'a> DecoLevelExt for JniLevel<'a> {
+   649→    /// full state string for tree reads (props included). NOTE: the
+   650→    /// OverlayLevel wrapper serves its own writes first — this is the
+   651→    /// WORLD-side read only.
+   652→    fn state_full(&self, pos: BlockPos) -> String {
+   653→        let t0 = prof_now();
+   654→        let tbl = unsafe { *self.env };
+   655→        unsafe {
+   656→            let ivals = [
+   657→                Self::val_i(pos.x),
+   658→                Self::val_i(pos.y),
+   659→                Self::val_i(pos.z),
+   660→            ];
+   661→            let r = ((*tbl).v1_1.CallObjectMethodA)(
+   662→                self.env,
+   663→                self.obj,
+   664→                self.mids.state_full,
+   665→                ivals.as_ptr(),
+   666→            );
+   667→            if r.is_null() {
+   668→                PROF_STATE_FULL_NS.fetch_add(prof_now() - t0, std::sync::atomic::Ordering::Relaxed);
+   669→                return String::new();
+   670→            }
+   671→            let cstr = ((*tbl).v1_1.GetStringUTFChars)(self.env, r as jni_sys::jstring, std::ptr::null_mut());
+   672→            let s = if cstr.is_null() {
+   673→                String::new()
+   674→            } else {
+   675→                std::ffi::CStr::from_ptr(cstr).to_string_lossy().into_owned()
+   676→            };
+   677→            if !cstr.is_null() {
+   678→                ((*tbl).v1_1.ReleaseStringUTFChars)(self.env, r as jni_sys::jstring, cstr);
+   679→            }
+   680→            PROF_STATE_FULL_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+   681→            PROF_STATE_FULL_NS.fetch_add(prof_now() - t0, std::sync::atomic::Ordering::Relaxed);
+   682→            s
+   683→        }
+   684→    }
+   685→
+   686→    fn is_solid_render(&self, pos: BlockPos) -> bool {
+   687→        let t0 = prof_now();
+   688→        let ivals = [
+   689→            Self::val_i(pos.x),
+   690→            Self::val_i(pos.y),
+   691→            Self::val_i(pos.z),
+   692→        ];
+   693→        let r = self.z_call(self.mids.is_solid_render, &ivals);
+   694→        PROF_SOLIDR_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+   695→        PROF_SOLIDR_NS.fetch_add(prof_now() - t0, std::sync::atomic::Ordering::Relaxed);
+   696→        r
+   697→    }
+   698→
+   699→    /// freeze_top_layer per-column verdict (DecoDriver.freezeChecks): the
+   700→    /// packed y + shouldFreeze/shouldSnow/snowy-rewrite bitmask, evaluated by
+   701→    /// Java with the exact vanilla Biome methods on the live region.
+   702→    fn freeze_checks(&self, x: i32, z: i32) -> Option<i32> {
+   703→        if self.noup() || self.mids.freeze_checks.is_null() {
+   704→            return None;
+   705→        }
+   706→        let tbl = unsafe { *self.env };
+   707→        unsafe {
+   708→            let ivals = [Self::val_i(x), Self::val_i(z)];
+   709→            let r = ((*tbl).v1_1.CallIntMethodA)(
+   710→                self.env,
+   711→                self.obj,
+   712→                self.mids.freeze_checks,
+   713→                ivals.as_ptr(),
+   714→            );
+   715→            if ((*tbl).v1_2.ExceptionCheck)(self.env) {
+   716→                ((*tbl).v1_1.ExceptionClear)(self.env);
+   717→                return None;
+   718→            }
+   719→            Some(r)
+   720→        }
+   721→    }
+   722→
+   723→    /// Debug upcall: block registry key at pos (trace-only).
+   724→    fn state_name(&self, pos: BlockPos) -> String {
+   725→        let tbl = unsafe { *self.env };
+   726→        unsafe {
+   727→            let ivals = [
+   728→                Self::val_i(pos.x),
+   729→                Self::val_i(pos.y),
+   730→                Self::val_i(pos.z),
+   731→            ];
+   732→            let r = ((*tbl).v1_1.CallObjectMethodA)(
+   733→                self.env,
+   734→                self.obj,
+   735→                self.mids.state_name,
+   736→                ivals.as_ptr(),
+   737→            );
+   738→            if r.is_null() {
+   739→                return String::from("?");
+   740→            }
+   741→            let cstr = ((*tbl).v1_1.GetStringUTFChars)(self.env, r as jni_sys::jstring, std::ptr::null_mut());
+   742→            let s = if cstr.is_null() {
+   743→                String::from("?")
+   744→            } else {
+   745→                std::ffi::CStr::from_ptr(cstr).to_string_lossy().into_owned()
+   746→            };
+   747→            if !cstr.is_null() {
+   748→                ((*tbl).v1_1.ReleaseStringUTFChars)(self.env, r as jni_sys::jstring, cstr);
+   749→            }
+   750→            s
+   751→        }
+   752→    }
+   753→    fn tag_is(&self, pos: BlockPos, tag: &str) -> bool {
+   754→        let Some(js) = self.new_jstring(tag) else { return false };
+   755→        self.z_call(
+   756→            self.mids.tag_is,
+   757→            &[
+   758→                Self::val_i(pos.x),
+   759→                Self::val_i(pos.y),
+   760→                Self::val_i(pos.z),
+   761→                Self::val_l(js),
+   762→            ],
+   763→        )
+   764→    }
+   765→    fn name_is_solid(&self, name: &str) -> bool {
+   766→        // solidity of a written state's block name (overlay reads); cached per
+   767→        // name — the JVM parses the state string and asks BlockState.isSolid
+   768→        thread_local! {
+   769→            static CACHE: std::cell::RefCell<std::collections::HashMap<String, bool>> =
+   770→                std::cell::RefCell::new(std::collections::HashMap::new());
+   771→        }
+   772→        if let Some(v) = CACHE.with(|c| c.borrow().get(name).copied()) {
+   773→            return v;
+   774→        }
+   775→        let Some(js) = self.new_jstring(name) else { return false };
+   776→        let v = self.z_call(
+   777→            self.mids.name_is_solid,
+   778→            &[Self::val_l(js)],
+   779→        );
+   780→        CACHE.with(|c| c.borrow_mut().insert(name.to_string(), v));
+   781→        v
+   782→    }
+   783→    fn state_is(&self, pos: BlockPos, ids: &[String]) -> bool {
+   784→        let Some(arr) = self.new_string_array(ids) else { return false };
+   785→        self.z_call(
+   786→            self.mids.state_is,
+   787→            &[
+   788→                Self::val_i(pos.x),
+   789→                Self::val_i(pos.y),
+   790→                Self::val_i(pos.z),
+   791→                Self::val_l(arr),
+   792→            ],
+   793→        )
+   794→    }
+   795→    /// Full member set of a block tag — the feed for the process-wide tag
+   796→    /// registry (features_snap::tag_registry_is): ONE crossing per tag
+   797→    /// replaces the per-cell tagIs upcalls inside the 26.3 ore rule tests
+   798→    /// ([ore-prof] top holder: tag=4.4ms/chunk, ~2 crossings x ~3K cells).
+   799→    /// None = no tagMembers mid (older jar) / the call failed — the caller
+   800→    /// keeps the per-cell bridge.
+   801→    fn tag_members(&self, tag: &str) -> Option<Vec<String>> {
+   802→        if self.noup() || self.mids.tag_members.is_null() {
+   803→            return None;
+   804→        }
+   805→        let Some(js) = self.new_jstring(tag) else {
+   806→            return None;
+   807→        };
+   808→        let tbl = unsafe { *self.env };
+   809→        unsafe {
+   810→            let ivals = [Self::val_l(js)];
+   811→            let r = ((*tbl).v1_1.CallObjectMethodA)(
+   812→                self.env,
+   813→                self.obj,
+   814→                self.mids.tag_members,
+   815→                ivals.as_ptr(),
+   816→            ) as jni_sys::jobjectArray;
+   817→            ((*tbl).v1_1.DeleteLocalRef)(self.env, js as jni_sys::jobject);
+   818→            if ((*tbl).v1_2.ExceptionCheck)(self.env) {
+   819→                ((*tbl).v1_2.ExceptionClear)(self.env);
+   820→                return None;
+   821→            }
+   822→            if r.is_null() {
+   823→                return None;
+   824→            }
+   825→            let len = ((*tbl).v1_1.GetArrayLength)(self.env, r as jni_sys::jarray) as usize;
+   826→            let mut out: Vec<String> = Vec::with_capacity(len);
+   827→            for i in 0..len {
+   828→                let el = ((*tbl).v1_1.GetObjectArrayElement)(self.env, r, i as jni_sys::jsize);
+   829→                if el.is_null() {
+   830→                    continue;
+   831→                }
+   832→                let c = ((*tbl).v1_1.GetStringUTFChars)(self.env, el as jni_sys::jstring, std::ptr::null_mut());
+   833→                if !c.is_null() {
+   834→                    out.push(std::ffi::CStr::from_ptr(c).to_string_lossy().into_owned());
+   835→                    ((*tbl).v1_2.ReleaseStringUTFChars)(self.env, el as jni_sys::jstring, c);
+   836→                }
+   837→                ((*tbl).v1_1.DeleteLocalRef)(self.env, el);
+   838→            }
+   839→            ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+   840→            Some(out)
+   841→        }
+   842→    }
+   843→    fn fluid_is(&self, pos: BlockPos, ids: &[String]) -> bool {
+   844→        let Some(arr) = self.new_string_array(ids) else { return false };
+   845→        self.z_call(
+   846→            self.mids.fluid_is,
+   847→            &[
+   848→                Self::val_i(pos.x),
+   849→                Self::val_i(pos.y),
+   850→                Self::val_i(pos.z),
+   851→                Self::val_l(arr),
+   852→            ],
+   853→        )
+   854→    }
+   855→}
+   856→
+   857→// ---------------------------------------------------------------------------
+   858→// JNI exports
+   859→// ---------------------------------------------------------------------------
+   860→
+   861→use crate::ffi::sessions_lock;
+   862→
+   863→/// Best-effort panic payload to string (String / &'static str / opaque).
+   864→fn panic_msg(p: &Box<dyn std::any::Any + Send>) -> String {
+   865→    if let Some(s) = p.downcast_ref::<String>() {
+   866→        s.clone()
+   867→    } else if let Some(s) = p.downcast_ref::<&str>() {
+   868→        (*s).to_string()
+   869→    } else {
+   870→        "opaque panic payload".to_string()
+   871→    }
+   872→}
+   873→
+   874→/// decoBiomeFeaturesFull(ctx, String[] biomeNames, String[] joinedRefs) —
+   875→/// the FULL pack biome -> placed-refs union map, matching the Java
+   876→/// BiomeFilter source exactly (including biomes OUTSIDE possibleBiomes —
+   877→/// border positions sample neighbor biomes whose JSONs still list the
+   878→/// feature). joinedRefs[i] = "ref1\u{1}ref2..." (SOH-separated) or empty.
+   879→#[no_mangle]
+   880→pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoBiomeFeaturesFull(
+   881→    env: *mut jni_sys::JNIEnv,
+   882→    _class: jni_sys::jclass,
+   883→    ctx: jlong,
+   884→    names: jobjectArray,
+   885→    joined: jobjectArray,
+   886→) {
+   887→    let tbl = *env;
+   888→    let read_arr = |arr: jobjectArray| -> Vec<String> {
+   889→        let mut out = Vec::new();
+   890→        unsafe {
+   891→            let len = ((*tbl).v1_1.GetArrayLength)(env, arr as jni_sys::jarray) as usize;
+   892→            for i in 0..len {
+   893→                let jo = ((*tbl).v1_1.GetObjectArrayElement)(env, arr, i as jni_sys::jsize);
+   894→                if jo.is_null() {
+   895→                    out.push(String::new());
+   896→                    continue;
+   897→                }
+   898→                let chars = ((*tbl).v1_1.GetStringUTFChars)(env, jo as jni_sys::jstring, std::ptr::null_mut());
+   899→                let s = if chars.is_null() {
+   900→                    String::new()
+   901→                } else {
+   902→                    std::ffi::CStr::from_ptr(chars).to_string_lossy().into_owned()
+   903→                };
+   904→                if !chars.is_null() {
+   905→                    ((*tbl).v1_1.ReleaseStringUTFChars)(env, jo as jni_sys::jstring, chars);
+   906→                }
+   907→                ((*tbl).v1_1.DeleteLocalRef)(env, jo);
+   908→                out.push(s);
+   909→            }
+   910→        }
+   911→        out
+   912→    };
+   913→    let names_v = read_arr(names);
+   914→    let refs_v = read_arr(joined);
+   915→    // GLOBAL (the chunk deco acquires any ctx from the pool — per-ctx storage
+   916→    // would leave the other ctxs with an empty map)
+   917→    let mut map = crate::features_snap::BIOME_FULL.write().unwrap();
+   918→    map.clear();
+   919→    for (i, name) in names_v.iter().enumerate() {
+   920→        if name.is_empty() {
+   921→            continue;
+   922→        }
+   923→        let refs: Vec<String> = refs_v
+   924→            .get(i)
+   925→            .map(|j| j.split('\u{1}').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
+   926→            .unwrap_or_default();
+   927→        map.insert(name.clone(), refs);
+   928→    }
+   929→}
+   930→
+   931→/// decoStates(ctx) -> String[] — distinct block state strings of the decoded
+   932→/// feature registry (first-appearance order, ops reference them by index).
+   933→/// Null when the ctx has no native deco engine.
+   934→#[no_mangle]
+   935→pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoStates(
+   936→    env: *mut jni_sys::JNIEnv,
+   937→    _class: jni_sys::jclass,
+   938→    ctx: jlong,
+   939→) -> jobjectArray {
+   940→    let tbl = *env;
+   941→    let guard = sessions_lock();
+   942→    let Some(d) = guard.as_ref().and_then(|m| m.get(&(ctx as i64)))
+   943→        .and_then(|c| c.deco.as_ref()) else {
+   944→        return std::ptr::null_mut();
+   945→    };
+   946→    let str_class = ((*tbl).v1_1.FindClass)(env, c"java/lang/String".as_ptr());
+   947→    if str_class.is_null() {
+   948→        return std::ptr::null_mut();
+   949→    }
+   950→    let arr = ((*tbl).v1_1.NewObjectArray)(env, d.state.states.len() as jni_sys::jsize, str_class, std::ptr::null_mut());
+   951→    if arr.is_null() {
+   952→        return std::ptr::null_mut();
+   953→    }
+   954→    for (i, name) in d.state.states.iter().enumerate() {
+   955→        let Ok(cstr) = std::ffi::CString::new(name.as_str()) else { continue };
+   956→        let js = ((*tbl).v1_1.NewStringUTF)(env, cstr.as_ptr());
+   957→        if js.is_null() {
+   958→            continue;
+   959→        }
+   960→        ((*tbl).v1_1.SetObjectArrayElement)(env, arr, i as jni_sys::jsize, js);
+   961→    }
+   962→    arr
+   963→}
+   964→
+   965→/// decoPlan(ctx) -> String[][] — featuresPerStep: steps x placed feature
+   966→/// names in FeatureSorter order (index within a step = the vanilla i3 seed
+   967→/// index). Null when the ctx has no native deco engine.
+   968→#[no_mangle]
+   969→pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoPlan(
+   970→    env: *mut jni_sys::JNIEnv,
+   971→    _class: jni_sys::jclass,
+   972→    ctx: jlong,
+   973→) -> jobjectArray {
+   974→    let tbl = *env;
+   975→    let guard = sessions_lock();
+   976→    let Some(d) = guard.as_ref().and_then(|m| m.get(&(ctx as i64)))
+   977→        .and_then(|c| c.deco.as_ref()) else {
+   978→        return std::ptr::null_mut();
+   979→    };
+   980→    // outer component type must be String[] (ArrayStoreException otherwise)
+   981→    let str_class = ((*tbl).v1_1.FindClass)(env, c"java/lang/String".as_ptr());
+   982→    if str_class.is_null() {
+   983→        return std::ptr::null_mut();
+   984→    }
+   985→    let arr_class = ((*tbl).v1_1.FindClass)(env, c"[Ljava/lang/String;".as_ptr());
+   986→    if arr_class.is_null() {
+   987→        return std::ptr::null_mut();
+   988→    }
+   989→    let outer = ((*tbl).v1_1.NewObjectArray)(env, d.plan.steps.len() as jni_sys::jsize, arr_class, std::ptr::null_mut());
+   990→    if outer.is_null() {
+   991→        return std::ptr::null_mut();
+   992→    }
+   993→    for (s, names) in d.plan.steps.iter().enumerate() {
+   994→        let inner = ((*tbl).v1_1.NewObjectArray)(env, names.len() as jni_sys::jsize, str_class, std::ptr::null_mut());
+   995→        if inner.is_null() {
+   996→            return std::ptr::null_mut();
+   997→        }
+   998→        for (i, n) in names.iter().enumerate() {
+   999→            let Ok(cstr) = std::ffi::CString::new(n.as_str()) else { continue };
+  1000→            let js = ((*tbl).v1_1.NewStringUTF)(env, cstr.as_ptr());
+  1001→            if js.is_null() {
+  1002→                continue;
+  1003→            }
+  1004→            ((*tbl).v1_1.SetObjectArrayElement)(env, inner, i as jni_sys::jsize, js);
+  1005→        }
+  1006→        ((*tbl).v1_1.SetObjectArrayElement)(env, outer, s as jni_sys::jsize, inner);
+  1007→    }
+  1008→    outer
+  1009→}
+  1010→
+  1011→/// decoChunkPlan(ctx, String[] regionBiomes, int[] out) -> int.
+  1012→/// Union of the region biomes' features mapped to (step, index) runs, sorted
+  1013→/// per step (vanilla IntArraySet + sort). out[2k] = step, out[2k+1] = index.
+  1014→/// Returns the run count, -1 when out is too small.
+  1015→#[no_mangle]
+  1016→pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoChunkPlan(
+  1017→    env: *mut jni_sys::JNIEnv,
+  1018→    _class: jni_sys::jclass,
+  1019→    ctx: jlong,
+  1020→    region_biomes: jobjectArray,
+  1021→    out: jni_sys::jintArray,
+  1022→) -> jint {
+  1023→    let tbl = *env;
+  1024→    let guard = sessions_lock();
+  1025→    let Some(d) = guard.as_ref().and_then(|m| m.get(&(ctx as i64)))
+  1026→        .and_then(|c| c.deco.as_ref()) else {
+  1027→        return -1;
+  1028→    };
+  1029→    let n = ((*tbl).v1_1.GetArrayLength)(env, region_biomes as jni_sys::jarray) as usize;
+  1030→    let mut biomes: Vec<String> = Vec::with_capacity(n);
+  1031→    for i in 0..n {
+  1032→        let js = ((*tbl).v1_1.GetObjectArrayElement)(env, region_biomes, i as jni_sys::jsize);
+  1033→        if js.is_null() {
+  1034→            continue;
+  1035→        }
+  1036→        let cstr = ((*tbl).v1_1.GetStringUTFChars)(env, js as jni_sys::jstring, std::ptr::null_mut());
+  1037→        if cstr.is_null() {
+  1038→            continue;
+  1039→        }
+  1040→        biomes.push(std::ffi::CStr::from_ptr(cstr).to_string_lossy().into_owned());
+  1041→        ((*tbl).v1_1.ReleaseStringUTFChars)(env, js as jni_sys::jstring, cstr);
+  1042→    }
+  1043→    // cont-93 panic guard: a placement panic unwinding across this
+  1044→    // extern "system" boundary aborts the JVM (run 41324500487 deco lanes
+  1045→    // died silently exactly this way). Catch inside the sessions_lock scope
+  1046→    // (no poisoning), log the payload, degrade to an empty plan — Java
+  1047→    // decorates nothing this chunk but the server lives and the log names
+  1048→    // the panic.
+  1049→    let runs = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+  1050→        chunk_plan(&d.plan, &d.biome_features, &biomes)
+  1051→    })) {
+  1052→        Ok(r) => r,
+  1053→        Err(p) => {
+  1054→            crate::ffi::log_warn(&format!(
+  1055→                "deco: chunk_plan PANIC (chunk degrades to 0 runs): {}",
+  1056→                panic_msg(&p)
+  1057→            ));
+  1058→            Vec::new()
+  1059→        }
+  1060→    };
+  1061→    let olen = ((*tbl).v1_1.GetArrayLength)(env, out as jni_sys::jarray) as usize;
+  1062→    if olen < runs.len() * 2 {
+  1063→        return -1;
+  1064→    }
+  1065→    let ptr = ((*tbl).v1_2.GetPrimitiveArrayCritical)(env, out as jni_sys::jarray, std::ptr::null_mut());
+  1066→    if ptr.is_null() {
+  1067→        return -1;
+  1068→    }
+  1069→    let slice = std::slice::from_raw_parts_mut(ptr as *mut i32, olen);
+  1070→    for (k, (step, idx)) in runs.iter().enumerate() {
+  1071→        slice[k * 2] = *step as i32;
+  1072→        slice[k * 2 + 1] = *idx as i32;
+  1073→    }
+  1074→    ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
+  1075→    runs.len() as jint
+  1076→}
+  1077→
+  1078→/// decoRunFeature(ctx, decoSeed, paperSeed, originX, originY, originZ, maxY,
+  1079→/// step, gid, bridge, out) -> int ops. One master-loop feature run with the exact
+  1080→/// vanilla seeding (Paper featureSeeds override when paperSeed != -1);
+  1081→/// level-dependent queries go through the bridge upcalls. out: 5 i32 per op.
+  1082→#[no_mangle]
+  1083→#[allow(clippy::too_many_arguments)]
+  1084→pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFeature(
+  1085→    env: *mut jni_sys::JNIEnv,
+  1086→    _class: jni_sys::jclass,
+  1087→    ctx: jlong,
+  1088→    deco_seed: jlong,
+  1089→    paper_seed: jlong,
+  1090→    origin_x: jint,
+  1091→    origin_y: jint,
+  1092→    origin_z: jint,
+  1093→    max_y: jint,
+  1094→    step: jint,
+  1095→    gid: jint,
+  1096→    bridge: jobject,
+  1097→    out: jni_sys::jintArray,
+  1098→) -> jint {
+  1099→    if bridge.is_null() || out.is_null() {
+  1100→        return -1;
+  1101→    }
+  1102→    let tbl = *env;
+  1103→    let guard = sessions_lock();
+  1104→    let Some(d) = guard.as_ref().and_then(|m| m.get(&(ctx as i64)))
+  1105→        .and_then(|c| c.deco.as_ref()) else {
+  1106→        return -1;
+  1107→    };
+  1108→    let Some(name) = d.plan.steps.get(step as usize).and_then(|v| v.get(gid as usize)) else {
+  1109→        return -1;
+  1110→    };
+  1111→    let name = name.clone();
+  1112→    // Hybrid delegate gate: a placed feature whose configured graph contains
+  1113→    // ANY unsupported node (tree, vegetation_patch, ...) must run ENTIRELY on
+  1114→    // the vanilla lane (Java PlacedFeature.placeWithBiomeCheck) — a partial
+  1115→    // native run would desync that feature's own RNG stream. -2 = delegate.
+  1116→    // Early exit BEFORE the JniLevel/bridge setup (cheap, no upcalls).
+  1117→    if !crate::features_place::placed_fully_supported(&d.state.reg, &name, 0) {
+  1118→        return -2;
+  1119→    }
+  1120→    // NOTE: env may be attached to a worker thread; direct upcalls only.
+  1121→    let Some(level) = JniLevel::new(env, bridge, &d.uid_names, origin_y, max_y) else {
+  1122→        return -1;
+  1123→    };
+  1124→    // Chunk-scoped level: overlay (ALL of this chunk's feature writes) ->
+  1125→    // lazy 3x3 section snapshot -> JNI bridge. The per-feature OverlayLevel
+  1126→    // is gone: later features must see earlier features' writes (vanilla
+  1127→    // setBlock is live) AND the point queries must not upcall per query —
+  1128→    // the snapshot serves them natively (flags computed in Java).
+  1129→    let ov: &std::cell::RefCell<crate::features_snap::OvMap> = &d.chunk_ov;
+  1130→    let ov_cols: &std::cell::RefCell<std::collections::HashMap<(i32, i32), Vec<i32>>> =
+  1131→        &d.chunk_ov_cols;
+  1132→    let snap: &std::cell::RefCell<crate::features_snap::SnapRegion> = &d.chunk_snap;
+  1133→    let hms: &std::cell::RefCell<
+  1134→        std::collections::HashMap<
+  1135→            (i32, i32),
+  1136→            Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>>,
+  1137→        >,
+  1138→    > = &d.chunk_hms;
+  1139→    let zoom_seed = d.chunk_zoom_seed.get();
+  1140→    let level_ref = &level;
+  1141→    let run_loader: std::cell::Cell<u64> = std::cell::Cell::new(0);
+  1142→    // A/B: sy-1..sy+1 batch prefetch (CRUS_SNAP_RANGE=1). MEASURED NEGATIVE on
+  1143→    // the 2-core sandbox: the per-section Java build (~3.5-4.8us) dominates the
+  1144→    // JNI crossing (~2us), so the 1.78x section overbuild (11013 built vs 6188
+  1145→    // useful) costs more than the 1.7x fewer crossings save (loader 0.22-0.37ms
+  1146→    // vs 0.14-0.20ms single). Kept for cross-hardware A/B only; default OFF.
+  1147→    let snap_range = *SNAP_RANGE_ON.get_or_init(|| {
+  1148→        std::env::var("CRUS_SNAP_RANGE").as_deref() == Ok("1")
+  1149→    });
+  1150→    let loader = |cx: i32, cz: i32, sec_y: i32| -> Option<crate::features_snap::SnapSection> {
+  1151→        let t0 = prof_now();
+  1152→        PROF_LOADER_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+  1153→        let r = if snap_range {
+  1154→            let range = level_ref.snap_section_range(cx, cz, sec_y - 1, 3);
+  1155→            let mut target: Option<crate::features_snap::SnapSection> = None;
+  1156→            if let Some(bytes) = range {
+  1157→                let mut s = snap.borrow_mut();
+  1158→                let epoch = s.epoch.get();
+  1159→                let mut p = 0usize;
+  1160→                for _ in 0..3 {
+  1161→                    if p + 4 > bytes.len() {
+  1162→                        break;
+  1163→                    }
+  1164→                    let mut lb = [0u8; 4];
+  1165→                    lb.copy_from_slice(&bytes[p..p + 4]);
+  1166→                    let len32 = i32::from_le_bytes(lb);
+  1167→                    p += 4;
+  1168→                    if len32 <= 0 || len32 as usize > bytes.len() - p {
+  1169→                        break; // absent (null build) / malformed — stop, stay lazy
+  1170→                    }
+  1171→                    let len = len32 as usize;
+  1172→                    if let Some(sec) = crate::features_snap::parse_section(&bytes[p..p + len]) {
+  1173→                        let sy = sec.sec_y;
+  1174→                        if let Some(slot) = s.slot(cx, cz, sy) {
+  1175→                            if sy == sec_y {
+  1176→                                target = Some(sec);
+  1177→                            } else if s.secs[slot].is_none() {
+  1178→                                let mut sec2 = sec;
+  1179→                                sec2.epoch = epoch;
+  1180→                                s.secs[slot] = Some(sec2);
+  1181→                            }
+  1182→                        }
+  1183→                    }
+  1184→                    p += len;
+  1185→                }
+  1186→            }
+  1187→            target
+  1188→        } else {
+  1189→            let p0 = prof_now();
+  1190→            let parsed = level_ref.snap_section(cx, cz, sec_y);
+  1191→            PROF_PARSE_NS.fetch_add(prof_now() - p0, std::sync::atomic::Ordering::Relaxed);
+  1192→            parsed
+  1193→        };
+  1194→        run_loader.set(run_loader.get() + (prof_now() - t0));
+  1195→        r
+  1196→    };
+  1197→    let hm_loader = |cx: i32, cz: i32| -> Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>> {
+  1198→        if let Some(cached) = hms.borrow().get(&(cx, cz)) {
+  1199→            return cached.clone();
+  1200→        }
+  1201→        // the WG handshake must always succeed: 512 ints, O(1) Java
+  1202→        let loaded = level_ref
+  1203→            .heightmaps(cx, cz)
+  1204→            .map(|v| std::sync::Arc::new(std::sync::Mutex::new(v)));
+  1205→        if loaded.is_none() {
+  1206→            static LOGGED: std::sync::atomic::AtomicU32 =
+  1207→                std::sync::atomic::AtomicU32::new(0);
+  1208→            let n = LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+  1209→            if n < 3 {
+  1210→                crate::ffi::log_warn(&format!(
+  1211→                    "[deco-hm] heightmaps handshake failed cx={cx} cz={cz} (fallback to per-column JNI)"
+  1212→                ));
+  1213→            }
+  1214→        }
+  1215→        hms.borrow_mut().insert((cx, cz), loaded.clone());
+  1216→        loaded
+  1217→    };
+  1218→    let st_flags = |name: &str| -> Option<u8> {
+  1219→        let idx = *d.state.state_index.get(name)?;
+  1220→        d.state.state_flags.lock().unwrap().get(idx as usize).copied()
+  1221→    };
+  1222→    let chunk_level = crate::features_snap::ChunkLevel::new(
+  1223→        level_ref,
+  1224→        ov,
+  1225→        ov_cols,
+  1226→        snap,
+  1227→        &loader,
+  1228→        &hm_loader,
+  1229→        &d.uid_names,
+  1230→        zoom_seed,
+  1231→        &st_flags,
+  1232→    );
+  1233→    let olen = ((*tbl).v1_1.GetArrayLength)(env, out as jni_sys::jarray) as usize;
+  1234→    if olen < 5 {
+  1235→        return -1;
+  1236→    }
+  1237→    // GetPrimitiveArrayCritical: PIN the ops buffer (no copy). The old
+  1238→    // GetIntArrayElements copied the 1.5MB buffer TO and BACK per feature —
+  1239→    // 21818 features x 3MB traffic = ~65GB memcpy per 332-chunk pregen —
+  1240→    // the dominant cost of the native deco path (17ms of the 21.6ms run
+  1241→    // phase). Writes are short-lived (pin released at feature end).
+  1242→    let ptr = ((*tbl).v1_2.GetPrimitiveArrayCritical)(env, out as jni_sys::jarray, std::ptr::null_mut());
+  1243→    if ptr.is_null() {
+  1244→        return -1;
+  1245→    }
+  1246→    let slice = std::slice::from_raw_parts_mut(ptr as *mut i32, olen);
+  1247→    let t_run = prof_now();
+  1248→    // cont-93 panic guard: run_feature_master is the largest unproven native
+  1249→    // surface (feature placement). A panic here unwinds across the
+  1250→    // extern "system" boundary = JVM abort (run 41324500487 deco lanes: the
+  1251→    // JVM died silently right after the spawn backlog, both CRUS_NATIVE_DECO
+  1252→    // lanes, reproducibly). Catch INSIDE the sessions_lock scope (no mutex
+  1253→    // poisoning), release the pinned ops buffer, log the payload with the
+  1254→    // feature name, return -1 — the Java loop skips the feature (the n<0
+  1255→    // protocol branch) and the server lives.
+  1256→    let run_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+  1257→        run_feature_master(
+  1258→            &d.state,
+  1259→            &chunk_level,
+  1260→            deco_seed as i64,
+  1261→            if paper_seed == -1 { None } else { Some(paper_seed as i64) },
+  1262→            BlockPos::new(origin_x as i32, origin_y as i32, origin_z as i32),
+  1263→            &name,
+  1264→            step as usize,
+  1265→            gid as usize,
+  1266→            slice,
+  1267→        )
+  1268→    }));
+  1269→    let n = match run_res {
+  1270→        Ok(n) => n,
+  1271→        Err(p) => {
+  1272→            // release the critical pin FIRST (an unreleased critical blocks
+  1273→            // GC and can wedge the JVM a second way)
+  1274→            ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
+  1275→            crate::ffi::log_warn(&format!(
+  1276→                "deco: run_feature PANIC step={} gid={} feature={} (feature skipped, ops buffer stale): {}",
+  1277→                step, gid, name,
+  1278→                panic_msg(&p)
+  1279→            ));
+  1280→            return -1;
+  1281→        }
+  1282→    };
+  1283→    let t_run_ns = prof_now() - t_run;
+  1284→    PROF_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+  1285→    let rl = run_loader.get();
+  1286→    PROF_LOADER_NS.fetch_add(rl, std::sync::atomic::Ordering::Relaxed);
+  1287→    PROF_NATIVE_NS.fetch_add(
+  1288→        t_run_ns.saturating_sub(rl),
+  1289→        std::sync::atomic::Ordering::Relaxed,
+  1290→    );
+  1291→    if let Ok(mut m) = PROF_FEAT.lock() {
+  1292→        let e = m.entry(name.clone()).or_insert((0, 0));
+  1293→        e.0 += t_run_ns.saturating_sub(rl);
+  1294→        e.1 += 1;
+  1295→    }
+  1296→    ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
+  1297→    n as jint
+  1298→}
+  1299→
+  1300→/// decoDecoSeed(levelSeed, originX, originZ) -> long — the vanilla chunk
+  1301→/// decoration seed `l` (computed once per chunk; every feature re-seeds from it).
+  1302→#[no_mangle]
+  1303→pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoDecoSeed(
+  1304→    _env: *mut jni_sys::JNIEnv,
+  1305→    _class: jni_sys::jclass,
+  1306→    level_seed: jlong,
+  1307→    origin_x: jint,
+  1308→    origin_z: jint,
+  1309→) -> jlong {
+  1310→    decoration_seed(level_seed as i64, origin_x as i32, origin_z as i32) as jlong
+  1311→}
+  1312→
+  1313→/// decoChunkBegin(ctx, cx, cz, minSectionY) — reset the chunk-scoped overlay
+  1314→/// + snapshot grid before the feature loop of chunk (cx, cz).
+  1315→#[no_mangle]
+  1316→pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoChunkBegin(
+  1317→    _env: *mut jni_sys::JNIEnv,
+  1318→    _class: jni_sys::jclass,
+  1319→    ctx: jlong,
+  1320→    cx: jint,
+  1321→    cz: jint,
+  1322→    min_sec_y: jint,
+  1323→    zoom_seed: jlong,
+  1324→) {
+  1325→    prof_chunk_tick();
+  1326→    let guard = sessions_lock();
+  1327→    if let Some(d) = guard
+  1328→        .as_ref()
+  1329→        .and_then(|m| m.get(&(ctx as i64)))
+  1330→        .and_then(|c| c.deco.as_ref())
+  1331→    {
+  1332→        d.chunk_ov.borrow_mut().clear();
+  1333→        d.chunk_ov_cols.borrow_mut().clear();
+  1334→        d.chunk_snap.borrow_mut().reset(cx, cz, min_sec_y);
+  1335→        d.chunk_hms.borrow_mut().clear();
+  1336→        d.chunk_zoom_seed.set(zoom_seed);
+  1337→    }
+  1338→}
+  1339→
+  1340→/// oreRunConfigured(ctx, rngLo, rngHi, cornerX, minY, cornerZ, maxY,
+  1341→/// featX, featY, featZ, configuredName, bridge, out) -> int ops.
+  1342→///
+  1343→/// (cornerX, cornerZ) = the chunk origin block coords (the ops-rel base,
+  1344→/// same as decoRunFeature's origin); (featX, featY, featZ) = the ABSOLUTE
+  1345→/// FeaturePlaceContext.origin() — the position the vanilla placement
+  1346→/// modifiers produced.
+  1347→///
+  1348→/// cont-99 front 3 (deco=0 ore takeover): the vanilla decorate loop runs in
+  1349→/// Java and the placement modifiers (Count/InSquare/HeightRange/...) have
+  1350→/// ALREADY consumed their draws from the shared WorldgenRandom by the time
+  1351→/// OreFeature.place() is invoked on the swapped CrusstyOreFeature instance.
+  1352→/// This entry expands ONLY the configured feature graph at the given origin,
+  1353→/// continuing the Java RNG stream from the RAW Xoroshiro128PlusPlus engine
+  1354→/// state (seedLo/seedHi read by reflection at place() entry). Everything else
+  1355→/// mirrors decoRunFeature: per-run chunk scope (fresh overlay + lazy 3x3
+  1356→/// snapshot — earlier ore/vanilla writes are applied to the live region
+  1357→/// before this call and therefore visible), JNI upcalls for the rare
+  1358→/// queries the snapshot cannot serve, ops as 6-i32 records.
+  1359→///
+  1360→/// Return protocols: n>=0 = ops written; -1 = ctx/bridge/env failure;
+  1361→/// -3 = configured name absent from the native registry (the Java hook
+  1362→/// falls back to super.place() — the Java RNG is untouched by this entry
+  1363→/// in every non-success case, so the fallback is bit-exact).
+  1364→#[no_mangle]
+  1365→#[allow(clippy::too_many_arguments)]
+  1366→pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_oreRunConfigured(
+  1367→    env: *mut jni_sys::JNIEnv,
+  1368→    _class: jni_sys::jclass,
+  1369→    ctx: jlong,
+  1370→    rng_lo: jlong,
+  1371→    rng_hi: jlong,
+  1372→    corner_x: jint,
+  1373→    origin_y: jint,
+  1374→    corner_z: jint,
+  1375→    max_y: jint,
+  1376→    feat_x: jint,
+  1377→    feat_y: jint,
+  1378→    feat_z: jint,
+  1379→    configured: jstring,
+  1380→    bridge: jobject,
+  1381→    out: jni_sys::jintArray,
+  1382→) -> jint {
+  1383→    if bridge.is_null() || out.is_null() || configured.is_null() {
+  1384→        return -1;
+  1385→    }
+  1386→    let tbl = *env;
+  1387→    let guard = sessions_lock();
+  1388→    let Some(d) = guard.as_ref().and_then(|m| m.get(&(ctx as i64)))
+  1389→        .and_then(|c| c.deco.as_ref()) else {
+  1390→        return -1;
+  1391→    };
+  1392→    // configured name -> utf8
+  1393→    let clen = ((*tbl).v1_1.GetStringUTFLength)(env, configured) as usize;
+  1394→    let cptr = ((*tbl).v1_1.GetStringUTFChars)(env, configured, std::ptr::null_mut());
+  1395→    if cptr.is_null() {
+  1396→        return -1;
+  1397→    }
+  1398→    let name = std::ffi::CStr::from_ptr(cptr as *const i8).to_string_lossy().into_owned();
+  1399→    ((*tbl).v1_1.ReleaseStringUTFChars)(env, configured, cptr);
+  1400→    let _ = clen;
+  1401→    // -3: the native registry has no such feature (decode gap) — the Java
+  1402→    // hook falls back to the vanilla expansion for this feature.
+  1403→    // 26.3: the Java-side registry has NO configured layer — the hook binds
+  1404→    // the FEATURE registry name ("minecraft:ore_dirt"), which is the PLACED
+  1405→    // name for every ore. Accept both: configured names expand directly,
+  1406→    // placed names resolve through reg.placed -> configured.
+  1407→    let cfg_name = if d.state.reg.configured.contains_key(&name) {
+  1408→        name.clone()
+  1409→    } else {
+  1410→        match d.state.reg.placed.get(&name) {
+  1411→            Some(pd) if d.state.reg.configured.contains_key(&pd.feature) => {
+  1412→                pd.feature.clone()
+  1413→            }
+  1414→            _ => return -3,
+  1415→        }
+  1416→    };
+  1417→    let cfg_name = cfg_name.as_str();
+  1418→    // per-run scope (deco=0 ore hook): between two ore place() calls the
+  1419→    // vanilla decorate loop wrote non-ore features through the live region
+  1420→    // and this hook's own earlier ops were applied Java-side. A stale
+  1421→    // overlay would shadow those region writes for THIS run and a stale
+  1422→    // snapshot would miss them entirely (canPlaceOre isAdjacentToAir drift)
+  1423→    // — enforce the exactness contract here: fresh overlay + epoch bump +
+  1424→    // fresh heightmaps every run. Idempotent with the Java-side
+  1425→    // decoChunkBegin retarget (chunk change = same clears + snap.reset).
+  1426→    d.chunk_ov.borrow_mut().clear();
+  1427→    d.chunk_ov_cols.borrow_mut().clear();
+  1428→    d.chunk_snap.borrow().bump_epoch();
+  1429→    d.chunk_hms.borrow_mut().clear();
+  1430→    let Some(level) = JniLevel::new(env, bridge, &d.uid_names, origin_y, max_y) else {
+  1431→        return -1;
+  1432→    };
+  1433→    let ov: &std::cell::RefCell<crate::features_snap::OvMap> = &d.chunk_ov;
+  1434→    let ov_cols: &std::cell::RefCell<std::collections::HashMap<(i32, i32), Vec<i32>>> =
+  1435→        &d.chunk_ov_cols;
+  1436→    let snap: &std::cell::RefCell<crate::features_snap::SnapRegion> = &d.chunk_snap;
+  1437→    let hms: &std::cell::RefCell<
+  1438→        std::collections::HashMap<
+  1439→            (i32, i32),
+  1440→            Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>>,
+  1441→        >,
+  1442→    > = &d.chunk_hms;
+  1443→    let zoom_seed = d.chunk_zoom_seed.get();
+  1444→    let level_ref = &level;
+  1445→    let run_loader = std::cell::Cell::new(0u64);
+  1446→    let loader = |cx: i32, cz: i32, sec_y: i32| -> Option<crate::features_snap::SnapSection> {
+  1447→        let t0 = prof_now();
+  1448→        PROF_LOADER_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+  1449→        let p0 = prof_now();
+  1450→        let parsed = level_ref.snap_section(cx, cz, sec_y);
+  1451→        PROF_PARSE_NS.fetch_add(prof_now() - p0, std::sync::atomic::Ordering::Relaxed);
+  1452→        run_loader.set(run_loader.get() + (prof_now() - t0));
+  1453→        parsed
+  1454→    };
+  1455→    let hm_loader = |cx: i32, cz: i32| -> Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>> {
+  1456→        if let Some(cached) = hms.borrow().get(&(cx, cz)) {
+  1457→            return cached.clone();
+  1458→        }
+  1459→        let loaded = level_ref
+  1460→            .heightmaps(cx, cz)
+  1461→            .map(|v| std::sync::Arc::new(std::sync::Mutex::new(v)));
+  1462→        hms.borrow_mut().insert((cx, cz), loaded.clone());
+  1463→        loaded
+  1464→    };
+  1465→    let st_flags = |name: &str| -> Option<u8> {
+  1466→        let idx = *d.state.state_index.get(name)?;
+  1467→        d.state.state_flags.lock().unwrap().get(idx as usize).copied()
+  1468→    };
+  1469→    let chunk_level = crate::features_snap::ChunkLevel::new(
+  1470→        level_ref,
+  1471→        ov,
+  1472→        ov_cols,
+  1473→        snap,
+  1474→        &loader,
+  1475→        &hm_loader,
+  1476→        &d.uid_names,
+  1477→        zoom_seed,
+  1478→        &st_flags,
+  1479→    );
+  1480→    let olen = ((*tbl).v1_1.GetArrayLength)(env, out as jni_sys::jarray) as usize;
+  1481→    if olen < 6 {
+  1482→        return -1;
+  1483→    }
+  1484→    let ptr = ((*tbl).v1_2.GetPrimitiveArrayCritical)(env, out as jni_sys::jarray, std::ptr::null_mut());
+  1485→    if ptr.is_null() {
+  1486→        return -1;
+  1487→    }
+  1488→    let slice = std::slice::from_raw_parts_mut(ptr as *mut i32, olen);
+  1489→    let t_run = prof_now();
+  1490→    // same panic discipline as decoRunFeature (cont-93): a panic must not
+  1491→    // unwind across the extern "system" boundary (JVM abort) — catch inside,
+  1492→    // release the pin, log, return -1 (Java falls back to the vanilla
+  1493→    // expansion with the untouched Java RNG).
+  1494→    let run_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+  1495→        let mut rng = crate::features_rng::WorldgenRandom::from_state(
+  1496→            rng_lo as i64,
+  1497→            rng_hi as i64,
+  1498→        );
+  1499→        let pctx = crate::features_place::PlaceCtx {
+  1500→            reg: &d.state.reg,
+  1501→            level: &chunk_level,
+  1502→            center_x: corner_x as i32,
+  1503→            center_z: corner_z as i32,
+  1504→            state_index: &d.state.state_index,
+  1505→            uid_index: &d.state.uid_index,
+  1506→        };
+  1507→        let mut ops: Vec<crate::features_place::DecoOp> = Vec::new();
+  1508→        let placed = crate::features_place::place_configured(
+  1509→            &pctx,
+  1510→            cfg_name,
+  1511→            &mut rng,
+  1512→            crate::features_placement::BlockPos::new(
+  1513→                feat_x as i32,
+  1514→                feat_y as i32,
+  1515→                feat_z as i32,
+  1516→            ),
+  1517→            &mut ops,
+  1518→            0,
+  1519→        );
+  1520→        let _ = placed;
+  1521→        let mut n = 0usize;
+  1522→        for op in &ops {
+  1523→            if n * 6 + 5 >= slice.len() {
+  1524→                break;
+  1525→            }
+  1526→            slice[n * 6] = op.x as i32;
+  1527→            slice[n * 6 + 1] = op.y as i32;
+  1528→            slice[n * 6 + 2] = op.z as i32;
+  1529→            slice[n * 6 + 3] = op.state as i32;
+  1530→            slice[n * 6 + 4] = op.flags as i32;
+  1531→            slice[n * 6 + 5] = op.aux as i32;
+  1532→            n += 1;
+  1533→        }
+  1534→        n as i32
+  1535→    }));
+  1536→    let n = match run_res {
+  1537→        Ok(n) => n,
+  1538→        Err(p) => {
+  1539→            ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
+  1540→            crate::ffi::log_warn(&format!(
+  1541→                "ore: run_configured PANIC feature={} (fallback to vanilla): {}",
+  1542→                cfg_name,
+  1543→                panic_msg(&p)
+  1544→            ));
+  1545→            return -1;
+  1546→        }
+  1547→    };
+  1548→    let t_run_ns = prof_now() - t_run;
+  1549→    PROF_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+  1550→    let rl = run_loader.get();
+  1551→    PROF_LOADER_NS.fetch_add(rl, std::sync::atomic::Ordering::Relaxed);
+  1552→    PROF_NATIVE_NS.fetch_add(t_run_ns.saturating_sub(rl), std::sync::atomic::Ordering::Relaxed);
+  1553→    if let Ok(mut m) = PROF_FEAT.lock() {
+  1554→        let e = m.entry(format!("ore:{cfg_name}")).or_insert((0, 0));
+  1555→        e.0 += t_run_ns.saturating_sub(rl);
+  1556→        e.1 += 1;
+  1557→    }
+  1558→    ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
+  1559→    n as jint
+  1560→}
+  1561→
+  1562→/// decoOpsDropped(ctx, coords, count) — ops the Java apply loop dropped
+  1563→/// (postproc marks / unparseable states / out-of-range sections): remove
+  1564→/// their pending-overlay entries so the chunk overlay stays exact (a phantom
+  1565→/// entry would serve stale answers for the rest of the chunk — the old
+  1566→/// per-feature overlay discarded them implicitly at feature end).
+  1567→#[no_mangle]
+  1568→pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoOpsDropped(
+  1569→    env: *mut jni_sys::JNIEnv,
+  1570→    _class: jni_sys::jclass,
+  1571→    ctx: jlong,
+  1572→    coords: jintArray,
+  1573→    count: jint,
+  1574→) {
+  1575→    if coords.is_null() || count <= 0 {
+  1576→        return;
+  1577→    }
+  1578→    let tbl = *env;
+  1579→    unsafe {
+  1580→        let len = ((*tbl).v1_1.GetArrayLength)(env, coords as jni_sys::jarray) as usize;
+  1581→        if len < (count as usize) * 3 {
+  1582→            return;
+  1583→        }
+  1584→        let p = ((*tbl).v1_2.GetPrimitiveArrayCritical)(env, coords as jni_sys::jarray, std::ptr::null_mut());
+  1585→        if p.is_null() {
+  1586→            return;
+  1587→        }
+  1588→        let slice = std::slice::from_raw_parts(p as *const i32, len);
+  1589→        let guard = sessions_lock();
+  1590→        if let Some(d) = guard
+  1591→            .as_ref()
+  1592→            .and_then(|m| m.get(&(ctx as i64)))
+  1593→            .and_then(|c| c.deco.as_ref())
+  1594→        {
+  1595→            {
+  1596→                let mut ov = d.chunk_ov.borrow_mut();
+  1597→                let mut cols = d.chunk_ov_cols.borrow_mut();
+  1598→                for k in 0..count as usize {
+  1599→                    let (x, y, z) = (slice[k * 3], slice[k * 3 + 1], slice[k * 3 + 2]);
+  1600→                    ov.remove(&(x, y, z));
+  1601→                    if let Some(v) = cols.get_mut(&(x, z)) {
+  1602→                        v.retain(|&yy| yy != y);
+  1603→                        if v.is_empty() {
+  1604→                            cols.remove(&(x, z));
+  1605→                        }
+  1606→                    }
+  1607→                }
+  1608→            }
+  1609→            // revert the WG heightmap raise the dropped write may have caused
+  1610→            // (the op never lands in the region — vanilla Heightmap.update
+  1611→            // would never have seen it). Treat each dropped pos as a removal:
+  1612→            // rescan down when it sat exactly at top-1. Rare path (drops are
+  1613→            // zero in healthy runs) — correctness over speed.
+  1614→            let st_flags = |name: &str| -> Option<u8> {
+  1615→                let idx = *d.state.state_index.get(name)?;
+  1616→                d.state.state_flags.lock().unwrap().get(idx as usize).copied()
+  1617→            };
+  1618→            let probe = |x: i32, y: i32, z: i32, mask: u8| -> Option<bool> {
+  1619→                if let Some(st) = d.chunk_ov.borrow().get(&(x, y, z)) {
+  1620→                    return st_flags(st).map(|f| f & mask != 0);
+  1621→                }
+  1622→                d.chunk_snap.borrow().flag(x, y, z, mask as u16)
+  1623→            };
+  1624→            let mut hms = d.chunk_hms.borrow_mut();
+  1625→            for k in 0..count as usize {
+  1626→                let (x, y, z) = (slice[k * 3], slice[k * 3 + 1], slice[k * 3 + 2]);
+  1627→                let Some(Some(arc)) = hms.get_mut(&(x >> 4, z >> 4)) else {
+  1628→                    continue;
+  1629→                };
+  1630→                let mut hm = arc.lock().unwrap();
+  1631→                if hm.len() < 512 {
+  1632→                    continue;
+  1633→                }
+  1634→                let min_y = d.chunk_snap.borrow().min_sec_y * 16;
+  1635→                for (off, mask) in [(0usize, 1u8), (256, 2)] {
+  1636→                    let idx = off + ((z & 15) as usize) * 16 + (x & 15) as usize;
+  1637→                    let first = hm[idx];
+  1638→                    if first - 1 != y {
+  1639→                        continue;
+  1640→                    }
+  1641→                    let mut yy = y - 1;
+  1642→                    let mut done = false;
+  1643→                    while yy >= min_y {
+  1644→                        match probe(x, yy, z, mask) {
+  1645→                            Some(true) => {
+  1646→                                hm[idx] = yy + 1;
+  1647→                                done = true;
+  1648→                                break;
+  1649→                            }
+  1650→                            Some(false) => yy -= 1,
+  1651→                            None => break, // unsnapshotted: keep the frozen value
+  1652→                        }
+  1653→                    }
+  1654→                    if !done && yy < min_y {
+  1655→                        hm[idx] = min_y;
+  1656→                    }
+  1657→                }
+  1658→            }
+  1659→        }
+  1660→        ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, coords as jni_sys::jarray, p, jni_sys::JNI_ABORT);
+  1661→    }
+  1662→}
+  1663→
+  1664→/// decoDelegateMark(ctx) — a vanilla delegate feature ran (its writes went
+  1665→/// through the region directly, invisible to BOTH the overlay and the
+  1666→/// snapshot). Clear the chunk overlay (its entries may be stale where the
+  1667→/// delegate overwrote them; the flushed native writes live in the region and
+  1668→/// come back via the reloaded snapshot), bump the snapshot epoch (stale
+  1669→/// sections reload lazily on the next query) AND drop the cached WG
+  1670→/// heightmaps (the region maps moved under them — vanilla updates the WG
+  1671→/// heightmaps on every setBlock, so the next query re-handshakes with the
+  1672→/// post-delegate values; the cont-56 0.555% judge residual).
+  1673→#[no_mangle]
+  1674→pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoDelegateMark(
+  1675→    _env: *mut jni_sys::JNIEnv,
+  1676→    _class: jni_sys::jclass,
+  1677→    ctx: jlong,
+  1678→) {
+  1679→    let guard = sessions_lock();
+  1680→    if let Some(d) = guard
+  1681→        .as_ref()
+  1682→        .and_then(|m| m.get(&(ctx as i64)))
+  1683→        .and_then(|c| c.deco.as_ref())
+  1684→    {
+  1685→        d.chunk_ov.borrow_mut().clear();
+  1686→        d.chunk_ov_cols.borrow_mut().clear();
+  1687→        d.chunk_snap.borrow().bump_epoch();
+  1688→        d.chunk_hms.borrow_mut().clear();
+  1689→    }
+  1690→}
+  1691→
+  1692→/// decoSetFlags(ctx, byte[] flags) — the decoStates handshake tail: one flag
+  1693→/// byte per state string (bit0=isAir, bit1=blocksMotion), computed Java-side
+  1694→/// from the resolved BlockStates. Feeds the WG heightmap update-on-write.
+  1695→///
+  1696→/// Q5 (cont-136): the flags FAN OUT to every ctx with a deco engine, not
+  1697→/// just the addressed one. Pre-Q5 only the ctx that happened to run the
+  1698→/// first chunk deco received the handshake (DecoDriver FLAGS_SENT one-shot)
+  1699→/// — every other pool ctx kept all-zero flags, a latent ctx-dependent
+  1700→/// divergence in the WG heightmap update-on-write (only observable for
+  1701→/// air/blocksMotion writes landing exactly at top-1, which is why the A/B
+  1702→/// judges never caught it). The dedicated deco pool (Q5) — and equally the
+  1703→/// shared-pool kill-switch — requires all deco-capable ctxs to initialize
+  1704→/// identically, so the handshake is world-global now. Ctxs with a different
+  1705→/// states-table length (other worlds, other packs) are skipped; each world's
+  1706→/// own first populate re-sends its own table before any of its deco runs.
+  1707→#[no_mangle]
+  1708→pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoSetFlags(
+  1709→    env: *mut jni_sys::JNIEnv,
+  1710→    _class: jni_sys::jclass,
+  1711→    ctx: jlong,
+  1712→    flags: jni_sys::jbyteArray,
+  1713→) {
+  1714→    let tbl = *env;
+  1715→    let len = ((*tbl).v1_1.GetArrayLength)(env, flags as jni_sys::jarray) as usize;
+  1716→    let guard = sessions_lock();
+  1717→    // addressed-ctx length check first (pre-existing warn keyed on the caller's ctx)
+  1718→    if let Some(d) = guard
+  1719→        .as_ref()
+  1720→        .and_then(|m| m.get(&(ctx as i64)))
+  1721→        .and_then(|c| c.deco.as_ref())
+  1722→    {
+  1723→        if len != d.state.states.len() {
+  1724→            crate::ffi::log_warn(&format!(
+  1725→                "[deco-flags] length mismatch: got {len}, want {} (flags ignored)",
+  1726→                d.state.states.len()
+  1727→            ));
+  1728→            return;
+  1729→        }
+  1730→    }
+  1731→    let Some(map) = guard.as_ref() else {
+  1732→        return;
+  1733→    };
+  1734→    if len == 0 {
+  1735→        return;
+  1736→    }
+  1737→    let p = ((*tbl).v1_1.GetByteArrayElements)(env, flags as jni_sys::jarray, std::ptr::null_mut());
+  1738→    if p.is_null() {
+  1739→        return;
+  1740→    }
+  1741→    let bytes = std::slice::from_raw_parts(p as *const u8, len);
+  1742→    for c in map.values() {
+  1743→        let Some(d) = c.deco.as_ref() else {
+  1744→            continue;
+  1745→        };
+  1746→        if d.state.states.len() != len {
+  1747→            continue;
+  1748→        }
+  1749→        d.state.state_flags.lock().unwrap().copy_from_slice(bytes);
+  1750→    }
+  1751→    ((*tbl).v1_1.ReleaseByteArrayElements)(
+  1752→        env,
+  1753→        flags as jni_sys::jarray,
+  1754→        p as *mut i8,
+  1755→        0,
+  1756→    );
+  1757→}
+  1758→

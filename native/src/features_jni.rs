@@ -1384,7 +1384,8 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunBat
     if mlen < 3 {
         return -1;
     }
-    let write_meta = |meta_ptr: *mut i32, completed: usize, kind: i32, written: usize| {
+    let write_meta = |meta_ptr: *mut i32, completed: usize, kind: i32, written: usize| unsafe {
+        // (closure bodies do not inherit the unsafe fn context — explicit block)
         *meta_ptr.add(0) = completed as i32;
         *meta_ptr.add(1) = kind;
         *meta_ptr.add(2) = written as i32;

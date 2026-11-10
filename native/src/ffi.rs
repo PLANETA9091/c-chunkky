@@ -2198,20 +2198,17 @@ mod s1_batch_parity {
         }
     }
 
-    fn batch_level<'a>(mock: &'a Mock, scope: &'a ChunkScope) -> crate::features_snap::ChunkLevel<'a> {
-        let loader = |_cx: i32, _cz: i32, _sy: i32| -> Option<crate::features_snap::SnapSection> { None };
-        let hml = |_cx: i32, _cz: i32| -> Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>> { None };
-        let stf = |_n: &str| -> Option<u8> { None };
-        crate::features_snap::ChunkLevel::new(
-            mock,
-            &scope.ov,
-            &scope.ov_cols,
-            &scope.snap,
-            &loader,
-            &hml,
-            &[],
-            0,
-            &stf,
+    /// stone-mock level closures: no snapshot sections, no heightmap handshake,
+    /// no state flags (identical for both protocols)
+    fn mock_closures() -> (
+        impl Fn(i32, i32, i32) -> Option<crate::features_snap::SnapSection>,
+        impl Fn(i32, i32) -> Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>>,
+        impl Fn(&str) -> Option<u8>,
+    ) {
+        (
+            |_cx: i32, _cz: i32, _sy: i32| -> Option<crate::features_snap::SnapSection> { None },
+            |_cx: i32, _cz: i32| -> Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>> { None },
+            |_n: &str| -> Option<u8> { None },
         )
     }
 
@@ -2241,13 +2238,18 @@ mod s1_batch_parity {
     ) -> (Vec<i32>, usize) {
         let mut recorded = Vec::new();
         let mut max_n = 0usize;
+        let (loader, hml, stf) = mock_closures();
         for &(step, gid) in runs {
             let name = &plan.steps[step][gid];
             if !crate::features_place::placed_fully_supported(&state.reg, name, 0) {
                 scope.delegate_mark();
                 continue;
             }
-            let level = batch_level(mock, scope);
+            // fresh ChunkLevel per feature (the old decoRunFeature shape)
+            let level = crate::features_snap::ChunkLevel::new(
+                mock, &scope.ov, &scope.ov_cols, &scope.snap,
+                &loader, &hml, &[], 0, &stf,
+            );
             let n = crate::features_master::run_feature_master(
                 state, &level, seed, None, origin, name, step, gid, out,
             );
@@ -2271,7 +2273,14 @@ mod s1_batch_parity {
     ) -> Vec<i32> {
         let mut recorded = Vec::new();
         let mut carry: Vec<crate::features_place::DecoOp> = Vec::new();
-        let level = batch_level(mock, scope);
+        // ONE ChunkLevel for the whole batched sequence (the JNI layer creates
+        // one per decoRunBatch call; the tag memo is not observable on the
+        // stone mock — see the module comment)
+        let (loader, hml, stf) = mock_closures();
+        let level = crate::features_snap::ChunkLevel::new(
+            mock, &scope.ov, &scope.ov_cols, &scope.snap,
+            &loader, &hml, &[], 0, &stf,
+        );
         let progress = std::cell::Cell::new((0usize, 0usize));
         let clock = || 0u64;
         let mut i = 0usize;
