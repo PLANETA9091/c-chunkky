@@ -1503,7 +1503,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunBat
         Ok(r) => r,
         Err(p) => {
             let (completed, written) = progress.get();
-            write_meta(mt_ptr, completed, 4, written);
+            write_meta(mt_ptr as *mut i32, completed, 4, written);
             ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, meta as jni_sys::jarray, mt_ptr, 0);
             ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, per_run as jni_sys::jarray, pr_ptr, 0);
             ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
@@ -1516,7 +1516,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunBat
     };
     // per-run op counts were written into per_slice by the core as each run
     // completed (panic-consistent with meta[0]); meta carries the batch result
-    write_meta(mt_ptr, res.completed, res.boundary as i32, res.ops_written);
+    write_meta(mt_ptr as *mut i32, res.completed, res.boundary as i32, res.ops_written);
     ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, meta as jni_sys::jarray, mt_ptr, 0);
     ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, per_run as jni_sys::jarray, pr_ptr, 0);
     ((*tbl).v1_2.ReleasePrimitiveArrayCritical)(env, out as jni_sys::jarray, ptr, 0);
