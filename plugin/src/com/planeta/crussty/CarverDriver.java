@@ -67,6 +67,7 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
     private static final Field F_PALETTE;
     private static final Method M_GET_AND_SET;
     private static final Method M_RECOUNT;
+    private static final Method M_SEC_SET;
 
     static {
         try {
@@ -80,6 +81,14 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
             Class<?> cSec = Class.forName("net.minecraft.world.level.chunk.LevelChunkSection");
             M_RECOUNT = cSec.getDeclaredMethod("recalcBlockCounts");
             M_RECOUNT.setAccessible(true);
+            // cont-138 H10: vanilla chunk.setBlockState path — section-level
+            // 5-arg setBlockState(x,y,z,state,updateOnWrite=false) updates the
+            // section counters incrementally (vanilla applyCarvingMask
+            // semantics); replaces getAndSet+recalcBlockCounts.
+            M_SEC_SET = cSec.getDeclaredMethod("setBlockState",
+                    int.class, int.class, int.class,
+                    Class.forName("net.minecraft.world.level.block.state.BlockState"), boolean.class);
+            M_SEC_SET.setAccessible(true);
         } catch (Throwable t) {
             throw new ExceptionInInitializerError(t);
         }
@@ -92,12 +101,15 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
             return;
         }
         long tCarver0 = System.nanoTime();
+        long tp0 = System.nanoTime();
         java.util.concurrent.locks.ReentrantLock[] lockBox =
                 new java.util.concurrent.locks.ReentrantLock[1];
         long ctx = CrusstyChunkGenerator.decoAcquire(lockBox);
+        CarverStats.ACQ.addAndGet(System.nanoTime() - tp0);
         if (ctx == 0) {
             return;
         }
+        long tp1 = System.nanoTime();
         try {
             Object handle = limited.getClass().getMethod("getHandle").invoke(limited);
             // WorldGenRegion IS the region handle (it has no getHandle(); the
@@ -177,15 +189,22 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
             System.arraycopy(bits, 0, meta, 0, 24);
             System.arraycopy(rawOff, 0, meta, 24, 24);
             System.arraycopy(palOff, 0, meta, 48, 24);
+            CarverStats.PACK.addAndGet(System.nanoTime() - tp1);
+            CarverStats.N.incrementAndGet();
+            long tp2 = System.nanoTime();
 
             int n = ChunkGenNative.carve(ctx, cx, cz, SEED, meta, raw, pal);
             if (n == Integer.MIN_VALUE) {
                 return; // native declined — vanilla semantics lost for this chunk
             }
+            CarverStats.CARVE.addAndGet(System.nanoTime() - tp2);
+            long tp3 = System.nanoTime();
             long[] ops = new long[n];
             int got = n > 0 ? ChunkGenNative.carveOps(ctx, ops) : 0;
             long[] marks = new long[1024];
             int nm = ChunkGenNative.carveMarks(ctx, marks);
+            CarverStats.OPS.addAndGet(System.nanoTime() - tp3);
+            long tp4 = System.nanoTime();
             // ---- apply changed cells ----
             // ids span the full palette (base materials + the extended
             // surface states the topMaterial fix can write, e.g. dirt/grass
@@ -202,8 +221,14 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
             // writes of a section land first; one recount per touched
             // section then rebuilds the counts from the storage — identical
             // final state, O(sections) recounts instead of O(cells).
+            // cont-138 H10: vanilla applyCarvingMask writes through
+            // chunk.setBlockState — the SECTION method updates the counters
+            // incrementally, so the bulk getAndSet + recalcBlockCounts pair
+            // (cont-95) is replaced by the exact vanilla write path. The
+            // recount loop walked up to 24 sections x 4096 storage cells per
+            // chunk and dominated the carver wall (apply=5.50 of 7.3ms/ch in
+            // the carver-phases honest split; carve native = 1.55).
             Object[] statesById = STATES_BY_ID;
-            boolean[] touched = new boolean[sections];
             for (int i = 0; i < got; i++) {
                 long op = ops[i];
                 int idx = (int) (op >>> 16);
@@ -219,18 +244,12 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
                     continue;
                 }
                 LevelChunkSection sec = chunk.getSection(s);
-                PalettedContainer<?> pc = sec.getStates();
-                M_GET_AND_SET.invoke(pc, sx, sy, sz, state);
-                touched[s] = true;
-            }
-            for (int s = 0; s < sections; s++) {
-                if (touched[s]) {
-                    M_RECOUNT.invoke(chunk.getSection(s));
-                }
+                M_SEC_SET.invoke(sec, sx, sy, sz, state);
             }
             if (nm > 0) {
                 markPositions(chunk, marks, nm);
             }
+            CarverStats.APPLY.addAndGet(System.nanoTime() - tp4);
         } catch (Throwable t) {
             LOG.warning("carver driver failed: " + t);
         } finally {

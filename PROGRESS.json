@@ -99,9 +99,9 @@
     },
     {
       "id": "H10",
-      "text": "Carver native compute: with the Q5 dedicated deco pool, CarverDriver waits should be ~0 — honest carver=5.88-6.30 floor is NATIVE carve compute (carver263.rs 3D noise sampling per cell, same NormalNoise machinery as fill density). Plane/coarse-cell caching (the H6 agent's infra) applied to carver samplers is the expected cut; target carver 5.9 -> ~2ms/ch",
-      "test": "SPROF-style profile of native carve + reuse H6 cache infra + carve A/B honest window + carver bit-parity (carveMarks ops)",
-      "status": "identified (owner: main agent, after H6 lands)"
+      "text": "Carver wall was NOT native compute: carver-phases honest split showed acq=0.00 pack=0.21 carve=1.55 ops=0.43 apply=5.50 (ms/ch) — the JAVA op-apply (reflective PalettedContainer.getAndSet + per-section recalcBlockCounts walking 4096 cells x up to 24 sections). Vanilla 26.3 applyCarvingMask writes through chunk.setBlockState (section 5-arg, counters incremental) with NO recount — replaced the bulk getAndSet+recount pair with the exact vanilla write path (M_SEC_SET section 5-arg, updateOnWrite=false)",
+      "test": "done (paired A/B /tmp/h10_a vs h10_b, jars ad29800b/0cf604a0)",
+      "status": "CONFIRMED: carver wall 9.92 -> 5.05 honest (2x-contaminated box, paired runs); apply phases 5.50 -> ~0.00; native carve=1.69 ops=1.46 pack=0.10 acq=0.01. Biggest single cut of the day."
     }
   ],
   "log": [

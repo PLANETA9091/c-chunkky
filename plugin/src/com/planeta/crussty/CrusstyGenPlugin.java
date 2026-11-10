@@ -108,6 +108,7 @@ public final class CrusstyGenPlugin extends JavaPlugin {
             if (args.length >= 1 && args[0].equalsIgnoreCase("reset")) {
                 GenStats.reset();
                 DecoStats.reset();
+                com.planeta.crussty.CarverStats.reset();
                 try {
                     ChunkGenNative.fill263ProfReset();
                 } catch (Throwable ignored) {
@@ -147,6 +148,7 @@ public final class CrusstyGenPlugin extends JavaPlugin {
             // three diagnostic lines into a single message or rcon consumers
             // lose [cpu] and jni_prof (observed 2026-10-15, prof sessions).
             StringBuilder sb = new StringBuilder(cpuLine())
+                    .append(" | ").append(com.planeta.crussty.CarverStats.snapshot())
                     .append(" | [CrusstyGen] native noise stage: ").append(GenStats.snapshot())
                     .append(" | [CrusstyGen] honest window: ").append(GenStats.windowSnapshot());
             try {
