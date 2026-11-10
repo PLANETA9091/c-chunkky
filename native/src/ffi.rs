@@ -1897,3 +1897,182 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_carveMarks
     ((*tbl).v1_1.ReleaseLongArrayElements)(env, marks, ptr, 0);
     count as i32
 }
+
+// ---------------------------------------------------------------------------
+// Q5 (cont-136) — deco ctx identity parity. The dedicated deco ctx pool
+// spawns FRESH native ctxs at setup (CtxPool.decoPool) and the deco/carver
+// populators run on them where they previously borrowed fill-pool ctxs. Ctx
+// identity must not affect any generation output. These tests pin the parity
+// contract at the Rust level: two ctxs built from the same inputs (the exact
+// build path newCtxAssets uses for the embedded-vanilla ctx) expose
+// byte-identical deco tables AND produce identical op streams for the whole
+// feature plan.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod q5_deco_ctx_parity {
+    use super::*;
+
+    /// Stone-world level mock (oredbg.rs shape): every query deterministic
+    /// and ctx-independent, so any op divergence between two ctxs is a ctx
+    /// parity bug, not a level answer difference.
+    struct Mock;
+    impl crate::features_deco::DecoLevelExt for Mock {
+        fn state_is(&self, _: crate::features_placement::BlockPos, _: &[String]) -> bool {
+            false
+        }
+        fn fluid_is(&self, _: crate::features_placement::BlockPos, _: &[String]) -> bool {
+            false
+        }
+        fn tag_is(&self, _: crate::features_placement::BlockPos, _: &str) -> bool {
+            true
+        }
+    }
+    impl crate::features_deco::DecoLevel for Mock {
+        fn min_y(&self) -> i32 {
+            -64
+        }
+        fn max_y(&self) -> i32 {
+            320
+        }
+        fn height(&self, _: crate::features_deco::HeightmapTy, _: i32, _: i32) -> i32 {
+            200
+        }
+        fn state(&self, _: crate::features_placement::BlockPos) -> u32 {
+            1 // stone
+        }
+        fn is_air(&self, _: crate::features_placement::BlockPos) -> bool {
+            false
+        }
+        fn fluid(&self, _: crate::features_placement::BlockPos) -> u32 {
+            0
+        }
+        fn biome_has_feature(&self, _: crate::features_placement::BlockPos, _: u32) -> bool {
+            true
+        }
+        fn can_survive(&self, _: &str, _: crate::features_placement::BlockPos) -> bool {
+            true
+        }
+        fn is_replaceable(&self, _: crate::features_placement::BlockPos) -> bool {
+            false
+        }
+        fn is_solid(&self, _: crate::features_placement::BlockPos) -> bool {
+            true
+        }
+        fn has_sturdy_face(&self, _: crate::features_placement::BlockPos, _: u8) -> bool {
+            true
+        }
+        fn is_outside_build_height(&self, y: i32) -> bool {
+            y < -64 || y >= 320
+        }
+    }
+
+    fn two_fresh_ctxs() -> (
+        crate::features_master::DecoCtx,
+        crate::features_master::DecoCtx,
+    ) {
+        let assets = embedded263_assets();
+        let src = crate::biomes::BiomeSourceData::from_params263(include_str!(
+            "params263_overworld.json"
+        ))
+        .expect("263 biome source");
+        let a = crate::features_master::build_deco_ctx_src(&assets, &src)
+            .expect("deco ctx a");
+        let b = crate::features_master::build_deco_ctx_src(&assets, &src)
+            .expect("deco ctx b");
+        (a, b)
+    }
+
+    /// A FRESH deco ctx must initialize its deco tables identically to the
+    /// pool ctxs the deco path borrows (same assets -> deterministic parse):
+    /// plan, uid space, state table and per-biome feature lists byte-equal.
+    #[test]
+    fn fresh_ctx_tables_identical() {
+        let (a, b) = two_fresh_ctxs();
+        assert_eq!(a.plan.steps, b.plan.steps, "featuresPerStep plan");
+        assert_eq!(a.plan.index_of, b.plan.index_of, "plan index_of");
+        assert_eq!(a.uid_names, b.uid_names, "uid space (BiomeFilter ids)");
+        assert_eq!(a.state.states, b.state.states, "decoStates table");
+        assert_eq!(a.state.uid_index, b.state.uid_index, "uid index");
+        assert_eq!(a.state.state_index, b.state.state_index, "state index");
+        assert_eq!(a.biome_features, b.biome_features, "biome feature lists");
+        assert_eq!(
+            *a.state.state_flags.lock().unwrap(),
+            *b.state.state_flags.lock().unwrap(),
+            "state flags (pre-handshake zeros)"
+        );
+        assert!(!a.state.states.is_empty(), "embedded 26.3 states table");
+        assert!(a.plan.steps.len() >= 11, "vanilla overworld plan steps");
+    }
+
+    /// The full op stream of every fully-supported placed feature must be
+    /// byte-identical across two independently built ctxs (ctx identity must
+    /// not feed RNG, plans or placement). Delegates (-2 protocol) are the
+    /// Java lane and skipped. Also pins intra-ctx determinism: the same
+    /// feature run twice on the SAME ctx reproduces its ops (RNG is seeded
+    /// per run; no cross-run ctx state leaks into the output).
+    #[test]
+    fn fresh_ctx_ops_identical_across_full_plan() {
+        let (a, b) = two_fresh_ctxs();
+        let mut out_a = vec![0i32; 6 * 65536];
+        let mut out_b = vec![0i32; 6 * 65536];
+        let origin = crate::features_placement::BlockPos::new(48, -64, 112);
+        let deco_seed = crate::features_master::decoration_seed(18014, 48, 112);
+        let mut ran = 0usize;
+        let mut skipped = 0usize;
+        for (step, names) in a.plan.steps.iter().enumerate() {
+            for (gid, name) in names.iter().enumerate() {
+                if !crate::features_place::placed_fully_supported(&a.state.reg, name, 0) {
+                    skipped += 1;
+                    continue;
+                }
+                let ra = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let n = crate::features_master::run_feature_master(
+                        &a.state, &Mock, deco_seed, None, origin, name, step, gid,
+                        &mut out_a,
+                    );
+                    out_a[..n * 6].to_vec()
+                }));
+                let rb = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let n = crate::features_master::run_feature_master(
+                        &b.state, &Mock, deco_seed, None, origin, name, step, gid,
+                        &mut out_b,
+                    );
+                    out_b[..n * 6].to_vec()
+                }));
+                match (ra, rb) {
+                    (Ok(ops_a), Ok(ops_b)) => {
+                        assert_eq!(ops_a, ops_b, "op stream divergence: {name}");
+                        ran += 1;
+                    }
+                    // a feature panicking on the stone Mock is a feature-level
+                    // gap (not a ctx parity issue) — require symmetry
+                    (Err(_), Err(_)) => skipped += 1,
+                    (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
+                        panic!("one-sided failure for {name} (step {step} gid {gid})");
+                    }
+                }
+            }
+        }
+        // intra-ctx determinism on the first supported feature
+        'pick: for (step, names) in a.plan.steps.iter().enumerate() {
+            for (gid, name) in names.iter().enumerate() {
+                if !crate::features_place::placed_fully_supported(&a.state.reg, name, 0) {
+                    continue;
+                }
+                let n1 = crate::features_master::run_feature_master(
+                    &a.state, &Mock, deco_seed, None, origin, name, step, gid, &mut out_a,
+                );
+                let s1 = out_a[..n1 * 6].to_vec();
+                let n2 = crate::features_master::run_feature_master(
+                    &a.state, &Mock, deco_seed, None, origin, name, step, gid, &mut out_a,
+                );
+                assert_eq!(s1, &out_a[..n2 * 6], "same-ctx rerun divergence: {name}");
+                break 'pick;
+            }
+        }
+        assert!(
+            ran >= 20,
+            "expected a meaningful fully-supported plan slice, ran={ran} skipped={skipped}"
+        );
+    }
+}
