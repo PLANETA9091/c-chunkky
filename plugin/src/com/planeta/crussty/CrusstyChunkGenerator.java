@@ -2616,10 +2616,15 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             // at setup from the same inputs, verified against ctx0 below) so
             // populate acquisitions stop waiting on fill-held ctxs (fills hold
             // pool ctxs 5-12ms). CRUS_DECO_SHARED_POOL=1 restores the shared
-            // fill pool (pre-Q5 behavior).
-            DECO_POOL = DECO_SHARED_POOL
-                    ? pool
-                    : dedicatedDecoPool(pool, states, plan);
+            // fill pool (pre-Q5 behavior). Both modes log a run.out marker
+            // for A/B lane attribution.
+            if (DECO_SHARED_POOL) {
+                Logger.getLogger("CrusstyGen").warning(
+                        "deco ctx pool: shared fill pool (CRUS_DECO_SHARED_POOL=1, pre-Q5)");
+                DECO_POOL = pool;
+            } else {
+                DECO_POOL = dedicatedDecoPool(pool, states, plan);
+            }
             Class<?> drv = Class.forName("com.planeta.crussty.DecoDriver");
             drv.getMethod("setup", org.bukkit.World.class, String[].class,
                             String[][].class, java.util.Map.class, java.util.Set.class,
@@ -2714,9 +2719,13 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             // pool by default; CRUS_DECO_SHARED_POOL=1 shares the fill pool
             // (pre-Q5 behavior — note the ore leg was the measured worst
             // case of the shared-pool ctx wait, cont-102 carver=9.77ms/ch).
-            DECO_POOL = DECO_SHARED_POOL
-                    ? pool
-                    : dedicatedDecoPool(pool, states, plan);
+            if (DECO_SHARED_POOL) {
+                Logger.getLogger("CrusstyGen").warning(
+                        "deco ctx pool: shared fill pool (CRUS_DECO_SHARED_POOL=1, pre-Q5)");
+                DECO_POOL = pool;
+            } else {
+                DECO_POOL = dedicatedDecoPool(pool, states, plan);
+            }
             Class.forName("com.planeta.crussty.OreHook")
                     .getMethod("setup", org.bukkit.World.class, String[].class, String[][].class)
                     .invoke(null, w, states, plan);
