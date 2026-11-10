@@ -90,6 +90,10 @@ echo "warmup done: chunks=$s"
 $RCON "forceload remove all" >/dev/null 2>&1; sleep 2
 for w in $(seq 0 $((NW-1))); do
   rx=$((RX1 + w*100)); rz=$RZ1
+  # cont-138: arm the region-bounded honest window for THIS rect (per-window
+  # counters reset + fill263ProfReset) — the snapshot's window line then
+  # splits the wall into per-stage budgets instead of one opaque number
+  $RCON "crusgenstats window $rx $rz 11" >/dev/null 2>&1
   bash "$ROOT/harness/e2e263.sh" "$rx" "$rz" 11 2>&1 | grep -E "window:|chunks="
 done
 

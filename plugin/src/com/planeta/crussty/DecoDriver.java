@@ -576,7 +576,10 @@ public final class DecoDriver extends BlockPopulator {
             }
             DecoStats.STRUCT_LOOP_NS.addAndGet(System.nanoTime() - tl0);
         } catch (Throwable t) {
-            LOG.warning("deco structures failed (chunk " + cx + "," + cz + "): " + t);
+            // cont-138 diagnostics: full cause chain — the margin-chunk
+            // ReportedException walls need their primary exception visible
+            LOG.log(java.util.logging.Level.WARNING,
+                    "deco structures failed (chunk " + cx + "," + cz + ")", t);
         }
         // FUNC residual: full runStructures wall — the inner timers (gate,
         // setup, loop incl. starts/place) skip chunks that exit early or throw

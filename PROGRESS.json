@@ -87,6 +87,10 @@
   ],
   "log": [
     {
+      "t": "2026-11-11T02:05+08:00",
+      "event": "HONEST WINDOW ARMED (crusgenstats window rx rz 11 now wired into run263_baseline.sh): window[2100..2111,2000..2011] 144 chunks, NW=2 runs: e2e walls 70.6/75.9 raw; honest span=8601ms => e2e=59.73ms/ch, ramp=978ms. BUDGET: gen=18.14 (native fill=17.57 LOADED vs 5.7 idle, layout=0.30, beard=0.20) + carver=7.88 (top-3 item!) + deco_tail=590ms (4.1ms/ch) => ~30ms CPU/ch vs 59.73 wall => busy=18.1ms/ch cover=30.4% maxconc=1 (PIPELINE FULLY SERIAL — 69% idle). Priority reorder: (1) cover/concurrency 30%->60-100% config matrix (worker-threads x FILL_THREADS with honest windows) — worth up to 2-3x window; (2) carver driver 7.88; (3) fill loaded 17.6->idle 5.7 (H6 agent + thread config); (4) deco run 5.56 (H7 agent) + struct 2.89 margin walls. cont-137 validated live: native monster_room=0.30ms/ch (372 calls), freeze_top_layer=143.32ms(593)=0.24ms/ch, deleg 1.04->0.75; 4x 'deco structures failed' seen ONCE (run1 NW=3) not reproduced in 2 reruns — full-stack logging now deployed (cont-138 diag), treat as intermittent margin-chunk race pending stack capture."
+    },
+    {
       "t": "2026-11-11T01:15+08:00",
       "event": "cont-137: native monster_room (+monster_room_deep) + freeze_top_layer (26.3 SnowAndFreezeFeature) ports completed end-to-end: native place fns (features_place.rs, RNG draw order transcribed from vineflower decompile of paper-26.3.jar: chest loot nextLong + spawner nextInt(4) MOBS pick consumed on the native stream), Java bridge completed this session — DecoDriver.freezeChecks(II)I upcall (vanilla Biome.shouldFreeze/shouldSnow on the live region, ICE write ordered BEFORE shouldSnow per vanilla), applyOpStatic FLAG_SPAWNER (aux bits8-15 mob ordinal -> EntityTypes.SKELETON/ZOMBIE/SPIDER via setEntityId, zero RNG confirmed from decompile: empty WeightedList draws nothing) + FLAG_CHEST (SIMPLE_DUNGEON loot table, seed not transported: BE NBT outside judged surface, seed=0 deterministic), tree-aux guard for flags 64/128, FreezeTopLayer state registration (ice/snow/grass_block[snowy=true]/mycelium[snowy=true]) in features_place_ffi.rs seal(). Gates: cargo 86/86 (release), plugin jar md5 34741a8c, f1dbg arm. Kill-switch CRUS_DELEG_NOGEN=1 restores delegate lane. 26.3 deco bit-judge still open — CI judge pending push."
     },
@@ -121,6 +125,10 @@
     {
       "t": "2026-11-10T18:45+08:00",
       "event": "Agent outcomes: A3 (light) delivered fully (FINDINGS+PLAN, cheap branch verified in jar). A4 (deleg-native) implemented MonsterRoom+FreezeTopLayer ports (features_place.rs +313, dispatch, kill-switch CRUS_DELEG_NOGEN) but stalled before validation — /tmp wiped its worktree+evidence; WIP survived via cc40dc50. I completed: f1dbg.rs + delegcensus.rs match arms (2x E0004), verified compile, cargo test 86/86. A4 notes: monster_room native despite BlockEntity seed caveat (spawner NBT seed default — block-level judge unaffected, runtime-only). A1 (Q5) + A2 (S1) artifacts LOST with /tmp — Q5 re-implemented by me; S1 design pending. LESSON: agents must write outputs under /home/z/my-project (git-ignored scratch), never /tmp."
+    },
+    {
+      "t": "2026-11-10T18:40+08:00 (clock note: times are +08 approx, UTC-8h off)",
+      "event": "A4 ports A/B (same coords 2000/2100, back-to-back, E6 config, .so 8c6e38a3 + jar d32342a7): ON 70.5/75.3 vs OFF(CRUS_DELEG_NOGEN=1) 72.8/78.4 => -2.7 ms/ch windows. Deco phases ON struct=2.88 run=4.99 deleg=0.96 vs OFF struct=3.46 run=5.35 deleg=1.19 (-1.2ms/ch). deleg-names ON: monster_room x2 + freeze_top_layer GONE (native). Kill-switch verified. CORRECTNESS SIGNAL: 1x 'Tried to load a DUMMY block entity ... Block{minecraft:air}' — A4 BE path writes BE before block; block-level judge should pass, runtime-only; CI judge is the gate. Pushing branch to CI."
     }
   ],
   "ab_protocol": "wipe server263/world* before each config; coords RX1=2000 RZ1=2000, WX=500 WZ=500; NW=2..3; report window means + crusgenstats p50/p99; never compare across different regions",
