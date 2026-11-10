@@ -145,6 +145,7 @@ fn main() {
 
     let mut buf = vec![0u16; OUT_LEN];
 
+    let h6diag = crussty_chunkgen::density::h6_diag_init();
     let sprof = std::env::var("CRUS_SPROF").is_ok();
     if std::env::var("CRUS_DPROF").as_deref() == Ok("1") {
         crussty_chunkgen::density::PROF_ON
@@ -217,6 +218,27 @@ fn main() {
         *samples.last().unwrap(),
         sink as f64 * 0.0
     );
+    // cont-H6: df263 per-kind breakdown under CRUS_SPROF (separate pass so
+    // the timing loop above stays prof-free).
+    if sprof {
+        use crussty_chunkgen::df263 as d263;
+        d263::prof263_reset();
+        d263::PROF_ON_263.store(true, std::sync::atomic::Ordering::Relaxed);
+        for i in 0..8 {
+            let ccx = cx + (i as i32 % 17) - 8;
+            fill(id, ccx, cz, buf.as_mut_slice().try_into().unwrap());
+        }
+        println!("prof263: {}", d263::prof263_snapshot());
+        d263::PROF_ON_263.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    if h6diag {
+        crussty_chunkgen::density::h6_diag_reset();
+        for i in 0..8 {
+            let ccx = cx + (i as i32 % 17) - 8;
+            fill(id, ccx, cz, buf.as_mut_slice().try_into().unwrap());
+        }
+        println!("{}", crussty_chunkgen::density::h6_diag_snapshot());
+    }
     if std::env::var("CRUS_DPROF").as_deref() == Ok("1") {
         use crussty_chunkgen::density as d;
         let g = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed);

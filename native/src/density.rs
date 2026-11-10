@@ -1913,6 +1913,75 @@ pub static PROF_NOISE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 pub static PROF_BLEND_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PROF_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+// ---- H6 diag (CRUS_H6_DIAG=1): where does the slice noise cost go? -------
+// Per-noise-name (ns, lane-points, calls) + spline-blind-spot counters.
+// Diag-only (Mutex map); zero cost when the env is unset.
+pub static H6_DIAG_ON: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// scalar spline point-value evals issued from the BATCH Spline arm (mem=None).
+pub static H6_SPLINE_PT_EVALS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static H6_SPLINE_PT_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+/// batch Cache2d/FlatCache column-cache activity (slice slot0 walk).
+pub static H6_COL2D_HIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static H6_COL2D_MISS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// blended kernel (ns, lane-points, calls).
+pub static H6_BLEND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static H6_BLEND_PTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static H6_BLEND_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub fn h6_diag_init() -> bool {
+    let on = std::env::var("CRUS_H6_DIAG").ok().as_deref() == Some("1");
+    H6_DIAG_ON.store(on, std::sync::atomic::Ordering::Relaxed);
+    on
+}
+type H6NameMap = std::sync::Mutex<std::collections::BTreeMap<String, (u64, u64, u64)>>;
+static H6_NOISE_MAP: std::sync::OnceLock<H6NameMap> = std::sync::OnceLock::new();
+fn h6_noise_map() -> &'static H6NameMap {
+    H6_NOISE_MAP.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+#[inline]
+fn h6_noise_record(name: &str, ns: u64, pts: u64) {
+    if H6_DIAG_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut m = h6_noise_map().lock().unwrap();
+        let e = m.entry(name.to_string()).or_insert((0, 0, 0));
+        e.0 += ns;
+        e.1 += pts;
+        e.2 += 1;
+    }
+}
+/// (ns, pts, calls) per noise name, sorted by ns desc.
+pub fn h6_diag_snapshot() -> String {
+    let m = h6_noise_map().lock().unwrap();
+    let mut v: Vec<(&String, &(u64, u64, u64))> = m.iter().collect();
+    v.sort_by_key(|(_, w)| std::cmp::Reverse(w.0));
+    let mut s = format!(
+        "h6[spline_pt={}evals {:.2}ms col2d hit={} miss={} blend {:.2}ms pts={} calls={}]",
+        H6_SPLINE_PT_EVALS.load(std::sync::atomic::Ordering::Relaxed),
+        H6_SPLINE_PT_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+        H6_COL2D_HIT.load(std::sync::atomic::Ordering::Relaxed),
+        H6_COL2D_MISS.load(std::sync::atomic::Ordering::Relaxed),
+        H6_BLEND.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+        H6_BLEND_PTS.load(std::sync::atomic::Ordering::Relaxed),
+        H6_BLEND_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+    );
+    for (name, (ns, pts, calls)) in v {
+        let (ns, pts, calls) = (*ns, *pts, *calls);
+        s.push_str(&format!(" | {name} {:.3}ms pts={pts} c={calls}", ns as f64 / 1e6));
+    }
+    s
+}
+pub fn h6_diag_reset() {
+    H6_SPLINE_PT_EVALS.store(0, std::sync::atomic::Ordering::Relaxed);
+    H6_SPLINE_PT_NS.store(0, std::sync::atomic::Ordering::Relaxed);
+    H6_COL2D_HIT.store(0, std::sync::atomic::Ordering::Relaxed);
+    H6_COL2D_MISS.store(0, std::sync::atomic::Ordering::Relaxed);
+    H6_BLEND.store(0, std::sync::atomic::Ordering::Relaxed);
+    H6_BLEND_PTS.store(0, std::sync::atomic::Ordering::Relaxed);
+    H6_BLEND_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+    h6_noise_map().lock().unwrap().clear();
+}
+
 #[inline]
 fn noise_batch_n<const N: usize>(
     n: &crate::noise::NormalNoise,
@@ -1945,6 +2014,27 @@ fn noise_batch_n<const N: usize>(
         PROF_NOISE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     out
+}
+
+/// H6 diag: name-keyed wrapper — ns/pts for one noise kernel call.
+#[inline]
+fn h6_named_noise<const N: usize>(
+    name: &str,
+    n: &crate::noise::NormalNoise,
+    x: &[f64; N],
+    y: &[f64; N],
+    z: &[f64; N],
+) -> [f64; N] {
+    let t0 = if H6_DIAG_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
+    let v = noise_batch_n(n, x, y, z);
+    if let Some(t0) = t0 {
+        h6_noise_record(name, t0.elapsed().as_nanos() as u64, N as u64);
+    }
+    v
 }
 
 /// cont-39 A/B: the slice N==8 lane dispatches to the column-memo path
@@ -2106,7 +2196,7 @@ impl Env {
                     y[l] = pts[l].y as f64 * y_scale;
                     z[l] = pts[l].z as f64 * xz_scale;
                 }
-                let v = noise_batch_n(n, &x, &y, &z);
+                let v = h6_named_noise(&c.noise_ids[*noise_id as usize], n, &x, &y, &z);
                 let mut out = [0f64; N];
                 out.copy_from_slice(&v);
                 out
@@ -2124,7 +2214,7 @@ impl Env {
                     y[l] = pts[l].y as f64 * y_scale + sya[l];
                     z[l] = pts[l].z as f64 * xz_scale + sza[l];
                 }
-                let v = noise_batch_n(n, &x, &y, &z);
+                let v = h6_named_noise(&c.noise_ids[*noise_id as usize], n, &x, &y, &z);
                 let mut out = [0f64; N];
                 out.copy_from_slice(&v);
                 out
@@ -2138,7 +2228,7 @@ impl Env {
                     z[l] = pts[l].z as f64 * 0.25;
                 }
                 let y = [0.0f64; N];
-                let vb = noise_batch_n(n, &x, &y, &z);
+                let vb = h6_named_noise("__shift_a", n, &x, &y, &z);
                 let mut out = [0f64; N];
                 for l in 0..N {
                     out[l] = vb[l] * 4.0;
@@ -2157,7 +2247,7 @@ impl Env {
                     y[l] = pts[l].x as f64 * 0.25;
                 }
                 let z = [0.0f64; N];
-                let vb = noise_batch_n(n, &x, &y, &z);
+                let vb = h6_named_noise("__shift_b", n, &x, &y, &z);
                 let mut out = [0f64; N];
                 for l in 0..N {
                     out[l] = vb[l] * 4.0;
@@ -2173,7 +2263,20 @@ impl Env {
                     by[l] = pts[l].y;
                     bz[l] = pts[l].z;
                 }
-                let v = blended_batch_n(&c.blended, *instance as usize, &bx, &by, &bz);
+                let v = {
+                    let t0 = if H6_DIAG_ON.load(std::sync::atomic::Ordering::Relaxed) {
+                        Some(std::time::Instant::now())
+                    } else {
+                        None
+                    };
+                    let r = blended_batch_n(&c.blended, *instance as usize, &bx, &by, &bz);
+                    if let Some(t0) = t0 {
+                        H6_BLEND.fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                        H6_BLEND_PTS.fetch_add(N as u64, std::sync::atomic::Ordering::Relaxed);
+                        H6_BLEND_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    r
+                };
                 let mut out = [0f64; N];
                 out.copy_from_slice(&v);
                 out
@@ -2430,9 +2533,18 @@ impl Env {
                 for l in 0..N {
                     f[l] = f4[l] as f32;
                 }
+                let sp_t = if H6_DIAG_ON.load(std::sync::atomic::Ordering::Relaxed) {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
                 let mut out = [0f64; N];
                 for l in 0..N {
                     out[l] = spline_apply(self, c, points, f[l], pts[l], mode, interp, None) as f64;
+                }
+                if let Some(t0) = sp_t {
+                    H6_SPLINE_PT_NS.fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                    H6_SPLINE_PT_EVALS.fetch_add(N as u64, std::sync::atomic::Ordering::Relaxed);
                 }
                 out
             }
@@ -2462,7 +2574,7 @@ impl Env {
                     y[l] = pts[l].y as f64 / d[l];
                     z[l] = pts[l].z as f64 / d[l];
                 }
-                let nv = noise_batch_n(n, &x, &y, &z);
+                let nv = h6_named_noise(&c.noise_ids[*noise_id as usize], n, &x, &y, &z);
                 let mut out = [0f64; N];
                 for l in 0..N {
                     out[l] = d[l] * nv[l].abs();
@@ -2488,11 +2600,17 @@ impl Env {
                 if uniform && ci < memo.col.len() {
                     let e = memo.col[ci].get();
                     if e.ok && e.x == x0 && e.z == z0 {
+                        if H6_DIAG_ON.load(std::sync::atomic::Ordering::Relaxed) {
+                            H6_COL2D_HIT.fetch_add(N as u64, std::sync::atomic::Ordering::Relaxed);
+                        }
                         let mut out = [0.0f64; N];
                         out.fill(e.v);
                         return out;
                     }
                     let v = self.eval_batch_uncached(c, *child, pts, mode, interp, memo);
+                    if H6_DIAG_ON.load(std::sync::atomic::Ordering::Relaxed) {
+                        H6_COL2D_MISS.fetch_add(N as u64, std::sync::atomic::Ordering::Relaxed);
+                    }
                     memo.col[ci].set(ColEntry { ok: true, x: x0, z: z0, v: v[0] });
                     return v;
                 }
