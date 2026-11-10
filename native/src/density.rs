@@ -1492,7 +1492,17 @@ fn compute_col_caches(arena: &[WKind]) -> (Vec<u32>, u32) {
             // judge-passing trees, which itself proves effective
             // y-independence — the terrain spline forests live under these
             // wrappers and were re-evaluated on every y-batch before.)
-            if matches!(&arena[iu], WKind::Cache2d { .. } | WKind::FlatCache { .. }) {
+            // H6: ShiftA/ShiftB pass y=0.0 LITERALLY (vanilla
+            // ShiftNoise.compute(x, 0, z) / (z, x, 0)) — the value is a pure
+            // function of (x, z); vanilla recomputes it per call, so caching
+            // one value per column cannot change a single bit.
+            if matches!(
+                &arena[iu],
+                WKind::Cache2d { .. }
+                    | WKind::FlatCache { .. }
+                    | WKind::ShiftA { .. }
+                    | WKind::ShiftB { .. }
+            ) {
                 state[iu] = 2;
                 col_idx[iu] = next_slot;
                 next_slot += 1;
@@ -1530,9 +1540,50 @@ fn compute_col_caches(arena: &[WKind]) -> (Vec<u32>, u32) {
                 _ => false,
             };
             state[iu] = if yinv { 2 } else { 3 };
+            // H6 plane cache: 2D noise leaves (y_scale == 0) and shifted
+            // wrappers with compile-time y-invariant inputs also earn a
+            // per-(x, z) column slot. The cached lanes read the same pure
+            // value; the only lane-to-lane difference possible at y*0.0 is
+            // the SIGN of a zero (IEEE: identical in every comparison and
+            // block-relevant computation) — the same equivalence class the
+            // production Cache2d column cache already relies on.
+            if yinv
+                && matches!(
+                    &arena[iu],
+                    WKind::Noise { .. } | WKind::ShiftedNoise { .. }
+                )
+            {
+                col_idx[iu] = next_slot;
+                next_slot += 1;
+            }
         }
     }
     (col_idx, next_slot)
+}
+
+/// H6: is every lane of a slice batch in the same (x, z) corner column?
+/// Row-local walks guarantee it; straddling walks fall back gracefully.
+#[inline]
+fn batch_uniform_xz<const N: usize>(pts: &[Pt; N]) -> (bool, i32, i32) {
+    let x0 = pts[0].x;
+    let z0 = pts[0].z;
+    for l in 1..N {
+        if pts[l].x != x0 || pts[l].z != z0 {
+            return (false, x0, z0);
+        }
+    }
+    (true, x0, z0)
+}
+
+/// H6: per-column lookup in the batch col storage (one entry per slot).
+#[inline]
+fn batch_col_hit(memo_col: &[Cell<ColEntry>], ci: usize, x: i32, z: i32) -> Option<f64> {
+    let e = memo_col[ci].get();
+    if e.ok && e.x == x && e.z == z {
+        Some(e.v)
+    } else {
+        None
+    }
 }
 
 /// The "minecraft:terrain" XoroshiroRandomSource for the given worldgen seed:
@@ -2188,6 +2239,23 @@ impl Env {
             WKind::Const(v) => [*v; N],
             WKind::Noise { noise_id, xz_scale, y_scale } => {
                 let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
+                // H6 plane cache: a y_scale==0 noise is a pure function of
+                // (x, z) — serve the whole corner column from the per-plane
+                // column slot (same contract as the Cache2d arm below; a
+                // straddling group skips the cache and recomputes per lane).
+                let ci = c.col_idx[idx as usize] as usize;
+                let mut cache: Option<(usize, i32, i32)> = None;
+                if *y_scale == 0.0 && ci < memo.col.len() {
+                    let (uniform, x0, z0) = batch_uniform_xz(pts);
+                    if uniform {
+                        if let Some(v) = batch_col_hit(&memo.col, ci, x0, z0) {
+                            let mut out = [0.0f64; N];
+                            out.fill(v);
+                            return out;
+                        }
+                        cache = Some((ci, x0, z0));
+                    }
+                }
                 let mut x = [0f64; N];
                 let mut y = [0f64; N];
                 let mut z = [0f64; N];
@@ -2197,15 +2265,33 @@ impl Env {
                     z[l] = pts[l].z as f64 * xz_scale;
                 }
                 let v = h6_named_noise(&c.noise_ids[*noise_id as usize], n, &x, &y, &z);
+                if let Some((ci, x0, z0)) = cache {
+                    memo.col[ci].set(ColEntry { ok: true, x: x0, z: z0, v: v[0] });
+                }
                 let mut out = [0f64; N];
                 out.copy_from_slice(&v);
                 out
             }
             WKind::ShiftedNoise { noise_id, xz_scale, y_scale, sx, sy, sz } => {
+                let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
+                // H6 plane cache (see the Noise arm): y_scale==0 with
+                // compile-time y-invariant shift inputs -> per-column slot.
+                let ci = c.col_idx[idx as usize] as usize;
+                let mut cache: Option<(usize, i32, i32)> = None;
+                if *y_scale == 0.0 && ci < memo.col.len() {
+                    let (uniform, x0, z0) = batch_uniform_xz(pts);
+                    if uniform {
+                        if let Some(v) = batch_col_hit(&memo.col, ci, x0, z0) {
+                            let mut out = [0.0f64; N];
+                            out.fill(v);
+                            return out;
+                        }
+                        cache = Some((ci, x0, z0));
+                    }
+                }
                 let sxa = self.eval_batch_uncached(c, *sx, pts, mode, interp, memo);
                 let sya = self.eval_batch_uncached(c, *sy, pts, mode, interp, memo);
                 let sza = self.eval_batch_uncached(c, *sz, pts, mode, interp, memo);
-                let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
                 let mut x = [0f64; N];
                 let mut y = [0f64; N];
                 let mut z = [0f64; N];
@@ -2215,12 +2301,31 @@ impl Env {
                     z[l] = pts[l].z as f64 * xz_scale + sza[l];
                 }
                 let v = h6_named_noise(&c.noise_ids[*noise_id as usize], n, &x, &y, &z);
+                if let Some((ci, x0, z0)) = cache {
+                    memo.col[ci].set(ColEntry { ok: true, x: x0, z: z0, v: v[0] });
+                }
                 let mut out = [0f64; N];
                 out.copy_from_slice(&v);
                 out
             }
             WKind::ShiftA { noise_id } => {
                 let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
+                // H6 plane cache: ShiftA = noise(x*0.25, 0.0, z*0.25) * 4 —
+                // y is a 0.0 literal, the value is a pure function of (x, z);
+                // one perlin eval serves the whole corner column.
+                let ci = c.col_idx[idx as usize] as usize;
+                let mut cache: Option<(usize, i32, i32)> = None;
+                if ci < memo.col.len() {
+                    let (uniform, x0, z0) = batch_uniform_xz(pts);
+                    if uniform {
+                        if let Some(v) = batch_col_hit(&memo.col, ci, x0, z0) {
+                            let mut out = [0.0f64; N];
+                            out.fill(v);
+                            return out;
+                        }
+                        cache = Some((ci, x0, z0));
+                    }
+                }
                 let mut x = [0f64; N];
                 let mut z = [0f64; N];
                 for l in 0..N {
@@ -2233,6 +2338,9 @@ impl Env {
                 for l in 0..N {
                     out[l] = vb[l] * 4.0;
                 }
+                if let Some((ci, x0, z0)) = cache {
+                    memo.col[ci].set(ColEntry { ok: true, x: x0, z: z0, v: out[0] });
+                }
                 out
             }
             WKind::ShiftB { noise_id } => {
@@ -2240,6 +2348,21 @@ impl Env {
                 // vanilla ShiftNoise.compute(z, x, 0): x_arg = z*0.25,
                 // y_arg = x*0.25, z_arg = 0 (matches the scalar arm — the
                 // x/z SWAP reading was wrong and diverged from eval!)
+                // H6 plane cache: y_arg derives from blockX, z_arg is 0.0 —
+                // pure (x, z); one perlin eval per corner column.
+                let ci = c.col_idx[idx as usize] as usize;
+                let mut cache: Option<(usize, i32, i32)> = None;
+                if ci < memo.col.len() {
+                    let (uniform, x0, z0) = batch_uniform_xz(pts);
+                    if uniform {
+                        if let Some(v) = batch_col_hit(&memo.col, ci, x0, z0) {
+                            let mut out = [0.0f64; N];
+                            out.fill(v);
+                            return out;
+                        }
+                        cache = Some((ci, x0, z0));
+                    }
+                }
                 let mut x = [0f64; N];
                 let mut y = [0f64; N];
                 for l in 0..N {
@@ -2251,6 +2374,9 @@ impl Env {
                 let mut out = [0f64; N];
                 for l in 0..N {
                     out[l] = vb[l] * 4.0;
+                }
+                if let Some((ci, x0, z0)) = cache {
+                    memo.col[ci].set(ColEntry { ok: true, x: x0, z: z0, v: out[0] });
                 }
                 out
             }
@@ -2533,18 +2659,160 @@ impl Env {
                 for l in 0..N {
                     f[l] = f4[l] as f32;
                 }
+                // H6 batch-spline: the point VALUES are evaluated through the
+                // batch memo instead of per-lane scalar evals with mem=None.
+                // Each DISTINCT point-value node needed by the group is
+                // sampled once over all N lanes (eval_batch_uncached: stamps
+                // dedupe shared refs within the group; the Cache2d column
+                // cache serves 2D coordinate subtrees across y-groups of the
+                // whole plane). The per-lane f32 arithmetic below replicates
+                // spline_apply op-for-op (same findIntervalStart binary
+                // search, same f32 expression order), so values are
+                // bit-identical; the memo only changes WHEN a pure value is
+                // computed, never WHAT.
+                let last = points.len() - 1;
+                let mut iv = [0isize; N];
+                for l in 0..N {
+                    let mut lo = 0usize;
+                    let mut hi = points.len();
+                    while lo < hi {
+                        let mid = (lo + hi) / 2;
+                        if f[l] < points[mid].0 {
+                            hi = mid;
+                        } else {
+                            lo = mid + 1;
+                        }
+                    }
+                    iv[l] = lo as isize - 1;
+                }
+                // distinct point indices needed by this group (<= 2 per lane)
+                // H6-fix: const-generic arithmetic not accepted in array len here;
+                // fixed bound covers N<=16 (calibrated G is 4 or 8).
+                const NEED_MAX: usize = 34;
+                debug_assert!(2 * N + 2 <= NEED_MAX);
+                let mut need = [usize::MAX; NEED_MAX];
+                let mut nneed = 0usize;
+                for l in 0..N {
+                    let i = iv[l];
+                    let (p0, p1) = if i < 0 {
+                        (Some(0usize), None)
+                    } else if i as usize == last {
+                        (Some(last), None)
+                    } else {
+                        let i = i as usize;
+                        (Some(i), Some(i + 1))
+                    };
+                    if let Some(p) = p0 {
+                        let mut found = false;
+                        for k in 0..nneed {
+                            if need[k] == p {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            need[nneed] = p;
+                            nneed += 1;
+                        }
+                    }
+                    if let Some(p) = p1 {
+                        let mut found = false;
+                        for k in 0..nneed {
+                            if need[k] == p {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            need[nneed] = p;
+                            nneed += 1;
+                        }
+                    }
+                }
+                // one batched fetch per distinct point value
+                let mut pv = [[0f32; 16]; NEED_MAX];
+                debug_assert!(N <= 16);
                 let sp_t = if H6_DIAG_ON.load(std::sync::atomic::Ordering::Relaxed) {
                     Some(std::time::Instant::now())
                 } else {
                     None
                 };
-                let mut out = [0f64; N];
-                for l in 0..N {
-                    out[l] = spline_apply(self, c, points, f[l], pts[l], mode, interp, None) as f64;
+                for k in 0..nneed {
+                    match &points[need[k]].1 {
+                        SplineValueW::Const(v) => {
+                            for l in 0..N {
+                                pv[k][l] = *v;
+                            }
+                        }
+                        SplineValueW::Node(node) => {
+                            let vals = self.eval_batch_uncached(c, *node, pts, mode, interp, memo);
+                            for l in 0..N {
+                                pv[k][l] = vals[l] as f32;
+                            }
+                        }
+                    }
                 }
                 if let Some(t0) = sp_t {
-                    H6_SPLINE_PT_NS.fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-                    H6_SPLINE_PT_EVALS.fetch_add(N as u64, std::sync::atomic::Ordering::Relaxed);
+                    H6_SPLINE_PT_NS.fetch_add(
+                        t0.elapsed().as_nanos() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    H6_SPLINE_PT_EVALS.fetch_add(nneed as u64, std::sync::atomic::Ordering::Relaxed);
+                }
+                // per-lane spline_apply, exact op order
+                let mut out = [0f64; N];
+                for l in 0..N {
+                    let i = iv[l];
+                    if i < 0 {
+                        let mut v = 0f32;
+                        for k in 0..nneed {
+                            if need[k] == 0 {
+                                v = pv[k][l];
+                                break;
+                            }
+                        }
+                        let der = points[0].2;
+                        out[l] = if der == 0.0 {
+                            v as f64
+                        } else {
+                            (v + der * (f[l] - points[0].0)) as f64
+                        };
+                    } else if i as usize == last {
+                        let mut v = 0f32;
+                        for k in 0..nneed {
+                            if need[k] == last {
+                                v = pv[k][l];
+                                break;
+                            }
+                        }
+                        let der = points[last].2;
+                        out[l] = if der == 0.0 {
+                            v as f64
+                        } else {
+                            (v + der * (f[l] - points[last].0)) as f64
+                        };
+                    } else {
+                        let i = i as usize;
+                        let mut f6 = 0f32;
+                        let mut f7 = 0f32;
+                        for k in 0..nneed {
+                            if need[k] == i {
+                                f6 = pv[k][l];
+                            } else if need[k] == i + 1 {
+                                f7 = pv[k][l];
+                            }
+                        }
+                        let f1 = points[i].0;
+                        let f2 = points[i + 1].0;
+                        let f3 = (f[l] - f1) / (f2 - f1);
+                        let fa = points[i].2;
+                        let f5 = points[i + 1].2;
+                        let f8 = fa * (f2 - f1) - (f7 - f6);
+                        let f9 = -f5 * (f2 - f1) + (f7 - f6);
+                        let l0 = f6 + f3 * (f7 - f6); // Mth.lerp(f3, f6, f7) in f32
+                        let l1 = f8 + f3 * (f9 - f8); // Mth.lerp(f3, f8, f9) in f32
+                        out[l] = (l0 + f3 * (1.0f32 - f3) * l1) as f64;
+                    }
                 }
                 out
             }
@@ -2743,23 +3011,98 @@ impl Env {
             WKind::Const(v) => *v,
             WKind::Noise { noise_id, xz_scale, y_scale } => {
                 let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
+                // H6: per-column cache for y_scale==0 noise under a col-armed
+                // MemoCtx (pure-function value reuse — same contract as the
+                // Cache2d arm below).
+                if *y_scale == 0.0 {
+                    if let Some(m) = mem {
+                        if !m.cols.is_empty() {
+                            let ci = c.col_idx[idx as usize] as usize;
+                            if ci < m.cols.len() {
+                                if let Some(v) = col_lookup4(&m.cols[ci], pt.x, pt.z) {
+                                    return v;
+                                }
+                                let v = n.get_value(
+                                    pt.x as f64 * xz_scale,
+                                    pt.y as f64 * y_scale,
+                                    pt.z as f64 * xz_scale,
+                                );
+                                col_store4(&m.cols[ci], pt.x, pt.z, v);
+                                return v;
+                            }
+                        }
+                    }
+                }
                 n.get_value(pt.x as f64 * xz_scale, pt.y as f64 * y_scale, pt.z as f64 * xz_scale)
             }
             WKind::ShiftedNoise { noise_id, xz_scale, y_scale, sx, sy, sz } => {
+                let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
+                // H6: per-column cache for y_scale==0 ShiftedNoise with
+                // y-invariant shift inputs (compile-time proven — only such
+                // nodes carry a column slot).
+                if *y_scale == 0.0 {
+                    if let Some(m) = mem {
+                        if !m.cols.is_empty() {
+                            let ci = c.col_idx[idx as usize] as usize;
+                            if ci < m.cols.len() {
+                                if let Some(v) = col_lookup4(&m.cols[ci], pt.x, pt.z) {
+                                    return v;
+                                }
+                                let dx =
+                                    pt.x as f64 * xz_scale + self.eval(c, *sx, pt, mode, interp, mem);
+                                let dy =
+                                    pt.y as f64 * y_scale + self.eval(c, *sy, pt, mode, interp, mem);
+                                let dz =
+                                    pt.z as f64 * xz_scale + self.eval(c, *sz, pt, mode, interp, mem);
+                                let v = n.get_value(dx, dy, dz);
+                                col_store4(&m.cols[ci], pt.x, pt.z, v);
+                                return v;
+                            }
+                        }
+                    }
+                }
                 let dx = pt.x as f64 * xz_scale + self.eval(c, *sx, pt, mode, interp, mem);
                 let dy = pt.y as f64 * y_scale + self.eval(c, *sy, pt, mode, interp, mem);
                 let dz = pt.z as f64 * xz_scale + self.eval(c, *sz, pt, mode, interp, mem);
-                let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
                 n.get_value(dx, dy, dz)
             }
             WKind::ShiftA { noise_id } => {
                 let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
                 // ShiftNoise.compute(x, 0, z): noise(x*0.25, 0, z*0.25) * 4
+                // H6: pure (x, z) — serve the column from the MemoCtx cache
+                // when one is armed (16-way, holds the chunk's quart cols).
+                if let Some(m) = mem {
+                    if !m.cols.is_empty() {
+                        let ci = c.col_idx[idx as usize] as usize;
+                        if ci < m.cols.len() {
+                            if let Some(v) = col_lookup4(&m.cols[ci], pt.x, pt.z) {
+                                return v;
+                            }
+                            let v = n.get_value(pt.x as f64 * 0.25, 0.0, pt.z as f64 * 0.25) * 4.0;
+                            col_store4(&m.cols[ci], pt.x, pt.z, v);
+                            return v;
+                        }
+                    }
+                }
                 n.get_value(pt.x as f64 * 0.25, 0.0, pt.z as f64 * 0.25) * 4.0
             }
             WKind::ShiftB { noise_id } => {
                 let n = &self.noise.list[c.noise_resolved[*noise_id as usize] as usize];
                 // ShiftNoise.compute(z, x, 0)
+                // H6: pure (x, z) — column cache as in ShiftA.
+                if let Some(m) = mem {
+                    if !m.cols.is_empty() {
+                        let ci = c.col_idx[idx as usize] as usize;
+                        if ci < m.cols.len() {
+                            if let Some(v) = col_lookup4(&m.cols[ci], pt.x, pt.z) {
+                                return v;
+                            }
+                            let v = n.get_value(pt.z as f64 * 0.25, pt.x as f64 * 0.25, 0.0) * 4.0;
+                            col_store4(&m.cols[ci], pt.x, pt.z, v);
+                            return v;
+                        }
+                    }
+                }
                 n.get_value(pt.z as f64 * 0.25, pt.x as f64 * 0.25, 0.0) * 4.0
             }
             WKind::OldBlendedNoise { instance } => {
