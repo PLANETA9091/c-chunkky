@@ -7647,3 +7647,42 @@ Stage Summary:
 - Следующие: (1) CI-вердикт 86/86 + judge на порты A4; (2) Q5 пере-имплементация (мной,
   дизайн из аудита: отдельный deco-пул ctx); (3) S1 sub-batching; (4) A/B портов A4
   на 26.3 (deco wall + deleg counters); (5) 48x48 окно для paper-side дельт.
+
+---
+Task ID: cont-136 addendum (2026-11-10 evening: Q5 merge + honest-window matrix + CI state)
+Agent: Super Z (main)
+
+Work Log:
+- Q5 САБ-АГЕНТ (cont136-q5b) УСПЕШНО ЗАВЕРШЁН (в отличие от первой попытки, чей worktree
+  в /tmp был вычищен ретайпом): выделенный DECO_POOL из 2 ctx (создание из тех же
+  newCtxAssets-инпутов, parity-guard при setup с fallback на shared), kill-switch
+  CRUS_DECO_SHARED_POOL=1; попутно найден и исправлен ЛАТЕНТНЫЙ БАГ decoSetFlags —
+  флаги ставились один раз первому populate-ctx, остальные пула жили с нулевыми
+  (наблюдаемо только для air/blocksMotion-записей на top-1 — судей не задевало).
+  2 новых Rust-теста (таблицы ctx байт-идентичны; полные op-стримы плана идентичны
+  на обоих ctx) => 88/88. Merge b6569f47, main ddfceb14 запушен.
+- HONEST-WINDOW инструмент (GenStats windowSnapshot; армится crusgenstats-окном —
+  параллельная сессия вкоммитила arm в harness как cont-138/64d2f119): серверная
+  e2e-метрика без rcon-шума. Матрица E7 (те же координаты, back-to-back, Q5+порты):
+  worker=1: e2e=69.61, cover=24.6%, maxconc=1 (конвейер ОДНОПОТОЧНЫЙ!), carver=14.93
+  (ctx-wait переехал на deco-пул); worker=2: e2e=59.67, maxconc=2, cover=37.8%;
+  worker=2+fill=1: 62.49. ИТОГ КОНФИГА: worker-threads=2 + FILL_THREADS=2 +
+  -Ddisable.watchdog=true + Q5-пул + порты A4. E2-вывод (worker=1 лучше) был эффектом
+  старого режима: пока populate был медленным (struct 3.07/run 9.15/deleg 4.51),
+  сериализация конвейера окупалась; после Q5+портов worker=2 пиайплайнит.
+- CI: прогон ветки A4 (f554457) FAIL — тот же E0004 (несоответствие match'ей в
+  f1dbg/delegcensus на новых FeatureCfg), который я закрыл в dd2e3694 ДО мержа в main;
+  прогон main ddfceb1 (42884625556) in_progress — вердикт покажет, что порты+Q5
+  прошли судейские гейты 26.3 (vanilla worldgen refs).
+- Остаток бюджета (honest, worker=2): fill 24.94 loaded (CPU ~11.4: slice 2.9 у пола),
+  carver 15.64 loaded (нативные карверы + ожидания), deco run 7.1 (руда ~2.5-3,
+  dripstone 0.6, lush 0.4), cover всё ещё ~62% idle. Следующие фронты: S1
+  sub-batching (JNI 258->40 crossings — на 2c каждый crossing дорог: park/unpark +
+  safepoint), рудный compute (S1-агентский COMPUTE_TOP потерян с /tmp — пере-собрать),
+  carver-нативная оптимизация, light-divert на CI-лейне, DECO_POOL_SIZE=3.
+
+Stage Summary:
+- e2e за сессию: ~100.8 (rcon-базовая) -> honest e2e 59.67 (worker=2/Q5/порты/no-watchdog),
+  локальные rcon-окна до 70.5/72.8. Верификация: 88/88 Rust-тестов, kill-switch'и на всё
+  (CRUS_DELEG_NOGEN, CRUS_DECO_SHARED_POOL, CRUS_LIGHT_DIVERT, disable.watchdog),
+  CI-вердикт по main ожидается; независимые подтверждения: ручные A/B + honest-window.
