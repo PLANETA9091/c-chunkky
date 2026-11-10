@@ -141,6 +141,10 @@
     {
       "t": "2026-11-10T20:35+08:00",
       "event": "HONEST-WINDOW instrument (GenStats windowSnapshot, server-side span e2e — much less noise than rcon polls): worker=1 69.61 (carver=14.93 ctx-wait! cover=24.6% maxconc=1) vs worker=2 59.67 (maxconc=2 cover=37.8%) vs worker=2+fill=1 62.49. E2's worker=1 win was a pre-Q5 regime effect (slow populate made serialization cheap); once Q5+ports landed, worker=2 pipelines. Remaining whales: carver bucket 15.6-17.8 loaded (native carver compute + waits), deco run 7.1-7.5 (ores ~2.5-3), fill 24.9-26.1 loaded (CPU 5.7x2), cover still ~62% idle."
+    },
+    {
+      "t": "2026-11-10T21:45+08:00",
+      "event": "CI 42884625556 (main ddfceb1) SUCCESS — judge gates (vanilla/datapack/dptt 0.05%, ours 0.005%) confirm bit-parity of A4 native ports + Q5 dedicated pool + light-divert(OFF) + harness. Session net: honest e2e ~100 -> 59.67 (-41%), rcon windows 70.5-75.3 best. Open fronts for next iteration: S1 sub-batching (agent stalled 2.5h, no commits — reassign fresh), ore compute micro (COMPUTE_TOP lost with /tmp, re-gather), carver native opt (15.6 loaded), light-divert CI A/B lane, DECO_POOL_SIZE=3, watchdog main-thread stall (>10s between batches — root cause unexplored). Parallel session active on same main (cont-138 honest-window arm) — rebase before next push."
     }
   ],
   "ab_protocol": "wipe server263/world* before each config; coords RX1=2000 RZ1=2000, WX=500 WZ=500; NW=2..3; report window means + crusgenstats p50/p99; never compare across different regions",
@@ -150,5 +154,16 @@
     "config A/B allowed inline; code changes go through subagents with separate CARGO_TARGET_DIR",
     "timeout/obit of a subagent != death: check files/logs/results before reassigning",
     "PROGRESS.json read at start of each iteration, updated after every experiment"
-  ]
+  ],
+  "goal_status": {
+    "best_honest_e2e_ms": 59.67,
+    "best_rcon_window_ms": [
+      70.5,
+      75.3
+    ],
+    "baseline_ms": 100.8,
+    "target_ms": 5.0,
+    "tests": "88/88",
+    "ci": "SUCCESS 42884625556"
+  }
 }
