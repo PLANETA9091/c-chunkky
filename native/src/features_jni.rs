@@ -129,6 +129,23 @@ static SNAP_RANGE_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 // JVM upcall bridge (DecoLevel impl over the real WorldGenRegion)
 // ---------------------------------------------------------------------------
 
+// cont-135 (Q1, deco-wrapper audit): JniLevel::new resolved 19 method IDs +
+// ~19 CString allocs + one std::env::var on EVERY decoRunFeature (~73/chunk)
+// and oreRunConfigured (~250/chunk on the ore leg). The bridge class is
+// process-stable (one plugin, one classloader, never unloaded), so the table
+// is built ONCE into a global ref and reused. jmethodID/jclass are JVM
+// process globals — safe to share across gen threads (holder is Send+Sync;
+// JNI functions themselves take the caller's env per call).
+struct BridgeCache {
+    class: jni_sys::jclass, // global ref (kept alive for the mids)
+    mids: BridgeMids,
+}
+unsafe impl Send for BridgeCache {}
+unsafe impl Sync for BridgeCache {}
+static BRIDGE_CACHE: std::sync::OnceLock<Option<BridgeCache>> = std::sync::OnceLock::new();
+static NOUPCALL_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+#[derive(Clone, Copy)]
 struct BridgeMids {
     is_air: jni_sys::jmethodID,
     tag_is: jni_sys::jmethodID,
@@ -190,73 +207,96 @@ impl<'a> JniLevel<'a> {
         max_y: i32,
     ) -> Option<Self> {
         let tbl = *env;
-        {
-            let class = ((*tbl).v1_1.GetObjectClass)(env, obj);
-            if class.is_null() {
-                return None;
+        let no_upcall = *NOUPCALL_ON.get_or_init(|| {
+            std::env::var("CRUS_DECO_NOUPCALL").ok().as_deref() == Some("1")
+        });
+        // Fast path: table built on an earlier call — no JNI, no allocs.
+        let bc = match BRIDGE_CACHE.get() {
+            Some(Some(bc)) => bc,
+            _ => {
+                let built: Option<BridgeCache> = unsafe {
+                    let class = ((*tbl).v1_1.GetObjectClass)(env, obj);
+                    if class.is_null() {
+                        None
+                    } else {
+                        let gref = ((*tbl).v1_1.NewGlobalRef)(env, class);
+                        ((*tbl).v1_1.DeleteLocalRef)(env, class);
+                        let mid = |name: &str, sig: &str| -> jni_sys::jmethodID {
+                            let n = std::ffi::CString::new(name).unwrap();
+                            let s = std::ffi::CString::new(sig).unwrap();
+                            ((*tbl).v1_1.GetMethodID)(env, gref, n.as_ptr(), s.as_ptr())
+                        };
+                        let mids = BridgeMids {
+                            is_air: mid("isAir", "(III)Z"),
+                            tag_is: mid("tagIs", "(IIILjava/lang/String;)Z"),
+                            state_name: mid("stateName", "(III)Ljava/lang/String;"),
+                            name_is_solid: mid("nameIsSolid", "(Ljava/lang/String;)Z"),
+                            height: mid("height", "(III)I"),
+                            state_is: mid("stateIs", "(III[Ljava/lang/String;)Z"),
+                            fluid_is: mid("fluidIs", "(III[Ljava/lang/String;)Z"),
+                            is_replaceable: mid("isReplaceable", "(III)Z"),
+                            is_solid: mid("isSolid", "(III)Z"),
+                            has_sturdy_face: mid("hasSturdyFace", "(IIII)Z"),
+                            would_survive: mid("wouldSurvive", "(Ljava/lang/String;III)Z"),
+                            biome_has_feature: mid("biomeHasFeature", "(IIILjava/lang/String;)Z"),
+                            outside_build_height: mid("outsideBuildHeight", "(I)Z"),
+                            state_full: mid("stateFull", "(III)Ljava/lang/String;"),
+                            is_solid_render: mid("isSolidRender", "(III)Z"),
+                            deco_snap_section: mid("decoSnapSection", "(III)[B"),
+                            deco_snap_section_range: mid("decoSnapSectionRange", "(IIII)[B"),
+                            deco_heightmaps: mid("decoHeightmaps", "(II)[I"),
+                            tag_members: mid("tagMembers", "(Ljava/lang/String;)[Ljava/lang/String;"),
+                        };
+                        let ok = [
+                            mids.is_air,
+                            mids.tag_is,
+                            mids.state_name,
+                            mids.name_is_solid,
+                            mids.height,
+                            mids.state_is,
+                            mids.fluid_is,
+                            mids.is_replaceable,
+                            mids.is_solid,
+                            mids.has_sturdy_face,
+                            mids.would_survive,
+                            mids.biome_has_feature,
+                            mids.outside_build_height,
+                            mids.state_full,
+                            mids.is_solid_render,
+                            mids.deco_snap_section,
+                            mids.deco_snap_section_range,
+                            mids.deco_heightmaps,
+                        ]
+                        .iter()
+                        .all(|m| !m.is_null());
+                        if ok && !gref.is_null() {
+                            Some(BridgeCache { class: gref, mids })
+                        } else {
+                            None
+                        }
+                    }
+                };
+                // A None (old jar / broken env) is cached too — the same
+                // class resolves the same way on every call, so a per-call
+                // retry cannot produce a different answer.
+                let _ = BRIDGE_CACHE.set(built);
+                match BRIDGE_CACHE.get() {
+                    Some(Some(bc)) => bc,
+                    _ => return None,
+                }
             }
-            let mid = |name: &str, sig: &str| -> jni_sys::jmethodID {
-                let n = std::ffi::CString::new(name).unwrap();
-                let s = std::ffi::CString::new(sig).unwrap();
-                ((*tbl).v1_1.GetMethodID)(env, class, n.as_ptr(), s.as_ptr())
-            };
-            let mids = BridgeMids {
-                is_air: mid("isAir", "(III)Z"),
-                tag_is: mid("tagIs", "(IIILjava/lang/String;)Z"),
-                state_name: mid("stateName", "(III)Ljava/lang/String;"),
-                name_is_solid: mid("nameIsSolid", "(Ljava/lang/String;)Z"),
-                height: mid("height", "(III)I"),
-                state_is: mid("stateIs", "(III[Ljava/lang/String;)Z"),
-                fluid_is: mid("fluidIs", "(III[Ljava/lang/String;)Z"),
-                is_replaceable: mid("isReplaceable", "(III)Z"),
-                is_solid: mid("isSolid", "(III)Z"),
-                has_sturdy_face: mid("hasSturdyFace", "(IIII)Z"),
-                would_survive: mid("wouldSurvive", "(Ljava/lang/String;III)Z"),
-                biome_has_feature: mid("biomeHasFeature", "(IIILjava/lang/String;)Z"),
-                outside_build_height: mid("outsideBuildHeight", "(I)Z"),
-                state_full: mid("stateFull", "(III)Ljava/lang/String;"),
-                is_solid_render: mid("isSolidRender", "(III)Z"),
-                deco_snap_section: mid("decoSnapSection", "(III)[B"),
-                deco_snap_section_range: mid("decoSnapSectionRange", "(IIII)[B"),
-                deco_heightmaps: mid("decoHeightmaps", "(II)[I"),
-                tag_members: mid("tagMembers", "(Ljava/lang/String;)[Ljava/lang/String;"),
-            };
-            let ok = [
-                mids.is_air,
-                mids.tag_is,
-                mids.state_name,
-                mids.name_is_solid,
-                mids.height,
-                mids.state_is,
-                mids.fluid_is,
-                mids.is_replaceable,
-                mids.is_solid,
-                mids.has_sturdy_face,
-                mids.would_survive,
-                mids.biome_has_feature,
-                mids.outside_build_height,
-                mids.state_full,
-                mids.is_solid_render,
-                mids.deco_snap_section,
-                mids.deco_snap_section_range,
-                mids.deco_heightmaps,
-            ]
-            .iter()
-            .all(|m| !m.is_null());
-            if !ok {
-                return None;
-            }
-            Some(JniLevel {
-                env,
-                obj,
-                mids,
-                uid_names,
-                min_y,
-                max_y,
-                trace: std::cell::Cell::new(0),
-                no_upcall: std::env::var("CRUS_DECO_NOUPCALL").ok().as_deref() == Some("1"),
-            })
-        }
+        };
+        let mids = bc.mids;
+        Some(JniLevel {
+            env,
+            obj,
+            mids,
+            uid_names,
+            min_y,
+            max_y,
+            trace: std::cell::Cell::new(0),
+            no_upcall,
+        })
     }
 
     #[inline]
@@ -278,8 +318,11 @@ impl<'a> JniLevel<'a> {
     }
 
     /// One section snapshot from the bridge (DecoDriver.decoSnapSection).
-    /// Returns the raw little-endian payload bytes.
-    fn snap_section(&self, cx: i32, cz: i32, sec_y: i32) -> Option<Vec<u8>> {
+    /// cont-135 (Q3, deco-wrapper audit): Java now returns its REUSABLE
+    /// serialize buffer (GetArrayLength = capacity >= payload; parse_section
+    /// is strictly sequential and tolerates the trailing bytes), so both the
+    /// Java-side Arrays.copyOf and the native-side to_vec() copy are gone.
+    fn snap_section(&self, cx: i32, cz: i32, sec_y: i32) -> Option<crate::features_snap::SnapSection> {
         if self.noup() {
             return None;
         }
@@ -313,7 +356,10 @@ impl<'a> JniLevel<'a> {
                 ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
                 return None;
             }
-            let out = std::slice::from_raw_parts(p as *const u8, len).to_vec();
+            let parsed = crate::features_snap::parse_section(std::slice::from_raw_parts(
+                p as *const u8,
+                len,
+            ));
             ((*tbl).v1_2.ReleaseByteArrayElements)(
                 self.env,
                 r,
@@ -321,7 +367,7 @@ impl<'a> JniLevel<'a> {
                 jni_sys::JNI_ABORT,
             );
             ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
-            Some(out)
+            parsed
         }
     }
 
@@ -1091,9 +1137,8 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_decoRunFea
             }
             target
         } else {
-            let bytes = level_ref.snap_section(cx, cz, sec_y);
             let p0 = prof_now();
-            let parsed = bytes.and_then(|b| crate::features_snap::parse_section(&b));
+            let parsed = level_ref.snap_section(cx, cz, sec_y);
             PROF_PARSE_NS.fetch_add(prof_now() - p0, std::sync::atomic::Ordering::Relaxed);
             parsed
         };
@@ -1352,9 +1397,8 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_oreRunConf
     let loader = |cx: i32, cz: i32, sec_y: i32| -> Option<crate::features_snap::SnapSection> {
         let t0 = prof_now();
         PROF_LOADER_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let bytes = level_ref.snap_section(cx, cz, sec_y);
         let p0 = prof_now();
-        let parsed = bytes.and_then(|b| crate::features_snap::parse_section(&b));
+        let parsed = level_ref.snap_section(cx, cz, sec_y);
         PROF_PARSE_NS.fetch_add(prof_now() - p0, std::sync::atomic::Ordering::Relaxed);
         run_loader.set(run_loader.get() + (prof_now() - t0));
         parsed

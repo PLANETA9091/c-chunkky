@@ -41,13 +41,15 @@ mkfifo run.in
 echo $! > fifo.pid
 
 HEAP_ARGS="-Xms2G -Xmx3G"
-PGEN_FLAG="-Dpaper.chunk-system.gen-parallelism=false"
+# cont-134 (paper-levers audit): PGEN_FLAG (-Dpaper.chunk-system.gen-parallelism)
+# REMOVED — the key was dropped in Paper 26.3 (string survives only in
+# RemovedConfigurations; nothing reads the property). Was a dead no-op.
 
 # opt-in native carvers pass-through
 CRUS_NATIVE_CARVERS="${CRUS_NATIVE_CARVERS:-0}" CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" \
 echo "booting Paper 26.3 (JDK 25)..."
 CRUS_NATIVE_CARVERS="${CRUS_NATIVE_CARVERS:-0}" CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" \
-setsid $JAVA $HEAP_ARGS $PGEN_FLAG \
+setsid $JAVA $HEAP_ARGS \
   -XX:FlightRecorderOptions=stackdepth=128 \
   -Djava.library.path="$ROOT/native/target/release" \
   -jar paper-26.3-222.jar nogui < run.in > run.out 2>&1 &

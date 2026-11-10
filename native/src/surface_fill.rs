@@ -63,6 +63,23 @@ pub static SR_C_YABOVE: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 pub static SR_C_VGRAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static SR_C_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static SR_C_OTHER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+// cont-134: arith fast-path evals (StoneDepth/Water/YAbove inline in the VM
+// Test op — 2-3 ALU ops, no Instant timer, so no NS counter; the per-kind
+// NS counters now only reflect evals that still go through compute()).
+pub static SR_C_ARITH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// cont-134 A/B kill switches (env presence = disabled; read once):
+//   CRUS_SR_NOARITH  — route StoneDepth/Water/YAbove back through the
+//                      cache probe + compute() path (pre-cont-134 behavior)
+//   CRUS_SR_NOBIOME  — route Biome conds back through the q_cache probe
+fn sr_noarith() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("CRUS_SR_NOARITH").is_ok())
+}
+fn sr_nobiome() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("CRUS_SR_NOBIOME").is_ok())
+}
 
 #[inline]
 fn sr_on() -> bool {
@@ -167,6 +184,10 @@ pub struct ColWalk<'a> {
     /// Per-column biome quart table ((sy, qy) -> native biome) filled in
     /// update_xz; biome_idx_at becomes one array read (was full grid math).
     pub col_bq: Vec<u16>,
+    /// cont-134: per-arith-site column-constant thresholds, filled in
+    /// update_xz (StoneDepth full thr; Water offset+sd*mult; YAbove
+    /// anchor+sd*mult). The per-eval test is then 2-3 ALU ops.
+    pub col_thr: Vec<i32>,
     /// Bandlands band lookup — clay_bands_offset noise is (x,z)-bound;
     /// cached per column (was a NormalNoise eval per block).
     pub band_off: i64,
@@ -240,6 +261,7 @@ impl<'a> ColWalk<'a> {
             q_cache: vec![(0, false); cond_count],
             q_counter: 0,
             col_bq: vec![0u16; ((cfg.height >> 4).max(1) as usize) * 4],
+            col_thr: vec![0i32; cfg.arith_sites.len()],
             band_off: 0,
             band_last: 0,
             grad_cache: std::collections::HashMap::new(),
@@ -267,6 +289,30 @@ impl<'a> ColWalk<'a> {
         let d = sn.get_value(bx as f64, 0.0, bz as f64);
         let jit = self.factory.at(bx, 0, bz).next_f64();
         self.surface_depth = ((d * 2.75 + 3.0 + jit * 0.25)) as i32;
+        // cont-134: precompute the arithmetic thresholds for this column
+        // (pure ALU over column-constants; surface_secondary stays lazily
+        // memoized — the noise eval fires once per column iff some
+        // StoneDepth site has secondary_range != 0, same as the old
+        // compute()-miss path).
+        if !self.cfg.arith_sites.is_empty() {
+            for (s, site) in self.cfg.arith_sites.iter().enumerate() {
+                self.col_thr[s] = match site.kind {
+                    1 => {
+                        let j = if site.sd_asd { self.surface_depth } else { 0 };
+                        let k = if site.sec != 0 {
+                            mth_map(self.surface_secondary(), -1.0, 1.0, 0.0, site.sec as f64)
+                                as i32
+                        } else {
+                            0
+                        };
+                        1 + site.a + j + k
+                    }
+                    // Water: offset + surface_depth*mult (wh stays per-y);
+                    // YAbove: anchor + surface_depth*mult (whole thr).
+                    _ => site.a + self.surface_depth * site.b,
+                };
+            }
+        }
         // fill the per-column biome quart table: grid index
         // i = sy*64 + qx*16 + qy*4 + qz with qx/qz fixed for the column.
         let qx = ((bx & 15) >> 2) as usize;
@@ -481,7 +527,52 @@ impl<'a> ColWalk<'a> {
 
     // -- condition evaluation ------------------------------------------------
 
+    /// cont-134: arithmetic fast path — StoneDepth/Water/YAbove eval in 2-3
+    /// ALU ops over the column-constant thresholds filled in update_xz.
+    /// Bit-exact with compute(): same fields, same expression order, same
+    /// early-outs (Water wh==MIN → true). No cache probe/store — evaluating
+    /// directly is cheaper than any cache lookup.
+    #[inline]
+    fn arith_eval(&self, ci: usize, ar: u8) -> bool {
+        if sr_on() {
+            SR_C_ARITH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let s = self.cfg.arith_slot[ci] as usize;
+        let site = self.cfg.arith_sites[s];
+        match ar {
+            // StoneDepth: i <= thr  (thr = 1+offset+(asd?sd:0)+(sec?map:0))
+            1 => {
+                let i = if site.ceiling {
+                    self.stone_depth_below
+                } else {
+                    self.stone_depth_above
+                };
+                i <= self.col_thr[s]
+            }
+            // Water: y2 >= water_height + thr  (thr = offset+sd*mult)
+            2 => {
+                if self.water_height == MIN_LEVEL {
+                    return true;
+                }
+                let y2 = self.block_y + if site.asd { self.stone_depth_above } else { 0 };
+                y2 >= self.water_height + self.col_thr[s]
+            }
+            // YAbove: y2 >= thr  (thr = anchor+sd*mult)
+            _ => {
+                let y2 = self.block_y + if site.asd { self.stone_depth_above } else { 0 };
+                y2 >= self.col_thr[s]
+            }
+        }
+    }
+
     fn test(&mut self, ci: usize) -> bool {
+        // cont-134: arithmetic conds bypass the whole cache machinery even on
+        // the slow entries (Not-wrapped arith, deep-fast gate etc.) — the
+        // eval is cheaper than the probe.
+        let ar = self.cfg.cond_arith[ci];
+        if ar != 0 && !sr_noarith() {
+            return self.arith_eval(ci, ar);
+        }
         let conds = &self.cfg.conds;
         match &conds[ci] {
             SrCond::Not(inner) => {
@@ -710,13 +801,28 @@ impl<'a> ColWalk<'a> {
             match op {
                 super::surface::SrOp::Test { ci, false_pc } => {
                     let civ = ci as usize;
-                    // Inline the cache fast-path (test() full path only on
-                    // miss): no fn call, no Not re-match on the hot hit path.
-                    // Semantics identical to test() — including the Not arm,
-                    // which never caches and recurses.
+                    // cont-134: arithmetic conds — 2-3 ALU ops over
+                    // column-constant thresholds (col_thr, update_xz); no
+                    // cache probe, no cache store, no compute() call.
+                    // Biome conds (cache kind 2) — direct quart-bi + mask
+                    // eval: same ops the q_cache would save, but cheaper
+                    // than the probe itself, so the cache round-trip is
+                    // dropped entirely (both are pure functions of
+                    // (column, quartY)).
                     let v = if self.cfg.cond_is_not[civ] {
                         self.test(civ)
                     } else {
+                        let ar = self.cfg.cond_arith[civ];
+                        if ar != 0 && !sr_noarith() {
+                            self.arith_eval(civ, ar)
+                        } else if !sr_nobiome() && self.cfg.cond_cache[civ] == 2 {
+                            let bi = self.biome_idx_at(self.block_x, self.block_y, self.block_z);
+                            let m = &self.cfg.biome_masks[civ];
+                            if sr_on() {
+                                SR_C_BIOME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            (m[bi >> 6] >> (bi & 63)) & 1 == 1
+                        } else {
                         match self.cfg.cond_cache[civ] {
                             2 => {
                                 let (last, hv) = self.q_cache[civ];
@@ -748,6 +854,7 @@ impl<'a> ColWalk<'a> {
                                     v
                                 }
                             }
+                        }
                         }
                     };
                     if v {

@@ -52,7 +52,10 @@ online-mode=false
 enable-rcon=true
 rcon.port=$PORT
 rcon.password=crussty
-sync-chunk-writes=true
+# cont-134 (paper-levers audit): region writes async — saves were already
+# outside the e2e window, but sync writes caused sporadic multi-ms unload
+# stalls at forceload-remove phases; e2e_ci.sh already runs false.
+sync-chunk-writes=false
 view-distance=10
 simulation-distance=10
 spawn-protection=0
@@ -72,7 +75,7 @@ boot_run() { # $1 = dump tag, $2 = extra env
   (
     cd "$SRV"
     env $2 CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" \
-      setsid "$JAVA_BIN" -Xms2G -Xmx3G -Dpaper.chunk-system.gen-parallelism=false \
+      setsid "$JAVA_BIN" -Xms2G -Xmx3G \
       -Djava.library.path="$ROOT/native/target/release" \
       -jar paper.jar nogui < run.in > run.out 2>&1 &
     echo $! > server.pid

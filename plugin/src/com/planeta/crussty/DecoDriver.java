@@ -120,6 +120,8 @@ public final class DecoDriver extends BlockPopulator {
     private static final ThreadLocal<int[]> OPS_BUF = new ThreadLocal<>();
     /** Per-thread dropped-op coord buffer (x,y,z triples). */
     private static final ThreadLocal<int[]> DROP_BUF = new ThreadLocal<>();
+    /** cont-135 (Q2): per-thread reusable plan-runs buffer (PLAN_TOTAL*2+16). */
+    private static final ThreadLocal<int[]> RUNS_BUF = new ThreadLocal<>();
 
     /** Delegate holder cache (parse+registry walk once per placed name).
      * Concurrent populate threads: CHM + Set are the safe scope. */
@@ -316,7 +318,16 @@ public final class DecoDriver extends BlockPopulator {
         long tb0 = System.nanoTime();
         String[] biomes = regionBiomes(cx, cz);
         DecoStats.PLAN_BIOMES.addAndGet(System.nanoTime() - tb0);
-        int[] runsBuf = new int[PLAN_TOTAL() * 2 + 16];
+        // cont-135 (Q2, deco-wrapper audit): runsBuf reused via ThreadLocal —
+        // was a fresh int[PLAN_TOTAL*2+16] per chunk (~64 features/step-plan
+        // plans = several KB of GC churn per chunk). Sized up if PLAN grows
+        // (reload); never shrinks.
+        int runsNeed = PLAN_TOTAL() * 2 + 16;
+        int[] runsBuf = RUNS_BUF.get();
+        if (runsBuf == null || runsBuf.length < runsNeed) {
+            runsBuf = new int[Math.max(runsNeed, runsBuf == null ? 0 : runsBuf.length * 2)];
+            RUNS_BUF.set(runsBuf);
+        }
         int runs = ChunkGenNative.decoChunkPlan(ctx, biomes, runsBuf);
         DecoStats.PLAN_TOTAL.addAndGet(System.nanoTime() - tp0);
         if (first) {
@@ -1143,7 +1154,15 @@ public final class DecoDriver extends BlockPopulator {
         long t0 = System.nanoTime();
         DecoStats.SNAP_SECTIONS.incrementAndGet();
         try {
-            return decoSnapSection0(cx, cz, secY);
+            // cont-135 (Q3, deco-wrapper audit): decoSnapSection0 now returns
+            // its reusable SNAP_BUF. The backing array is handed over as-is —
+            // GetArrayLength is the capacity (>= payload), which the native
+            // parser tolerates (strictly sequential reads), and the buffer is
+            // consumed within THIS JNI call, before the next clear(). Saves
+            // one 2.7KB alloc+copy per section (~63/chunk). Returns null on
+            // internal failure (native treats null/len==0 as absent).
+            java.nio.ByteBuffer b = decoSnapSection0(cx, cz, secY);
+            return b == null ? null : b.array();
         } finally {
             DecoStats.SNAP_SECTION_NS.addAndGet(System.nanoTime() - t0);
         }
@@ -1170,13 +1189,13 @@ public final class DecoDriver extends BlockPopulator {
             }
             out.clear();
             for (int i = 0; i < n; i++) {
-                byte[] sec = decoSnapSection0(cx, cz, secY + i);
+                java.nio.ByteBuffer sec = decoSnapSection0(cx, cz, secY + i);
                 if (sec == null) {
                     out.putInt(0);
                 } else {
                     DecoStats.SNAP_SECTION_BLOCKS.incrementAndGet();
-                    out.putInt(sec.length);
-                    out.put(sec);
+                    out.putInt(sec.position());
+                    out.put(sec.array(), 0, sec.position());
                 }
             }
             return java.util.Arrays.copyOf(out.array(), out.position());
@@ -1241,14 +1260,17 @@ public final class DecoDriver extends BlockPopulator {
         return b;
     }
 
-    private byte[] decoSnapSection0(int cx, int cz, int secY) {
+    /** cont-135 (Q3): returns the reusable SNAP_BUF with the payload in
+     *  [0, position()). The caller must consume it before the next call on
+     *  the same thread (both current callers do — within one JNI call). */
+    private java.nio.ByteBuffer decoSnapSection0(int cx, int cz, int secY) {
         ChunkAccess ch = reg().getChunk(cx, cz);
         int si = secY - reg().getMinSectionY();
         java.nio.ByteBuffer buf = snapBuf(16384);
         buf.putInt(secY);
         if (si < 0 || si >= ch.getSectionsCount()) {
             buf.putInt(-1);
-            return java.util.Arrays.copyOf(buf.array(), buf.position());
+            return buf;
         }
         LevelChunkSection sec = ch.getSection(si);
         ArrayList<String> names = new ArrayList<>();
@@ -1342,6 +1364,6 @@ public final class DecoDriver extends BlockPopulator {
             LOG.warning("deco snap: section " + cx + "," + cz + "," + secY + " failed: " + t);
             return null;
         }
-        return java.util.Arrays.copyOf(buf.array(), buf.position());
+        return buf;
     }
 }

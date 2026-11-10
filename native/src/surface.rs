@@ -127,6 +127,32 @@ pub enum SrCond {
     Not(usize),
 }
 
+/// cont-134: arithmetic condition site — a cond whose evaluation is pure ALU
+/// over column-constants (StoneDepth / Water / YAbove). All per-y-varying
+/// inputs are simple counters (stone_depth_above/below, block_y,
+/// water_height); every threshold term is a column constant
+/// (`surface_depth`, `surface_secondary` — both fixed in update_xz), so the
+/// per-column threshold is precomputed once into ColWalk::col_thr and the
+/// per-eval cost drops to 2-3 ALU ops. Fields mirror the SrCond variants
+/// verbatim (bit-exactness by construction).
+#[derive(Clone, Copy)]
+pub struct ArithSite {
+    /// 1 = StoneDepth, 2 = Water, 3 = YAbove (matches cond_arith).
+    pub kind: u8,
+    /// StoneDepth/Water: offset; YAbove: anchor.
+    pub a: i32,
+    /// Water/YAbove: surface_depth multiplier.
+    pub b: i32,
+    /// StoneDepth: i = stone_depth_below (ceiling) vs stone_depth_above.
+    pub ceiling: bool,
+    /// StoneDepth: add_surface_depth (folds surface_depth into col_thr).
+    pub sd_asd: bool,
+    /// Water/YAbove: add_stone_depth (adds stone_depth_above to y2).
+    pub asd: bool,
+    /// StoneDepth: secondary_range (0 = no k term).
+    pub sec: i32,
+}
+
 pub struct SurfaceConfig {
     pub rules: Vec<SrRule>,
     pub conds: Vec<SrCond>,
@@ -144,6 +170,15 @@ pub struct SurfaceConfig {
     /// Biome set membership is the hottest surface test — replaces the
     /// linear Vec::contains (sets reach 30+ biomes) with one bit test.
     pub biome_masks: Vec<Vec<u64>>,
+    /// cont-134: per-cond arithmetic classification: 0 = not arithmetic,
+    /// 1..3 = ArithSite kind (StoneDepth/Water/YAbove). Lets the VM Test
+    /// fast path skip the cache machinery entirely — arith conds evaluate
+    /// in 2-3 ALU ops over col_thr (cheaper than any cache probe).
+    pub cond_arith: Vec<u8>,
+    /// cont-134: cond idx -> arith_sites slot (u16::MAX when cond_arith=0).
+    pub arith_slot: Vec<u16>,
+    /// cont-134: compact arithmetic-site table (see ArithSite).
+    pub arith_sites: Vec<ArithSite>,
     pub root: usize,
     /// Distinct block state strings in first-appearance order. Material ids
     /// are assigned by the JVM (setSurfaceIds) into `ids` (same order).
@@ -932,12 +967,65 @@ pub fn build(
         .map(|c| matches!(c, SrCond::Not(_)))
         .collect();
     let masks = biome_masks(&p.cfg.conds);
+    // cont-134: arithmetic-site classification (StoneDepth/Water/YAbove).
+    // Pure metadata — same fields, same values as the SrCond variants; the
+    // evaluation stays bit-exact (see ArithSite + ColWalk::arith_eval).
+    let mut cond_arith = vec![0u8; p.cfg.conds.len()];
+    let mut arith_slot = vec![u16::MAX; p.cfg.conds.len()];
+    let mut arith_sites: Vec<ArithSite> = Vec::new();
+    for (i, c) in p.cfg.conds.iter().enumerate() {
+        let (kind, site) = match c {
+            SrCond::StoneDepth { offset, add_surface_depth, secondary_range, ceiling } => (
+                1u8,
+                ArithSite {
+                    kind: 1,
+                    a: *offset,
+                    b: 0,
+                    ceiling: *ceiling,
+                    sd_asd: *add_surface_depth,
+                    asd: false,
+                    sec: *secondary_range,
+                },
+            ),
+            SrCond::Water { offset, surface_depth_multiplier, add_stone_depth } => (
+                2u8,
+                ArithSite {
+                    kind: 2,
+                    a: *offset,
+                    b: *surface_depth_multiplier,
+                    ceiling: false,
+                    sd_asd: false,
+                    asd: *add_stone_depth,
+                    sec: 0,
+                },
+            ),
+            SrCond::YAbove { anchor, add_stone_depth, surface_depth_multiplier } => (
+                3u8,
+                ArithSite {
+                    kind: 3,
+                    a: *anchor,
+                    b: *surface_depth_multiplier,
+                    ceiling: false,
+                    sd_asd: false,
+                    asd: *add_stone_depth,
+                    sec: 0,
+                },
+            ),
+            _ => continue,
+        };
+        arith_slot[i] = arith_sites.len() as u16;
+        cond_arith[i] = kind;
+        arith_sites.push(site);
+    }
     let cfg = SurfaceConfig {
         rules: p.cfg.rules,
         conds: p.cfg.conds,
         cond_cache,
         cond_is_not,
         biome_masks: masks,
+        cond_arith,
+        arith_slot,
+        arith_sites,
         root,
         states: p.cfg.states,
         ids: Vec::new(),

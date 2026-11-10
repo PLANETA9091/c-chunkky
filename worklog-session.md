@@ -2,6 +2,12 @@
 
 Проект: нативный генератор чанков (Rust .so) для Paper 1.21.8, цель — полный чанк за 1мс даже с датапаками, бит-в-бит паритет с ванилью (судья: reference/*.crsf, снятые с настоящей ванили).
 
+> **ПЛАТФОРМА (cont-134, поправка по указанию владельца): целевая платформа — Paper 26.3.**
+> Записи до cont-130 — эра Paper 1.21.8 (тогда платформа была такой; javap-снятия,
+> «paper-1.21.8.jar» и т.п. в старых записях — исторически верны). Ретаргет на 26.3
+> выполнен в remote-кампании cont-131/132; все СВЕЖИЕ записи и планы — только 26.3.
+> Сервер: server263/ + paper-26.3-222.jar; legacy server/paper.jar (1.21.8-60) — артефакт старой эры.
+
 ## Статус репо на момент восстановления (2026-10-11)
 В c-faster запушено только M1-M3: json.rs, worldgen.rs (реестр), noise.rs, rng.rs, md5.rs.
 ВСЯ работа M4/M5 потеряна при сбросе окружения (не была запушена). Восстанавливаем.
@@ -7455,3 +7461,63 @@ Stage Summary:
 - Следующие фронты (из cont-131/132, незанятые): surface-хвост ~2.0ms — biome-пересчёты на кварт
   (q_cache гранулярность, возможен x3 срез на 0.6ms) и stone_depth per-column depth-count memo
   (0.8ms, 41%); микро: NN col-path ~0.03, row4 hoist ~0.05, merge OR disjoint ~0.03.
+
+---
+Task ID: cont-134 (2026-11-10, ФРОНТ 5ММС: inline surface-арифметика + саб-агентский wrapper-аудит + paper-рычаги)
+Agent: Super Z (main)
+Task: «давай 5мс на текущем железе! на максимум работай с саб агентами и математическеми арифметикой»
+Плюс поправка владельца: платформа — Paper 26.3, НЕ 1.21.8 (см. баннер в шапке).
+
+Work Log:
+- РЕСИНК ПЕСОЧНИЦЫ (recycle): rust-toolchain потерян → rustup 1.99.1; git reset на origin/main
+  (d7b1b514, cont-133; 34 «грязных» файлов оказались только chmod-модами, 0 строк контента).
+- САБ-АГЕНТ A «Deco wrapper audit» (research, Task ID 2): cost-модель deco=1 пути с файловыми
+  цитатами (reference/audit_deco_wrapper.md, 234 строки). Ключевое: три разных «15ms» не путать —
+  (A) deco=1 A/B delta +15.1..16.8 на CI, (B) Java-половина e2e ~15ms, (C) DecoDriver CPU wall
+  3.2–4.9 (2-core). Разложение A: carver 4.3 + drain 2.0 + stagnation ~8 + DecoDriver 3–5.
+  JNI-census: ~258 crossings/chunk deco=1 → 0.8–1.1ms обвязки. QUICK WINS Q1 (кэш method-ID
+  таблицы JniLevel: 19×GetMethodID + 19 CString + env::var на КАЖДЫЙ decoRunFeature, ~73/ч,
+  EST 0.25–0.55ms) / Q2 (TL runsBuf) / Q3 (убить Arrays.copyOf snap-сериализации, ~63×2.7KB/ч)
+  — АГЕНТ ВЫШЕЛ ЗА РАМКИ research И ИМПЛЕМЕНТИЛ ИХ (features_jni.rs BridgeCache + DecoDriver
+  RUNS_BUF/SNAP_BUF, помечено cont-135): стрим оборвался посреди правки, агент ДОДЕЛАЛ (файлы
+  консистентны); cargo test 86/86 прошёл на объединённом дереве. CI = авторитетный гейт плагина
+  (локального 26.3 server jar для javac нет).
+- САБ-АГЕНТ B «Paper 26.3 light/serialization levers» (research, Task ID 3): декомпил build 222.
+  ИТОГ: light+serial на 26.3 ≈ ~1ms/ch СОВМЕСТНО (не 5–10!): starlight 5–12% Java-CPU, сериализация
+  0 in-window (автосейв 5 мин, max-auto-save 24/tick). Конфиг-ключа «пропустить light» НЕТ (для
+  свежих чанков StarLightEngine.light() безусловен; gen-parallelism УДАЛЁН из 26.3 — флаг был
+  мёртвым no-op). Единственный настоящий рычаг — NMS light-divert (persistedStatus=LIGHT +
+  setLightCorrect до LIGHT-таски → дешёвая ветка forceLoadInChunk+checkChunkEdges, ≤0.7–1.0ms/ch,
+  judge light не проверяет → паритет-риск низкий; СРЕДНИЙ runtime-риск — моб-спавн/релизы) —
+  ОТЛОЖЕНО в бэклог (нужен NMS-мост, отдельный cont). Применены дельты: ab263_ci.sh
+  sync-chunk-writes=true→false; server263_up.sh мёртвый PGEN_FLAG удалён (ключ не читается 26.3).
+  Ramp/status-chain = 30% окна 12×12 (6.1ms/ch) — мерить на 48×48+.
+- ФРОНТ 1 (мой): inline surface-арифметика (cont-134).
+  surface.rs: ArithSite{kind,a,b,ceiling,sd_asd,asd,sec} + cond_arith/arith_slot/arith_sites в
+  SurfaceConfig, классификация при парсе (1=StoneDepth,2=Water,3=YAbove).
+  surface_fill.rs: ColWalk.col_thr — колонно-константные пороги, предвычисление в update_xz
+  (StoneDepth: 1+offset+(asd?sd:0)+(sec?map(surface_secondary):0) — f64-map поднят из per-eval
+  в per-column; Water: offset+sd*mult; YAbove: anchor+sd*mult); arith_eval() = 2-3 ALU-опа,
+  БЕЗ кэш-проб/записей и БЕЗ Instant-таймера; VM Test в try_apply: arith → arith_eval напрямую,
+  Biome (kind==2) → прямой bi+маска (кварт-биомет из col_bq; q_cache round-trip удалён —
+  прямой перебор дешевле зонда); kill-switches CRUS_SR_NOARITH / CRUS_SR_NOBIOME (A/B).
+  dpperf: SR_C_ARITH счётчик + печать.
+- ВАЛИДАЦИЯ: cargo test 86/86 (объединённое дерево); filldump бит-паритет родитель(d7b1b514,
+  git-worktree /tmp/parent_wt) vs cont-134 — 64/64 чанков судейского набора dptt + 8/8 на сиде
+  123 (scripts/parity_filldump.py, multi-root 01+02); SPROF: walk_steps идентичны 146,942.31;
+  compute-хвост 3.28 → 0.98ms/чанк (−70%): stone_depth/water/y_above compute → 0 (42.2k evals
+  инлайн), биом 0.99 → ~0.15ms; dpperf p50 (3 раунда): parent 5.97 → all-on 5.71 (−0.26 median;
+  рычаги по отдельности +0.37 arith / +0.26 biome; общий на шумном 2-core ~0.3–0.6ms — SPROF-
+  таймеры в старом профиле завышали хвост).
+- ВОРКЛОГ: шапка worklog-session.md — баннер «платформа 26.3» (историю до cont-130 не
+  переписываем: там javap 1.21.8 был истиной того момента).
+
+Stage Summary:
+- native fill p50 6.0 → 5.7ms (2-core шумный), compute-хвост −70%. Оба фронт-аудита легли в
+  evidence base: wrapper-v2 = Q1–Q3 (сделаны) → Q4–Q6/S1 (батчиing crossings 73→~9/ч) → S4
+  (deco=1 как дефолт, приз — 5–15ms Java decorate). Paper-side: ~1ms light — рычаг один
+  (NMS light-divert, бэклог); сериализация не в окне.
+- СЛЕДУЮЩИЕ: (1) CI-гейт этого дерева (native 86/86 + сборка плагина на 26.3 + ab263 пары);
+  (2) deco A/B с CRUS_DECO_NOUPCALL floor + DecoStats на 26.3 (нет ни одного 26.3-era deco
+  артефакта — gap из аудита); (3) S1 sub-batching decoRunFeature (крупнейший структурный);
+  (4) биом-хвост 0.15ms: остаточные Not-обёрнутые biome/deep-gate — кандидат на тот же инлайн.

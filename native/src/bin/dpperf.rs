@@ -181,6 +181,7 @@ fn main() {
             &sf::SR_C_VGRAD,
             &sf::SR_C_TEMP,
             &sf::SR_C_OTHER,
+            &sf::SR_C_ARITH,
             &sf::SR_NS_BIOME,
             &sf::SR_NS_NOISE_THR,
             &sf::SR_NS_STONE_DEPTH,
@@ -251,7 +252,7 @@ fn main() {
             pern(g(&sf::SR_WALK_STEPS)),
         );
         println!(
-            "sprof kinds: test_total {} | biome {} nthr {} stone_depth {} water {} y_above {} vgrad {} temp/other {}",
+            "sprof kinds: test_total {} | biome {} nthr {} stone_depth {} water {} y_above {} vgrad {} temp/other {} | arith(inline) {}",
             pern(g(&sf::SR_TEST_TOTAL)),
             pern(g(&sf::SR_C_BIOME)),
             pern(g(&sf::SR_C_NOISE_THR)),
@@ -260,6 +261,7 @@ fn main() {
             pern(g(&sf::SR_C_YABOVE)),
             pern(g(&sf::SR_C_VGRAD)),
             pern(g(&sf::SR_C_TEMP) + g(&sf::SR_C_OTHER)),
+            pern(g(&sf::SR_C_ARITH)),
         );
         let ns = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6;
         println!(
