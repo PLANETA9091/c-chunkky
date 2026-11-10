@@ -756,6 +756,19 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                             "native carvers setup failed (vanilla carvers stay): " + t);
                 }
             }
+            // cont-136 CRUS_LIGHT_DIVERT: register the light-divert populator
+            // LAST (strictly after DecoDriver + marker; ordering contract in
+            // LightDivert class doc — setLightCorrect/persistedStatus=LIGHT
+            // makes ChunkLightTask take the cheap branch). Default OFF.
+            if ("1".equals(System.getenv("CRUS_LIGHT_DIVERT"))) {
+                try {
+                    Class<?> ld = Class.forName("com.planeta.crussty.LightDivert");
+                    ld.getMethod("setup", org.bukkit.World.class).invoke(null, w);
+                } catch (Throwable t) {
+                    Logger.getLogger("CrusstyGen").warning(
+                            "light divert setup failed (full light stays): " + t);
+                }
+            }
             String[] names = ChunkGenNative.ctxBiomeNames(pool.firstCtx());
             if (names == null) {
                 Logger.getLogger("CrusstyGen").info(

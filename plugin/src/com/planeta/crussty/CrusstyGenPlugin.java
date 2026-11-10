@@ -122,6 +122,12 @@ public final class CrusstyGenPlugin extends JavaPlugin {
                 sb.append(" | [CrusstyGen] ").append(ChunkGenNative.profStatsGlobal());
             } catch (Throwable ignored) {
             }
+            try {
+                sb.append(" | [CrusstyGen] ").append((String) Class
+                        .forName("com.planeta.crussty.LightDivert")
+                        .getMethod("statsLine").invoke(null));
+            } catch (Throwable ignored) {
+            }
             sender.sendMessage(sb.toString());
             return true;
         }

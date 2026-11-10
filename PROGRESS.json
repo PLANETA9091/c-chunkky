@@ -1,0 +1,101 @@
+{
+  "goal": "e2e <= 5 ms/chunk on the noisy 2-core sandbox, Paper 26.3 build 222, vanilla worldgen + native engine (deco=1, carvers=1)",
+  "metric": "harness/e2e263.sh: forceload fresh 12x12 window, wall ms/chunk; report 3 windows + crusgenstats (p50/p99, phase split)",
+  "platform": "Paper 26.3 build 222 sha256 f649771a..., JDK Temurin 25.0.5+8, seed 3257840388504953787, NO datapacks (26.3 pack restore is a separate task)",
+  "updated": "2026-11-10T14:40:00+08:00",
+  "baseline": {
+    "source": "cont-135 reference/prof_session_deco263_q13.txt (MINE windows; tree 9a4d6272 = cont-134)",
+    "e2e_windows_ms": [95.0, 86.6, 106.8],
+    "mean": 96.1,
+    "loaded_split_ms_per_chunk": {
+      "native_fill": 34.0,
+      "native_fill_idle_p50": 5.7,
+      "deco_wall": 18.4,
+      "deco_phases": {"plan": 0.30, "struct": 5.24, "run": 8.23, "apply": 0.30, "deleg": 3.55},
+      "carver_driver": "4.3 on CI deco=1 lanes (partly ctx-wait, cont-102: 9.77 pure wait)",
+      "java_rest": "light ~1 (starlight), drain 2.0, stagnation ~8, ramp/status-chain ~6.1",
+      "note": "native fill inflates 6x idle->loaded (thread oversubscription: 2 fill threads + 2 chunk workers + main on 2 logical cores)"
+    },
+    "jni_counts_per_chunk": {"upcalls": 64.6, "features": 55.4, "ops": 1377.5, "snap_sec": 92.8, "crossings_all": 258}
+  },
+  "hypotheses": [
+    {
+      "id": "H1",
+      "text": "Config-only: CRUS_FILL_THREADS=1 (serial fill) reduces loaded fill wall by removing thread thrash; serial idle ~11ms may still beat 34ms loaded",
+      "test": "A/B e2e windows, 3 runs each, same box noise",
+      "status": "pending"
+    },
+    {
+      "id": "H2",
+      "text": "Config-only: chunk-system worker-threads=1 leaves a core for fill threads",
+      "test": "A/B e2e windows",
+      "status": "pending"
+    },
+    {
+      "id": "H3",
+      "text": "Q5 (audit): deco/carver ctx contention — fills hold pool ctxs 5-12ms so populate waits; dedicated deco ctx pool or tryLock-fallback-to-fresh-ctx gives up to ~4ms/ch on deco=1 lanes",
+      "test": "impl + A/B + filldump bit-parity (dptt set, serial+2t) + cargo 86/86",
+      "status": "pending"
+    },
+    {
+      "id": "H4",
+      "text": "S1 (audit): sub-batch decoRunFeature between delegates, 258->~40 JNI crossings/ch, wrapper mass collapse (0.2-0.4ms idle, more loaded)",
+      "test": "impl (Rust+DecoDriver.java) + ops-count equality probes + bit-parity + judge",
+      "status": "pending"
+    },
+    {
+      "id": "H5",
+      "text": "Light-divert NMS (audit B): persistedStatus=LIGHT + setLightCorrect before LIGHT task -> ~0.7-1.0ms/ch",
+      "test": "implemented (CRUS_LIGHT_DIVERT, default OFF); A/B inconclusive on 2-core 12x12 (divert 96.2 vs adjacent control 94.5, within noise); needs 48x48 or CI",
+      "status": "implemented-inconclusive"
+    },
+    {
+      "id": "H6",
+      "text": "Native fill idle 5.7 -> ~3ms: slice noise sampling ~2.9ms is the biggest native item (cont-132); plane cache + blended-noise call reduction",
+      "test": "dpperf A/B p50 x3 rounds + filldump bit-parity",
+      "status": "pending"
+    },
+    {
+      "id": "H7",
+      "text": "Ore-family native compute ~5.5ms/ch (8 types) + dripstone ~0.9ms/ch = per-cell overlay query cost inside deco run phase (8.5ms loaded)",
+      "test": "agent-2 COMPUTE_TOP.md findings -> targeted native cuts + filldump bit-parity",
+      "status": "in_progress (agent 2)"
+    },
+    {
+      "id": "H8",
+      "text": "Fill loaded 29.5ms vs idle 5.7ms = 80% scheduling loss (4+ runnable threads / 2 cores); thread-config matrix (FILL_THREADS x worker-threads) may recover several ms without any code change",
+      "test": "clean A/B: wipe + same coords + back-to-back runs",
+      "status": "in_progress"
+    }
+  ],
+  "log": [
+    {
+      "t": "2026-11-10T16:45+08:00",
+      "event": "LIGHT-DIVERT (CRUS_LIGHT_DIVERT) implemented per /tmp/lightdivert/PLAN.md: LightDivert.java NMS populator registered LAST, setLightCorrect+persistedStatus=LIGHT during decorate. Corrections vs audit: (1) real status during decorate = minecraft:terrain (BELOW features — [FEATURES,LIGHT) guard diverted 0/1153, fixed to skip-only->=LIGHT), (2) TWO flags required. diverted=1144/1144, fail=0. A/B: divert 83.4/96.2/109.1 (mean 96.2) vs adjacent control 86.6/88.1/108.8 (mean 94.5) => INCONCLUSIVE (+1.7, noise; mechanism: dropped INIT_LIGHT barrier adds 2-core contention, may help on 4c CI). DEFAULT OFF. GIT LESSON: git checkout -- plugin/ wiped uncommitted source edits twice; never checkout while carrying edits."
+    },
+    {
+      "t": "2026-11-10T16:50+08:00",
+      "event": "Control table: baseline@15:05 mean 100.8, divert mean 96.2, control mean 94.5 (quietest). 12x12 window = ramp/status-chain ~30% — 48x48+ needed for paper-side deltas. Fill loaded drifts 35.2->29.5 with box noise: A/B ALWAYS wipe+same-coords+back-to-back."
+    },
+    {
+      "t": "2026-11-10T14:20+08:00",
+      "event": "sandbox recycle #N: git was at 848b2b6 (cont-41); resynced to origin/main fdbd8dbc (cont-134b, incl. cont-133/134/135 from parallel sessions). rustup 1.99.1 + JDK 25.0.5+8 + paper-26.3-222.jar (sha f649771a bit-exact) restored. cargo build release 3m01s. patchonly extraction done."
+    },
+    {
+      "t": "2026-11-10T15:05+08:00",
+      "event": "BASELINE (this box, tree fdbd8dbc, .so 33a481ef, jar 2b72d745): windows 98.5/94.6/109.4 mean 100.8 ms/ch. loaded: native fill mean 35.2ms p50 30.1 (idle p50 5.7 -> 6x contention inflation), deco mean 18.1 (plan .35 struct 3.07 run 9.15 apply .35 deleg 4.51), upcalls 68.9/ch, snap-sec 100.6/ch. run-top: dripstone 1051ms/617calls + 8 ore types ~400-630ms each. CPU math: ~25-35ms CPU/ch vs ~100ms window => ~75% scheduling loss."
+    },
+    {
+      "t": "2026-11-10T15:25+08:00",
+      "event": "E1 CRUS_FILL_THREADS=1: 113.5/109.7 — INVALID (region hit jungle biome: trees_jungle 1468ms, struct 8.51 vs 3.07). Lesson: same-region-only comparisons; A/B protocol = wipe world + identical coords (deterministic per seed). loaded fill wall 37ms @1 thread ~= 35ms @2 threads => our thread count is NOT the contention driver; server threads are."
+    }
+  ],
+  "ab_protocol": "wipe server263/world* before each config; coords RX1=2000 RZ1=2000, WX=500 WZ=500; NW=2..3; report window means + crusgenstats p50/p99; never compare across different regions",
+  "rules": [
+    "never trust a number not measured on this box; report min/p50 of >=3 windows",
+    "any impl change gates on: cargo test 86/86 + filldump bit-parity vs parent (dptt set) + judge CI",
+    "config A/B allowed inline; code changes go through subagents with separate CARGO_TARGET_DIR",
+    "timeout/obit of a subagent != death: check files/logs/results before reassigning",
+    "PROGRESS.json read at start of each iteration, updated after every experiment"
+  ]
+}
