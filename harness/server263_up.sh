@@ -52,6 +52,7 @@ CRUS_NATIVE_CARVERS="${CRUS_NATIVE_CARVERS:-0}" CRUS_NATIVE_DECO="${CRUS_NATIVE_
 setsid $JAVA $HEAP_ARGS \
   -XX:FlightRecorderOptions=stackdepth=128 \
   -Djava.library.path="$ROOT/native/target/release" \
+  ${JVM_FLAGS_ADD:-} \
   -jar paper-26.3-222.jar nogui < run.in > run.out 2>&1 &
 echo $! > server.pid
 echo "server263 pid: $(cat server.pid)"

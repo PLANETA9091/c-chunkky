@@ -7753,3 +7753,36 @@ Work Log:
 Stage Summary:
 - Honest e2e today: 53.9-63.3 (noise +-15%); campaign best 50.97 (cont-138 quiet-box). S1 crossings -88% shipped (sub-noise wall delta, as projected). H6 reverted honestly. Slice whale localized for cont-140 (slots-1-7 batching). CI green through it all; kill-switches: CRUS_S1_SUBBATCH=0, CRUS_DELEG_NOGEN, CRUS_DECO_SHARED_POOL, CRUS_LIGHT_DIVERT, disable.watchdog.
 - Next: (1) CI verdict on default-ON (f24f6878) — judge batched lane; (2) cont140-slice slots-1-7 batching + dpperf A/B; (3) pipelining re-test at lower CPU; (4) paper-side idle 25-28ms front; (5) worklog cont-42 "1.21.8" -> "26.3" wording fix on next docs commit.
+
+---
+Task ID: cont-141 (2026-11-11 ~09:15-10:00 +08). Agent: Super Z (main). Resume per manifesto loop: read PROGRESS.json -> measure -> bottleneck -> next.
+
+Work Log:
+- cont-140 ПРОВЕРЕН И ОСТАВЛЕН: пересборка --lib из committed state (.so md5 8634f9c4 = deployed),
+  гейты агента в коммите (filldump 6/6 byte-identical, 92/92, vbench A/B p50x3 5.50->5.44 sub-noise).
+  FINDING #2 (вторичная misattribution): «slots-1-7 whale 1.2-2.0ms» была артефактом холодного
+  per-point пробинга — production col-memo+pipeline уже амортизируют. Реальные остатки fill:
+  Blend stack 1.4-1.5ms (batch8, уже avx2), material 0.75ms.
+- WORKER MATRIX (quiet box, honest 12x12 @2100,2000, WIPE, back-to-back, .so 8634f9c4, jar 22c333c7):
+  control w2/F2/no-watchdog: e2e=47.02 (best 12x12 за кампанию; busy=20.1, cover=42.7%, maxconc=2,
+  native=23.39, carver=4.74, deco struct 4.83/run 7.06/apply 0.96/deleg 2.01).
+  w3: e2e=52.21 ХУЖЕ — cover вырос до 57.3%/maxconc=3, но busy распух до 29.9 (native 36.70,
+  carver 7.42) — CFS-закон измерена: добор воркеров конвертирует dependency-idle в contention,
+  а не в throughput. w4 не запускался (тот же механизм строго хуже; E7-матрица).
+- WINDOW SCALING: 24x24 (576 чанков, 4 квадрантных forceload — ЛИМИТ КОМАНДЫ 256!) @4500,3500:
+  e2e=57.13 (cold, ramp 1409) и @4600,3500: e2e=41.41 (warm, ramp 362, busy 22.0, cover 53.0) —
+  лучший honest номер кампании. Вывод: idle ИНТРАИНСИЧЕН (dependency-граф+CFS), не edge-артефакт
+  12x12; большое окно даёт только ~-12% warm.
+- ИНФРА: server263_up.sh +JVM_FLAGS_ADD; пойманы 2 ловушки: (1) bash `cd && cmd &` бэкграундит
+  весь список (cd уходил в фон, фор-луп смотрел не тот cwd — дважды); (2) forceload max 256 чанков.
+- УРАВНЕНИЕ ПУТИ К 5ms (измеренное): wall ~= CPU_ch/(2 ядра x cover). Сегодня 20-22ms CPU при
+  cover 43-53% -> 41-47ms. Нужно: CPU ~7-10ms И cover ->90%+ (либо CPU<10 при maxconc>2 без
+  контенции). Gap wall-busy = 19-27ms/ch = dependency-сериализация (Q6 margins) — фронт №1.
+- Запущены 2 саб-агента: (A) idle/margin decomposition (механизм-карта по server263 decompile,
+  staged-window квантификация, рычаги); (B) deleg-native порты lake_lava x2 + amethyst_geode
+  (паттерн A4 monster_room/freeze, bit-judged CI). Push cont-140 -> CI судит S1 default-ON + cont-140.
+
+Stage Summary:
+- Измерительная итерация без кода: cont-140 keep; champion конфиг подтверждён (w2/F2/no-watchdog);
+  honest 47.02 (12x12) / 41.41 (24x24 warm) — новые лучшие; фронты ранжированы по измеренному
+  бюджету. Все выводы — замерами, ни одной догадки.

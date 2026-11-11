@@ -106,6 +106,10 @@
   ],
   "log": [
     {
+      "t": "2026-11-11T10:00+08:00",
+      "event": "cont-141 MEASURE ITERATION (post-manifesto resume): cont-140 verified kept (agent gates: filldump 6/6, 92/92, vbench A/B 5.50->5.44 sub-noise; slots-1-7 whale = misattribution #2 — production col-memo already amortizes). Worker matrix on quiet box: control w2 47.02 honest (today's best 12x12) vs w3 52.21 WORSE (cover 42.7->57.3% but busy 20.1->29.9, CFS law measured). Window scaling: 24x24 warm 41.41 (campaign best honest number) vs 12x12 47.02 — idle intrinsic, not edge artifact. forceload 256-chunk cap discovered (24x24 = 4 quadrants). server263_up.sh: JVM_FLAGS_ADD support added; bash precedence trap (cd && cmd & backgrounds the cd) documented. Next: push cont-140 -> CI (judges S1 default-ON + cont-140), launch idle/margin decomposition agent + deleg-native ports agent."
+    },
+    {
       "t": "2026-11-11T06:45+08:00",
       "event": "cont-139 SESSION NET: (1) H9 SyncGen measured NO-WIN (64.28/61.94 vs 63.34) — convergent with parallel session's refutation; floor evidence min 2.93ms/ch (warm chunk, ready neighbors). (2) H6 (fill plane cache) implemented w/ agents, parity-safe, REVERTED after paired A/B showed no win; misattribution finding redirects fill lever to blended final-density. (3) H4/S1 sub-batch implemented (agent takeover after stream death), merged, crossings -88%, e2e delta sub-noise, default OFF. (4) Parallel session (cont-138) independently merged H7 (91/91) + H10 carver (9.92->5.05) and closed at honest 50.97 — my numbers reproduce their regime (today's honest 53.9-63.3 band, noise +-15%). NEXT FRONTS: pipelining re-test at lower CPU; paper-side idle 25-28ms; blended final-density fill (real 2.9ms whale); S1 default-ON after CI judge; stable-box carver re-measure."
     },
@@ -203,8 +207,10 @@
     "PROGRESS.json read at start of each iteration, updated after every experiment"
   ],
   "goal_status": {
-    "best_honest_e2e_ms": 59.67,
-    "today_honest_ms": 63.34,
+    "best_honest_e2e_ms": 41.41,
+    "best_honest_note": "41.41 = 24x24 warm window (4600,3500, cont-141); 12x12 champion config today = 47.02 (2100,2000); cont-138 quiet best was 50.97",
+    "today_honest_ms": 47.02,
+    "today_24x24_ms": [57.13, 41.41],
     "syncgen_ms": [
       64.28,
       61.94
@@ -217,6 +223,29 @@
     "baseline_ms": 100.8,
     "target_ms": 5.0,
     "tests": "92/92",
-    "ci": "SUCCESS 42884625556"
+    "ci": "SUCCESS 42884625556; cont-140 push verdict pending"
+  },
+  "cont141_measurements": {
+    "date": "2026-11-11 09:15-10:00 +08",
+    "box": "quiet (load 0.0), .so 8634f9c4 = committed cont-140 state (rebuild verified), jar 22c333c7",
+    "worker_matrix_honest_12x12": {
+      "worker2_fill2_nowatchdog_control": {"e2e": 47.02, "span_ms": 6770.74, "ramp": 709, "busy": 20.1, "cover_pct": 42.7, "maxconc": 2, "native": 23.39, "carver": 4.74, "deco": "struct 4.83 run 7.06 apply 0.96 deleg 2.01"},
+      "worker3": {"e2e": 52.21, "busy": 29.9, "cover_pct": 57.3, "maxconc": 3, "native": 36.70, "carver": 7.42, "verdict": "WORSE: cover +34% rel but CPU busy +49% (CFS thrash)"},
+      "worker4": "skipped — strictly worse by same measured mechanism (E7 thrash law; worker=3 already decisive)",
+      "law": "adding workers converts dependency-idle into contention, not throughput; worker=2 remains champion at current CPU"
+    },
+    "window_scaling": {
+      "12x12": 47.02,
+      "24x24_w1_4500_3500": {"e2e": 57.13, "ramp": 1409, "busy": 27.2, "note": "cold: high ramp"},
+      "24x24_w2_4600_3500": {"e2e": 41.41, "ramp": 362, "busy": 22.0, "cover_pct": 53.0},
+      "verdict": "idle is INTRINSIC (dependency graph + CFS), not a 12x12 edge artifact; bigger window ~ -12% warm only; forceload cmd max 256 chunks -> 24x24 needs 4 quadrant forceloads"
+    },
+    "path_to_5ms_equation": "wall ~= CPU_ch / (2 cores x cover); today: 20-22 CPU, cover 43-53% -> 41-47. Need CPU ~7-10ms AND cover ->90%+; OR CPU <10 with maxconc>2 at low contention",
+    "next_fronts_ranked": [
+      "1. margin/dependency serialization (Q6) = the wall-vs-busy gap 19-27ms/ch: mechanism map on server263 decompile + staged-window quantification + plugin-side lever",
+      "2. deleg-native ports: lake_lava_surface/underground + amethyst_geode run EVERY chunk (deleg 2.01ms/ch + their share of run) — A4 pattern (monster_room/freeze) proven bit-judged",
+      "3. H7 ore verdict (merged, CRUS_H7_OFF flip) — needs quiet paired A/B or CI",
+      "4. native fill floor: Blend 1.4-1.5ms batch8 avx2 (hard), material 0.75"
+    ]
   }
 }
