@@ -1,0 +1,603 @@
+Wed Nov 11 12:04:19 UTC 2026
+=== Q6 idle-decomposition audit start ===
+[t0 env-recovery] sandbox snapshot missing paper-26.3-222.jar + versions/cache in c-faster/server263; restored from /home/z/my-project/server263 (paperclip layout: paper.jar 55MB + versions/26.3/paper-26.3.jar + cache/mojang_26.3.jar). audit_lights/ does NOT exist in this snapshot; /home/z/tools/decomp missing. Will re-derive method (CFR needs download or use javap).
+
+== MECHANISM MAP (decompile-verified, CFR on c-faster/server263/versions/26.3/paper-26.3.jar) ==
+Sources: audit_idle263/decomp/out/... + ChunkTaskScheduler.java (copy at audit_idle263/)
+1. Pyramid (ChunkPyramid.java:19-22): EMPTY > STRUCTURE_STARTS > STRUCTURE_REFERENCES > BIOMES > TERRAIN > FEATURES > INITIALIZE_LIGHT > LIGHT > SPAWN > FULL.
+   GENERATION_PYRAMID: FEATURES = req(STRUCTURE_STARTS,r8) + req(TERRAIN,r1), writeRadius=1. LIGHT = req(INITIALIZE_LIGHT,r1), writeRadius=2. TERRAIN = req(SS,r8)+req(BIOMES,r1), writeRadius 0.
+2. Executor routing (ChunkTaskScheduler.<clinit> L800-830 + ChunkUpgradeGenericStatusTask ctor L70-90):
+   parallelCapable = {EMPTY, STRUCTURE_STARTS, STRUCTURE_REFERENCES, BIOMES, TERRAIN, INITIALIZE_LIGHT} -> parallelGenExecutor (BalancedPrioritisedThreadPool worker pool; no area lock).
+   FEATURES (writeR=1), LIGHT (writeR=2), SPAWN, FULL -> radiusAwareScheduler = AreaDependentQueue(parallelGenExecutor, 4) (ChunkTaskScheduler.java:202): tasks serialize when (2*writeR+1)^2 areas overlap. FEATURES: chunks <3 apart cannot overlap; LIGHT: <5 apart.
+3. Neighbor read deps (ChunkTaskScheduler.schedule L541-599 + checkNeighbour L601-620): before scheduling a step, iterates radius = step.getAccumulatedRadiusOf(EMPTY); byRadius for FEATURES step: d0-1->TERRAIN, d2-3->BIOMES, d4-10->STRUCTURE_STARTS (accumulated radius of EMPTY = 10). If any neighbor short -> center gets neighboursBlockingGenTask, neighbor gets addWaitingNeighbour + recursive schedule; center task is NOT created until all margins reach required status. Completion: NewChunkHolder.onChunkGenComplete (L1042+) -> scheduleNeighbours re-schedules blocked centers.
+   => fresh 12x12 window drags a ~32x32 region to STRUCTURE_STARTS, 16x16 to BIOMES, 14x14 to TERRAIN: margin work is real generation, invisible to the window denominator.
+4. Worker parking (ChunkUpgradeGenericStatusTask.run L116-160): worker thread BLOCKS on completeFuture.join() after scheduling the step; buildTerrain future = native JNI fill (Crussty), full() conversion = ChunkFullTask.run inline (L63-104: LevelChunk ctor, entity chunk load, registerAllBlockEntities, tick containers).
+5. ChunkFullTask (L40-70): convertToFullTask = scheduler.createChunkTask = MAIN-THREAD executor (PrioritisedTaskQueue, ChunkTaskScheduler L120) -> per-chunk main-thread work + ticket updates between tick batches.
+6. addStatusConsumer EXISTS in 26.3 (NewChunkHolder.java:994, package-private, consumers fired via scheduleChunkTask on MAIN thread at Priority.HIGHEST, completeStatusConsumers0 L1002-1016).
+[12:19:56] battery A starting
+[12:19:59] === BOOT begin (JFR profile, worker=2, fill=2, deco=1, carvers=1, watchdog off) ===
+--- deployed263.md5 ---
+# deployed263.md5 2026-11-11T12:19:59Z
+716cedc616ada6534a5e7d0e94d69b09  plugins/CrusstyGen.jar
+8634f9c431aa02c327ee95f2f4558b64  /home/z/my-project/c-faster/native/target/release/libcrussty_chunkgen.so
+booting Paper 26.3 (JDK 25)...
+server263 pid: 5842
+[12:20:30] server up
+[12:20:30] --- WARMUP 13x13 @1000,1000 (regenerated region, fills expected ~0) ---
+[CrusstyGen] stats window reset
+
+Marked 9 chunks in minecraft:overworld from [1000, 1000] to [1002, 1002] to be force loaded
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=121  mean=33824.2us  min=13015.6us  p50=30079.8us  p99=85332.1us  max=96315.0us  [native=22.06ms nat_p50=18.33ms layout=11.55ms beard=0.00ms marks=0.03ms]  [lay setup=0.00 sec=0.00 hmap=0.00 verify=0.00 | uni=0.00/0.0 lin=0.00/0.0 glob=0.00/0.0 pb=0.00/0.00]  [sections filled=0 mixed=0 air=0 v1fallback=0 bulk=NoSuchFieldException: registry]  swapfail=null  marks_seen=0 marks_landed=0 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00]
+
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=121  mean=33824.2us  min=13015.6us  p50=30079.8us  p99=85332.1us  max=96315.0us  [native=22.06ms nat_p50=18.33ms layout=11.55ms beard=0.00ms marks=0.03ms]  [lay setup=0.00 sec=0.00 hmap=0.00 verify=0.00 | uni=0.00/0.0 lin=0.00/0.0 glob=0.00/0.0 pb=0.00/0.00]  [sections filled=0 mixed=0 air=0 v1fallback=0 bulk=NoSuchFieldException: registry]  swapfail=null  marks_seen=0 marks_landed=0 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00]
+
+[12:20:41] --- EXP E1-square-6200: window(6200,6200,n=11) forceload [99200 99200]->[99391 99391] ---
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=121  mean=33824.2us  min=13015.6us  p50=30079.8us  p99=85332.1us  max=96315.0us  [native=22.06ms nat_p50=18.33ms layout=11.55ms beard=0.00ms marks=0.03ms]  [lay setup=0.00 sec=0.00 hmap=0.00 verify=0.00 | uni=0.00/0.0 lin=0.00/0.0 glob=0.00/0.0 pb=0.00/0.00]  [sections filled=0 mixed=0 air=0 v1fallback=0 bulk=NoSuchFieldException: registry]  swapfail=null  marks_seen=0 marks_landed=0 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00]
+
+Marked 144 chunks in minecraft:overworld from [6200, 6200] to [6211, 6211] to be force loaded
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+  [E1-square-6200] t=s inside=0 deco=0
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=521  mean=31091.6us  min=11895.0us  p50=27577.2us  p99=95150.1us  max=159185.4us  [native=19.04ms nat_p50=15.67ms layout=11.83ms beard=0.01ms marks=0.01ms]  [lay setup=0.00 sec=0.00 hmap=0.00 verify=0.00 | uni=0.00/0.0 lin=0.00/0.0 glob=0.00/0.0 pb=0.00/0.00]  [sections filled=0 mixed=0 air=0 v1fallback=0 bulk=NoSuchFieldException: registry]  swapfail=null  marks_seen=0 marks_landed=0 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00]
+
+[12:21:51] --- EXP E1-square-6200 done ---
+[12:21:51] --- EXP E2-row: window(6500,6400,n=11) forceload [104000 102400]->[104015 102591] ---
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=521  mean=31091.6us  min=11895.0us  p50=27577.2us  p99=95150.1us  max=159185.4us  [native=19.04ms nat_p50=15.67ms layout=11.83ms beard=0.01ms marks=0.01ms]  [lay setup=0.00 sec=0.00 hmap=0.00 verify=0.00 | uni=0.00/0.0 lin=0.00/0.0 glob=0.00/0.0 pb=0.00/0.00]  [sections filled=0 mixed=0 air=0 v1fallback=0 bulk=NoSuchFieldException: registry]  swapfail=null  marks_seen=0 marks_landed=0 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00]
+
+Marked 12 chunks in minecraft:overworld from [6500, 6400] to [6500, 6411] to be force loaded
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+  [E2-row] t=s inside=0 deco=0
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=701  mean=35517.4us  min=11895.0us  p50=30460.8us  p99=110913.1us  max=267995.4us  [native=21.88ms nat_p50=17.49ms layout=13.45ms beard=0.01ms marks=0.00ms]  [lay setup=0.00 sec=0.00 hmap=0.00 verify=0.00 | uni=0.00/0.0 lin=0.00/0.0 glob=0.00/0.0 pb=0.00/0.00]  [sections filled=0 mixed=0 air=0 v1fallback=0 bulk=NoSuchFieldException: registry]  swapfail=null  marks_seen=0 marks_landed=0 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00]
+
+[12:22:56] --- EXP E2-row done ---
+[12:22:56] --- EXP E3-col: window(6400,6700,n=11) forceload [102400 107200]->[102591 107215] ---
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=701  mean=35517.4us  min=11895.0us  p50=30460.8us  p99=110913.1us  max=267995.4us  [native=21.88ms nat_p50=17.49ms layout=13.45ms beard=0.01ms marks=0.00ms]  [lay setup=0.00 sec=0.00 hmap=0.00 verify=0.00 | uni=0.00/0.0 lin=0.00/0.0 glob=0.00/0.0 pb=0.00/0.00]  [sections filled=0 mixed=0 air=0 v1fallback=0 bulk=NoSuchFieldException: registry]  swapfail=null  marks_seen=0 marks_landed=0 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00]
+
+Marked 12 chunks in minecraft:overworld from [6400, 6700] to [6411, 6700] to be force loaded
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+  [E3-col] t=s inside=0 deco=0
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=881  mean=36000.5us  min=11895.0us  p50=30669.7us  p99=106547.4us  max=267995.4us  [native=22.44ms nat_p50=17.56ms layout=13.35ms beard=0.01ms marks=0.00ms]  [lay setup=0.00 sec=0.00 hmap=0.00 verify=0.00 | uni=0.00/0.0 lin=0.00/0.0 glob=0.00/0.0 pb=0.00/0.00]  [sections filled=0 mixed=0 air=0 v1fallback=0 bulk=NoSuchFieldException: registry]  swapfail=null  marks_seen=0 marks_landed=0 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00]
+
+[12:24:00] --- EXP E3-col done ---
+[12:24:00] --- EXP E4-square-6900: window(6900,6400,n=11) forceload [110400 102400]->[110591 102591] ---
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=881  mean=36000.5us  min=11895.0us  p50=30669.7us  p99=106547.4us  max=267995.4us  [native=22.44ms nat_p50=17.56ms layout=13.35ms beard=0.01ms marks=0.00ms]  [lay setup=0.00 sec=0.00 hmap=0.00 verify=0.00 | uni=0.00/0.0 lin=0.00/0.0 glob=0.00/0.0 pb=0.00/0.00]  [sections filled=0 mixed=0 air=0 v1fallback=0 bulk=NoSuchFieldException: registry]  swapfail=null  marks_seen=0 marks_landed=0 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00]
+
+Marked 144 chunks in minecraft:overworld from [6900, 6400] to [6911, 6411] to be force loaded
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+  [E4-square-6900] t=s inside=0 deco=0
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=1281  mean=34608.9us  min=11895.0us  p50=30032.8us  p99=105279.8us  max=267995.4us  [native=21.72ms nat_p50=17.43ms layout=12.71ms beard=0.01ms marks=0.00ms]  [lay setup=0.00 sec=0.00 hmap=0.00 verify=0.00 | uni=0.00/0.0 lin=0.00/0.0 glob=0.00/0.0 pb=0.00/0.00]  [sections filled=0 mixed=0 air=0 v1fallback=0 bulk=NoSuchFieldException: registry]  swapfail=null  marks_seen=0 marks_landed=0 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00]
+
+[12:25:10] --- EXP E4-square-6900 done ---
+[12:25:10] --- EXP E5b-concurrent: rectB(7400) submitted, then rectA(7200) ~0.15s later ---
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=1281  mean=34608.9us  min=11895.0us  p50=30032.8us  p99=105279.8us  max=267995.4us  [native=21.72ms nat_p50=17.43ms layout=12.71ms beard=0.01ms marks=0.00ms]  [lay setup=0.00 sec=0.00 hmap=0.00 verify=0.00 | uni=0.00/0.0 lin=0.00/0.0 glob=0.00/0.0 pb=0.00/0.00]  [sections filled=0 mixed=0 air=0 v1fallback=0 bulk=NoSuchFieldException: registry]  swapfail=null  marks_seen=0 marks_landed=0 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00]
+
+Marked 144 chunks in minecraft:overworld from [7400, 7200] to [7411, 7211] to be force loaded
+Marked 144 chunks in minecraft:overworld from [7200, 7200] to [7211, 7211] to be force loaded
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+  [E5b] t=s inside=0 deco=0
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=2081  mean=31698.9us  min=10973.3us  p50=27992.8us  p99=99206.0us  max=267995.4us  [native=19.73ms nat_p50=15.59ms layout=11.78ms beard=0.01ms marks=0.00ms]  [lay setup=0.00 sec=0.00 hmap=0.00 verify=0.00 | uni=0.00/0.0 lin=0.00/0.0 glob=0.00/0.0 pb=0.00/0.00]  [sections filled=0 mixed=0 air=0 v1fallback=0 bulk=NoSuchFieldException: registry]  swapfail=null  marks_seen=0 marks_landed=0 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00]
+
+Unmarked all force loaded chunks in minecraft:overworld
+[12:26:59] --- EXP E5c-solo-7600: window(7600,7200,n=11) forceload [121600 115200]->[121791 115391] ---
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=2081  mean=31698.9us  min=10973.3us  p50=27992.8us  p99=99206.0us  max=267995.4us  [native=19.73ms nat_p50=15.59ms layout=11.78ms beard=0.01ms marks=0.00ms]  [lay setup=0.00 sec=0.00 hmap=0.00 verify=0.00 | uni=0.00/0.0 lin=0.00/0.0 glob=0.00/0.0 pb=0.00/0.00]  [sections filled=0 mixed=0 air=0 v1fallback=0 bulk=NoSuchFieldException: registry]  swapfail=null  marks_seen=0 marks_landed=0 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00]
+
+Marked 144 chunks in minecraft:overworld from [7600, 7200] to [7611, 7211] to be force loaded
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+  [E5c-solo-7600] t=s inside=0 deco=0
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [CrusstyGen] native noise stage: chunks=2481  mean=30866.5us  min=10973.3us  p50=26678.9us  p99=96315.0us  max=267995.4us  [native=19.36ms nat_p50=14.29ms layout=11.33ms beard=0.01ms marks=0.00ms]  [lay setup=0.00 sec=0.00 hmap=0.00 verify=0.00 | uni=0.00/0.0 lin=0.00/0.0 glob=0.00/0.0 pb=0.00/0.00]  [sections filled=0 mixed=0 air=0 v1fallback=0 bulk=NoSuchFieldException: registry]  swapfail=null  marks_seen=0 marks_landed=0 bridge_no_chunk=0 bridge_err=0 beard_chunks=0 beard_pieces=0 | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00]
+
+[12:28:10] --- EXP E5c-solo-7600 done ---
+Unmarked all force loaded chunks in minecraft:overworld
+[12:28:10] === BATTERY A done; stopping server (JFR dumps on exit) ===
+server263 stopped
+-rw-rw-r-- 1 z z 10305737 Nov 11 12:28 /home/z/my-project/audit_idle263/rec.jfr
+[12:28:15] === BATTERY A complete ===
+[t1 root-cause] battery A ran with STALE plugin jar: deployed CrusstyGen.jar was Oct 16 build WITHOUT window/wincount/honest-window support (src+classes fresh Nov 11 11:48). E1-E5 invalid (arm response was stale no-arg dump; wincount returned unknown-cmd → inside=0). Also warmup @1000,1000 GENERATED 121 fresh chunks (world data recycled with snapshot) — good: fresh coords guaranteed fills>0.
+[t1 fix] repackaged plugin/CrusstyGen.jar from existing classes/ (md5 9adfdcea6a3ac0bcfadb1d68e79d3409; old jar backed up audit_idle263/CrusstyGen.jar.oct16.bak). No src/native changes.

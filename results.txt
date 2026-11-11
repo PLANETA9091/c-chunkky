@@ -1,0 +1,419 @@
+[12:32:29] === BOOT begin (JFR profile, worker=2, fill=2, deco=1, carvers=1, watchdog off) ===
+--- deployed263.md5 ---
+# deployed263.md5 2026-11-11T12:32:29Z
+9adfdcea6a3ac0bcfadb1d68e79d3409  plugins/CrusstyGen.jar
+8634f9c431aa02c327ee95f2f4558b64  /home/z/my-project/c-faster/native/target/release/libcrussty_chunkgen.so
+booting Paper 26.3 (JDK 25)...
+server263 pid: 16644
+[12:32:46] server up
+[12:32:46] --- WARMUP 13x13 @1000,1000 (regenerated region, fills expected ~0) ---
+[CrusstyGen] stats window reset
+
+Marked 9 chunks in minecraft:overworld from [1000, 1000] to [1002, 1002] to be force loaded
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [carver-phases] n=0 acq=0.00 pack=0.00 carve=0.00 ops=0.00 apply=0.00 (ms/ch) | [CrusstyGen] native noise stage: no chunks generated yet | [CrusstyGen] honest window: window: never armed | [CrusstyGen] native deco stage: deco: no chunks decorated yet | [CrusstyGen] fill263 prof: fills=0 interp_cell=0.000ms interp_fill=0.000ms | stage[terrain=0.000 surface=0.000 hood=0.000 hood_compute=0.000 ncomp=0 park=0.000] surf_aux=0.000 surf_walk=0.000 terr_sample=0.000 terr_walk=0.000 terr_setup=0.000 terr_prefill=0.000 cc[hits=0 miss=0 box=0] nf[2d=0.000ms n=0 3d=0.000ms n=0 fb=0 shift=0.000 n=0 shiftB=0.000 n=0 blend=0.000 n=0 perlin=0.000ms pts=0 lay=0] | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00] | [CrusstyGen] [lightdivert off (env not set) diverted=0 skipped_status=0 fail=0]
+
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [carver-phases] n=0 acq=0.00 pack=0.00 carve=0.00 ops=0.00 apply=0.00 (ms/ch) | [CrusstyGen] native noise stage: no chunks generated yet | [CrusstyGen] honest window: window: never armed | [CrusstyGen] native deco stage: deco: no chunks decorated yet | [CrusstyGen] fill263 prof: fills=0 interp_cell=0.000ms interp_fill=0.000ms | stage[terrain=0.000 surface=0.000 hood=0.000 hood_compute=0.000 ncomp=0 park=0.000] surf_aux=0.000 surf_walk=0.000 terr_sample=0.000 terr_walk=0.000 terr_setup=0.000 terr_prefill=0.000 cc[hits=0 miss=0 box=0] nf[2d=0.000ms n=0 3d=0.000ms n=0 fb=0 shift=0.000 n=0 shiftB=0.000 n=0 blend=0.000 n=0 perlin=0.000ms pts=0 lay=0] | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00] | [CrusstyGen] [lightdivert off (env not set) diverted=0 skipped_status=0 fail=0]
+
+[12:32:55] --- EXP E1-square-6200: window(6200,6200,n=11) forceload [99200 99200]->[99391 99391] ---
+[CrusstyGen] window armed [6200..6211,6200..6211]
+
+window_inside=0 window_deco_inside=0
+
+Marked 144 chunks in minecraft:overworld from [6200, 6200] to [6211, 6211] to be force loaded
+  [E1-square-6200] t=2.0s inside=0 deco=0
+  [E1-square-6200] t=2.8s inside=0 deco=0
+  [E1-square-6200] t=3.5s inside=0 deco=0
+  [E1-square-6200] t=4.3s inside=0 deco=0
+  [E1-square-6200] t=5.0s inside=0 deco=0
+  [E1-square-6200] t=5.7s inside=0 deco=0
+  [E1-square-6200] t=6.5s inside=0 deco=0
+  [E1-square-6200] t=7.2s inside=0 deco=0
+  [E1-square-6200] t=7.9s inside=0 deco=0
+  [E1-square-6200] t=8.7s inside=0 deco=0
+  [E1-square-6200] t=9.4s inside=0 deco=0
+  [E1-square-6200] t=10.1s inside=0 deco=0
+  [E1-square-6200] t=10.9s inside=0 deco=0
+  [E1-square-6200] t=11.6s inside=0 deco=0
+  [E1-square-6200] t=12.3s inside=0 deco=0
+  [E1-square-6200] t=13.1s inside=0 deco=0
+  [E1-square-6200] t=13.8s inside=0 deco=0
+  [E1-square-6200] t=14.6s inside=0 deco=0
+  [E1-square-6200] t=15.3s inside=0 deco=0
+  [E1-square-6200] t=16.0s inside=0 deco=0
+  [E1-square-6200] t=16.8s inside=0 deco=0
+  [E1-square-6200] t=17.5s inside=0 deco=0
+  [E1-square-6200] t=18.2s inside=0 deco=0
+  [E1-square-6200] t=19.0s inside=0 deco=0
+  [E1-square-6200] t=19.7s inside=0 deco=0
+  [E1-square-6200] t=20.4s inside=0 deco=0
+  [E1-square-6200] t=21.2s inside=0 deco=0
+  [E1-square-6200] t=21.9s inside=0 deco=0
+  [E1-square-6200] t=22.6s inside=0 deco=0
+  [E1-square-6200] t=23.4s inside=0 deco=0
+  [E1-square-6200] t=24.1s inside=0 deco=0
+  [E1-square-6200] t=24.8s inside=0 deco=0
+  [E1-square-6200] t=25.6s inside=0 deco=0
+  [E1-square-6200] t=26.3s inside=0 deco=0
+  [E1-square-6200] t=27.1s inside=0 deco=0
+  [E1-square-6200] t=27.8s inside=0 deco=0
+  [E1-square-6200] t=28.5s inside=0 deco=0
+  [E1-square-6200] t=29.3s inside=0 deco=0
+  [E1-square-6200] t=30.0s inside=0 deco=0
+  [E1-square-6200] t=30.7s inside=0 deco=0
+  [E1-square-6200] t=31.5s inside=0 deco=0
+  [E1-square-6200] t=32.2s inside=0 deco=0
+  [E1-square-6200] t=33.0s inside=0 deco=0
+  [E1-square-6200] t=33.7s inside=0 deco=0
+  [E1-square-6200] t=34.4s inside=0 deco=0
+  [E1-square-6200] t=35.2s inside=0 deco=0
+  [E1-square-6200] t=35.9s inside=0 deco=0
+  [E1-square-6200] t=36.6s inside=0 deco=0
+  [E1-square-6200] t=37.4s inside=0 deco=0
+  [E1-square-6200] t=38.1s inside=0 deco=0
+  [E1-square-6200] t=38.9s inside=0 deco=0
+  [E1-square-6200] t=39.6s inside=0 deco=0
+  [E1-square-6200] t=40.4s inside=0 deco=0
+  [E1-square-6200] t=41.1s inside=0 deco=0
+  [E1-square-6200] t=41.9s inside=0 deco=0
+  [E1-square-6200] t=42.6s inside=0 deco=0
+  [E1-square-6200] t=43.3s inside=0 deco=0
+  [E1-square-6200] t=44.1s inside=0 deco=0
+  [E1-square-6200] t=44.9s inside=0 deco=0
+  [E1-square-6200] t=45.6s inside=0 deco=0
+  [E1-square-6200] t=46.4s inside=0 deco=0
+  [E1-square-6200] t=47.1s inside=0 deco=0
+  [E1-square-6200] t=47.9s inside=0 deco=0
+  [E1-square-6200] t=48.6s inside=0 deco=0
+  [E1-square-6200] t=49.4s inside=0 deco=0
+  [E1-square-6200] t=50.1s inside=0 deco=0
+  [E1-square-6200] t=50.9s inside=0 deco=0
+  [E1-square-6200] t=51.7s inside=0 deco=0
+  [E1-square-6200] t=52.4s inside=0 deco=0
+  [E1-square-6200] t=53.2s inside=0 deco=0
+  [E1-square-6200] t=53.9s inside=0 deco=0
+  [E1-square-6200] t=54.7s inside=0 deco=0
+  [E1-square-6200] t=55.4s inside=0 deco=0
+  [E1-square-6200] t=56.2s inside=0 deco=0
+  [E1-square-6200] t=56.9s inside=0 deco=0
+  [E1-square-6200] t=57.6s inside=0 deco=0
+  [E1-square-6200] t=58.4s inside=0 deco=0
+  [E1-square-6200] t=59.1s inside=0 deco=0
+  [E1-square-6200] t=59.9s inside=0 deco=0
+  [E1-square-6200] t=60.6s inside=0 deco=0
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [carver-phases] n=0 acq=0.00 pack=0.00 carve=0.00 ops=0.00 apply=0.00 (ms/ch) | [CrusstyGen] native noise stage: no chunks generated yet | [CrusstyGen] honest window: window[6200..6211,6200..6211] inside=0 | [CrusstyGen] native deco stage: deco: no chunks decorated yet | [CrusstyGen] fill263 prof: fills=0 interp_cell=0.000ms interp_fill=0.000ms | stage[terrain=0.000 surface=0.000 hood=0.000 hood_compute=0.000 ncomp=0 park=0.000] surf_aux=0.000 surf_walk=0.000 terr_sample=0.000 terr_walk=0.000 terr_setup=0.000 terr_prefill=0.000 cc[hits=0 miss=0 box=0] nf[2d=0.000ms n=0 3d=0.000ms n=0 fb=0 shift=0.000 n=0 shiftB=0.000 n=0 blend=0.000 n=0 perlin=0.000ms pts=0 lay=0] | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00] | [CrusstyGen] [lightdivert off (env not set) diverted=0 skipped_status=0 fail=0]
+
+[12:33:56] --- EXP E1-square-6200 done ---
+[12:33:56] --- EXP E2-row: window(6500,6400,n=11) forceload [104000 102400]->[104015 102591] ---
+[CrusstyGen] window armed [6500..6511,6400..6411]
+
+window_inside=0 window_deco_inside=0
+
+Marked 12 chunks in minecraft:overworld from [6500, 6400] to [6500, 6411] to be force loaded
+  [E2-row] t=1.4s inside=0 deco=0
+  [E2-row] t=2.1s inside=0 deco=0
+  [E2-row] t=2.8s inside=0 deco=0
+  [E2-row] t=3.6s inside=0 deco=0
+  [E2-row] t=4.3s inside=0 deco=0
+  [E2-row] t=5.1s inside=0 deco=0
+  [E2-row] t=5.8s inside=0 deco=0
+  [E2-row] t=6.5s inside=0 deco=0
+  [E2-row] t=7.3s inside=0 deco=0
+  [E2-row] t=8.0s inside=0 deco=0
+  [E2-row] t=8.8s inside=0 deco=0
+  [E2-row] t=9.5s inside=0 deco=0
+  [E2-row] t=10.3s inside=0 deco=0
+  [E2-row] t=11.0s inside=0 deco=0
+  [E2-row] t=11.7s inside=0 deco=0
+  [E2-row] t=12.5s inside=0 deco=0
+  [E2-row] t=13.2s inside=0 deco=0
+  [E2-row] t=14.0s inside=0 deco=0
+  [E2-row] t=14.8s inside=0 deco=0
+  [E2-row] t=15.6s inside=0 deco=0
+  [E2-row] t=16.3s inside=0 deco=0
+  [E2-row] t=17.1s inside=0 deco=0
+  [E2-row] t=17.8s inside=0 deco=0
+  [E2-row] t=18.6s inside=0 deco=0
+  [E2-row] t=19.3s inside=0 deco=0
+  [E2-row] t=20.1s inside=0 deco=0
+  [E2-row] t=20.8s inside=0 deco=0
+  [E2-row] t=21.5s inside=0 deco=0
+  [E2-row] t=22.3s inside=0 deco=0
+  [E2-row] t=23.1s inside=0 deco=0
+  [E2-row] t=23.8s inside=0 deco=0
+  [E2-row] t=24.6s inside=0 deco=0
+  [E2-row] t=25.4s inside=0 deco=0
+  [E2-row] t=26.2s inside=0 deco=0
+  [E2-row] t=26.9s inside=0 deco=0
+  [E2-row] t=27.7s inside=0 deco=0
+  [E2-row] t=28.4s inside=0 deco=0
+  [E2-row] t=29.2s inside=0 deco=0
+  [E2-row] t=29.9s inside=0 deco=0
+  [E2-row] t=30.6s inside=0 deco=0
+  [E2-row] t=31.4s inside=0 deco=0
+  [E2-row] t=32.1s inside=0 deco=0
+  [E2-row] t=32.9s inside=0 deco=0
+  [E2-row] t=33.7s inside=0 deco=0
+  [E2-row] t=34.4s inside=0 deco=0
+  [E2-row] t=35.2s inside=0 deco=0
+  [E2-row] t=35.9s inside=0 deco=0
+  [E2-row] t=36.7s inside=0 deco=0
+  [E2-row] t=37.4s inside=0 deco=0
+  [E2-row] t=38.1s inside=0 deco=0
+  [E2-row] t=38.9s inside=0 deco=0
+  [E2-row] t=39.6s inside=0 deco=0
+  [E2-row] t=40.4s inside=0 deco=0
+  [E2-row] t=41.1s inside=0 deco=0
+  [E2-row] t=41.8s inside=0 deco=0
+  [E2-row] t=42.6s inside=0 deco=0
+  [E2-row] t=43.3s inside=0 deco=0
+  [E2-row] t=44.1s inside=0 deco=0
+  [E2-row] t=44.8s inside=0 deco=0
+  [E2-row] t=45.6s inside=0 deco=0
+  [E2-row] t=46.3s inside=0 deco=0
+  [E2-row] t=47.1s inside=0 deco=0
+  [E2-row] t=47.8s inside=0 deco=0
+  [E2-row] t=48.6s inside=0 deco=0
+  [E2-row] t=49.3s inside=0 deco=0
+  [E2-row] t=50.1s inside=0 deco=0
+  [E2-row] t=50.8s inside=0 deco=0
+  [E2-row] t=51.6s inside=0 deco=0
+  [E2-row] t=52.3s inside=0 deco=0
+  [E2-row] t=53.1s inside=0 deco=0
+  [E2-row] t=53.8s inside=0 deco=0
+  [E2-row] t=54.5s inside=0 deco=0
+  [E2-row] t=55.3s inside=0 deco=0
+  [E2-row] t=56.0s inside=0 deco=0
+  [E2-row] t=56.8s inside=0 deco=0
+  [E2-row] t=57.5s inside=0 deco=0
+  [E2-row] t=58.2s inside=0 deco=0
+  [E2-row] t=59.1s inside=0 deco=0
+  [E2-row] t=59.9s inside=0 deco=0
+  [E2-row] t=60.8s inside=0 deco=0
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [carver-phases] n=0 acq=0.00 pack=0.00 carve=0.00 ops=0.00 apply=0.00 (ms/ch) | [CrusstyGen] native noise stage: no chunks generated yet | [CrusstyGen] honest window: window[6500..6511,6400..6411] inside=0 | [CrusstyGen] native deco stage: deco: no chunks decorated yet | [CrusstyGen] fill263 prof: fills=0 interp_cell=0.000ms interp_fill=0.000ms | stage[terrain=0.000 surface=0.000 hood=0.000 hood_compute=0.000 ncomp=0 park=0.000] surf_aux=0.000 surf_walk=0.000 terr_sample=0.000 terr_walk=0.000 terr_setup=0.000 terr_prefill=0.000 cc[hits=0 miss=0 box=0] nf[2d=0.000ms n=0 3d=0.000ms n=0 fb=0 shift=0.000 n=0 shiftB=0.000 n=0 blend=0.000 n=0 perlin=0.000ms pts=0 lay=0] | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00] | [CrusstyGen] [lightdivert off (env not set) diverted=0 skipped_status=0 fail=0]
+
+[12:34:58] --- EXP E2-row done ---
+[12:34:58] --- EXP E3-col: window(6400,6700,n=11) forceload [102400 107200]->[102591 107215] ---
+[CrusstyGen] window armed [6400..6411,6700..6711]
+
+window_inside=0 window_deco_inside=0
+
+Marked 12 chunks in minecraft:overworld from [6400, 6700] to [6411, 6700] to be force loaded
+  [E3-col] t=1.1s inside=0 deco=0
+  [E3-col] t=1.9s inside=0 deco=0
+  [E3-col] t=2.6s inside=0 deco=0
+  [E3-col] t=3.4s inside=0 deco=0
+  [E3-col] t=4.1s inside=0 deco=0
+  [E3-col] t=4.8s inside=0 deco=0
+  [E3-col] t=5.6s inside=0 deco=0
+  [E3-col] t=6.3s inside=0 deco=0
+  [E3-col] t=7.0s inside=0 deco=0
+  [E3-col] t=7.8s inside=0 deco=0
+  [E3-col] t=8.5s inside=0 deco=0
+  [E3-col] t=9.3s inside=0 deco=0
+  [E3-col] t=10.0s inside=0 deco=0
+  [E3-col] t=10.7s inside=0 deco=0
+  [E3-col] t=11.5s inside=0 deco=0
+  [E3-col] t=12.2s inside=0 deco=0
+  [E3-col] t=12.9s inside=0 deco=0
+  [E3-col] t=13.7s inside=0 deco=0
+  [E3-col] t=14.4s inside=0 deco=0
+  [E3-col] t=15.2s inside=0 deco=0
+  [E3-col] t=15.9s inside=0 deco=0
+  [E3-col] t=16.6s inside=0 deco=0
+  [E3-col] t=17.4s inside=0 deco=0
+  [E3-col] t=18.1s inside=0 deco=0
+  [E3-col] t=18.8s inside=0 deco=0
+  [E3-col] t=19.6s inside=0 deco=0
+  [E3-col] t=20.3s inside=0 deco=0
+  [E3-col] t=21.0s inside=0 deco=0
+  [E3-col] t=21.8s inside=0 deco=0
+  [E3-col] t=22.5s inside=0 deco=0
+  [E3-col] t=23.2s inside=0 deco=0
+  [E3-col] t=24.0s inside=0 deco=0
+  [E3-col] t=24.7s inside=0 deco=0
+  [E3-col] t=25.4s inside=0 deco=0
+  [E3-col] t=26.2s inside=0 deco=0
+  [E3-col] t=26.9s inside=0 deco=0
+  [E3-col] t=27.6s inside=0 deco=0
+  [E3-col] t=28.4s inside=0 deco=0
+  [E3-col] t=29.1s inside=0 deco=0
+  [E3-col] t=29.9s inside=0 deco=0
+  [E3-col] t=30.6s inside=0 deco=0
+  [E3-col] t=31.3s inside=0 deco=0
+  [E3-col] t=32.1s inside=0 deco=0
+  [E3-col] t=32.8s inside=0 deco=0
+  [E3-col] t=33.5s inside=0 deco=0
+  [E3-col] t=34.3s inside=0 deco=0
+  [E3-col] t=35.0s inside=0 deco=0
+  [E3-col] t=35.7s inside=0 deco=0
+  [E3-col] t=36.5s inside=0 deco=0
+  [E3-col] t=37.2s inside=0 deco=0
+  [E3-col] t=38.0s inside=0 deco=0
+  [E3-col] t=38.7s inside=0 deco=0
+  [E3-col] t=39.4s inside=0 deco=0
+  [E3-col] t=40.2s inside=0 deco=0
+  [E3-col] t=40.9s inside=0 deco=0
+  [E3-col] t=41.6s inside=0 deco=0
+  [E3-col] t=42.4s inside=0 deco=0
+  [E3-col] t=43.1s inside=0 deco=0
+  [E3-col] t=43.8s inside=0 deco=0
+  [E3-col] t=44.6s inside=0 deco=0
+  [E3-col] t=45.3s inside=0 deco=0
+  [E3-col] t=46.0s inside=0 deco=0
+  [E3-col] t=46.8s inside=0 deco=0
+  [E3-col] t=47.5s inside=0 deco=0
+  [E3-col] t=48.2s inside=0 deco=0
+  [E3-col] t=49.0s inside=0 deco=0
+  [E3-col] t=49.7s inside=0 deco=0
+  [E3-col] t=50.4s inside=0 deco=0
+  [E3-col] t=51.2s inside=0 deco=0
+  [E3-col] t=51.9s inside=0 deco=0
+  [E3-col] t=52.7s inside=0 deco=0
+  [E3-col] t=53.4s inside=0 deco=0
+  [E3-col] t=54.1s inside=0 deco=0
+  [E3-col] t=54.9s inside=0 deco=0
+  [E3-col] t=55.6s inside=0 deco=0
+  [E3-col] t=56.3s inside=0 deco=0
+  [E3-col] t=57.1s inside=0 deco=0
+  [E3-col] t=57.8s inside=0 deco=0
+  [E3-col] t=58.6s inside=0 deco=0
+  [E3-col] t=59.3s inside=0 deco=0
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [carver-phases] n=0 acq=0.00 pack=0.00 carve=0.00 ops=0.00 apply=0.00 (ms/ch) | [CrusstyGen] native noise stage: no chunks generated yet | [CrusstyGen] honest window: window[6400..6411,6700..6711] inside=0 | [CrusstyGen] native deco stage: deco: no chunks decorated yet | [CrusstyGen] fill263 prof: fills=0 interp_cell=0.000ms interp_fill=0.000ms | stage[terrain=0.000 surface=0.000 hood=0.000 hood_compute=0.000 ncomp=0 park=0.000] surf_aux=0.000 surf_walk=0.000 terr_sample=0.000 terr_walk=0.000 terr_setup=0.000 terr_prefill=0.000 cc[hits=0 miss=0 box=0] nf[2d=0.000ms n=0 3d=0.000ms n=0 fb=0 shift=0.000 n=0 shiftB=0.000 n=0 blend=0.000 n=0 perlin=0.000ms pts=0 lay=0] | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00] | [CrusstyGen] [lightdivert off (env not set) diverted=0 skipped_status=0 fail=0]
+
+[12:35:58] --- EXP E3-col done ---
+[12:35:58] --- EXP E4-square-6900: window(6900,6400,n=11) forceload [110400 102400]->[110591 102591] ---
+[CrusstyGen] window armed [6900..6911,6400..6411]
+
+window_inside=0 window_deco_inside=0
+
+Marked 144 chunks in minecraft:overworld from [6900, 6400] to [6911, 6411] to be force loaded
+  [E4-square-6900] t=1.7s inside=0 deco=0
+  [E4-square-6900] t=2.4s inside=0 deco=0
+  [E4-square-6900] t=3.2s inside=0 deco=0
+  [E4-square-6900] t=3.9s inside=0 deco=0
+  [E4-square-6900] t=4.7s inside=0 deco=0
+  [E4-square-6900] t=5.4s inside=0 deco=0
+  [E4-square-6900] t=6.1s inside=0 deco=0
+  [E4-square-6900] t=6.9s inside=0 deco=0
+  [E4-square-6900] t=7.6s inside=0 deco=0
+  [E4-square-6900] t=8.3s inside=0 deco=0
+  [E4-square-6900] t=9.1s inside=0 deco=0
+  [E4-square-6900] t=9.8s inside=0 deco=0
+  [E4-square-6900] t=10.5s inside=0 deco=0
+  [E4-square-6900] t=11.3s inside=0 deco=0
+  [E4-square-6900] t=12.0s inside=0 deco=0
+  [E4-square-6900] t=12.8s inside=0 deco=0
+  [E4-square-6900] t=13.5s inside=0 deco=0
+  [E4-square-6900] t=14.2s inside=0 deco=0
+  [E4-square-6900] t=15.0s inside=0 deco=0
+  [E4-square-6900] t=15.7s inside=0 deco=0
+  [E4-square-6900] t=16.4s inside=0 deco=0
+  [E4-square-6900] t=17.2s inside=0 deco=0
+  [E4-square-6900] t=17.9s inside=0 deco=0
+  [E4-square-6900] t=18.7s inside=0 deco=0
+  [E4-square-6900] t=19.4s inside=0 deco=0
+  [E4-square-6900] t=20.1s inside=0 deco=0
+  [E4-square-6900] t=20.9s inside=0 deco=0
+  [E4-square-6900] t=21.6s inside=0 deco=0
+  [E4-square-6900] t=22.3s inside=0 deco=0
+  [E4-square-6900] t=23.1s inside=0 deco=0
+  [E4-square-6900] t=23.8s inside=0 deco=0
+  [E4-square-6900] t=24.6s inside=0 deco=0
+  [E4-square-6900] t=25.3s inside=0 deco=0
+  [E4-square-6900] t=26.0s inside=0 deco=0
+  [E4-square-6900] t=26.8s inside=0 deco=0
+  [E4-square-6900] t=27.5s inside=0 deco=0
+  [E4-square-6900] t=28.2s inside=0 deco=0
+  [E4-square-6900] t=29.0s inside=0 deco=0
+  [E4-square-6900] t=29.7s inside=0 deco=0
+  [E4-square-6900] t=30.5s inside=0 deco=0
+  [E4-square-6900] t=31.2s inside=0 deco=0
+  [E4-square-6900] t=31.9s inside=0 deco=0
+  [E4-square-6900] t=32.7s inside=0 deco=0
+  [E4-square-6900] t=33.4s inside=0 deco=0
+  [E4-square-6900] t=34.1s inside=0 deco=0
+  [E4-square-6900] t=34.9s inside=0 deco=0
+  [E4-square-6900] t=35.6s inside=0 deco=0
+  [E4-square-6900] t=36.3s inside=0 deco=0
+  [E4-square-6900] t=37.1s inside=0 deco=0
+  [E4-square-6900] t=37.8s inside=0 deco=0
+  [E4-square-6900] t=38.6s inside=0 deco=0
+  [E4-square-6900] t=39.3s inside=0 deco=0
+  [E4-square-6900] t=40.0s inside=0 deco=0
+  [E4-square-6900] t=40.8s inside=0 deco=0
+  [E4-square-6900] t=41.5s inside=0 deco=0
+  [E4-square-6900] t=42.2s inside=0 deco=0
+  [E4-square-6900] t=43.0s inside=0 deco=0
+  [E4-square-6900] t=43.7s inside=0 deco=0
+  [E4-square-6900] t=44.5s inside=0 deco=0
+  [E4-square-6900] t=45.2s inside=0 deco=0
+  [E4-square-6900] t=45.9s inside=0 deco=0
+  [E4-square-6900] t=46.7s inside=0 deco=0
+  [E4-square-6900] t=47.4s inside=0 deco=0
+  [E4-square-6900] t=48.1s inside=0 deco=0
+  [E4-square-6900] t=48.9s inside=0 deco=0
+  [E4-square-6900] t=49.6s inside=0 deco=0
+  [E4-square-6900] t=50.3s inside=0 deco=0
+  [E4-square-6900] t=51.1s inside=0 deco=0
+  [E4-square-6900] t=51.8s inside=0 deco=0
+  [E4-square-6900] t=52.6s inside=0 deco=0
+  [E4-square-6900] t=53.3s inside=0 deco=0
+  [E4-square-6900] t=54.0s inside=0 deco=0
+  [E4-square-6900] t=54.8s inside=0 deco=0
+  [E4-square-6900] t=55.5s inside=0 deco=0
+  [E4-square-6900] t=56.2s inside=0 deco=0
+  [E4-square-6900] t=57.0s inside=0 deco=0
+  [E4-square-6900] t=57.7s inside=0 deco=0
+  [E4-square-6900] t=58.4s inside=0 deco=0
+  [E4-square-6900] t=59.2s inside=0 deco=0
+  [E4-square-6900] t=59.9s inside=0 deco=0
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [carver-phases] n=0 acq=0.00 pack=0.00 carve=0.00 ops=0.00 apply=0.00 (ms/ch) | [CrusstyGen] native noise stage: no chunks generated yet | [CrusstyGen] honest window: window[6900..6911,6400..6411] inside=0 | [CrusstyGen] native deco stage: deco: no chunks decorated yet | [CrusstyGen] fill263 prof: fills=0 interp_cell=0.000ms interp_fill=0.000ms | stage[terrain=0.000 surface=0.000 hood=0.000 hood_compute=0.000 ncomp=0 park=0.000] surf_aux=0.000 surf_walk=0.000 terr_sample=0.000 terr_walk=0.000 terr_setup=0.000 terr_prefill=0.000 cc[hits=0 miss=0 box=0] nf[2d=0.000ms n=0 3d=0.000ms n=0 fb=0 shift=0.000 n=0 shiftB=0.000 n=0 blend=0.000 n=0 perlin=0.000ms pts=0 lay=0] | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00] | [CrusstyGen] [lightdivert off (env not set) diverted=0 skipped_status=0 fail=0]
+
+[12:36:59] --- EXP E4-square-6900 done ---
+[12:36:59] --- EXP E5b-concurrent: rectB(7400) submitted, then rectA(7200) ~0.15s later ---
+[CrusstyGen] window armed [7200..7211,7200..7211]
+
+Marked 144 chunks in minecraft:overworld from [7400, 7200] to [7411, 7211] to be force loaded
+Marked 144 chunks in minecraft:overworld from [7200, 7200] to [7211, 7211] to be force loaded
+  [E5b] t=2.4s inside=0 deco=0
+  [E5b] t=3.2s inside=0 deco=0
+  [E5b] t=3.9s inside=0 deco=0
+  [E5b] t=4.6s inside=0 deco=0
+  [E5b] t=5.4s inside=0 deco=0
+  [E5b] t=6.1s inside=0 deco=0
+  [E5b] t=6.8s inside=0 deco=0
+  [E5b] t=7.6s inside=0 deco=0
+  [E5b] t=8.3s inside=0 deco=0
+  [E5b] t=9.1s inside=0 deco=0
+  [E5b] t=9.8s inside=0 deco=0
+  [E5b] t=10.5s inside=0 deco=0
+  [E5b] t=11.3s inside=0 deco=0
+  [E5b] t=12.0s inside=0 deco=0
+  [E5b] t=12.7s inside=0 deco=0
+  [E5b] t=13.5s inside=0 deco=0
+  [E5b] t=14.2s inside=0 deco=0
+  [E5b] t=15.0s inside=0 deco=0
+  [E5b] t=15.7s inside=0 deco=0
+  [E5b] t=16.4s inside=0 deco=0
+  [E5b] t=17.2s inside=0 deco=0
+  [E5b] t=17.9s inside=0 deco=0
+  [E5b] t=18.7s inside=0 deco=0
+  [E5b] t=19.4s inside=0 deco=0
+  [E5b] t=20.1s inside=0 deco=0
+  [E5b] t=20.9s inside=0 deco=0
+  [E5b] t=21.6s inside=0 deco=0
+  [E5b] t=22.3s inside=0 deco=0
+  [E5b] t=23.1s inside=0 deco=0
+  [E5b] t=23.8s inside=0 deco=0
+  [E5b] t=24.6s inside=0 deco=0
+  [E5b] t=25.3s inside=0 deco=0
+  [E5b] t=26.0s inside=0 deco=0
+  [E5b] t=26.8s inside=0 deco=0
+  [E5b] t=27.5s inside=0 deco=0
+  [E5b] t=28.2s inside=0 deco=0
+  [E5b] t=29.0s inside=0 deco=0
+  [E5b] t=29.7s inside=0 deco=0
+  [E5b] t=30.5s inside=0 deco=0
+  [E5b] t=31.2s inside=0 deco=0
+  [E5b] t=31.9s inside=0 deco=0
+  [E5b] t=32.7s inside=0 deco=0
