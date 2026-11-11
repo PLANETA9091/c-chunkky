@@ -1,0 +1,1660 @@
+total samples in file-window (>= 17:11:00): 870
+
+=== samples per thread (window) ===
+  Paper Common Worker #1: 391
+  Paper Common Worker #0: 355
+  Server thread: 95
+  Log4j2-AsyncAppenderEventDispatcher-1-Async: 15
+  Paper I/O Worker #0: 8
+  RCON Listener #1: 2
+  Paper DensityBuffer garbage collector: 1
+  RCON Client /0:0:0:0:0:0:0:1 #11: 1
+  Craft Async Scheduler Management Thread: 1
+  RCON Client /0:0:0:0:0:0:0:1 #14: 1
+
+=== top leaf frames (thread, leaf) x count ===
+    12  [Paper Common Worker #0]  net.minecraft.world.level.levelgen.synth.NoiseStack$Perlin.get(double, double, double) line: 115
+     8  [Paper Common Worker #1]  net.minecraft.server.level.WorldGenRegion.lambda$new$2(ChunkAccess, ChunkStep, GenerationChunkHolder, int, int) line: 124
+     8  [Paper Common Worker #1]  com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1719
+     7  [Paper Common Worker #1]  net.minecraft.world.level.levelgen.synth.NoiseStack$Perlin.get(double, double, double) line: 115
+     6  [Paper Common Worker #0]  com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1719
+     4  [Paper Common Worker #1]  java.util.Objects.requireNonNull(Object) line: 219
+     4  [Paper Common Worker #1]  ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder.lambda$setGenerationTask$0(ChunkProgressionTask, ChunkStatus, List, ChunkAccess, Throwable) line: 1616
+     4  [Paper Common Worker #0]  net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 140
+     4  [Paper Common Worker #1]  net.minecraft.util.StaticCache2D.get(int, int) line: 49
+     4  [Paper Common Worker #1]  java.lang.invoke.DirectMethodHandle.allocateInstance(Object) line: 500
+     4  [Paper Common Worker #0]  ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkHolderManager.getChunkHolder(int, int) line: 929
+     4  [Paper Common Worker #0]  net.minecraft.nbt.ListTag.getIdToWrite(List, int) line: 37
+     4  [Paper Common Worker #1]  net.minecraft.world.level.chunk.PalettedContainer.get(int) line: 236
+     3  [Paper Common Worker #1]  net.minecraft.util.StaticCache2D.<init>(int, int, int, int, StaticCache2D$Initializer) line: 30
+     3  [Paper Common Worker #1]  net.minecraft.world.level.chunk.ProtoChunk.getBlockState(int, int, int) line: 161
+     3  [Paper Common Worker #0]  ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler.lambda$schedule$0(int, int, NewChunkHolder, List, int, int) line: 765
+     3  [Paper Common Worker #0]  java.util.Collections.unmodifiableCollection(Collection) line: 1044
+     3  [Paper Common Worker #0]  com.planeta.crussty.DecoDriver.tagMembers(String) line: 1177
+     3  [Paper Common Worker #1]  java.util.Comparator.lambda$comparingInt$7b0bb60$1(ToIntFunction, Object, Object) line: 494
+     3  [Paper Common Worker #0]  net.minecraft.world.level.chunk.PalettedContainer.get(int) line: 236
+     3  [Paper Common Worker #1]  ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkHolderManager.getChunkHolder(int, int) line: 929
+     3  [Paper Common Worker #0]  net.minecraft.nbt.CompoundTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 57
+     3  [Paper Common Worker #0]  net.minecraft.util.StaticCache2D.get(int, int) line: 49
+     3  [Paper Common Worker #1]  java.util.concurrent.ConcurrentHashMap.get(Object) line: 951
+     3  [Paper Common Worker #0]  net.minecraft.world.level.chunk.Strategy.getIndex(int, int, int) line: 70
+     3  [Paper Common Worker #0]  net.minecraft.world.level.chunk.LinearPalette.idFor(Object, PaletteResize) line: 42
+     3  [Paper Common Worker #0]  java.util.Comparator.lambda$comparingInt$7b0bb60$1(ToIntFunction, Object, Object) line: 494
+     2  [Paper Common Worker #0]  ca.spottedleaf.concurrentutil.map.concurrent.longs.ConcurrentChainedLong2ReferenceHashTable.getNode(long) line: 237
+     2  [Paper Common Worker #1]  net.minecraft.world.level.chunk.LevelChunkSection.fillBiomesFromNoise(BiomeResolver, int, int, int) line: 334
+     2  [Paper Common Worker #0]  net.minecraft.world.level.chunk.ChunkAccess.getSections() line: 241
+     2  [Paper Common Worker #0]  java.lang.Class.cast(Object) line: 3491
+     2  [Paper Common Worker #1]  net.minecraft.world.level.chunk.LevelChunkSection.setBlockState(int, int, int, BlockState, boolean) line: 134
+     2  [Paper Common Worker #1]  java.lang.ThreadLocal$ThreadLocalMap.getEntry(ThreadLocal) line: 491
+     2  [Paper Common Worker #1]  java.lang.AbstractStringBuilder.append(String) line: 650
+     2  [Paper Common Worker #0]  com.planeta.crussty.ChunkGenNative.decoRunBatch(long, long, long, int, int, int, int, int[], int, int, Object, int[], int[], int[])
+     2  [Paper Common Worker #1]  java.util.TreeMap.compare(Object, Object) line: 1605
+     2  [Paper Common Worker #0]  net.minecraft.server.level.WorldGenRegion.getChunk(int, int) line: 175
+     2  [Paper Common Worker #1]  net.minecraft.util.SimpleBitStorage.get(int) line: 348
+     2  [Paper Common Worker #1]  ca.spottedleaf.moonrise.patches.collisions.CollisionUtil$MergedVoxelCoordinateList.merge(double[], double, double[], double, boolean, boolean) line: 1496
+     2  [Paper Common Worker #1]  net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate.buildInfoList(List, List, List) line: 162
+     2  [Paper Common Worker #1]  ca.spottedleaf.moonrise.patches.blockstate_propertyaccess.util.ZeroCollidingReferenceStateTable.get(long, Property) line: 108
+     2  [Paper Common Worker #0]  net.minecraft.world.level.levelgen.Heightmap.primeHeightmaps(ChunkAccess, Set) line: 74
+     2  [Paper Common Worker #0]  net.minecraft.util.StaticCache2D.<init>(int, int, int, int, StaticCache2D$Initializer) line: 30
+     2  [Paper Common Worker #1]  net.minecraft.world.level.chunk.LinearPalette.idFor(Object, PaletteResize) line: 42
+     2  [Paper Common Worker #0]  ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.performLightIncrease(LightChunkGetter) line: 1146
+     2  [Paper Common Worker #1]  net.minecraft.world.level.levelgen.Heightmap.primeHeightmaps(ChunkAccess, Set) line: 74
+     2  [Paper Common Worker #1]  net.minecraft.world.level.chunk.PalettedContainer$Data.copyFrom(Palette, BitStorage) line: 511
+     2  [Paper Common Worker #0]  java.util.Objects.requireNonNull(Object) line: 219
+     2  [Paper Common Worker #0]  ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder.addNeighbourUsingChunk() line: 679
+     2  [Paper Common Worker #0]  java.lang.ThreadLocal.get(Thread) line: 184
+     2  [Paper Common Worker #0]  jdk.internal.foreign.AbstractMemorySegmentImpl.isAlignedForElement(long, long) line: 385
+     2  [Paper Common Worker #0]  net.minecraft.util.SimpleBitStorage.<init>(int, int, int[]) line: 234
+     2  [Paper Common Worker #0]  com.mojang.serialization.Encoder$1.encode(Object, DynamicOps, Object) line: 25
+     2  [Paper Common Worker #1]  net.minecraft.util.SimpleBitStorage.<init>(int, int, int[]) line: 236
+     2  [Paper Common Worker #1]  ca.spottedleaf.moonrise.patches.bitstorage.PaletteReadoutCache.readout(BitStorage, Palette) line: 96
+     2  [Paper Common Worker #1]  ca.spottedleaf.ioutil.buffer.Buffer.advanceWrite(long) line: 343
+     2  [Paper Common Worker #1]  ca.spottedleaf.ioutil.stream.AbstractBufferOutputStream.writeBytes(String, int, int) line: 159
+     2  [Paper Common Worker #1]  net.minecraft.nbt.CompoundTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 55
+     2  [Paper Common Worker #1]  net.minecraft.world.level.chunk.PalettedContainer$Data.storage() line: 498
+     2  [Paper Common Worker #1]  net.minecraft.nbt.CompoundTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 57
+
+### leaf-target 'NoiseStack$Perlin': 19 samples ~ 0.66 ms/ch
+
+### leaf-target 'ReferencePipeline': 3 samples ~ 0.10 ms/ch
+
+### leaf-target 'Spliterator': 7 samples ~ 0.24 ms/ch
+
+### leaf-target 'forEachRemaining': 1 samples ~ 0.03 ms/ch
+
+### leaf-target 'layoutBulk': 24 samples ~ 0.83 ms/ch
+
+### leaf-target 'PaletteReadoutCache': 10 samples ~ 0.35 ms/ch
+
+### leaf-target 'ListTag.getIdToWrite': 7 samples ~ 0.24 ms/ch
+
+### leaf-target 'PalettedContainer': 21 samples ~ 0.73 ms/ch
+
+### leaf-target 'GeodeFeature': 9 samples ~ 0.31 ms/ch
+
+### leaf-target 'performLightIncrease': 13 samples ~ 0.45 ms/ch
+
+### leaf-target 'ForwardLogHandler': 1 samples ~ 0.03 ms/ch
+
+### leaf-target 'StaticCache2D': 15 samples ~ 0.52 ms/ch
+
+### leaf-target 'CarverDriver': 3 samples ~ 0.10 ms/ch
+
+=== leaf-target attribution (tag, thread, leaf -> first owner frame) ===
+    12 ~0.42ms/ch  [Paper Common Worker #0] net.minecraft.world.level.levelgen.synth.NoiseStack$Perlin.get(double, double, double) line: 115
+        owner: net.minecraft.world.level.levelgen.synth.NoiseStack$Perlin.get(double, double, double) line: 115
+     8 ~0.28ms/ch  [Paper Common Worker #1] com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1719
+        owner: com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1719
+     7 ~0.24ms/ch  [Paper Common Worker #1] net.minecraft.world.level.levelgen.synth.NoiseStack$Perlin.get(double, double, double) line: 115
+        owner: net.minecraft.world.level.levelgen.synth.NoiseStack$Perlin.get(double, double, double) line: 115
+     6 ~0.21ms/ch  [Paper Common Worker #0] com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1719
+        owner: com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1719
+     4 ~0.14ms/ch  [Paper Common Worker #0] net.minecraft.nbt.ListTag.getIdToWrite(List, int) line: 37
+        owner: net.minecraft.nbt.ListTag.getIdToWrite(List, int) line: 37
+     4 ~0.14ms/ch  [Paper Common Worker #1] net.minecraft.world.level.chunk.PalettedContainer.get(int) line: 236
+        owner: net.minecraft.world.level.chunk.PalettedContainer.get(int) line: 236
+     4 ~0.14ms/ch  [Paper Common Worker #0] net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 140
+        owner: net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 140
+     4 ~0.14ms/ch  [Paper Common Worker #1] net.minecraft.util.StaticCache2D.get(int, int) line: 49
+        owner: net.minecraft.util.StaticCache2D.get(int, int) line: 49
+     3 ~0.10ms/ch  [Paper Common Worker #0] net.minecraft.world.level.chunk.PalettedContainer.get(int) line: 236
+        owner: net.minecraft.world.level.chunk.PalettedContainer.get(int) line: 236
+     3 ~0.10ms/ch  [Paper Common Worker #1] net.minecraft.util.StaticCache2D.<init>(int, int, int, int, StaticCache2D$Initializer) line: 30
+        owner: net.minecraft.util.StaticCache2D.<init>(int, int, int, int, StaticCache2D$Initializer) line: 30
+     3 ~0.10ms/ch  [Paper Common Worker #0] net.minecraft.util.StaticCache2D.get(int, int) line: 49
+        owner: net.minecraft.util.StaticCache2D.get(int, int) line: 49
+     2 ~0.07ms/ch  [Paper Common Worker #1] it.unimi.dsi.fastutil.objects.ObjectArrayList$Spliterator.forEachRemaining(Consumer) line: 974
+        owner: net.minecraft.world.attribute.EnvironmentAttributeSystem.addBiomeLayer(EnvironmentAttributeSystem$Builder, HolderLookup, BiomeManager) line: 87
+     2 ~0.07ms/ch  [Paper Common Worker #1] ca.spottedleaf.moonrise.patches.bitstorage.PaletteReadoutCache.readout(BitStorage, Palette) line: 96
+        owner: net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 364
+     2 ~0.07ms/ch  [Paper Common Worker #0] ca.spottedleaf.moonrise.patches.bitstorage.PaletteReadoutCache.readout(BitStorage, Palette) line: 81
+        owner: net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 364
+     2 ~0.07ms/ch  [Paper Common Worker #0] ca.spottedleaf.moonrise.patches.bitstorage.PaletteReadoutCache.readout(BitStorage, Palette) line: 96
+        owner: net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 364
+     2 ~0.07ms/ch  [Paper Common Worker #1] net.minecraft.world.level.chunk.PalettedContainer$Data.copyFrom(Palette, BitStorage) line: 511
+        owner: net.minecraft.world.level.chunk.PalettedContainer$Data.copyFrom(Palette, BitStorage) line: 511
+     2 ~0.07ms/ch  [Paper Common Worker #1] net.minecraft.world.level.chunk.PalettedContainer$Data.storage() line: 498
+        owner: net.minecraft.world.level.chunk.PalettedContainer$Data.storage() line: 498
+     2 ~0.07ms/ch  [Paper Common Worker #0] ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.performLightIncrease(LightChunkGetter) line: 1146
+        owner: (none)
+     2 ~0.07ms/ch  [Paper Common Worker #0] ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.performLightIncrease(LightChunkGetter) line: 1154
+        owner: (none)
+     2 ~0.07ms/ch  [Paper Common Worker #0] ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.performLightIncrease(LightChunkGetter) line: 1151
+        owner: (none)
+     2 ~0.07ms/ch  [Paper Common Worker #1] ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.performLightIncrease(LightChunkGetter) line: 1156
+        owner: (none)
+     2 ~0.07ms/ch  [Paper Common Worker #0] net.minecraft.util.StaticCache2D.<init>(int, int, int, int, StaticCache2D$Initializer) line: 30
+        owner: net.minecraft.util.StaticCache2D.<init>(int, int, int, int, StaticCache2D$Initializer) line: 30
+     1 ~0.03ms/ch  [Paper Common Worker #1] java.util.stream.ReferencePipeline$7$1FlatMap.accept(Object) line: 288
+        owner: net.minecraft.world.attribute.EnvironmentAttributeSystem.addBiomeLayer(EnvironmentAttributeSystem$Builder, HolderLookup, BiomeManager) line: 87
+     1 ~0.03ms/ch  [Paper Common Worker #0] java.util.stream.ReferencePipeline$7$1FlatMap.accept(Object) line: 288
+        owner: net.minecraft.world.attribute.EnvironmentAttributeSystem.addBiomeLayer(EnvironmentAttributeSystem$Builder, HolderLookup, BiomeManager) line: 87
+     1 ~0.03ms/ch  [Server thread] java.util.stream.ReferencePipeline$3$1.accept(Object) line: 214
+        owner: net.minecraft.world.level.storage.PrimaryLevelData.stringCollectionToTag(Set) line: 205
+     1 ~0.03ms/ch  [Paper Common Worker #0] java.util.stream.StreamOpFlag.fromCharacteristics(Spliterator) line: 751
+        owner: net.minecraft.world.attribute.EnvironmentAttributeSystem.lambda$addBiomeLayer$0(Holder$Reference) line: 85
+     1 ~0.03ms/ch  [Paper Common Worker #1] java.util.stream.StreamSupport.intStream(Spliterator$OfInt, boolean) line: 138
+        owner: net.minecraft.world.attribute.EnvironmentAttributeSystem.lambda$addBiomeLayer$0(Holder$Reference) line: 85
+     1 ~0.03ms/ch  [Paper Common Worker #0] java.util.Spliterators$IteratorSpliterator.tryAdvance(Consumer) line: 1944
+        owner: net.minecraft.SystemReport.lambda$putHardware$0(HardwareAbstractionLayer) line: 105
+     1 ~0.03ms/ch  [Paper Common Worker #1] java.util.stream.StreamOpFlag.fromCharacteristics(Spliterator) line: 750
+        owner: net.minecraft.core.MappedRegistry.listElements() line: 256
+     1 ~0.03ms/ch  [Paper Common Worker #0] java.util.stream.StreamOpFlag.fromCharacteristics(Spliterator) line: 750
+        owner: net.minecraft.core.MappedRegistry.listElements() line: 256
+     1 ~0.03ms/ch  [Server thread] java.util.Spliterator.getExactSizeIfKnown() line: 414
+        owner: net.minecraft.nbt.NbtOps.createIntList(IntStream) line: 295
+     1 ~0.03ms/ch  [Paper Common Worker #0] com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1708
+        owner: com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1708
+     1 ~0.03ms/ch  [Paper Common Worker #0] com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1542
+        owner: com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1542
+     1 ~0.03ms/ch  [Paper Common Worker #1] com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1711
+        owner: com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1711
+     1 ~0.03ms/ch  [Paper Common Worker #0] com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1543
+        owner: com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1543
+     1 ~0.03ms/ch  [Paper Common Worker #1] com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1700
+        owner: com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1700
+     1 ~0.03ms/ch  [Paper Common Worker #1] com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1543
+        owner: com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1543
+     1 ~0.03ms/ch  [Paper Common Worker #1] com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1594
+        owner: com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1594
+     1 ~0.03ms/ch  [Paper Common Worker #1] com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1701
+        owner: com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1701
+     1 ~0.03ms/ch  [Paper Common Worker #0] com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1700
+        owner: com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1700
+     1 ~0.03ms/ch  [Paper Common Worker #0] com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1711
+        owner: com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1711
+     1 ~0.03ms/ch  [Paper Common Worker #0] ca.spottedleaf.moonrise.patches.bitstorage.PaletteReadoutCache.readout(BitStorage, Palette) line: 80
+        owner: net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 364
+     1 ~0.03ms/ch  [Paper Common Worker #0] ca.spottedleaf.moonrise.patches.bitstorage.PaletteReadoutCache.readout(BitStorage, Palette) line: 86
+        owner: net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 364
+     1 ~0.03ms/ch  [Paper Common Worker #1] ca.spottedleaf.moonrise.patches.bitstorage.PaletteReadoutCache.readout(BitStorage, Palette) line: 81
+        owner: net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 364
+     1 ~0.03ms/ch  [Paper Common Worker #0] ca.spottedleaf.moonrise.patches.bitstorage.PaletteReadoutCache.readout(BitStorage, Palette) line: 39
+        owner: net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 364
+     1 ~0.03ms/ch  [Paper Common Worker #1] net.minecraft.nbt.ListTag.getIdToWrite(List, int) line: 37
+        owner: net.minecraft.nbt.ListTag.getIdToWrite(List, int) line: 37
+     1 ~0.03ms/ch  [Paper Common Worker #0] net.minecraft.nbt.ListTag.getIdToWrite(List, int) line: 40
+        owner: net.minecraft.nbt.ListTag.getIdToWrite(List, int) line: 40
+     1 ~0.03ms/ch  [Paper Common Worker #1] net.minecraft.nbt.ListTag.getIdToWrite(List, int) line: 40
+        owner: net.minecraft.nbt.ListTag.getIdToWrite(List, int) line: 40
+     1 ~0.03ms/ch  [Paper Common Worker #1] net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 423
+        owner: net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 423
+     1 ~0.03ms/ch  [Paper Common Worker #0] net.minecraft.world.level.chunk.PalettedContainer.getAndSetUnchecked(int, int, int, Object) line: 201
+        owner: net.minecraft.world.level.chunk.PalettedContainer.getAndSetUnchecked(int, int, int, Object) line: 201
+     1 ~0.03ms/ch  [Paper Common Worker #0] net.minecraft.world.level.chunk.ChunkAccess.replaceMissingSections(PalettedContainerFactory, LevelChunkSection[]) line: 194
+        owner: net.minecraft.world.level.chunk.ChunkAccess.replaceMissingSections(PalettedContainerFactory, LevelChunkSection[]) line: 194
+     1 ~0.03ms/ch  [Paper Common Worker #0] net.minecraft.world.level.chunk.PalettedContainer.getAndSet(int, int, int, Object) line: 191
+        owner: net.minecraft.world.level.chunk.PalettedContainer.getAndSet(int, int, int, Object) line: 191
+     1 ~0.03ms/ch  [Paper Common Worker #1] net.minecraft.world.level.chunk.PalettedContainer.readPalette(PalettedContainer$Data, int) line: 77
+        owner: net.minecraft.world.level.chunk.PalettedContainer.readPalette(PalettedContainer$Data, int) line: 77
+     1 ~0.03ms/ch  [Paper Common Worker #0] net.minecraft.world.level.chunk.PalettedContainer.getAndSet(int, Object) line: 208
+        owner: net.minecraft.world.level.chunk.PalettedContainer.getAndSet(int, Object) line: 208
+     1 ~0.03ms/ch  [Paper Common Worker #0] net.minecraft.world.level.chunk.PalettedContainer.getAndSet(int, Object) line: 206
+        owner: net.minecraft.world.level.chunk.PalettedContainer.getAndSet(int, Object) line: 206
+     1 ~0.03ms/ch  [Server thread] net.minecraft.world.level.chunk.PalettedContainer.get(int) line: 236
+        owner: net.minecraft.world.level.chunk.PalettedContainer.get(int) line: 236
+     1 ~0.03ms/ch  [Server thread] net.minecraft.world.level.chunk.PalettedContainer.getAndSet(int, int, int, Object) line: 194
+        owner: net.minecraft.world.level.chunk.PalettedContainer.getAndSet(int, int, int, Object) line: 194
+     1 ~0.03ms/ch  [Server thread] net.minecraft.world.level.chunk.PalettedContainer$Data.copy() line: 539
+        owner: net.minecraft.world.level.chunk.PalettedContainer$Data.copy() line: 539
+     1 ~0.03ms/ch  [Paper Common Worker #1] net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 141
+        owner: net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 141
+     1 ~0.03ms/ch  [Paper Common Worker #1] net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 140
+        owner: net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 140
+     1 ~0.03ms/ch  [Paper Common Worker #1] net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 104
+        owner: net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 104
+     1 ~0.03ms/ch  [Paper Common Worker #0] net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 104
+        owner: net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 104
+     1 ~0.03ms/ch  [Paper Common Worker #0] net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 141
+        owner: net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 141
+     1 ~0.03ms/ch  [Paper Common Worker #1] ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.performLightIncrease(LightChunkGetter) line: 1152
+        owner: (none)
+     1 ~0.03ms/ch  [Paper Common Worker #1] ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.performLightIncrease(LightChunkGetter) line: 1132
+        owner: (none)
+     1 ~0.03ms/ch  [Paper Common Worker #1] ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.performLightIncrease(LightChunkGetter) line: 1146
+        owner: (none)
+     1 ~0.03ms/ch  [Paper Common Worker #1] ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.performLightIncrease(LightChunkGetter) line: 1151
+        owner: (none)
+     1 ~0.03ms/ch  [Paper Common Worker #1] ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.performLightIncrease(LightChunkGetter) line: 1154
+        owner: (none)
+     1 ~0.03ms/ch  [Paper Common Worker #1] org.bukkit.craftbukkit.util.ForwardLogHandler.getLogger(String) line: 15
+        owner: com.planeta.crussty.CarverDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 254
+     1 ~0.03ms/ch  [Paper Common Worker #0] net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71
+        owner: net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71
+     1 ~0.03ms/ch  [Paper Common Worker #0] net.minecraft.world.level.chunk.status.ChunkStatusTasks.initializeLight(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 164
+        owner: net.minecraft.world.level.chunk.status.ChunkStatusTasks.initializeLight(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 164
+     1 ~0.03ms/ch  [Paper Common Worker #1] net.minecraft.util.StaticCache2D.<init>(int, int, int, int, StaticCache2D$Initializer) line: 26
+        owner: net.minecraft.util.StaticCache2D.<init>(int, int, int, int, StaticCache2D$Initializer) line: 26
+     1 ~0.03ms/ch  [Paper Common Worker #0] com.planeta.crussty.CarverDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 176
+        owner: com.planeta.crussty.CarverDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 176
+     1 ~0.03ms/ch  [Paper Common Worker #0] com.planeta.crussty.CarverDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 204
+        owner: com.planeta.crussty.CarverDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 204
+     1 ~0.03ms/ch  [Paper Common Worker #1] com.planeta.crussty.CarverDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 176
+        owner: com.planeta.crussty.CarverDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 176
+
+================================================================================
+=== DISTINCT FULL STACKS per interesting tag ===
+
+##### NoiseStack$Perlin (19 samples) #####
+  --- x6 [Paper Common Worker #0] ---
+     0 net.minecraft.world.level.levelgen.synth.NoiseStack$Perlin.get(double, double, double) line: 115   << OWNER
+     1 net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 136   << OWNER
+     2 net.minecraft.world.level.levelgen.placement.FeaturePlacer.place(PlacedFeature, RandomSource, BlockPos, boolean) line: 65   << OWNER
+     3 net.minecraft.world.level.levelgen.placement.FeaturePlacer.placeWithBiomeCheck(PlacedFeature, RandomSource, BlockPos) line: 33   << OWNER
+     4 com.planeta.crussty.DecoDriver.delegateVanilla(String, int, int, long, int, int, int) line: 659   << OWNER
+     5 com.planeta.crussty.DecoDriver.runChunkBatched(long, long, int, int, int, int, int[], int, int[], int[], boolean) line: 578   << OWNER
+     6 com.planeta.crussty.DecoDriver.runChunk(long, int, int, LimitedRegion) line: 386   << OWNER
+     7 com.planeta.crussty.DecoDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 285   << OWNER
+     8 net.minecraft.world.level.chunk.ChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager, boolean) line: 524   << OWNER
+     9 org.bukkit.craftbukkit.generator.CustomChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager) line: 342
+    10 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 150   << OWNER
+    11 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    12 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    13 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+    14 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    15 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    17 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    20 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    21 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    22 java.lang.Thread.run() line: 1474
+  --- x6 [Paper Common Worker #0] ---
+     0 net.minecraft.world.level.levelgen.synth.NoiseStack$Perlin.get(double, double, double) line: 115   << OWNER
+     1 net.minecraft.world.level.levelgen.densityfunction.generator.NoiseFunction$ShiftedXzSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 158   << OWNER
+     2 net.minecraft.world.level.levelgen.densityfunction.op.SliceFunction$YSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 153   << OWNER
+     3 net.minecraft.world.level.levelgen.densityfunction.SamplerContext.sampleVolumeCached(int, DensitySampler, DensityBuffer, DensityVolume) line: 70   << OWNER
+     4 net.minecraft.world.level.levelgen.densityfunction.CachingDensitySampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 6   << OWNER
+     5 net.minecraft.world.level.levelgen.densityfunction.op.SplineFunction$BufferSplineInput.sampleCoordinate(DensitySampler, int) line: 87   << OWNER
+     6 net.minecraft.world.level.levelgen.densityfunction.op.SplineFunction$SamplerCoordinate.apply(SplineFunction$SplineInput) line: 181   << OWNER
+     7 net.minecraft.world.level.levelgen.densityfunction.op.SplineFunction$SamplerCoordinate.apply(Object) line: 178   << OWNER
+     8 net.minecraft.util.CubicSpline$Multipoint.sample(BoundedFloatFunction, float[], float[], List, Object) line: 250   << OWNER
+     9 net.minecraft.util.CubicSpline$Multipoint.sample(CubicSpline$Multipoint, Object) line: 244   << OWNER
+    10 net.minecraft.util.CubicSpline$1.apply(Object) line: 45   << OWNER
+    11 net.minecraft.world.level.levelgen.densityfunction.op.SplineFunction$Sampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 167   << OWNER
+    12 net.minecraft.world.level.levelgen.densityfunction.op.LerpFunction$ConstFirstSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 69   << OWNER
+    13 net.minecraft.world.level.levelgen.densityfunction.op.SliceFunction$YSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 153   << OWNER
+    14 net.minecraft.world.level.levelgen.densityfunction.SamplerContext.sampleVolumeCached(int, DensitySampler, DensityBuffer, DensityVolume) line: 70   << OWNER
+    15 net.minecraft.world.level.levelgen.densityfunction.CachingDensitySampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 6   << OWNER
+    16 net.minecraft.world.level.levelgen.densityfunction.op.BinaryFunction$ConstDivSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 193   << OWNER
+    17 net.minecraft.world.level.levelgen.densityfunction.op.BinaryFunction$SubSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 367   << OWNER
+    18 net.minecraft.world.level.levelgen.densityfunction.op.BinaryFunction$ConstMulSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 245   << OWNER
+    19 net.minecraft.world.level.levelgen.densityfunction.op.BinaryFunction$ConstAddSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 177   << OWNER
+    20 net.minecraft.world.level.levelgen.densityfunction.op.ClampFunction$Sampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 62   << OWNER
+    21 net.minecraft.world.level.levelgen.densityfunction.op.FindTopSurfaceFunction$Sampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 67   << OWNER
+    22 net.minecraft.world.level.levelgen.densityfunction.op.SliceFunction$YSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 153   << OWNER
+    23 net.minecraft.world.level.levelgen.densityfunction.op.SliceFunction$YSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 153   << OWNER
+    24 net.minecraft.world.level.levelgen.densityfunction.DensitySampler$Bound.sampleVolume(DensityBuffer, DensityVolume) line: 35   << OWNER
+    25 net.minecraft.world.level.levelgen.densityfunction.DensitySampler$Bound.sampleVolume(DensityVolume) line: 40   << OWNER
+    26 net.minecraft.world.level.levelgen.Aquifer$NoiseBasedAquifer.maxSurfaceLevel(int, int, int, int) line: 181   << OWNER
+    ... (22 more frames above owner)
+  --- x3 [Paper Common Worker #1] ---
+     0 net.minecraft.world.level.levelgen.synth.NoiseStack$Perlin.get(double, double, double) line: 115   << OWNER
+     1 net.minecraft.world.level.levelgen.densityfunction.generator.NoiseFunction$ShiftedXzSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 158   << OWNER
+     2 net.minecraft.world.level.levelgen.densityfunction.op.SliceFunction$YSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 153   << OWNER
+     3 net.minecraft.world.level.levelgen.densityfunction.SamplerContext.sampleVolumeCached(int, DensitySampler, DensityBuffer, DensityVolume) line: 70   << OWNER
+     4 net.minecraft.world.level.levelgen.densityfunction.CachingDensitySampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 6   << OWNER
+     5 net.minecraft.world.level.levelgen.densityfunction.op.SplineFunction$BufferSplineInput.sampleCoordinate(DensitySampler, int) line: 87   << OWNER
+     6 net.minecraft.world.level.levelgen.densityfunction.op.SplineFunction$SamplerCoordinate.apply(SplineFunction$SplineInput) line: 181   << OWNER
+     7 net.minecraft.world.level.levelgen.densityfunction.op.SplineFunction$SamplerCoordinate.apply(Object) line: 178   << OWNER
+     8 net.minecraft.util.CubicSpline$Multipoint.sample(BoundedFloatFunction, float[], float[], List, Object) line: 250   << OWNER
+     9 net.minecraft.util.CubicSpline$Multipoint.sample(CubicSpline$Multipoint, Object) line: 244   << OWNER
+    10 net.minecraft.util.CubicSpline$1.apply(Object) line: 45   << OWNER
+    11 net.minecraft.world.level.levelgen.densityfunction.op.SplineFunction$Sampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 167   << OWNER
+    12 net.minecraft.world.level.levelgen.densityfunction.op.LerpFunction$ConstFirstSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 69   << OWNER
+    13 net.minecraft.world.level.levelgen.densityfunction.op.SliceFunction$YSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 153   << OWNER
+    14 net.minecraft.world.level.levelgen.densityfunction.SamplerContext.sampleVolumeCached(int, DensitySampler, DensityBuffer, DensityVolume) line: 70   << OWNER
+    15 net.minecraft.world.level.levelgen.densityfunction.CachingDensitySampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 6   << OWNER
+    16 net.minecraft.world.level.levelgen.densityfunction.op.BinaryFunction$ConstDivSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 193   << OWNER
+    17 net.minecraft.world.level.levelgen.densityfunction.op.BinaryFunction$SubSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 367   << OWNER
+    18 net.minecraft.world.level.levelgen.densityfunction.op.BinaryFunction$ConstMulSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 245   << OWNER
+    19 net.minecraft.world.level.levelgen.densityfunction.op.BinaryFunction$ConstAddSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 177   << OWNER
+    20 net.minecraft.world.level.levelgen.densityfunction.op.ClampFunction$Sampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 62   << OWNER
+    21 net.minecraft.world.level.levelgen.densityfunction.op.FindTopSurfaceFunction$Sampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 67   << OWNER
+    22 net.minecraft.world.level.levelgen.densityfunction.op.SliceFunction$YSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 153   << OWNER
+    23 net.minecraft.world.level.levelgen.densityfunction.op.SliceFunction$YSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 153   << OWNER
+    24 net.minecraft.world.level.levelgen.densityfunction.DensitySampler$Bound.sampleVolume(DensityBuffer, DensityVolume) line: 35   << OWNER
+    25 net.minecraft.world.level.levelgen.densityfunction.DensitySampler$Bound.sampleVolume(DensityVolume) line: 40   << OWNER
+    26 net.minecraft.world.level.levelgen.Aquifer$NoiseBasedAquifer.maxSurfaceLevel(int, int, int, int) line: 181   << OWNER
+    ... (22 more frames above owner)
+  --- x2 [Paper Common Worker #1] ---
+     0 net.minecraft.world.level.levelgen.synth.NoiseStack$Perlin.get(double, double, double) line: 115   << OWNER
+     1 net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 136   << OWNER
+     2 net.minecraft.world.level.levelgen.placement.FeaturePlacer.place(PlacedFeature, RandomSource, BlockPos, boolean) line: 65   << OWNER
+     3 net.minecraft.world.level.levelgen.placement.FeaturePlacer.placeWithBiomeCheck(PlacedFeature, RandomSource, BlockPos) line: 33   << OWNER
+     4 com.planeta.crussty.DecoDriver.delegateVanilla(String, int, int, long, int, int, int) line: 659   << OWNER
+     5 com.planeta.crussty.DecoDriver.runChunkBatched(long, long, int, int, int, int, int[], int, int[], int[], boolean) line: 578   << OWNER
+     6 com.planeta.crussty.DecoDriver.runChunk(long, int, int, LimitedRegion) line: 386   << OWNER
+     7 com.planeta.crussty.DecoDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 285   << OWNER
+     8 net.minecraft.world.level.chunk.ChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager, boolean) line: 524   << OWNER
+     9 org.bukkit.craftbukkit.generator.CustomChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager) line: 342
+    10 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 150   << OWNER
+    11 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    12 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    13 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+    14 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    15 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    17 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    20 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    21 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    22 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 net.minecraft.world.level.levelgen.synth.NoiseStack$Perlin.get(double, double, double) line: 115   << OWNER
+     1 net.minecraft.world.level.levelgen.densityfunction.generator.NoiseFunction$ShiftedXzSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 158   << OWNER
+     2 net.minecraft.world.level.levelgen.densityfunction.op.SliceFunction$YSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 153   << OWNER
+     3 net.minecraft.world.level.levelgen.densityfunction.SamplerContext.sampleVolumeCached(int, DensitySampler, DensityBuffer, DensityVolume) line: 70   << OWNER
+     4 net.minecraft.world.level.levelgen.densityfunction.CachingDensitySampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 6   << OWNER
+     5 net.minecraft.world.level.levelgen.densityfunction.op.SplineFunction$BufferSplineInput.sampleCoordinate(DensitySampler, int) line: 87   << OWNER
+     6 net.minecraft.world.level.levelgen.densityfunction.op.SplineFunction$SamplerCoordinate.apply(SplineFunction$SplineInput) line: 181   << OWNER
+     7 net.minecraft.world.level.levelgen.densityfunction.op.SplineFunction$SamplerCoordinate.apply(Object) line: 178   << OWNER
+     8 net.minecraft.util.CubicSpline$Multipoint.sample(BoundedFloatFunction, float[], float[], List, Object) line: 250   << OWNER
+     9 net.minecraft.util.CubicSpline$Multipoint.sample(CubicSpline$Multipoint, Object) line: 244   << OWNER
+    10 net.minecraft.util.CubicSpline.sample(CubicSpline, Object) line: 34   << OWNER
+    11 net.minecraft.util.CubicSpline$Multipoint.sample(BoundedFloatFunction, float[], float[], List, Object) line: 269   << OWNER
+    12 net.minecraft.util.CubicSpline$Multipoint.sample(CubicSpline$Multipoint, Object) line: 244   << OWNER
+    13 net.minecraft.util.CubicSpline$1.apply(Object) line: 45   << OWNER
+    14 net.minecraft.world.level.levelgen.densityfunction.op.SplineFunction$Sampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 167   << OWNER
+    15 net.minecraft.world.level.levelgen.densityfunction.op.LerpFunction$ConstFirstSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 69   << OWNER
+    16 net.minecraft.world.level.levelgen.densityfunction.op.SliceFunction$YSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 153   << OWNER
+    17 net.minecraft.world.level.levelgen.densityfunction.SamplerContext.sampleVolumeCached(int, DensitySampler, DensityBuffer, DensityVolume) line: 70   << OWNER
+    18 net.minecraft.world.level.levelgen.densityfunction.CachingDensitySampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 6   << OWNER
+    19 net.minecraft.world.level.levelgen.densityfunction.op.BinaryFunction$ConstDivSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 193   << OWNER
+    20 net.minecraft.world.level.levelgen.densityfunction.op.BinaryFunction$SubSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 367   << OWNER
+    21 net.minecraft.world.level.levelgen.densityfunction.op.BinaryFunction$ConstMulSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 245   << OWNER
+    22 net.minecraft.world.level.levelgen.densityfunction.op.BinaryFunction$ConstAddSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 177   << OWNER
+    23 net.minecraft.world.level.levelgen.densityfunction.op.ClampFunction$Sampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 62   << OWNER
+    24 net.minecraft.world.level.levelgen.densityfunction.op.FindTopSurfaceFunction$Sampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 67   << OWNER
+    25 net.minecraft.world.level.levelgen.densityfunction.op.SliceFunction$YSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 153   << OWNER
+    26 net.minecraft.world.level.levelgen.densityfunction.op.SliceFunction$YSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 153   << OWNER
+    ... (25 more frames above owner)
+  --- x1 [Paper Common Worker #1] ---
+     0 net.minecraft.world.level.levelgen.synth.NoiseStack$Perlin.get(double, double, double) line: 115   << OWNER
+     1 net.minecraft.world.level.levelgen.densityfunction.generator.NoiseFunction$ShiftedXzSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 158   << OWNER
+     2 net.minecraft.world.level.levelgen.densityfunction.op.SliceFunction$YSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 153   << OWNER
+     3 net.minecraft.world.level.levelgen.densityfunction.SamplerContext.sampleVolumeCached(int, DensitySampler, DensityBuffer, DensityVolume) line: 70   << OWNER
+     4 net.minecraft.world.level.levelgen.densityfunction.CachingDensitySampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 6   << OWNER
+     5 net.minecraft.world.level.levelgen.densityfunction.op.SplineFunction$BufferSplineInput.sampleCoordinate(DensitySampler, int) line: 87   << OWNER
+     6 net.minecraft.world.level.levelgen.densityfunction.op.SplineFunction$SamplerCoordinate.apply(SplineFunction$SplineInput) line: 181   << OWNER
+     7 net.minecraft.world.level.levelgen.densityfunction.op.SplineFunction$SamplerCoordinate.apply(Object) line: 178   << OWNER
+     8 net.minecraft.util.CubicSpline$Multipoint.sample(BoundedFloatFunction, float[], float[], List, Object) line: 250   << OWNER
+     9 net.minecraft.util.CubicSpline$Multipoint.sample(CubicSpline$Multipoint, Object) line: 244   << OWNER
+    10 net.minecraft.util.CubicSpline.sample(CubicSpline, Object) line: 34   << OWNER
+    11 net.minecraft.util.CubicSpline$Multipoint.sample(BoundedFloatFunction, float[], float[], List, Object) line: 268   << OWNER
+    12 net.minecraft.util.CubicSpline$Multipoint.sample(CubicSpline$Multipoint, Object) line: 244   << OWNER
+    13 net.minecraft.util.CubicSpline.sample(CubicSpline, Object) line: 34   << OWNER
+    14 net.minecraft.util.CubicSpline$Multipoint.sample(BoundedFloatFunction, float[], float[], List, Object) line: 268   << OWNER
+    15 net.minecraft.util.CubicSpline$Multipoint.sample(CubicSpline$Multipoint, Object) line: 244   << OWNER
+    16 net.minecraft.util.CubicSpline$1.apply(Object) line: 45   << OWNER
+    17 net.minecraft.world.level.levelgen.densityfunction.op.SplineFunction$Sampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 167   << OWNER
+    18 net.minecraft.world.level.levelgen.densityfunction.op.LerpFunction$ConstFirstSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 69   << OWNER
+    19 net.minecraft.world.level.levelgen.densityfunction.op.SliceFunction$YSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 153   << OWNER
+    20 net.minecraft.world.level.levelgen.densityfunction.SamplerContext.sampleVolumeCached(int, DensitySampler, DensityBuffer, DensityVolume) line: 70   << OWNER
+    21 net.minecraft.world.level.levelgen.densityfunction.CachingDensitySampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 6   << OWNER
+    22 net.minecraft.world.level.levelgen.densityfunction.op.BinaryFunction$ConstDivSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 193   << OWNER
+    23 net.minecraft.world.level.levelgen.densityfunction.op.BinaryFunction$SubSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 367   << OWNER
+    24 net.minecraft.world.level.levelgen.densityfunction.op.BinaryFunction$ConstMulSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 245   << OWNER
+    25 net.minecraft.world.level.levelgen.densityfunction.op.BinaryFunction$ConstAddSampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 177   << OWNER
+    26 net.minecraft.world.level.levelgen.densityfunction.op.ClampFunction$Sampler.sampleVolume(SamplerContext, DensityBuffer, DensityVolume) line: 62   << OWNER
+    ... (28 more frames above owner)
+
+##### ReferencePipeline (3 samples) #####
+  --- x1 [Paper Common Worker #1] ---
+     0 java.util.stream.ReferencePipeline$7$1FlatMap.accept(Object) line: 288
+     1 it.unimi.dsi.fastutil.objects.ObjectArrayList$Spliterator.forEachRemaining(Consumer) line: 975
+     2 java.util.stream.AbstractPipeline.copyInto(Sink, Spliterator) line: 570
+     3 java.util.stream.AbstractPipeline.wrapAndCopyInto(Sink, Spliterator) line: 560
+     4 java.util.stream.ForEachOps$ForEachOp.evaluateSequential(PipelineHelper, Spliterator) line: 153
+     5 java.util.stream.ForEachOps$ForEachOp$OfRef.evaluateSequential(PipelineHelper, Spliterator) line: 176
+     6 java.util.stream.AbstractPipeline.evaluate(TerminalOp) line: 265
+     7 java.util.stream.ReferencePipeline.forEach(Consumer) line: 632
+     8 net.minecraft.world.attribute.EnvironmentAttributeSystem.addBiomeLayer(EnvironmentAttributeSystem$Builder, HolderLookup, BiomeManager) line: 87   << OWNER
+     9 net.minecraft.world.attribute.EnvironmentAttributeSystem.addStaticLayers(EnvironmentAttributeSystem$Builder, LevelAccessor) line: 68   << OWNER
+    10 net.minecraft.world.attribute.EnvironmentAttributeSystem$Builder.addStaticLayers(LevelAccessor) line: 157   << OWNER
+    11 net.minecraft.server.level.WorldGenRegion.<init>(ServerLevel, StaticCache2D, ChunkStep, ChunkAccess) line: 139   << OWNER
+    12 net.minecraft.world.level.chunk.status.ChunkStatusTasks.buildTerrain(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 106   << OWNER
+    13 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    14 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    16 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    17 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    18 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    20 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    21 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    22 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    23 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 java.util.stream.ReferencePipeline$7$1FlatMap.accept(Object) line: 288
+     1 it.unimi.dsi.fastutil.objects.ObjectArrayList$Spliterator.forEachRemaining(Consumer) line: 975
+     2 java.util.stream.AbstractPipeline.copyInto(Sink, Spliterator) line: 570
+     3 java.util.stream.AbstractPipeline.wrapAndCopyInto(Sink, Spliterator) line: 560
+     4 java.util.stream.ForEachOps$ForEachOp.evaluateSequential(PipelineHelper, Spliterator) line: 153
+     5 java.util.stream.ForEachOps$ForEachOp$OfRef.evaluateSequential(PipelineHelper, Spliterator) line: 176
+     6 java.util.stream.AbstractPipeline.evaluate(TerminalOp) line: 265
+     7 java.util.stream.ReferencePipeline.forEach(Consumer) line: 632
+     8 net.minecraft.world.attribute.EnvironmentAttributeSystem.addBiomeLayer(EnvironmentAttributeSystem$Builder, HolderLookup, BiomeManager) line: 87   << OWNER
+     9 net.minecraft.world.attribute.EnvironmentAttributeSystem.addStaticLayers(EnvironmentAttributeSystem$Builder, LevelAccessor) line: 68   << OWNER
+    10 net.minecraft.world.attribute.EnvironmentAttributeSystem$Builder.addStaticLayers(LevelAccessor) line: 157   << OWNER
+    11 net.minecraft.server.level.WorldGenRegion.<init>(ServerLevel, StaticCache2D, ChunkStep, ChunkAccess) line: 139   << OWNER
+    12 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateBiomes(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 84   << OWNER
+    13 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    14 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    16 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    17 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    18 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    20 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    21 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    22 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    23 java.lang.Thread.run() line: 1474
+  --- x1 [Server thread] ---
+     0 java.util.stream.ReferencePipeline$3$1.accept(Object) line: 214
+     1 java.util.Iterator.forEachRemaining(Consumer) line: 133
+     2 java.util.Spliterators$IteratorSpliterator.forEachRemaining(Consumer) line: 1939
+     3 java.util.stream.AbstractPipeline.copyInto(Sink, Spliterator) line: 570
+     4 java.util.stream.AbstractPipeline.wrapAndCopyInto(Sink, Spliterator) line: 560
+     5 java.util.stream.ForEachOps$ForEachOp.evaluateSequential(PipelineHelper, Spliterator) line: 153
+     6 java.util.stream.ForEachOps$ForEachOp$OfRef.evaluateSequential(PipelineHelper, Spliterator) line: 176
+     7 java.util.stream.AbstractPipeline.evaluate(TerminalOp) line: 265
+     8 java.util.stream.ReferencePipeline.forEach(Consumer) line: 632
+     9 net.minecraft.world.level.storage.PrimaryLevelData.stringCollectionToTag(Set) line: 205   << OWNER
+    10 net.minecraft.world.level.storage.PrimaryLevelData.setTagData(CompoundTag, UUID) line: 139   << OWNER
+    11 net.minecraft.world.level.storage.PrimaryLevelData.createTag(UUID) line: 134   << OWNER
+    12 net.minecraft.world.level.storage.LevelStorageSource$LevelStorageAccess.saveDataTag(WorldData, UUID) line: 612   << OWNER
+    13 net.minecraft.server.MinecraftServer.saveGlobalData(boolean) line: 953   << OWNER
+    14 net.minecraft.server.MinecraftServer.saveAllChunks(boolean, boolean, boolean, boolean) line: 933   << OWNER
+    15 net.minecraft.server.dedicated.DedicatedServer.saveAllChunks(boolean, boolean, boolean, boolean) line: 413   << OWNER
+    16 net.minecraft.server.MinecraftServer.stopServer() line: 1050   << OWNER
+    17 net.minecraft.server.dedicated.DedicatedServer.stopServer() line: 909   << OWNER
+    18 net.minecraft.server.MinecraftServer.runServer() line: 1368   << OWNER
+    19 net.minecraft.server.MinecraftServer.lambda$spin$0(AtomicReference) line: 299   << OWNER
+    20 java.lang.Thread.run() line: 1474
+
+##### Spliterator (7 samples) #####
+  --- x1 [Paper Common Worker #0] ---
+     0 java.util.stream.StreamOpFlag.fromCharacteristics(Spliterator) line: 751
+     1 java.util.stream.StreamSupport.intStream(Spliterator$OfInt, boolean) line: 139
+     2 java.util.stream.IntStream.range(int, int) line: 1083
+     3 com.google.common.collect.CollectSpliterators.indexed(int, int, IntFunction, Comparator) line: 101
+     4 com.google.common.collect.CollectSpliterators.indexed(int, int, IntFunction) line: 45
+     5 com.google.common.collect.IndexedImmutableSet.spliterator() line: 39
+     6 java.util.Collection.stream() line: 748
+     7 net.minecraft.world.attribute.EnvironmentAttributeSystem.lambda$addBiomeLayer$0(Holder$Reference) line: 85   << OWNER
+     8 java.util.stream.ReferencePipeline$7$1FlatMap.accept(Object) line: 288
+     9 it.unimi.dsi.fastutil.objects.ObjectArrayList$Spliterator.forEachRemaining(Consumer) line: 975
+    10 java.util.stream.AbstractPipeline.copyInto(Sink, Spliterator) line: 570
+    11 java.util.stream.AbstractPipeline.wrapAndCopyInto(Sink, Spliterator) line: 560
+    12 java.util.stream.ForEachOps$ForEachOp.evaluateSequential(PipelineHelper, Spliterator) line: 153
+    13 java.util.stream.ForEachOps$ForEachOp$OfRef.evaluateSequential(PipelineHelper, Spliterator) line: 176
+    14 java.util.stream.AbstractPipeline.evaluate(TerminalOp) line: 265
+    15 java.util.stream.ReferencePipeline.forEach(Consumer) line: 632
+    16 net.minecraft.world.attribute.EnvironmentAttributeSystem.addBiomeLayer(EnvironmentAttributeSystem$Builder, HolderLookup, BiomeManager) line: 87   << OWNER
+    17 net.minecraft.world.attribute.EnvironmentAttributeSystem.addStaticLayers(EnvironmentAttributeSystem$Builder, LevelAccessor) line: 68   << OWNER
+    18 net.minecraft.world.attribute.EnvironmentAttributeSystem$Builder.addStaticLayers(LevelAccessor) line: 157   << OWNER
+    19 net.minecraft.server.level.WorldGenRegion.<init>(ServerLevel, StaticCache2D, ChunkStep, ChunkAccess) line: 139   << OWNER
+    20 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 148   << OWNER
+    21 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    22 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    23 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+    24 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    25 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    26 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    27 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    28 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    29 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    30 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    31 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    32 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 java.util.stream.StreamSupport.intStream(Spliterator$OfInt, boolean) line: 138
+     1 java.util.stream.IntStream.range(int, int) line: 1083
+     2 com.google.common.collect.CollectSpliterators.indexed(int, int, IntFunction, Comparator) line: 101
+     3 com.google.common.collect.CollectSpliterators.indexed(int, int, IntFunction) line: 45
+     4 com.google.common.collect.IndexedImmutableSet.spliterator() line: 39
+     5 java.util.Collection.stream() line: 748
+     6 net.minecraft.world.attribute.EnvironmentAttributeSystem.lambda$addBiomeLayer$0(Holder$Reference) line: 85   << OWNER
+     7 java.util.stream.ReferencePipeline$7$1FlatMap.accept(Object) line: 288
+     8 it.unimi.dsi.fastutil.objects.ObjectArrayList$Spliterator.forEachRemaining(Consumer) line: 975
+     9 java.util.stream.AbstractPipeline.copyInto(Sink, Spliterator) line: 570
+    10 java.util.stream.AbstractPipeline.wrapAndCopyInto(Sink, Spliterator) line: 560
+    11 java.util.stream.ForEachOps$ForEachOp.evaluateSequential(PipelineHelper, Spliterator) line: 153
+    12 java.util.stream.ForEachOps$ForEachOp$OfRef.evaluateSequential(PipelineHelper, Spliterator) line: 176
+    13 java.util.stream.AbstractPipeline.evaluate(TerminalOp) line: 265
+    14 java.util.stream.ReferencePipeline.forEach(Consumer) line: 632
+    15 net.minecraft.world.attribute.EnvironmentAttributeSystem.addBiomeLayer(EnvironmentAttributeSystem$Builder, HolderLookup, BiomeManager) line: 87   << OWNER
+    16 net.minecraft.world.attribute.EnvironmentAttributeSystem.addStaticLayers(EnvironmentAttributeSystem$Builder, LevelAccessor) line: 68   << OWNER
+    17 net.minecraft.world.attribute.EnvironmentAttributeSystem$Builder.addStaticLayers(LevelAccessor) line: 157   << OWNER
+    18 net.minecraft.server.level.WorldGenRegion.<init>(ServerLevel, StaticCache2D, ChunkStep, ChunkAccess) line: 139   << OWNER
+    19 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateStructureReferences(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 75   << OWNER
+    20 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    21 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    22 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    23 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    24 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    25 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    26 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    27 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    28 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    29 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    30 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 it.unimi.dsi.fastutil.objects.ObjectArrayList$Spliterator.forEachRemaining(Consumer) line: 974
+     1 java.util.stream.AbstractPipeline.copyInto(Sink, Spliterator) line: 570
+     2 java.util.stream.AbstractPipeline.wrapAndCopyInto(Sink, Spliterator) line: 560
+     3 java.util.stream.ForEachOps$ForEachOp.evaluateSequential(PipelineHelper, Spliterator) line: 153
+     4 java.util.stream.ForEachOps$ForEachOp$OfRef.evaluateSequential(PipelineHelper, Spliterator) line: 176
+     5 java.util.stream.AbstractPipeline.evaluate(TerminalOp) line: 265
+     6 java.util.stream.ReferencePipeline.forEach(Consumer) line: 632
+     7 net.minecraft.world.attribute.EnvironmentAttributeSystem.addBiomeLayer(EnvironmentAttributeSystem$Builder, HolderLookup, BiomeManager) line: 87   << OWNER
+     8 net.minecraft.world.attribute.EnvironmentAttributeSystem.addStaticLayers(EnvironmentAttributeSystem$Builder, LevelAccessor) line: 68   << OWNER
+     9 net.minecraft.world.attribute.EnvironmentAttributeSystem$Builder.addStaticLayers(LevelAccessor) line: 157   << OWNER
+    10 net.minecraft.server.level.WorldGenRegion.<init>(ServerLevel, StaticCache2D, ChunkStep, ChunkAccess) line: 139   << OWNER
+    11 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateStructureReferences(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 75   << OWNER
+    12 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    13 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    14 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    15 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    17 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    20 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    21 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    22 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 java.util.Spliterators$IteratorSpliterator.tryAdvance(Consumer) line: 1944
+     1 java.util.stream.ReferencePipeline.forEachWithCancel(Spliterator, Sink) line: 147
+     2 java.util.stream.AbstractPipeline.copyIntoWithCancel(Sink, Spliterator) line: 588
+     3 java.util.stream.AbstractPipeline.copyInto(Sink, Spliterator) line: 574
+     4 java.util.stream.AbstractPipeline.wrapAndCopyInto(Sink, Spliterator) line: 560
+     5 java.util.stream.FindOps$FindOp.evaluateSequential(PipelineHelper, Spliterator) line: 150
+     6 java.util.stream.AbstractPipeline.evaluate(TerminalOp) line: 265
+     7 java.util.stream.ReferencePipeline.findFirst() line: 683
+     8 oshi.hardware.platform.linux.LinuxCentralProcessor.getLogicalProcessorFromSyspath(String, Set, String, Map, Map) line: 278
+     9 oshi.hardware.platform.linux.LinuxCentralProcessor.readTopologyFromUdev() line: 229
+    10 oshi.hardware.platform.linux.LinuxCentralProcessor.initProcessorCounts() line: 175
+    11 oshi.hardware.common.AbstractCentralProcessor.<init>() line: 68
+    12 oshi.hardware.platform.linux.LinuxCentralProcessor.<init>() line: 59
+    13 oshi.hardware.platform.linux.LinuxHardwareAbstractionLayer.createProcessor() line: 43
+    14 oshi.util.Memoizer$1.get() line: 65
+    15 oshi.hardware.common.AbstractHardwareAbstractionLayer.getProcessor() line: 48
+    16 net.minecraft.SystemReport.lambda$putHardware$0(HardwareAbstractionLayer) line: 105   << OWNER
+    17 net.minecraft.SystemReport.ignoreErrors(String, Runnable) line: 120   << OWNER
+    18 net.minecraft.SystemReport.putHardware(SystemInfo) line: 105   << OWNER
+    19 net.minecraft.SystemReport.lambda$new$6() line: 67   << OWNER
+    20 net.minecraft.SystemReport.ignoreErrors(String, Runnable) line: 120   << OWNER
+    21 net.minecraft.SystemReport.<init>() line: 67   << OWNER
+    22 net.minecraft.CrashReport.<init>(String, Throwable) line: 32   << OWNER
+    23 net.minecraft.CrashReport.forThrowable(Throwable, String) line: 232   << OWNER
+    24 net.minecraft.server.level.WorldGenRegion.getChunk(int, int, ChunkStatus, boolean) line: 200   << OWNER
+    25 net.minecraft.world.level.LevelReader.getNoiseBiome(int, int, int) line: 75   << OWNER
+    26 net.minecraft.world.level.biome.BiomeManager.getBiome(int, int, int) line: 68   << OWNER
+    ... (24 more frames above owner)
+  --- x1 [Paper Common Worker #1] ---
+     0 java.util.stream.StreamOpFlag.fromCharacteristics(Spliterator) line: 750
+     1 java.util.stream.StreamSupport.stream(Spliterator, boolean) line: 70
+     2 java.util.Collection.stream() line: 748
+     3 net.minecraft.core.MappedRegistry.listElements() line: 256   << OWNER
+     4 net.minecraft.world.attribute.EnvironmentAttributeSystem.addBiomeLayer(EnvironmentAttributeSystem$Builder, HolderLookup, BiomeManager) line: 84   << OWNER
+     5 net.minecraft.world.attribute.EnvironmentAttributeSystem.addStaticLayers(EnvironmentAttributeSystem$Builder, LevelAccessor) line: 68   << OWNER
+     6 net.minecraft.world.attribute.EnvironmentAttributeSystem$Builder.addStaticLayers(LevelAccessor) line: 157   << OWNER
+     7 net.minecraft.server.level.WorldGenRegion.<init>(ServerLevel, StaticCache2D, ChunkStep, ChunkAccess) line: 139   << OWNER
+     8 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateSpawn(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 178   << OWNER
+     9 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    10 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    11 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+    12 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    13 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    14 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    16 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    19 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    20 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 java.util.stream.StreamOpFlag.fromCharacteristics(Spliterator) line: 750
+     1 java.util.stream.StreamSupport.stream(Spliterator, boolean) line: 70
+     2 java.util.Collection.stream() line: 748
+     3 net.minecraft.core.MappedRegistry.listElements() line: 256   << OWNER
+     4 net.minecraft.world.attribute.EnvironmentAttributeSystem.addBiomeLayer(EnvironmentAttributeSystem$Builder, HolderLookup, BiomeManager) line: 84   << OWNER
+     5 net.minecraft.world.attribute.EnvironmentAttributeSystem.addStaticLayers(EnvironmentAttributeSystem$Builder, LevelAccessor) line: 68   << OWNER
+     6 net.minecraft.world.attribute.EnvironmentAttributeSystem$Builder.addStaticLayers(LevelAccessor) line: 157   << OWNER
+     7 net.minecraft.server.level.WorldGenRegion.<init>(ServerLevel, StaticCache2D, ChunkStep, ChunkAccess) line: 139   << OWNER
+     8 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateBiomes(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 84   << OWNER
+     9 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    10 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    11 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    12 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    14 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    15 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    16 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    18 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    19 java.lang.Thread.run() line: 1474
+
+##### forEachRemaining (1 samples) #####
+  --- x1 [Paper Common Worker #1] ---
+     0 it.unimi.dsi.fastutil.objects.ObjectArrayList$Spliterator.forEachRemaining(Consumer) line: 974
+     1 java.util.stream.AbstractPipeline.copyInto(Sink, Spliterator) line: 570
+     2 java.util.stream.AbstractPipeline.wrapAndCopyInto(Sink, Spliterator) line: 560
+     3 java.util.stream.ForEachOps$ForEachOp.evaluateSequential(PipelineHelper, Spliterator) line: 153
+     4 java.util.stream.ForEachOps$ForEachOp$OfRef.evaluateSequential(PipelineHelper, Spliterator) line: 176
+     5 java.util.stream.AbstractPipeline.evaluate(TerminalOp) line: 265
+     6 java.util.stream.ReferencePipeline.forEach(Consumer) line: 632
+     7 net.minecraft.world.attribute.EnvironmentAttributeSystem.addBiomeLayer(EnvironmentAttributeSystem$Builder, HolderLookup, BiomeManager) line: 87   << OWNER
+     8 net.minecraft.world.attribute.EnvironmentAttributeSystem.addStaticLayers(EnvironmentAttributeSystem$Builder, LevelAccessor) line: 68   << OWNER
+     9 net.minecraft.world.attribute.EnvironmentAttributeSystem$Builder.addStaticLayers(LevelAccessor) line: 157   << OWNER
+    10 net.minecraft.server.level.WorldGenRegion.<init>(ServerLevel, StaticCache2D, ChunkStep, ChunkAccess) line: 139   << OWNER
+    11 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateStructureReferences(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 75   << OWNER
+    12 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    13 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    14 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    15 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    17 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    20 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    21 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    22 java.lang.Thread.run() line: 1474
+
+##### layoutBulk (24 samples) #####
+  --- x8 [Paper Common Worker #1] ---
+     0 com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1719   << OWNER
+     1 com.planeta.crussty.CrusstyChunkGenerator.layout(ChunkGenerator$ChunkData, int, int, short[]) line: 1039   << OWNER
+     2 com.planeta.crussty.CrusstyChunkGenerator.generateNoise(WorldInfo, Random, int, int, ChunkGenerator$ChunkData) line: 1028   << OWNER
+     3 org.bukkit.craftbukkit.generator.CustomChunkGenerator.fillFromNoise(ChunkAccess) line: 310
+     4 net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator.lambda$buildTerrain$1(ChunkAccess, StructureManager, Blender, RandomState, NoiseSettings, CustomChunkGenerator, BiomeManager, Set, WorldGenRegion) line: 418   << OWNER
+     5 java.util.concurrent.CompletableFuture$AsyncSupply.run() line: 1789
+     6 java.util.concurrent.CompletableFuture.asyncSupplyStage(Executor, Supplier) line: 1803
+     7 java.util.concurrent.CompletableFuture.supplyAsync(Supplier, Executor) line: 2026
+     8 net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator.buildTerrain(ChunkAccess, Blender, RandomState, StructureManager, BiomeManager, WorldGenRegion, Set, CustomChunkGenerator) line: 395   << OWNER
+     9 org.bukkit.craftbukkit.generator.CustomChunkGenerator.buildTerrain(ChunkAccess, Blender, RandomState, StructureManager, BiomeManager, WorldGenRegion, Set) line: 275
+    10 net.minecraft.world.level.chunk.status.ChunkStatusTasks.buildTerrain(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 109   << OWNER
+    11 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    12 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    14 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    20 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    21 java.lang.Thread.run() line: 1474
+  --- x6 [Paper Common Worker #0] ---
+     0 com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1719   << OWNER
+     1 com.planeta.crussty.CrusstyChunkGenerator.layout(ChunkGenerator$ChunkData, int, int, short[]) line: 1039   << OWNER
+     2 com.planeta.crussty.CrusstyChunkGenerator.generateNoise(WorldInfo, Random, int, int, ChunkGenerator$ChunkData) line: 1028   << OWNER
+     3 org.bukkit.craftbukkit.generator.CustomChunkGenerator.fillFromNoise(ChunkAccess) line: 310
+     4 net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator.lambda$buildTerrain$1(ChunkAccess, StructureManager, Blender, RandomState, NoiseSettings, CustomChunkGenerator, BiomeManager, Set, WorldGenRegion) line: 418   << OWNER
+     5 java.util.concurrent.CompletableFuture$AsyncSupply.run() line: 1789
+     6 java.util.concurrent.CompletableFuture.asyncSupplyStage(Executor, Supplier) line: 1803
+     7 java.util.concurrent.CompletableFuture.supplyAsync(Supplier, Executor) line: 2026
+     8 net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator.buildTerrain(ChunkAccess, Blender, RandomState, StructureManager, BiomeManager, WorldGenRegion, Set, CustomChunkGenerator) line: 395   << OWNER
+     9 org.bukkit.craftbukkit.generator.CustomChunkGenerator.buildTerrain(ChunkAccess, Blender, RandomState, StructureManager, BiomeManager, WorldGenRegion, Set) line: 275
+    10 net.minecraft.world.level.chunk.status.ChunkStatusTasks.buildTerrain(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 109   << OWNER
+    11 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    12 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    14 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    20 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    21 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1708   << OWNER
+     1 com.planeta.crussty.CrusstyChunkGenerator.layout(ChunkGenerator$ChunkData, int, int, short[]) line: 1039   << OWNER
+     2 com.planeta.crussty.CrusstyChunkGenerator.generateNoise(WorldInfo, Random, int, int, ChunkGenerator$ChunkData) line: 1028   << OWNER
+     3 org.bukkit.craftbukkit.generator.CustomChunkGenerator.fillFromNoise(ChunkAccess) line: 310
+     4 net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator.lambda$buildTerrain$1(ChunkAccess, StructureManager, Blender, RandomState, NoiseSettings, CustomChunkGenerator, BiomeManager, Set, WorldGenRegion) line: 418   << OWNER
+     5 java.util.concurrent.CompletableFuture$AsyncSupply.run() line: 1789
+     6 java.util.concurrent.CompletableFuture.asyncSupplyStage(Executor, Supplier) line: 1803
+     7 java.util.concurrent.CompletableFuture.supplyAsync(Supplier, Executor) line: 2026
+     8 net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator.buildTerrain(ChunkAccess, Blender, RandomState, StructureManager, BiomeManager, WorldGenRegion, Set, CustomChunkGenerator) line: 395   << OWNER
+     9 org.bukkit.craftbukkit.generator.CustomChunkGenerator.buildTerrain(ChunkAccess, Blender, RandomState, StructureManager, BiomeManager, WorldGenRegion, Set) line: 275
+    10 net.minecraft.world.level.chunk.status.ChunkStatusTasks.buildTerrain(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 109   << OWNER
+    11 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    12 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    14 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    20 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    21 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1542   << OWNER
+     1 com.planeta.crussty.CrusstyChunkGenerator.layout(ChunkGenerator$ChunkData, int, int, short[]) line: 1039   << OWNER
+     2 com.planeta.crussty.CrusstyChunkGenerator.generateNoise(WorldInfo, Random, int, int, ChunkGenerator$ChunkData) line: 1028   << OWNER
+     3 org.bukkit.craftbukkit.generator.CustomChunkGenerator.fillFromNoise(ChunkAccess) line: 310
+     4 net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator.lambda$buildTerrain$1(ChunkAccess, StructureManager, Blender, RandomState, NoiseSettings, CustomChunkGenerator, BiomeManager, Set, WorldGenRegion) line: 418   << OWNER
+     5 java.util.concurrent.CompletableFuture$AsyncSupply.run() line: 1789
+     6 java.util.concurrent.CompletableFuture.asyncSupplyStage(Executor, Supplier) line: 1803
+     7 java.util.concurrent.CompletableFuture.supplyAsync(Supplier, Executor) line: 2026
+     8 net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator.buildTerrain(ChunkAccess, Blender, RandomState, StructureManager, BiomeManager, WorldGenRegion, Set, CustomChunkGenerator) line: 395   << OWNER
+     9 org.bukkit.craftbukkit.generator.CustomChunkGenerator.buildTerrain(ChunkAccess, Blender, RandomState, StructureManager, BiomeManager, WorldGenRegion, Set) line: 275
+    10 net.minecraft.world.level.chunk.status.ChunkStatusTasks.buildTerrain(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 109   << OWNER
+    11 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    12 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    14 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    20 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    21 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1711   << OWNER
+     1 com.planeta.crussty.CrusstyChunkGenerator.layout(ChunkGenerator$ChunkData, int, int, short[]) line: 1039   << OWNER
+     2 com.planeta.crussty.CrusstyChunkGenerator.generateNoise(WorldInfo, Random, int, int, ChunkGenerator$ChunkData) line: 1028   << OWNER
+     3 org.bukkit.craftbukkit.generator.CustomChunkGenerator.fillFromNoise(ChunkAccess) line: 310
+     4 net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator.lambda$buildTerrain$1(ChunkAccess, StructureManager, Blender, RandomState, NoiseSettings, CustomChunkGenerator, BiomeManager, Set, WorldGenRegion) line: 418   << OWNER
+     5 java.util.concurrent.CompletableFuture$AsyncSupply.run() line: 1789
+     6 java.util.concurrent.CompletableFuture.asyncSupplyStage(Executor, Supplier) line: 1803
+     7 java.util.concurrent.CompletableFuture.supplyAsync(Supplier, Executor) line: 2026
+     8 net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator.buildTerrain(ChunkAccess, Blender, RandomState, StructureManager, BiomeManager, WorldGenRegion, Set, CustomChunkGenerator) line: 395   << OWNER
+     9 org.bukkit.craftbukkit.generator.CustomChunkGenerator.buildTerrain(ChunkAccess, Blender, RandomState, StructureManager, BiomeManager, WorldGenRegion, Set) line: 275
+    10 net.minecraft.world.level.chunk.status.ChunkStatusTasks.buildTerrain(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 109   << OWNER
+    11 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    12 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    14 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    20 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    21 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 com.planeta.crussty.CrusstyChunkGenerator.layoutBulk(ChunkGenerator$ChunkData, int, int, short[], Material[]) line: 1543   << OWNER
+     1 com.planeta.crussty.CrusstyChunkGenerator.layout(ChunkGenerator$ChunkData, int, int, short[]) line: 1039   << OWNER
+     2 com.planeta.crussty.CrusstyChunkGenerator.generateNoise(WorldInfo, Random, int, int, ChunkGenerator$ChunkData) line: 1028   << OWNER
+     3 org.bukkit.craftbukkit.generator.CustomChunkGenerator.fillFromNoise(ChunkAccess) line: 310
+     4 net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator.lambda$buildTerrain$1(ChunkAccess, StructureManager, Blender, RandomState, NoiseSettings, CustomChunkGenerator, BiomeManager, Set, WorldGenRegion) line: 418   << OWNER
+     5 java.util.concurrent.CompletableFuture$AsyncSupply.run() line: 1789
+     6 java.util.concurrent.CompletableFuture.asyncSupplyStage(Executor, Supplier) line: 1803
+     7 java.util.concurrent.CompletableFuture.supplyAsync(Supplier, Executor) line: 2026
+     8 net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator.buildTerrain(ChunkAccess, Blender, RandomState, StructureManager, BiomeManager, WorldGenRegion, Set, CustomChunkGenerator) line: 395   << OWNER
+     9 org.bukkit.craftbukkit.generator.CustomChunkGenerator.buildTerrain(ChunkAccess, Blender, RandomState, StructureManager, BiomeManager, WorldGenRegion, Set) line: 275
+    10 net.minecraft.world.level.chunk.status.ChunkStatusTasks.buildTerrain(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 109   << OWNER
+    11 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    12 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    14 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    20 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    21 java.lang.Thread.run() line: 1474
+
+##### PaletteReadoutCache (10 samples) #####
+  --- x2 [Paper Common Worker #0] ---
+     0 ca.spottedleaf.moonrise.patches.bitstorage.PaletteReadoutCache.readout(BitStorage, Palette) line: 96
+     1 net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 364   << OWNER
+     2 net.minecraft.world.level.chunk.PalettedContainer.lambda$codec$2(Strategy, PalettedContainerRO) line: 71   << OWNER
+     3 com.mojang.serialization.Encoder$1.encode(Object, DynamicOps, Object) line: 25
+     4 com.mojang.serialization.Codec$2.encode(Object, DynamicOps, Object) line: 79
+     5 com.mojang.serialization.Encoder.encodeStart(DynamicOps, Object) line: 14
+     6 net.minecraft.nbt.CompoundTag.store(String, Codec, DynamicOps, Object) line: 537   << OWNER
+     7 net.minecraft.nbt.CompoundTag.store(String, Codec, Object) line: 527   << OWNER
+     8 net.minecraft.world.level.chunk.storage.SerializableChunkData.write() line: 548   << OWNER
+     9 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder.lambda$saveChunk$0(SerializableChunkData, Completable) line: 1732
+    10 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    11 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    12 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    14 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    15 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    16 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    17 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    18 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 ca.spottedleaf.moonrise.patches.bitstorage.PaletteReadoutCache.readout(BitStorage, Palette) line: 96
+     1 net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 364   << OWNER
+     2 net.minecraft.world.level.chunk.PalettedContainer.lambda$codec$2(Strategy, PalettedContainerRO) line: 71   << OWNER
+     3 com.mojang.serialization.Encoder$1.encode(Object, DynamicOps, Object) line: 25
+     4 com.mojang.serialization.Codec$2.encode(Object, DynamicOps, Object) line: 79
+     5 com.mojang.serialization.Encoder.encodeStart(DynamicOps, Object) line: 14
+     6 net.minecraft.nbt.CompoundTag.store(String, Codec, DynamicOps, Object) line: 537   << OWNER
+     7 net.minecraft.nbt.CompoundTag.store(String, Codec, Object) line: 527   << OWNER
+     8 net.minecraft.world.level.chunk.storage.SerializableChunkData.write() line: 548   << OWNER
+     9 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder.lambda$saveChunk$0(SerializableChunkData, Completable) line: 1732
+    10 ca.spottedleaf.moonrise.common.misc.LazyRunnable.run() line: 20
+    11 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    12 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    14 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    15 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    16 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    18 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    19 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 ca.spottedleaf.moonrise.patches.bitstorage.PaletteReadoutCache.readout(BitStorage, Palette) line: 80
+     1 net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 364   << OWNER
+     2 net.minecraft.world.level.chunk.PalettedContainer.lambda$codec$2(Strategy, PalettedContainerRO) line: 71   << OWNER
+     3 com.mojang.serialization.Encoder$1.encode(Object, DynamicOps, Object) line: 25
+     4 com.mojang.serialization.Codec$2.encode(Object, DynamicOps, Object) line: 79
+     5 com.mojang.serialization.Encoder.encodeStart(DynamicOps, Object) line: 14
+     6 net.minecraft.nbt.CompoundTag.store(String, Codec, DynamicOps, Object) line: 537   << OWNER
+     7 net.minecraft.nbt.CompoundTag.store(String, Codec, Object) line: 527   << OWNER
+     8 net.minecraft.world.level.chunk.storage.SerializableChunkData.write() line: 548   << OWNER
+     9 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder.lambda$saveChunk$0(SerializableChunkData, Completable) line: 1732
+    10 ca.spottedleaf.moonrise.common.misc.LazyRunnable.run() line: 20
+    11 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    12 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    14 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    15 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    16 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    18 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    19 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 ca.spottedleaf.moonrise.patches.bitstorage.PaletteReadoutCache.readout(BitStorage, Palette) line: 81
+     1 net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 364   << OWNER
+     2 net.minecraft.world.level.chunk.PalettedContainer.lambda$codec$2(Strategy, PalettedContainerRO) line: 71   << OWNER
+     3 com.mojang.serialization.Encoder$1.encode(Object, DynamicOps, Object) line: 25
+     4 com.mojang.serialization.Codec$2.encode(Object, DynamicOps, Object) line: 79
+     5 com.mojang.serialization.Encoder.encodeStart(DynamicOps, Object) line: 14
+     6 net.minecraft.nbt.CompoundTag.store(String, Codec, DynamicOps, Object) line: 537   << OWNER
+     7 net.minecraft.nbt.CompoundTag.store(String, Codec, Object) line: 527   << OWNER
+     8 net.minecraft.world.level.chunk.storage.SerializableChunkData.write() line: 548   << OWNER
+     9 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder.lambda$saveChunk$0(SerializableChunkData, Completable) line: 1732
+    10 ca.spottedleaf.moonrise.common.misc.LazyRunnable.run() line: 20
+    11 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    12 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    14 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    15 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    16 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    18 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    19 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 ca.spottedleaf.moonrise.patches.bitstorage.PaletteReadoutCache.readout(BitStorage, Palette) line: 81
+     1 net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 364   << OWNER
+     2 net.minecraft.world.level.chunk.PalettedContainer.lambda$codec$2(Strategy, PalettedContainerRO) line: 71   << OWNER
+     3 com.mojang.serialization.Encoder$1.encode(Object, DynamicOps, Object) line: 25
+     4 com.mojang.serialization.Codec$2.encode(Object, DynamicOps, Object) line: 79
+     5 com.mojang.serialization.Encoder.encodeStart(DynamicOps, Object) line: 14
+     6 net.minecraft.nbt.CompoundTag.store(String, Codec, DynamicOps, Object) line: 537   << OWNER
+     7 net.minecraft.nbt.CompoundTag.store(String, Codec, Object) line: 527   << OWNER
+     8 net.minecraft.world.level.chunk.storage.SerializableChunkData.write() line: 548   << OWNER
+     9 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder.lambda$saveChunk$0(SerializableChunkData, Completable) line: 1732
+    10 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    11 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    12 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    14 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    15 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    16 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    17 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    18 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 ca.spottedleaf.moonrise.patches.bitstorage.PaletteReadoutCache.readout(BitStorage, Palette) line: 96
+     1 net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 364   << OWNER
+     2 net.minecraft.world.level.chunk.PalettedContainer.lambda$codec$2(Strategy, PalettedContainerRO) line: 71   << OWNER
+     3 com.mojang.serialization.Encoder$1.encode(Object, DynamicOps, Object) line: 25
+     4 com.mojang.serialization.Codec$2.encode(Object, DynamicOps, Object) line: 79
+     5 com.mojang.serialization.Encoder.encodeStart(DynamicOps, Object) line: 14
+     6 net.minecraft.nbt.CompoundTag.store(String, Codec, DynamicOps, Object) line: 537   << OWNER
+     7 net.minecraft.nbt.CompoundTag.store(String, Codec, Object) line: 527   << OWNER
+     8 net.minecraft.world.level.chunk.storage.SerializableChunkData.write() line: 548   << OWNER
+     9 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder.lambda$saveChunk$0(SerializableChunkData, Completable) line: 1732
+    10 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    11 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    12 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    14 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    15 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    16 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    17 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    18 java.lang.Thread.run() line: 1474
+
+##### ListTag.getIdToWrite (7 samples) #####
+  --- x4 [Paper Common Worker #0] ---
+     0 net.minecraft.nbt.ListTag.getIdToWrite(List, int) line: 37   << OWNER
+     1 net.minecraft.nbt.ListTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 62   << OWNER
+     2 net.minecraft.nbt.ListTag.moonrise$writeWithIdAndName(AbstractBufferOutputStream, String, boolean) line: 29   << OWNER
+     3 ca.spottedleaf.moonrise.patches.nbt_rw.FastNBTSerialiser.writeNamedTag(Tag, String, AbstractBufferOutputStream, boolean) line: 32
+     4 net.minecraft.nbt.CompoundTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 57   << OWNER
+     5 net.minecraft.nbt.CompoundTag.moonrise$writeWithIdAndName(AbstractBufferOutputStream, String, boolean) line: 49   << OWNER
+     6 ca.spottedleaf.moonrise.patches.nbt_rw.FastNBTSerialiser.writeNamedTag(Tag, String, AbstractBufferOutputStream, boolean) line: 32
+     7 net.minecraft.nbt.CompoundTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 57   << OWNER
+     8 net.minecraft.nbt.ListTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 74   << OWNER
+     9 net.minecraft.nbt.ListTag.moonrise$writeWithIdAndName(AbstractBufferOutputStream, String, boolean) line: 29   << OWNER
+    10 ca.spottedleaf.moonrise.patches.nbt_rw.FastNBTSerialiser.writeNamedTag(Tag, String, AbstractBufferOutputStream, boolean) line: 32
+    11 net.minecraft.nbt.CompoundTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 57   << OWNER
+    12 net.minecraft.nbt.CompoundTag.moonrise$writeWithIdAndName(AbstractBufferOutputStream, String, boolean) line: 49   << OWNER
+    13 ca.spottedleaf.moonrise.patches.nbt_rw.FastNBTSerialiser.writeNamedTag(Tag, String, AbstractBufferOutputStream, boolean) line: 32
+    14 net.minecraft.nbt.NbtIo.writeTag(Tag, OutputStream, String, boolean) line: 222   << OWNER
+    15 net.minecraft.nbt.NbtIo.writeTag(Tag, DataOutput, String) line: 194   << OWNER
+    16 net.minecraft.nbt.NbtIo.writeUnnamedTag(Tag, DataOutput) line: 263   << OWNER
+    17 net.minecraft.nbt.NbtIo.writeUnnamedTagWithFallback(Tag, DataOutput) line: 268   << OWNER
+    18 net.minecraft.nbt.NbtIo.write(CompoundTag, DataOutput) line: 137   << OWNER
+    19 net.minecraft.world.level.chunk.storage.RegionFileStorage.moonrise$startWrite(int, int, CompoundTag) line: 100   << OWNER
+    20 ca.spottedleaf.moonrise.patches.chunk_system.io.datacontroller.ChunkDataController.startWrite(int, int, CompoundTag) line: 28
+    21 ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO$ChunkIOTask.performWriteCompress(MoonriseRegionFileIO$ChunkIOTask$InProgressWrite) line: 1265
+    22 ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO$ChunkIOTask.lambda$scheduleWriteCompress$0(MoonriseRegionFileIO$ChunkIOTask$InProgressWrite) line: 1216
+    23 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    24 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    25 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    26 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    27 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    28 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    29 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    30 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    31 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 net.minecraft.nbt.ListTag.getIdToWrite(List, int) line: 37   << OWNER
+     1 net.minecraft.nbt.ListTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 62   << OWNER
+     2 net.minecraft.nbt.ListTag.moonrise$writeWithIdAndName(AbstractBufferOutputStream, String, boolean) line: 29   << OWNER
+     3 ca.spottedleaf.moonrise.patches.nbt_rw.FastNBTSerialiser.writeNamedTag(Tag, String, AbstractBufferOutputStream, boolean) line: 32
+     4 net.minecraft.nbt.CompoundTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 57   << OWNER
+     5 net.minecraft.nbt.CompoundTag.moonrise$writeWithIdAndName(AbstractBufferOutputStream, String, boolean) line: 49   << OWNER
+     6 ca.spottedleaf.moonrise.patches.nbt_rw.FastNBTSerialiser.writeNamedTag(Tag, String, AbstractBufferOutputStream, boolean) line: 32
+     7 net.minecraft.nbt.CompoundTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 57   << OWNER
+     8 net.minecraft.nbt.ListTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 74   << OWNER
+     9 net.minecraft.nbt.ListTag.moonrise$writeWithIdAndName(AbstractBufferOutputStream, String, boolean) line: 29   << OWNER
+    10 ca.spottedleaf.moonrise.patches.nbt_rw.FastNBTSerialiser.writeNamedTag(Tag, String, AbstractBufferOutputStream, boolean) line: 32
+    11 net.minecraft.nbt.CompoundTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 57   << OWNER
+    12 net.minecraft.nbt.CompoundTag.moonrise$writeWithIdAndName(AbstractBufferOutputStream, String, boolean) line: 49   << OWNER
+    13 ca.spottedleaf.moonrise.patches.nbt_rw.FastNBTSerialiser.writeNamedTag(Tag, String, AbstractBufferOutputStream, boolean) line: 32
+    14 net.minecraft.nbt.NbtIo.writeTag(Tag, OutputStream, String, boolean) line: 222   << OWNER
+    15 net.minecraft.nbt.NbtIo.writeTag(Tag, DataOutput, String) line: 194   << OWNER
+    16 net.minecraft.nbt.NbtIo.writeUnnamedTag(Tag, DataOutput) line: 263   << OWNER
+    17 net.minecraft.nbt.NbtIo.writeUnnamedTagWithFallback(Tag, DataOutput) line: 268   << OWNER
+    18 net.minecraft.nbt.NbtIo.write(CompoundTag, DataOutput) line: 137   << OWNER
+    19 net.minecraft.world.level.chunk.storage.RegionFileStorage.moonrise$startWrite(int, int, CompoundTag) line: 100   << OWNER
+    20 ca.spottedleaf.moonrise.patches.chunk_system.io.datacontroller.ChunkDataController.startWrite(int, int, CompoundTag) line: 28
+    21 ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO$ChunkIOTask.performWriteCompress(MoonriseRegionFileIO$ChunkIOTask$InProgressWrite) line: 1265
+    22 ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO$ChunkIOTask.lambda$scheduleWriteCompress$0(MoonriseRegionFileIO$ChunkIOTask$InProgressWrite) line: 1216
+    23 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    24 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    25 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    26 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    27 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    28 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    29 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    30 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    31 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 net.minecraft.nbt.ListTag.getIdToWrite(List, int) line: 40   << OWNER
+     1 net.minecraft.nbt.ListTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 62   << OWNER
+     2 net.minecraft.nbt.ListTag.moonrise$writeWithIdAndName(AbstractBufferOutputStream, String, boolean) line: 29   << OWNER
+     3 ca.spottedleaf.moonrise.patches.nbt_rw.FastNBTSerialiser.writeNamedTag(Tag, String, AbstractBufferOutputStream, boolean) line: 32
+     4 net.minecraft.nbt.CompoundTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 57   << OWNER
+     5 net.minecraft.nbt.CompoundTag.moonrise$writeWithIdAndName(AbstractBufferOutputStream, String, boolean) line: 49   << OWNER
+     6 ca.spottedleaf.moonrise.patches.nbt_rw.FastNBTSerialiser.writeNamedTag(Tag, String, AbstractBufferOutputStream, boolean) line: 32
+     7 net.minecraft.nbt.CompoundTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 57   << OWNER
+     8 net.minecraft.nbt.ListTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 74   << OWNER
+     9 net.minecraft.nbt.ListTag.moonrise$writeWithIdAndName(AbstractBufferOutputStream, String, boolean) line: 29   << OWNER
+    10 ca.spottedleaf.moonrise.patches.nbt_rw.FastNBTSerialiser.writeNamedTag(Tag, String, AbstractBufferOutputStream, boolean) line: 32
+    11 net.minecraft.nbt.CompoundTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 57   << OWNER
+    12 net.minecraft.nbt.CompoundTag.moonrise$writeWithIdAndName(AbstractBufferOutputStream, String, boolean) line: 49   << OWNER
+    13 ca.spottedleaf.moonrise.patches.nbt_rw.FastNBTSerialiser.writeNamedTag(Tag, String, AbstractBufferOutputStream, boolean) line: 32
+    14 net.minecraft.nbt.NbtIo.writeTag(Tag, OutputStream, String, boolean) line: 222   << OWNER
+    15 net.minecraft.nbt.NbtIo.writeTag(Tag, DataOutput, String) line: 194   << OWNER
+    16 net.minecraft.nbt.NbtIo.writeUnnamedTag(Tag, DataOutput) line: 263   << OWNER
+    17 net.minecraft.nbt.NbtIo.writeUnnamedTagWithFallback(Tag, DataOutput) line: 268   << OWNER
+    18 net.minecraft.nbt.NbtIo.write(CompoundTag, DataOutput) line: 137   << OWNER
+    19 net.minecraft.world.level.chunk.storage.RegionFileStorage.moonrise$startWrite(int, int, CompoundTag) line: 100   << OWNER
+    20 ca.spottedleaf.moonrise.patches.chunk_system.io.datacontroller.ChunkDataController.startWrite(int, int, CompoundTag) line: 28
+    21 ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO$ChunkIOTask.performWriteCompress(MoonriseRegionFileIO$ChunkIOTask$InProgressWrite) line: 1265
+    22 ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO$ChunkIOTask.lambda$scheduleWriteCompress$0(MoonriseRegionFileIO$ChunkIOTask$InProgressWrite) line: 1216
+    23 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    24 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    25 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    26 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    27 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    28 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    29 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    30 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    31 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 net.minecraft.nbt.ListTag.getIdToWrite(List, int) line: 40   << OWNER
+     1 net.minecraft.nbt.ListTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 62   << OWNER
+     2 net.minecraft.nbt.ListTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 79   << OWNER
+     3 net.minecraft.nbt.ListTag.moonrise$writeWithIdAndName(AbstractBufferOutputStream, String, boolean) line: 29   << OWNER
+     4 ca.spottedleaf.moonrise.patches.nbt_rw.FastNBTSerialiser.writeNamedTag(Tag, String, AbstractBufferOutputStream, boolean) line: 32
+     5 net.minecraft.nbt.CompoundTag.moonrise$writeWithoutId(AbstractBufferOutputStream, boolean) line: 57   << OWNER
+     6 net.minecraft.nbt.CompoundTag.moonrise$writeWithIdAndName(AbstractBufferOutputStream, String, boolean) line: 49   << OWNER
+     7 ca.spottedleaf.moonrise.patches.nbt_rw.FastNBTSerialiser.writeNamedTag(Tag, String, AbstractBufferOutputStream, boolean) line: 32
+     8 net.minecraft.nbt.NbtIo.writeTag(Tag, OutputStream, String, boolean) line: 222   << OWNER
+     9 net.minecraft.nbt.NbtIo.writeTag(Tag, DataOutput, String) line: 194   << OWNER
+    10 net.minecraft.nbt.NbtIo.writeUnnamedTag(Tag, DataOutput) line: 263   << OWNER
+    11 net.minecraft.nbt.NbtIo.writeUnnamedTagWithFallback(Tag, DataOutput) line: 268   << OWNER
+    12 net.minecraft.nbt.NbtIo.write(CompoundTag, DataOutput) line: 137   << OWNER
+    13 net.minecraft.world.level.chunk.storage.RegionFileStorage.moonrise$startWrite(int, int, CompoundTag) line: 100   << OWNER
+    14 ca.spottedleaf.moonrise.patches.chunk_system.io.datacontroller.ChunkDataController.startWrite(int, int, CompoundTag) line: 28
+    15 ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO$ChunkIOTask.performWriteCompress(MoonriseRegionFileIO$ChunkIOTask$InProgressWrite) line: 1265
+    16 ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO$ChunkIOTask.lambda$scheduleWriteCompress$0(MoonriseRegionFileIO$ChunkIOTask$InProgressWrite) line: 1216
+    17 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    18 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    19 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    20 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    21 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    22 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    23 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    24 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    25 java.lang.Thread.run() line: 1474
+
+##### PalettedContainer (21 samples) #####
+  --- x1 [Paper Common Worker #0] ---
+     0 net.minecraft.world.level.chunk.PalettedContainer.get(int) line: 236   << OWNER
+     1 net.minecraft.world.level.chunk.PalettedContainer.get(int, int, int) line: 230   << OWNER
+     2 net.minecraft.world.level.chunk.LevelChunkSection.getNoiseBiome(int, int, int) line: 308   << OWNER
+     3 net.minecraft.world.level.chunk.ChunkAccess.getNoiseBiome(int, int, int) line: 569   << OWNER
+     4 net.minecraft.world.level.chunk.ProtoChunk.getNoiseBiome(int, int, int) line: 289   << OWNER
+     5 net.minecraft.world.level.LevelReader.getNoiseBiome(int, int, int) line: 76   << OWNER
+     6 net.minecraft.world.level.biome.BiomeManager.getBiome(int, int, int) line: 68   << OWNER
+     7 net.minecraft.world.level.biome.BiomeManager.getBiome(BlockPos) line: 32   << OWNER
+     8 com.planeta.crussty.DecoDriver.biomeHasFeature(int, int, int, String) line: 1250   << OWNER
+     9 com.planeta.crussty.ChunkGenNative.decoRunBatch(long, long, long, int, int, int, int, int[], int, int, Object, int[], int[], int[])   << OWNER
+    10 com.planeta.crussty.DecoDriver.runChunkBatched(long, long, int, int, int, int, int[], int, int[], int[], boolean) line: 500   << OWNER
+    11 com.planeta.crussty.DecoDriver.runChunk(long, int, int, LimitedRegion) line: 386   << OWNER
+    12 com.planeta.crussty.DecoDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 285   << OWNER
+    13 net.minecraft.world.level.chunk.ChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager, boolean) line: 524   << OWNER
+    14 org.bukkit.craftbukkit.generator.CustomChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager) line: 342
+    15 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 150   << OWNER
+    16 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    17 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    18 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+    19 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    20 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    21 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    22 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    23 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    24 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    25 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    26 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    27 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 net.minecraft.world.level.chunk.PalettedContainer$Data.copyFrom(Palette, BitStorage) line: 511   << OWNER
+     1 net.minecraft.world.level.chunk.PalettedContainer.onResize(int, Object) line: 181   << OWNER
+     2 net.minecraft.world.level.chunk.LinearPalette.idFor(Object, PaletteResize) line: 53   << OWNER
+     3 net.minecraft.world.level.chunk.PalettedContainer.getAndSet(int, Object) line: 206   << OWNER
+     4 net.minecraft.world.level.chunk.PalettedContainer.getAndSet(int, int, int, Object) line: 194   << OWNER
+     5 net.minecraft.world.level.chunk.LevelChunkSection.setBlockState(int, int, int, BlockState, boolean) line: 132   << OWNER
+     6 net.minecraft.world.level.chunk.LevelChunkSection.setBlockState(int, int, int, BlockState) line: 87   << OWNER
+     7 net.minecraft.world.level.chunk.ProtoChunk.setBlockState(BlockPos, BlockState, int) line: 188   << OWNER
+     8 net.minecraft.server.level.WorldGenRegion.setBlock(BlockPos, BlockState, int, int) line: 415   << OWNER
+     9 net.minecraft.world.level.LevelWriter.setBlock(BlockPos, BlockState, int) line: 17   << OWNER
+    10 net.minecraft.world.level.levelgen.feature.SimpleBlockFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 61   << OWNER
+    11 net.minecraft.world.level.levelgen.placement.FeaturePlacer.place(PlacedFeature, RandomSource, BlockPos, boolean) line: 46   << OWNER
+    12 net.minecraft.world.level.levelgen.placement.FeaturePlacer.place(PlacedFeature, RandomSource, BlockPos) line: 29   << OWNER
+    13 net.minecraft.world.level.levelgen.placement.PlacedFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 31   << OWNER
+    14 net.minecraft.world.level.levelgen.feature.WeightedRandomSelectorFeature.lambda$place$0(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos, Holder) line: 34   << OWNER
+    15 java.util.Optional.map(Function) line: 260
+    16 net.minecraft.world.level.levelgen.feature.WeightedRandomSelectorFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 34   << OWNER
+    17 net.minecraft.world.level.levelgen.placement.FeaturePlacer.place(PlacedFeature, RandomSource, BlockPos, boolean) line: 65   << OWNER
+    18 net.minecraft.world.level.levelgen.placement.FeaturePlacer.placeWithBiomeCheck(PlacedFeature, RandomSource, BlockPos) line: 33   << OWNER
+    19 com.planeta.crussty.DecoDriver.delegateVanilla(String, int, int, long, int, int, int) line: 659   << OWNER
+    20 com.planeta.crussty.DecoDriver.runChunkBatched(long, long, int, int, int, int, int[], int, int[], int[], boolean) line: 578   << OWNER
+    21 com.planeta.crussty.DecoDriver.runChunk(long, int, int, LimitedRegion) line: 386   << OWNER
+    22 com.planeta.crussty.DecoDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 285   << OWNER
+    23 net.minecraft.world.level.chunk.ChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager, boolean) line: 524   << OWNER
+    24 org.bukkit.craftbukkit.generator.CustomChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager) line: 342
+    25 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 150   << OWNER
+    26 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    ... (11 more frames above owner)
+  --- x1 [Paper Common Worker #1] ---
+     0 net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 423   << OWNER
+     1 net.minecraft.world.level.chunk.PalettedContainer.lambda$codec$2(Strategy, PalettedContainerRO) line: 71   << OWNER
+     2 com.mojang.serialization.Encoder$1.encode(Object, DynamicOps, Object) line: 25
+     3 com.mojang.serialization.Codec$2.encode(Object, DynamicOps, Object) line: 79
+     4 com.mojang.serialization.Encoder.encodeStart(DynamicOps, Object) line: 14
+     5 net.minecraft.nbt.CompoundTag.store(String, Codec, DynamicOps, Object) line: 537   << OWNER
+     6 net.minecraft.nbt.CompoundTag.store(String, Codec, Object) line: 527   << OWNER
+     7 net.minecraft.world.level.chunk.storage.SerializableChunkData.write() line: 549   << OWNER
+     8 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder.lambda$saveChunk$0(SerializableChunkData, Completable) line: 1732
+     9 ca.spottedleaf.moonrise.common.misc.LazyRunnable.run() line: 20
+    10 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    11 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    12 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    14 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    15 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    16 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    17 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    18 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 net.minecraft.world.level.chunk.PalettedContainer$Data.storage() line: 498   << OWNER
+     1 net.minecraft.world.level.chunk.PalettedContainer.pack(Strategy) line: 359   << OWNER
+     2 net.minecraft.world.level.chunk.PalettedContainer.lambda$codec$2(Strategy, PalettedContainerRO) line: 71   << OWNER
+     3 com.mojang.serialization.Encoder$1.encode(Object, DynamicOps, Object) line: 25
+     4 com.mojang.serialization.Codec$2.encode(Object, DynamicOps, Object) line: 79
+     5 com.mojang.serialization.Encoder.encodeStart(DynamicOps, Object) line: 14
+     6 net.minecraft.nbt.CompoundTag.store(String, Codec, DynamicOps, Object) line: 537   << OWNER
+     7 net.minecraft.nbt.CompoundTag.store(String, Codec, Object) line: 527   << OWNER
+     8 net.minecraft.world.level.chunk.storage.SerializableChunkData.write() line: 549   << OWNER
+     9 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder.lambda$saveChunk$0(SerializableChunkData, Completable) line: 1732
+    10 ca.spottedleaf.moonrise.common.misc.LazyRunnable.run() line: 20
+    11 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    12 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    14 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    15 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    16 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    18 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    19 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 net.minecraft.world.level.chunk.PalettedContainer.getAndSetUnchecked(int, int, int, Object) line: 201   << OWNER
+     1 net.minecraft.world.level.chunk.LevelChunkSection.setBlockState(int, int, int, BlockState, boolean) line: 134   << OWNER
+     2 com.planeta.crussty.DecoDriver.applyOpStatic(WorldGenRegion, int, int, int[], int) line: 855   << OWNER
+     3 com.planeta.crussty.DecoDriver.runChunkBatched(long, long, int, int, int, int, int[], int, int[], int[], boolean) line: 552   << OWNER
+     4 com.planeta.crussty.DecoDriver.runChunk(long, int, int, LimitedRegion) line: 386   << OWNER
+     5 com.planeta.crussty.DecoDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 285   << OWNER
+     6 net.minecraft.world.level.chunk.ChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager, boolean) line: 524   << OWNER
+     7 org.bukkit.craftbukkit.generator.CustomChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager) line: 342
+     8 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 150   << OWNER
+     9 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    10 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    11 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+    12 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    13 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    14 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    16 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    19 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    20 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 net.minecraft.world.level.chunk.PalettedContainer.get(int) line: 236   << OWNER
+     1 net.minecraft.world.level.chunk.PalettedContainer.get(int, int, int) line: 230   << OWNER
+     2 net.minecraft.world.level.chunk.LevelChunkSection.getBlockState(int, int, int) line: 71   << OWNER
+     3 ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.getBlockState(int, int, int) line: 299
+     4 ca.spottedleaf.moonrise.patches.starlight.light.SkyStarLightEngine.calculateLightValue(LightChunkGetter, int, int, int, int) line: 311
+     5 ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.checkChunkEdge(LightChunkGetter, ChunkAccess, int, int, int) line: 543
+     6 ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.checkChunkEdges(LightChunkGetter, ChunkAccess, int, int) line: 596
+     7 ca.spottedleaf.moonrise.patches.starlight.light.SkyStarLightEngine.lightChunk(LightChunkGetter, ChunkAccess, boolean) line: 557
+     8 ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.light(LightChunkGetter, ChunkAccess, Boolean[]) line: 918
+     9 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface.lightChunk(ChunkAccess, Boolean[]) line: 473
+    10 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkLightTask$LightTask.getAsBoolean() line: 159
+    11 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface$LightQueue$ChunkTasks.runTasks() line: 620
+    12 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface$ServerLightQueue$ServerChunkTasks.run() line: 932
+    13 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+    14 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    15 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    17 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    20 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    21 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    22 java.lang.Thread.run() line: 1474
+
+##### GeodeFeature (9 samples) #####
+  --- x4 [Paper Common Worker #0] ---
+     0 net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 140   << OWNER
+     1 net.minecraft.world.level.levelgen.placement.FeaturePlacer.place(PlacedFeature, RandomSource, BlockPos, boolean) line: 65   << OWNER
+     2 net.minecraft.world.level.levelgen.placement.FeaturePlacer.placeWithBiomeCheck(PlacedFeature, RandomSource, BlockPos) line: 33   << OWNER
+     3 com.planeta.crussty.DecoDriver.delegateVanilla(String, int, int, long, int, int, int) line: 659   << OWNER
+     4 com.planeta.crussty.DecoDriver.runChunkBatched(long, long, int, int, int, int, int[], int, int[], int[], boolean) line: 578   << OWNER
+     5 com.planeta.crussty.DecoDriver.runChunk(long, int, int, LimitedRegion) line: 386   << OWNER
+     6 com.planeta.crussty.DecoDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 285   << OWNER
+     7 net.minecraft.world.level.chunk.ChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager, boolean) line: 524   << OWNER
+     8 org.bukkit.craftbukkit.generator.CustomChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager) line: 342
+     9 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 150   << OWNER
+    10 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    11 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    12 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    14 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    20 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    21 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 141   << OWNER
+     1 net.minecraft.world.level.levelgen.placement.FeaturePlacer.place(PlacedFeature, RandomSource, BlockPos, boolean) line: 65   << OWNER
+     2 net.minecraft.world.level.levelgen.placement.FeaturePlacer.placeWithBiomeCheck(PlacedFeature, RandomSource, BlockPos) line: 33   << OWNER
+     3 com.planeta.crussty.DecoDriver.delegateVanilla(String, int, int, long, int, int, int) line: 659   << OWNER
+     4 com.planeta.crussty.DecoDriver.runChunkBatched(long, long, int, int, int, int, int[], int, int[], int[], boolean) line: 578   << OWNER
+     5 com.planeta.crussty.DecoDriver.runChunk(long, int, int, LimitedRegion) line: 386   << OWNER
+     6 com.planeta.crussty.DecoDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 285   << OWNER
+     7 net.minecraft.world.level.chunk.ChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager, boolean) line: 524   << OWNER
+     8 org.bukkit.craftbukkit.generator.CustomChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager) line: 342
+     9 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 150   << OWNER
+    10 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    11 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    12 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    14 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    20 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    21 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 140   << OWNER
+     1 net.minecraft.world.level.levelgen.placement.FeaturePlacer.place(PlacedFeature, RandomSource, BlockPos, boolean) line: 65   << OWNER
+     2 net.minecraft.world.level.levelgen.placement.FeaturePlacer.placeWithBiomeCheck(PlacedFeature, RandomSource, BlockPos) line: 33   << OWNER
+     3 com.planeta.crussty.DecoDriver.delegateVanilla(String, int, int, long, int, int, int) line: 659   << OWNER
+     4 com.planeta.crussty.DecoDriver.runChunkBatched(long, long, int, int, int, int, int[], int, int[], int[], boolean) line: 578   << OWNER
+     5 com.planeta.crussty.DecoDriver.runChunk(long, int, int, LimitedRegion) line: 386   << OWNER
+     6 com.planeta.crussty.DecoDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 285   << OWNER
+     7 net.minecraft.world.level.chunk.ChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager, boolean) line: 524   << OWNER
+     8 org.bukkit.craftbukkit.generator.CustomChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager) line: 342
+     9 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 150   << OWNER
+    10 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    11 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    12 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    14 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    20 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    21 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 104   << OWNER
+     1 net.minecraft.world.level.levelgen.placement.FeaturePlacer.place(PlacedFeature, RandomSource, BlockPos, boolean) line: 65   << OWNER
+     2 net.minecraft.world.level.levelgen.placement.FeaturePlacer.placeWithBiomeCheck(PlacedFeature, RandomSource, BlockPos) line: 33   << OWNER
+     3 com.planeta.crussty.DecoDriver.delegateVanilla(String, int, int, long, int, int, int) line: 659   << OWNER
+     4 com.planeta.crussty.DecoDriver.runChunkBatched(long, long, int, int, int, int, int[], int, int[], int[], boolean) line: 578   << OWNER
+     5 com.planeta.crussty.DecoDriver.runChunk(long, int, int, LimitedRegion) line: 386   << OWNER
+     6 com.planeta.crussty.DecoDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 285   << OWNER
+     7 net.minecraft.world.level.chunk.ChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager, boolean) line: 524   << OWNER
+     8 org.bukkit.craftbukkit.generator.CustomChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager) line: 342
+     9 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 150   << OWNER
+    10 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    11 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    12 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    14 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    20 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    21 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 104   << OWNER
+     1 net.minecraft.world.level.levelgen.placement.FeaturePlacer.place(PlacedFeature, RandomSource, BlockPos, boolean) line: 65   << OWNER
+     2 net.minecraft.world.level.levelgen.placement.FeaturePlacer.placeWithBiomeCheck(PlacedFeature, RandomSource, BlockPos) line: 33   << OWNER
+     3 com.planeta.crussty.DecoDriver.delegateVanilla(String, int, int, long, int, int, int) line: 659   << OWNER
+     4 com.planeta.crussty.DecoDriver.runChunkBatched(long, long, int, int, int, int, int[], int, int[], int[], boolean) line: 578   << OWNER
+     5 com.planeta.crussty.DecoDriver.runChunk(long, int, int, LimitedRegion) line: 386   << OWNER
+     6 com.planeta.crussty.DecoDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 285   << OWNER
+     7 net.minecraft.world.level.chunk.ChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager, boolean) line: 524   << OWNER
+     8 org.bukkit.craftbukkit.generator.CustomChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager) line: 342
+     9 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 150   << OWNER
+    10 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    11 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    12 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    14 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    20 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    21 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 net.minecraft.world.level.levelgen.feature.GeodeFeature.place(WorldGenLevel, ChunkGenerator, RandomSource, BlockPos) line: 141   << OWNER
+     1 net.minecraft.world.level.levelgen.placement.FeaturePlacer.place(PlacedFeature, RandomSource, BlockPos, boolean) line: 65   << OWNER
+     2 net.minecraft.world.level.levelgen.placement.FeaturePlacer.placeWithBiomeCheck(PlacedFeature, RandomSource, BlockPos) line: 33   << OWNER
+     3 com.planeta.crussty.DecoDriver.delegateVanilla(String, int, int, long, int, int, int) line: 659   << OWNER
+     4 com.planeta.crussty.DecoDriver.runChunkBatched(long, long, int, int, int, int, int[], int, int[], int[], boolean) line: 578   << OWNER
+     5 com.planeta.crussty.DecoDriver.runChunk(long, int, int, LimitedRegion) line: 386   << OWNER
+     6 com.planeta.crussty.DecoDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 285   << OWNER
+     7 net.minecraft.world.level.chunk.ChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager, boolean) line: 524   << OWNER
+     8 org.bukkit.craftbukkit.generator.CustomChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager) line: 342
+     9 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 150   << OWNER
+    10 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    11 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    12 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    14 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    20 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    21 java.lang.Thread.run() line: 1474
+
+##### performLightIncrease (13 samples) #####
+  --- x2 [Paper Common Worker #0] ---
+     0 ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.performLightIncrease(LightChunkGetter) line: 1154
+     1 ca.spottedleaf.moonrise.patches.starlight.light.SkyStarLightEngine.lightChunk(LightChunkGetter, ChunkAccess, boolean) line: 551
+     2 ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.light(LightChunkGetter, ChunkAccess, Boolean[]) line: 918
+     3 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface.lightChunk(ChunkAccess, Boolean[]) line: 473
+     4 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkLightTask$LightTask.getAsBoolean() line: 159
+     5 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface$LightQueue$ChunkTasks.runTasks() line: 620
+     6 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface$ServerLightQueue$ServerChunkTasks.run() line: 932
+     7 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+     8 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+     9 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    10 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    11 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    12 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    13 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    14 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    15 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    16 java.lang.Thread.run() line: 1474
+  --- x2 [Paper Common Worker #1] ---
+     0 ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.performLightIncrease(LightChunkGetter) line: 1156
+     1 ca.spottedleaf.moonrise.patches.starlight.light.SkyStarLightEngine.lightChunk(LightChunkGetter, ChunkAccess, boolean) line: 551
+     2 ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.light(LightChunkGetter, ChunkAccess, Boolean[]) line: 918
+     3 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface.lightChunk(ChunkAccess, Boolean[]) line: 473
+     4 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkLightTask$LightTask.getAsBoolean() line: 159
+     5 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface$LightQueue$ChunkTasks.runTasks() line: 620
+     6 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface$ServerLightQueue$ServerChunkTasks.run() line: 932
+     7 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+     8 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+     9 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    10 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    11 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    12 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    13 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    14 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    15 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    16 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.performLightIncrease(LightChunkGetter) line: 1152
+     1 ca.spottedleaf.moonrise.patches.starlight.light.SkyStarLightEngine.lightChunk(LightChunkGetter, ChunkAccess, boolean) line: 551
+     2 ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.light(LightChunkGetter, ChunkAccess, Boolean[]) line: 918
+     3 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface.lightChunk(ChunkAccess, Boolean[]) line: 473
+     4 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkLightTask$LightTask.getAsBoolean() line: 159
+     5 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface$LightQueue$ChunkTasks.runTasks() line: 620
+     6 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface$ServerLightQueue$ServerChunkTasks.run() line: 932
+     7 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+     8 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+     9 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    10 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    11 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    12 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    13 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    14 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    15 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    16 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.performLightIncrease(LightChunkGetter) line: 1132
+     1 ca.spottedleaf.moonrise.patches.starlight.light.SkyStarLightEngine.lightChunk(LightChunkGetter, ChunkAccess, boolean) line: 551
+     2 ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.light(LightChunkGetter, ChunkAccess, Boolean[]) line: 918
+     3 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface.lightChunk(ChunkAccess, Boolean[]) line: 473
+     4 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkLightTask$LightTask.getAsBoolean() line: 159
+     5 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface$LightQueue$ChunkTasks.runTasks() line: 620
+     6 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface$ServerLightQueue$ServerChunkTasks.run() line: 932
+     7 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+     8 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+     9 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    10 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    11 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    12 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    13 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    14 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    15 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    16 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.performLightIncrease(LightChunkGetter) line: 1146
+     1 ca.spottedleaf.moonrise.patches.starlight.light.SkyStarLightEngine.lightChunk(LightChunkGetter, ChunkAccess, boolean) line: 551
+     2 ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.light(LightChunkGetter, ChunkAccess, Boolean[]) line: 918
+     3 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface.lightChunk(ChunkAccess, Boolean[]) line: 473
+     4 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkLightTask$LightTask.getAsBoolean() line: 159
+     5 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface$LightQueue$ChunkTasks.runTasks() line: 620
+     6 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface$ServerLightQueue$ServerChunkTasks.run() line: 932
+     7 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+     8 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+     9 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    10 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    11 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    12 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    13 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    14 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    15 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    16 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.performLightIncrease(LightChunkGetter) line: 1146
+     1 ca.spottedleaf.moonrise.patches.starlight.light.BlockStarLightEngine.lightChunk(LightChunkGetter, ChunkAccess, boolean) line: 270
+     2 ca.spottedleaf.moonrise.patches.starlight.light.StarLightEngine.light(LightChunkGetter, ChunkAccess, Boolean[]) line: 918
+     3 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface.lightChunk(ChunkAccess, Boolean[]) line: 476
+     4 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkLightTask$LightTask.getAsBoolean() line: 159
+     5 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface$LightQueue$ChunkTasks.runTasks() line: 620
+     6 ca.spottedleaf.moonrise.patches.starlight.light.StarLightInterface$ServerLightQueue$ServerChunkTasks.run() line: 932
+     7 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+     8 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+     9 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    10 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    11 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    12 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    13 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    14 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    15 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    16 java.lang.Thread.run() line: 1474
+
+##### ForwardLogHandler (1 samples) #####
+  --- x1 [Paper Common Worker #1] ---
+     0 org.bukkit.craftbukkit.util.ForwardLogHandler.getLogger(String) line: 15
+     1 org.bukkit.craftbukkit.util.ForwardLogHandler.publish(LogRecord) line: 26
+     2 java.util.logging.Logger.log(LogRecord) line: 962
+     3 java.util.logging.Logger.doLog(LogRecord) line: 989
+     4 java.util.logging.Logger.log(Level, String) line: 1012
+     5 java.util.logging.Logger.warning(String) line: 1772
+     6 com.planeta.crussty.CarverDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 254   << OWNER
+     7 net.minecraft.world.level.chunk.ChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager, boolean) line: 524   << OWNER
+     8 org.bukkit.craftbukkit.generator.CustomChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager) line: 342
+     9 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 150   << OWNER
+    10 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+    11 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+    12 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    14 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    15 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    16 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    17 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    18 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    19 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    20 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    21 java.lang.Thread.run() line: 1474
+
+##### StaticCache2D (15 samples) #####
+  --- x3 [Paper Common Worker #1] ---
+     0 net.minecraft.util.StaticCache2D.get(int, int) line: 49   << OWNER
+     1 net.minecraft.util.StaticCache2D.lambda$map$0(StaticCache2D$MappingFunction, int, int) line: 36   << OWNER
+     2 net.minecraft.util.StaticCache2D.<init>(int, int, int, int, StaticCache2D$Initializer) line: 30   << OWNER
+     3 net.minecraft.util.StaticCache2D.map(StaticCache2D$MappingFunction) line: 36   << OWNER
+     4 net.minecraft.server.level.WorldGenRegion.<init>(ServerLevel, StaticCache2D, ChunkStep, ChunkAccess) line: 121   << OWNER
+     5 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 148   << OWNER
+     6 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+     7 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+     8 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+     9 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    10 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    11 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    12 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    13 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    14 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    15 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    16 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    17 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 net.minecraft.util.StaticCache2D.<init>(int, int, int, int, StaticCache2D$Initializer) line: 30   << OWNER
+     1 net.minecraft.util.StaticCache2D.create(int, int, int, StaticCache2D$Initializer) line: 18   << OWNER
+     2 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler.schedule(int, int, ChunkStatus, NewChunkHolder, List, Priority) line: 761
+     3 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler.schedule(int, int, ChunkStatus, NewChunkHolder, List) line: 673
+     4 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder.scheduleNeighbours(List, List) line: 1552
+     5 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder.onChunkGenComplete(ChunkAccess, ChunkStatus, List, List) line: 1543
+     6 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder.lambda$setGenerationTask$0(ChunkProgressionTask, ChunkStatus, List, ChunkAccess, Throwable) line: 1618
+     7 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkProgressionTask.complete0(ChunkAccess, Throwable) line: 91
+     8 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkProgressionTask.complete(ChunkAccess, Throwable) line: 74
+     9 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 156
+    10 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    11 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    12 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    14 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    15 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    16 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    17 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    18 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 net.minecraft.util.StaticCache2D.<init>(int, int, int, int, StaticCache2D$Initializer) line: 30   << OWNER
+     1 net.minecraft.util.StaticCache2D.map(StaticCache2D$MappingFunction) line: 36   << OWNER
+     2 net.minecraft.server.level.WorldGenRegion.<init>(ServerLevel, StaticCache2D, ChunkStep, ChunkAccess) line: 121   << OWNER
+     3 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 148   << OWNER
+     4 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+     5 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+     6 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+     7 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+     8 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+     9 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    10 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    11 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    12 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    13 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    14 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    15 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+     1 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+     2 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+     3 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+     4 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+     5 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+     6 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+     7 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+     8 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+     9 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    10 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 net.minecraft.util.StaticCache2D.<init>(int, int, int, int, StaticCache2D$Initializer) line: 30   << OWNER
+     1 net.minecraft.util.StaticCache2D.create(int, int, int, StaticCache2D$Initializer) line: 18   << OWNER
+     2 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler.schedule(int, int, ChunkStatus, NewChunkHolder, List, Priority) line: 761
+     3 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler.schedule(int, int, ChunkStatus, NewChunkHolder, List) line: 673
+     4 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder.scheduleNeighbours(List, List) line: 1552
+     5 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder.onChunkGenComplete(ChunkAccess, ChunkStatus, List, List) line: 1528
+     6 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder.lambda$setGenerationTask$0(ChunkProgressionTask, ChunkStatus, List, ChunkAccess, Throwable) line: 1618
+     7 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkProgressionTask.complete0(ChunkAccess, Throwable) line: 91
+     8 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkProgressionTask.complete(ChunkAccess, Throwable) line: 74
+     9 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 156
+    10 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+    11 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+    12 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    13 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    14 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    15 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    16 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    17 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    18 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 net.minecraft.util.StaticCache2D.get(int, int) line: 49   << OWNER
+     1 net.minecraft.server.level.WorldGenRegion.getChunk(int, int) line: 175   << OWNER
+     2 net.minecraft.world.level.chunk.ChunkGenerator.createReferences(WorldGenLevel, StructureManager, ChunkAccess) line: 735   << OWNER
+     3 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateStructureReferences(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 76   << OWNER
+     4 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+     5 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+     6 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+     7 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+     8 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+     9 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    10 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    11 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    12 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    13 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    14 java.lang.Thread.run() line: 1474
+
+##### CarverDriver (3 samples) #####
+  --- x1 [Paper Common Worker #0] ---
+     0 com.planeta.crussty.CarverDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 176   << OWNER
+     1 net.minecraft.world.level.chunk.ChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager, boolean) line: 524   << OWNER
+     2 org.bukkit.craftbukkit.generator.CustomChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager) line: 342
+     3 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 150   << OWNER
+     4 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+     5 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+     6 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+     7 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+     8 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+     9 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    10 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    11 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    12 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    13 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    14 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    15 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #0] ---
+     0 com.planeta.crussty.CarverDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 204   << OWNER
+     1 net.minecraft.world.level.chunk.ChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager, boolean) line: 524   << OWNER
+     2 org.bukkit.craftbukkit.generator.CustomChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager) line: 342
+     3 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 150   << OWNER
+     4 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+     5 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+     6 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+     7 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+     8 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+     9 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    10 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    11 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    12 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    13 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    14 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    15 java.lang.Thread.run() line: 1474
+  --- x1 [Paper Common Worker #1] ---
+     0 com.planeta.crussty.CarverDriver.populate(WorldInfo, Random, int, int, LimitedRegion) line: 176   << OWNER
+     1 net.minecraft.world.level.chunk.ChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager, boolean) line: 524   << OWNER
+     2 org.bukkit.craftbukkit.generator.CustomChunkGenerator.applyBiomeDecoration(WorldGenLevel, ChunkAccess, StructureManager) line: 342
+     3 net.minecraft.world.level.chunk.status.ChunkStatusTasks.generateFeatures(WorldGenContext, ChunkStep, StaticCache2D, ChunkAccess) line: 150   << OWNER
+     4 net.minecraft.world.level.chunk.status.ChunkStep.apply(WorldGenContext, StaticCache2D, ChunkAccess) line: 71   << OWNER
+     5 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.task.ChunkUpgradeGenericStatusTask.run() line: 97
+     6 ca.spottedleaf.concurrentutil.executor.queue.AreaDependentQueue$QueuedTask.run() line: 1154
+     7 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue.lambda$createTask$0(Runnable) line: 467
+     8 ca.spottedleaf.concurrentutil.executor.queue.PrioritisedTaskQueue$PrioritisedQueuedTask.execute() line: 345
+     9 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$OrderedStreamGroup.executeTask() line: 344
+    10 ca.spottedleaf.concurrentutil.executor.thread.BalancedPrioritisedThreadPool$WorkerThread.pollTasks() line: 630
+    11 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.mainLoop() line: 38
+    12 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.doRun() line: 61
+    13 ca.spottedleaf.concurrentutil.executor.QueueExecutorRunnable.run() line: 30
+    14 ca.spottedleaf.concurrentutil.util.LazyRunnable.run() line: 25
+    15 java.lang.Thread.run() line: 1474
