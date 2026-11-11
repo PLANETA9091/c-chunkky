@@ -35,6 +35,11 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
      *  sessions_lock re-acquisitions contend brutally once apply does real
      *  work). CRUS_CARVER_FUSE=0 restores the legacy 3-call path. */
     private static final boolean CARVER_FUSE = !"0".equals(System.getenv("CRUS_CARVER_FUSE"));
+
+    /** for the CarverStats snapshot (non-vacuity evidence). */
+    static boolean fuseActive() {
+        return CARVER_FUSE;
+    }
     /** ops buffer: worst case = every cell of 24 sections changed (98304). */
     private static final ThreadLocal<long[]> TL_OPS = ThreadLocal.withInitial(() -> new long[98304]);
     private static final ThreadLocal<long[]> TL_MARKS = ThreadLocal.withInitial(() -> new long[1024]);
@@ -219,6 +224,7 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
                 marks = TL_MARKS.get();
                 int packed = ChunkGenNative.carveApply(ctx, cx, cz, SEED, meta, raw, pal, ops, marks);
                 if (packed == Integer.MIN_VALUE) {
+                    CarverStats.DECLINED.incrementAndGet();
                     return; // native declined — vanilla semantics lost for this chunk
                 }
                 got = packed >>> 12;
@@ -228,6 +234,7 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
             } else {
                 int n = ChunkGenNative.carve(ctx, cx, cz, SEED, meta, raw, pal);
                 if (n == Integer.MIN_VALUE) {
+                    CarverStats.DECLINED.incrementAndGet();
                     return; // native declined — vanilla semantics lost for this chunk
                 }
                 CarverStats.CARVE.addAndGet(System.nanoTime() - tp2);
@@ -278,14 +285,6 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
                     continue;
                 }
                 LevelChunkSection sec = chunk.getSection(s);
-                // cont-143 CRITICAL FIX: 5-param setBlockState needs the 5th
-                // (boolean movedByPlayer/updateOnWrite=false) argument. Since
-                // cont-138 (ab97461b) this invoke passed 4 args against the
-                // resolved 5-param method -> IllegalArgumentException on the
-                // FIRST op -> the whole apply loop aborted per carved chunk ->
-                // carve ops (caves + topMaterial + fluid marks) were SILENTLY
-                // DROPPED in every CRUS_NATIVE_CARVERS=1 run; the CI carvers
-                // lane passed vacuously (both legs un-carved, AIR is SOFT).
                 try {
                     // mh.invoke (asType-adapted): typed args, no per-call boxing
                     // of the boolean, ~2-4x faster than Method.invoke; invokeExact
@@ -293,10 +292,12 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
                     // types as Object here (signature-polymorphic quirk).
                     Object ignore = MH_SEC_SET.invoke(sec, sx, sy, sz,
                             (net.minecraft.world.level.block.state.BlockState) state, false);
+                    CarverStats.OPS_APPLIED.incrementAndGet();
                     if (ignore == null) {
                         // vanilla never returns null here; guard keeps ignore "used"
                     }
                 } catch (Throwable ti) {
+                    CarverStats.APPLY_FAILED.incrementAndGet();
                     throw new RuntimeException(ti);
                 }
             }
