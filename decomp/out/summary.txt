@@ -1,0 +1,2 @@
+Summary for /home/z/my-project/c-faster/server263/versions/26.3/paper-26.3.jar
+Decompiled with CFR 0.152
