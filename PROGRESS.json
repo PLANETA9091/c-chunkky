@@ -310,7 +310,20 @@
     },
     "struct_analysis": {
       "finding": "struct 4.83ms/ch = vanilla placeInChunk (Jigsaw assembly, func=4044ms/window); gate+setup are ~0.01ms; port = whole Jigsaw system — parked, not a quick win"
-    }
+    },
+    "climate_whale_IDENTIFIED": {
+      "jfr": "rec_main.jfr (9800,9800, native regime, 1230 samples): Climate$RTree.findNearest0 top leaf on all 3 worker threads + NoiseStack$Perlin.get 61 samples on Worker-Main-1; total ~5.8-8ms/ch Java climate cost",
+      "mechanism_pinned": "ChunkGeneratorStructureState.biomeSource = private final, captured at createForNormal BEFORE the plugin biome-swap; generateRingPositions L204 calls this.biomeSource.findBiomeHorizontal (vanilla MultiNoise search = NoiseStack perlin + RTree per candidate); structure placement checks same path; ring futures resolve lazily for far regions DURING windows (rings-warmup only covered boot-time sets)",
+      "already_native": "chunk BIOMES step is grid-served (NativeBiomeSource.GridResolver: 1 JNI fill ~0.15ms per chunk, fallback vanilla for out-of-range) — the measured RTree samples inside ChunkStep.apply = STRUCTURE_STARTS placement checks, NOT the biomes step",
+      "lever_options": [
+        "A: reflectively refresh ChunkGeneratorStructureState.biomeSource -> NativeBiomeSource post-swap (needs findBiomeHorizontal on native source — base impl walks getNoiseBiome = JNI-per-point, too slow; needs native radius-search port or climate memo)",
+        "B: memoizing Climate.Sampler proxy (pure function of seed+coords; bounded LRU; high hit rate for structure-candidate checks repeated from 232 margin chunks; RandomState final-field reflection on JDK25 = risky)",
+        "C: native findBiomeHorizontal port (radius search in Rust, 1 JNI call per search)"
+      ],
+      "expected": "-3..-6ms/ch (the whole structure-state climate cost)",
+      "status": "DESIGNED, not implemented — next iteration opening task"
+    },
+    "main_thread": "Server thread only 6.9% JFR — main-thread FULL promotion NOT the bottleneck; cover idle = structure-state climate CPU + dependency waves"
   },
   "cont141_measurements": {
     "date": "2026-11-11 09:15-10:00 +08",

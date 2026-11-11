@@ -7810,3 +7810,20 @@ Work Log:
 - E-агент (cover lever) ПУШНУЛ d795527f: CoverStage.java (374 строки, полностью рефлективный NMS-companion, CRUS_COVER_STAGE=0/1/2) — margin staging через ПУБЛИЧНЫЙ ChunkTaskScheduler.beginChunkLoadForNonFullSync (без тикетов, unload-eligible, тот же путь что walk); staged-множество = СТРОГОЕ ПОДМНОЖЕСТВО контрольной работы (zero extra fills); Priority.LOW заполняет паркинг-паузы; writeRadius 0 у staged-статусов => контент-нейтрально.
 - Оркестратор верифицировал сам: мерж в рабочую ветку, jar c13e3b92, парный A/B (9000,9000, wipe, back-to-back): R1 S0 64.59 / S1 61.57 (cover 38.1->40.8), R2 S0 60.47 / S1 61.88 (cover 37.9->41.5). Дельты -3.02/+1.41 — ЗНАК ПЕРЕВЕРНУЛСЯ => INCONCLUSIVE (2-core шум); cover +3pp стабилен, но wall не следует (busy растёт тоже); margin_fills 253/256/256 = zero-extra-fills ПОДТВЕРЖДЁН. Stage2 (62.65) хуже S1. Вердикт: default OFF, CI 4-core арбитр перфа, судьи — арбитры паритета. Merged в main d795527f, push -> CI.
 - Продолжение: B3 (deleg ports) в работе; fill CPU фронт припаркован с квантованным полом (normalnoise 1.45 = perlin core post-hoist).
+
+---
+Task ID: cont-142 phase 3 (15:30-17:00 +08). Orchestrator: ports takeover, MAT_V2 adoption, climate whale.
+
+Work Log:
+- B3 zombie takeover: staged 987 lines (place_lake lava-only + place_geode + PORT3 kill-switch + world-seed note). Fixed: 2x E0308 (&[String] adapters, OnceLock), 2x E0004 (f1dbg/delegcensus arms). 92/92.
+- Smoke: deleg-names lake_lava_surface/underground + amethyst_geode GONE (routing live).
+- MAT_V2 (агент C, умер до замера): filldump 6/6 byte-identical ON/OFF + vbench A/B x3 непересекающиеся p50 (-185us/fill) + 92/92 -> ADOPTED. CI judge SUCCESS (43049891123).
+- PORT3 paired A/B (9500,9500, wipe, same jar/.so): ON 68.07 vs OFF 65.42 = +2.65 РЕГРЕССИЯ (тысячи ops/чанк через op stream; per-op apply бьёт ванильный lane; A4 выигрывал на small-op фичах). Дефолт FLIPPED в OFF (a2cd2556), код сохранён для bulk-op follow-up. Честный откат.
+- Cover A/B (E-агент CoverStage, 9000,9000): R1 -3.0/R2 +1.4 = sign-flip INCONCLUSIVE; margin_fills 253/256/256 = zero-extra-fills верифицирован; default OFF; CI SUCCESS (43045680751) — бит-нейтрален.
+- CLIMATE WHALE (JFR rec_main.jfr, native regime): RTree.findNearest0 + NoiseStack$Perlin = 5.8-8ms/ch; механизм запинен — ChunkGeneratorStructureState.biomeSource (private final) захвачен ДО свапа, ring generation + structure placement ищут биомы через ВАНИЛЬНЫЙ источник; BIOMES-шаг чанков УЖЕ grid-served (GridResolver 1 JNI ~0.15ms). Lever options A/B/C записаны; ожидание -3..-6ms/ch. Main thread 6.9% — не узкое место.
+- struct 4.83ms/ch = vanilla placeInChunk (Jigsaw) — park.
+- fill floor: normalnoise 1.45 + blend minmax 0.58 = perlin octave-стек (avx2, bit-exact запрещает f32) — floor.
+
+Stage Summary:
+- Интегрировано: MAT_V2 (замер+гейты+CI), CoverStage (в main, OFF), margin-инструментация, PORT3 (код в main, OFF после честного замера).
+- Кампейная позиция: honest 47.02/41.41; главный новый рычаг = climate whale (structure-state source refresh), второй = bulk-op для порт-фич, третий = UP_OTHER зеркало.
