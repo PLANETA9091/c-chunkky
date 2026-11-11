@@ -7827,3 +7827,16 @@ Work Log:
 Stage Summary:
 - Интегрировано: MAT_V2 (замер+гейты+CI), CoverStage (в main, OFF), margin-инструментация, PORT3 (код в main, OFF после честного замера).
 - Кампейная позиция: honest 47.02/41.41; главный новый рычаг = climate whale (structure-state source refresh), второй = bulk-op для порт-фич, третий = UP_OTHER зеркало.
+
+---
+Task ID: cont-142 phase 4 (16:00-17:20 +08). Orchestrator: grid discovery + reswap honest revert.
+
+Work Log:
+- DISCOVERY: CRUS_BIOME_GRID НЕ ставился в локальных прогонах (только CI) — весь день BIOMES-шаг платил ванильный climate (SliceFunction/RTree/NoiseStack 3-5ms/ch), хотя grid-резолвер УЖЕ реализован (NativeBiomeSource.GridResolver: 1 JNI ~0.15ms/чанк) и судейски верифицирован (ab263_ci + BIOME_DEBUG, SUCCESS = 0 mismatches).
+- Включён в чемпионский дефолт (run263_baseline.sh + server263_up.sh). Парный A/B (9900,9900): native 26.43->22.25, busy 23.8->21.5. Grid-era тихий бокс (10500,10500): honest 46.49/48.87, native 20.36-21.61, busy 18.0-19.1 — НОВЫЕ ЛУЧШИЕ.
+- structure-state reswap (BiomeSwap + Unsafe final-write biomeSource -> native source, fix setAccessible): смоук OK, парный A/B x2 — РЕГРЕССИЯ (OFF 46.49/48.87 vs ON 51.68/57.69; ring search трогает 9-16 чанков = полные вертикальные JNI-гриды под локом + контеншн с fill-пулом; vanilla caching sampler бьёт эту форму). Дефолт OFF, код сохранён (y-sliced/batched вариант — будущий рычаг).
+- Фронты после grid: (1) structure placement RTree остаток (y-sliced grid), (2) bulk-op для PORT3 (lakes/geode), (3) UP_OTHER зеркало (0.2-0.4). fill/normalnoise/minmax = perlin floor (bit-exact). struct=Jigsaw=park.
+- CI: eee9f1d4 (MAT_V2) SUCCESS; 80d0ddd7 (CoverStage) SUCCESS; 8f3c38bf (grid champion) — вердикт в полёте.
+
+Stage Summary:
+- Кампейная позиция: honest 100.8 (cont-135 baseline) -> 47.02 (cont-141) -> 46.49 grid-era; native inside-window 23.4 -> 20.4; busy 20.1 -> 18.0. Все решения — замерами; две честные отмены за сессию (PORT3, reswap).

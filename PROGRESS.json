@@ -211,8 +211,8 @@
     "PROGRESS.json read at start of each iteration, updated after every experiment"
   ],
   "goal_status": {
-    "best_honest_e2e_ms": 41.41,
-    "best_honest_note": "41.41 = 24x24 warm window (4600,3500, cont-141); 12x12 champion config today = 47.02 (2100,2000); cont-138 quiet best was 50.97",
+    "best_honest_e2e_ms": 46.49,
+    "best_honest_note": "46.49 = grid era, 12x12 @10500 quiet (cont-142); champion config now: worker=2/FILL=2/no-watchdog/CRUS_BIOME_GRID=1/MAT_V2/S1-ON/H7-ON",
     "today_honest_ms": 47.02,
     "today_24x24_ms": [
       57.13,
@@ -323,7 +323,14 @@
       "expected": "-3..-6ms/ch (the whole structure-state climate cost)",
       "status": "DESIGNED, not implemented — next iteration opening task"
     },
-    "main_thread": "Server thread only 6.9% JFR — main-thread FULL promotion NOT the bottleneck; cover idle = structure-state climate CPU + dependency waves"
+    "main_thread": "Server thread only 6.9% JFR — main-thread FULL promotion NOT the bottleneck; cover idle = structure-state climate CPU + dependency waves",
+    "grid_adopted": {
+      "what": "CRUS_BIOME_GRID=1 -> champion default (harness run263_baseline.sh + server263_up.sh); NativeBiomeSource.GridResolver serves the BIOMES step via 1 JNI grid fill per chunk (~0.15ms) instead of vanilla climate sampling",
+      "discovery": "today's local honest numbers ran WITHOUT the grid (only CI harness set it) — the 3-5ms/ch Java climate cost (SliceFunction/RTree/NoiseStack) was live locally",
+      "measured": "paired (9900,9900): OFF 59.02/native 26.43/busy 23.8 vs ON 58.34/22.25/21.5; quiet-box grid-era (10500,10500): 46.49 & 48.87 honest, native 20.36-21.61, busy 18.0-19.1",
+      "bit_exact": "CI ab263_ci boots grid+BIOME_DEBUG, SUCCESS = no mismatches",
+      "climate_whale_residual": "structure placement checks remain vanilla-source; reswap REGRESSION x2 (46.49/48.87 OFF vs 51.68/57.69 ON — vertical grid fills under lock contend with fill pool); CRUS_STRUCT_RESWAP default OFF, code kept for y-sliced/batched variant"
+    }
   },
   "cont141_measurements": {
     "date": "2026-11-11 09:15-10:00 +08",
