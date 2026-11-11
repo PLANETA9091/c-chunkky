@@ -7872,3 +7872,14 @@ Work Log:
 Stage Summary:
 - Honest e2e: 46.49 (broken world) → 47.19 @13700 (CORRECT carving + fuse) = new honest best; anchor ~47-52. Вся кампания cont-138..142 измеряла мир без карвинга — все относительные сравнения валидны (одинаково сломанный бейзлайн), абсолютные номера — нет.
 - Next: (1) b3 bulk-op adoption (agent WIP 402 lines), (2) carve-activity counters + non-vacuous carvers CI gate, (3) apply-path optimization (getAndSet+recount ≈ 5.50 vs vanilla-path 9.68 — restore old path for -4ms/ch IF bit-parity proven), (4) margin/serialization Q6 with the r4 mechanism map.
+
+---
+Task ID: cont-143 addendum 2 (21:30-22:05 +01). Orchestrator: counters + anchors + SerialGC.
+
+Work Log:
+- Non-vacuity counters shipped (9bb9d290): carver-phases now prints opsApplied/declined/applyFailed/fuse. Smoke: opsApplied=39.6M declined=0 applyFailed=0 fuse=true. TL-буферы фьюза ДОПОЛНИТЕЛЬНО срезали apply 9.68→4.38 ms/ch (нет per-chunk long[] аллокаций/GC) — carver wall 7.36 в honest окне.
+- SerialGC REFUTED для перф-конфига: 60.11 vs 39.91 (без параллельных GC-потоков паузы стопорят пайплайн; carver 10.19 vs 5.71). Остается judge-mode only.
+- NEW HONEST BEST: 43.34 @14600 (третьи точки: 47.19 @13700, 39.91 @15200 — rect variance; диапазон 40-47 с КОРРЕКТНЫМ карвингом).
+- CI: ALL GREEN на всех пушах (68aa8efc, 9bb9d290, 728de48e; infra-failure 456fbce2 = GitHub artifact outage, гейты PASS).
+- b3/b4 bulk-op: b3 умер на компиляции; b4 перезапущен — ЖИВ, сам починил compile error (ChunkAccess.setBlockState = (pos,state,int flags) в 26.3; flags=2 = byte-parity с mode-1 region.setBlock(pos,st,2)) и пересобрал jar (4e995196). Осталось: cargo-тесты + parity-тест + headless p50 + REPORT.
+- Блочная проверка carve-parity (native vs vanilla, rect 20480): 127/144 чанков дивергентны на уровне хешей при 0.3% AIR-дельте — native carve ≈ vanilla по объёму, НЕ по позициям; block-level judge = follow-up (для e2e-метрики конфиг теперь vanilla-семантичен).
