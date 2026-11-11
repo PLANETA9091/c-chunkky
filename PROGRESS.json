@@ -288,6 +288,28 @@
       ],
       "stage2": "62.65 (worse than S1)",
       "verdict": "INCONCLUSIVE at 2-core noise: paired deltas -3.02/+1.41 sign-flip; cover +3pp consistent but wall does not follow (busy rises too); margin_fills equal => zero-extra-fills verified; default stays OFF; CI 4-core = perf arbiter, judge gates = parity arbiter"
+    },
+    "mat_v2_adopted": {
+      "author": "agent C (died pre-measurement), gates+measurement by orchestrator",
+      "what": "AllNeg no-aquifer cells skip exact cellfill+per-block material walk -> per-row constants (LAVA<-54/WATER<sea/AIR)",
+      "gates": [
+        "filldump 6/6 byte-identical ON vs OFF (783-889KB dumps, coords 0_0,1_0,-1_-1,5_3,2_-2,7_7)",
+        "cargo test 92/92",
+        "vbench A/B x3: ON 5.204/5.181/5.202 vs OFF 5.373/5.387/5.410 -> -185us/fill, ranges non-overlapping"
+      ],
+      "leverage": "-0.48ms/ch wall at 2.6x margin-law factor"
+    },
+    "deleg_ports": {
+      "author": "agent B3 (staged 987 lines, died) + orchestrator fixes",
+      "what": "native place_lake (lava x2) + place_geode; kill-switch CRUS_DELEG_PORT3; f1dbg/delegcensus E0004 arms fixed; &[String] OnceLock adapters",
+      "gates": [
+        "cargo test 92/92",
+        "smoke: deleg-names lake_lava_surface/underground/amethyst_geode GONE (native routing live), so 1de2fa1d",
+        "CI judge = block bit-parity arbiter (push d05f1df6)"
+      ]
+    },
+    "struct_analysis": {
+      "finding": "struct 4.83ms/ch = vanilla placeInChunk (Jigsaw assembly, func=4044ms/window); gate+setup are ~0.01ms; port = whole Jigsaw system — parked, not a quick win"
     }
   },
   "cont141_measurements": {

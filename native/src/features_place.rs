@@ -3039,11 +3039,16 @@ fn deleg_nogen() -> bool {
     *ON.get_or_init(|| std::env::var("CRUS_DELEG_NOGEN").as_deref() == Ok("1"))
 }
 
-/// CRUS_DELEG_PORT3=0: kill-switch restoring the vanilla-lane delegate for
-/// the deleg-ports-3 types (lake_lava_surface / lake_lava_underground /
-/// amethyst_geode). Default ON. PORT3_FORCE is the test/bench override
-/// (1 = port ON, 2 = delegate OFF-lane) evaluated FIRST so parity tests can
-/// pin both lanes in one process (H7_FORCE pattern).
+/// CRUS_DELEG_PORT3: kill-switch for the deleg-ports-3 types
+/// (lake_lava_surface / lake_lava_underground / amethyst_geode).
+/// DEFAULT OFF (delegate lane) — cont-142 paired A/B (9500,9500 wiped,
+/// same jar/.so): ON 68.07 vs OFF 65.42 e2e (+2.65 REGRESSION: lake+geode
+/// emit thousands of ops/chunk through the op stream; per-op apply overhead
+/// beats the vanilla Java lane; A4's small-op features won, high-volume
+/// ones need a bulk-op path first). CRUS_DELEG_PORT3=1 opts back in.
+/// PORT3_FORCE is the test/bench override (1 = port ON, 2 = delegate
+/// OFF-lane) evaluated FIRST so parity tests can pin both lanes in one
+/// process (H7_FORCE pattern).
 pub static PORT3_FORCE: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(0);
 static PORT3_OFF_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 fn deleg_port3_off() -> bool {
@@ -3051,7 +3056,7 @@ fn deleg_port3_off() -> bool {
         1 => false,
         2 => true,
         _ => *PORT3_OFF_ENV.get_or_init(|| {
-            std::env::var("CRUS_DELEG_PORT3").ok().as_deref() == Some("0")
+            std::env::var("CRUS_DELEG_PORT3").ok().as_deref() != Some("1")
         }),
     }
 }
