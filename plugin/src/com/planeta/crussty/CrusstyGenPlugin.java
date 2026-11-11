@@ -113,6 +113,12 @@ public final class CrusstyGenPlugin extends JavaPlugin {
                     ChunkGenNative.fill263ProfReset();
                 } catch (Throwable ignored) {
                 }
+                try {
+                    // cont-142-E: cancel any armed cover-staging timer
+                    Class.forName("com.planeta.crussty.CoverStage")
+                            .getMethod("reset").invoke(null);
+                } catch (Throwable ignored) {
+                }
                 sender.sendMessage("[CrusstyGen] stats window reset");
                 return true;
             }
@@ -134,6 +140,20 @@ public final class CrusstyGenPlugin extends JavaPlugin {
                     }
                     sender.sendMessage("[CrusstyGen] window armed [" + rx + ".."
                             + (rx + n) + "," + rz + ".." + (rz + n) + "]");
+                    // cont-142-E cover lever: margin staging armed with the
+                    // window (reflective — CoverStage is an NMS companion,
+                    // absent on API-only builds; kill-switch CRUS_COVER_STAGE,
+                    // default off).
+                    try {
+                        Class.forName("com.planeta.crussty.CoverStage")
+                                .getMethod("onWindowArmed",
+                                        org.bukkit.plugin.java.JavaPlugin.class,
+                                        org.bukkit.World.class,
+                                        int.class, int.class, int.class)
+                                .invoke(null, this, getServer().getWorlds().get(0),
+                                        rx, rz, n);
+                    } catch (Throwable ignored) {
+                    }
                 } catch (NumberFormatException e) {
                     sender.sendMessage("[CrusstyGen] window: bad coords");
                 }
@@ -167,6 +187,12 @@ public final class CrusstyGenPlugin extends JavaPlugin {
             try {
                 sb.append(" | [CrusstyGen] ").append((String) Class
                         .forName("com.planeta.crussty.LightDivert")
+                        .getMethod("statsLine").invoke(null));
+            } catch (Throwable ignored) {
+            }
+            try {
+                sb.append(" | [CrusstyGen] ").append((String) Class
+                        .forName("com.planeta.crussty.CoverStage")
                         .getMethod("statsLine").invoke(null));
             } catch (Throwable ignored) {
             }
