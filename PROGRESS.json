@@ -106,6 +106,10 @@
   ],
   "log": [
     {
+      "t": "2026-11-11T12:00+08:00",
+      "event": "cont-142 ATTACK WAVE: CI SUCCESS on 2072e998 (S1 default-ON + cont-140 judge-verified). Sandbox recycled to 848b2b6 again mid-session; recovered via fetch+reset+recover.sh. Launched 3 parallel agents (all alive despite Task-tool deadline errors — artifacts-check protocol): A=idle/margin decomposition (server box + JFR), B=deleg ports lake x2+geode (deleg-ports-3 pushed), C=fill Blend/material deep-dive (wt_c, cont142-fill-c pushed). Recycle-proofing adopted: agents commit+push every milestone; orchestrator re-verifies all gates before integration."
+    },
+    {
       "t": "2026-11-11T10:00+08:00",
       "event": "cont-141 MEASURE ITERATION (post-manifesto resume): cont-140 verified kept (agent gates: filldump 6/6, 92/92, vbench A/B 5.50->5.44 sub-noise; slots-1-7 whale = misattribution #2 — production col-memo already amortizes). Worker matrix on quiet box: control w2 47.02 honest (today's best 12x12) vs w3 52.21 WORSE (cover 42.7->57.3% but busy 20.1->29.9, CFS law measured). Window scaling: 24x24 warm 41.41 (campaign best honest number) vs 12x12 47.02 — idle intrinsic, not edge artifact. forceload 256-chunk cap discovered (24x24 = 4 quadrants). server263_up.sh: JVM_FLAGS_ADD support added; bash precedence trap (cd && cmd & backgrounds the cd) documented. Next: push cont-140 -> CI (judges S1 default-ON + cont-140), launch idle/margin decomposition agent + deleg-native ports agent."
     },
@@ -210,7 +214,10 @@
     "best_honest_e2e_ms": 41.41,
     "best_honest_note": "41.41 = 24x24 warm window (4600,3500, cont-141); 12x12 champion config today = 47.02 (2100,2000); cont-138 quiet best was 50.97",
     "today_honest_ms": 47.02,
-    "today_24x24_ms": [57.13, 41.41],
+    "today_24x24_ms": [
+      57.13,
+      41.41
+    ],
     "syncgen_ms": [
       64.28,
       61.94
@@ -223,21 +230,91 @@
     "baseline_ms": 100.8,
     "target_ms": 5.0,
     "tests": "92/92",
-    "ci": "SUCCESS 42884625556; cont-140 push verdict pending"
+    "ci": "SUCCESS 42884625556 + 42999118452 (2072e998: S1 default-ON + cont-140 judge-verified)"
+  },
+  "cont142_attack_wave": {
+    "date": "2026-11-11 ~11:50-12:30 +08",
+    "recovery": "sandbox recycled to 848b2b6 again -> fetch+reset --hard origin/main (2072e998) + sandbox_recover.sh x2 (paper sha f649771a OK, .so 8634f9c4)",
+    "agents": {
+      "A_idle_margins": "server box owner: decompiled ChunkTaskScheduler 26.3, battery_a.sh staged experiments, JFR rec.jfr, results.txt — recycle-unsafe artifacts, orchestrator snapshots",
+      "B_deleg_ports": "branch deleg-ports-3 (pushed early): lake_lava_surface/underground + amethyst_geode native ports, cargo test running",
+      "C_fill_cpu": "worktree wt_c branch cont142-fill-c (9b222d15 pushed): Blend batch8 + material 0.75 attack, isolated CARGO_TARGET_DIR"
+    },
+    "integration_protocol": "orchestrator re-verifies gates itself (never accept unmeasured conclusions): cargo tests + filldump/delegcensus + vbench A/B before merging to main; CI judges bit-parity after push",
+    "h7_verdict": {
+      "pair_region": "8000,8000",
+      "jar": "9adfdcea (rebuild of committed src, timestamp-only)",
+      "so": "8634f9c4",
+      "ON": {
+        "e2e": 65.95,
+        "busy": 25.6,
+        "cover": 38.9,
+        "carver": 7.29
+      },
+      "OFF": {
+        "e2e": 67.33,
+        "busy": 24.5,
+        "cover": 36.3,
+        "carver": 5.69
+      },
+      "verdict": "INCONCLUSIVE at 2-core noise (carver counter-delta +1.6 untouched-code proves noise domination); H7 kept ON: headless CPU reduction + fast==exact oracle tests + CI green; final perf word = CI repeats",
+      "upcall_analysis": "UP_OTHER=52/ch = isReplaceable/isSolid/hasSturdyFace/biomeHasFeature (DecoDriver.java:1213-1250); cut needs native-side state mirror, est 0.2-0.4ms/ch, MEDIUM priority"
+    },
+    "margin_law_measured": {
+      "region": "8800,8800",
+      "jar": "23f2bf76 (GenStats margin instrumentation, orchestrator)",
+      "so": "8634f9c4",
+      "inside": 144,
+      "e2e": 72.38,
+      "span_ms": 10423.19,
+      "cover_pct": 39.8,
+      "native_inside_ms": 31.71,
+      "margin_fills": 232,
+      "margin_fill_cpu_ms_per_inside_chunk": 55.9,
+      "conclusion": "margin fill CPU = 1.76x inside fill CPU (77% of span); fill CPU cuts have 2.6x leverage on honest e2e: dWall ~= dFill*2.6/2lanes; ring-pregen lever REFUTED (ring pulls window through TERRAIN pre-arm, inside=16 invalid)"
+    }
   },
   "cont141_measurements": {
     "date": "2026-11-11 09:15-10:00 +08",
     "box": "quiet (load 0.0), .so 8634f9c4 = committed cont-140 state (rebuild verified), jar 22c333c7",
     "worker_matrix_honest_12x12": {
-      "worker2_fill2_nowatchdog_control": {"e2e": 47.02, "span_ms": 6770.74, "ramp": 709, "busy": 20.1, "cover_pct": 42.7, "maxconc": 2, "native": 23.39, "carver": 4.74, "deco": "struct 4.83 run 7.06 apply 0.96 deleg 2.01"},
-      "worker3": {"e2e": 52.21, "busy": 29.9, "cover_pct": 57.3, "maxconc": 3, "native": 36.70, "carver": 7.42, "verdict": "WORSE: cover +34% rel but CPU busy +49% (CFS thrash)"},
+      "worker2_fill2_nowatchdog_control": {
+        "e2e": 47.02,
+        "span_ms": 6770.74,
+        "ramp": 709,
+        "busy": 20.1,
+        "cover_pct": 42.7,
+        "maxconc": 2,
+        "native": 23.39,
+        "carver": 4.74,
+        "deco": "struct 4.83 run 7.06 apply 0.96 deleg 2.01"
+      },
+      "worker3": {
+        "e2e": 52.21,
+        "busy": 29.9,
+        "cover_pct": 57.3,
+        "maxconc": 3,
+        "native": 36.7,
+        "carver": 7.42,
+        "verdict": "WORSE: cover +34% rel but CPU busy +49% (CFS thrash)"
+      },
       "worker4": "skipped — strictly worse by same measured mechanism (E7 thrash law; worker=3 already decisive)",
       "law": "adding workers converts dependency-idle into contention, not throughput; worker=2 remains champion at current CPU"
     },
     "window_scaling": {
       "12x12": 47.02,
-      "24x24_w1_4500_3500": {"e2e": 57.13, "ramp": 1409, "busy": 27.2, "note": "cold: high ramp"},
-      "24x24_w2_4600_3500": {"e2e": 41.41, "ramp": 362, "busy": 22.0, "cover_pct": 53.0},
+      "24x24_w1_4500_3500": {
+        "e2e": 57.13,
+        "ramp": 1409,
+        "busy": 27.2,
+        "note": "cold: high ramp"
+      },
+      "24x24_w2_4600_3500": {
+        "e2e": 41.41,
+        "ramp": 362,
+        "busy": 22.0,
+        "cover_pct": 53.0
+      },
       "verdict": "idle is INTRINSIC (dependency graph + CFS), not a 12x12 edge artifact; bigger window ~ -12% warm only; forceload cmd max 256 chunks -> 24x24 needs 4 quadrant forceloads"
     },
     "path_to_5ms_equation": "wall ~= CPU_ch / (2 cores x cover); today: 20-22 CPU, cover 43-53% -> 41-47. Need CPU ~7-10ms AND cover ->90%+; OR CPU <10 with maxconc>2 at low contention",

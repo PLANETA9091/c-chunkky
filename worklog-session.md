@@ -7786,3 +7786,19 @@ Stage Summary:
 - Измерительная итерация без кода: cont-140 keep; champion конфиг подтверждён (w2/F2/no-watchdog);
   honest 47.02 (12x12) / 41.41 (24x24 warm) — новые лучшие; фронты ранжированы по измеренному
   бюджету. Все выводы — замерами, ни одной догадки.
+
+---
+Task ID: cont-142 (2026-11-11 11:45-14:35 +08). Agent: Super Z (main). Attack wave: 3 agents (A idle/margins, B deleg ports, C fill CPU) + orchestrator.
+
+Work Log:
+- CI SUCCESS 42999118452 (2072e998): S1 default-ON + cont-140 judge-verified.
+- Ресайкл снапшота снова откатил дерево (848b2b6) -> fetch+reset+recover (paper sha f649771a OK). Агенты переживают ресайклы через push-every-milestone.
+- Агент A (idle/margins): МЕХАНИЗМ-КАРТА 26.3 (results_A1.txt): пирамида EMPTY>STRUCT_STARTS>REFS>BIOMES>TERRAIN>FEATURES>INIT_LIGHT>LIGHT>SPAWN; FEATURES требует STRUCT_STARTS r8 + TERRAIN r1 => свежее 12x12 тянет 32x32 до STRUCT_STARTS, 16x16 до BIOMES, 14x14 до TERRAIN; воркеры BLOCK на completeFuture.join; addStatusConsumer существует (NewChunkHolder.java:994, package-private). Первая батарея A — void (стейл jar 16 окт без window-команд после ресайкла; A перепаковал jar из classes/, md5 9adfdcea).
+- Оркестратор (я): ring-pregen проба РЕФУТОВАНА измерением — кольцо 32x32-minus-window само протаскивает окно через TERRAIN до арма (inside=16/144, филлы ушли в pre-arm) => «pregen margins» не рычаг; margin-work неразделима с window-work при r8. Арифмо-ловушки: 8600*16=137600 (дважды промахнулся), forceload cap 256.
+- ИНСТРУМЕНТАЦИЯ (GenStats.java, jar 23f2bf76, бит-нейтральна): WIN_OUTSIDE/WIN_OUTSIDE_NANOS — сплит филлов окно/маржа. МЕРЯНИЕ (8800,8800, native regime): inside=144 e2e=72.38, margin_fills=232, margin_fill_cpu=55.9ms/inside-chunk vs native_inside=31.7 => МАРЖИНАЛЬНАЯ РАБОТА=1.76x ОКОННОЙ (77% span). РЫЧАГ: fill CPU cut X ms => wall ~2.6*X/2 lanes. C-профайлер (vbench CRUS_DETAIL, 128 fills): normalnoise 1.45ms/ch (3474 вызовов, крупнейший native item), blend b8col 0.82 (minmax 0.58+main 0.22), dispatch 0.87; material row4 counters не зацепили путь (taken=0) — misattribution #3.
+- H7 пар-вед A/B (8000,8000): ON 65.95 vs OFF 67.33 — в шуме (carver контр-дельта 5.69->7.29 на нетронутом коде доказывает noise-доминацию). H7 оставлен ON (headless CPU-срез, бит-тесты, CI зелёный).
+- UP_OTHER разбор: 52/чанк = isReplaceable/isSolid/hasSturdyFace/biomeHasFeature (DecoDriver:1213-1250); режется нативным зеркалом состояния, est 0.2-0.4ms/ch, MEDIUM.
+- Агент B3 (перезапуск с pre-digested контекстом: RNG-порядок LakeFeature — nextInt(4)+4, 6×nextDouble/спот, барьер nextInt(2) на yy>=4 check-true; декомпилы готовы) — портирует lake_lava x2 + amethyst_geode, branch deleg-ports-3. Агент C закоммитил vbench CRUS_DETAIL (9b222d15) до смерти стрима — инструментация работает (числа выше).
+
+Stage Summary:
+- margin_law = главный декомпозиционный результат дня: честный e2e это В ОСНОВНОМ маржинальная генерация + dependency-волны, не «простой». Приоритеты пересчитаны: (1) fill CPU (2.6x leverage), (2) deleg ports B3 (−1.3 CPU x 2.6 leverage на fill-часть... deleg — populate, leverage 1x), (3) UP_OTHER зеркало, (4) worker-matrix re-test при низком CPU.

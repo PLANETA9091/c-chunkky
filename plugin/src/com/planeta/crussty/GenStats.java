@@ -104,6 +104,12 @@ public final class GenStats {
     private static volatile int WIN_MIN_X, WIN_MIN_Z, WIN_N;
     private static final AtomicLong WIN_INSIDE = new AtomicLong();
     private static final AtomicLong WIN_TOTAL = new AtomicLong();
+    // cont-142 margin-law probe: fills OUTSIDE the armed window are the
+    // dependency-margin work (14x14 TERRAIN / 16x16 BIOMES / 32x32
+    // STRUCTURE_STARTS drag) that consumes the same workers while the window
+    // shows as "idle" wall — quantify fills + fill-CPU outside vs inside.
+    private static final AtomicLong WIN_OUTSIDE = new AtomicLong();
+    private static final AtomicLong WIN_OUTSIDE_NANOS = new AtomicLong();
     private static final AtomicLong WIN_NATIVE = new AtomicLong();
     private static final AtomicLong WIN_LAYOUT = new AtomicLong();
     private static final AtomicLong WIN_BEARD = new AtomicLong();
@@ -147,6 +153,8 @@ public final class GenStats {
         WIN_N = n;
         WIN_INSIDE.set(0);
         WIN_TOTAL.set(0);
+        WIN_OUTSIDE.set(0);
+        WIN_OUTSIDE_NANOS.set(0);
         WIN_NATIVE.set(0);
         WIN_LAYOUT.set(0);
         WIN_BEARD.set(0);
@@ -250,6 +258,7 @@ public final class GenStats {
                 "window[%d..%d,%d..%d] inside=%d span=%.2fms ramp=%.0fms e2e=%.2fms/chunk"
                         + " gen=%.2f native=%.2f layout=%.2f beard=%.2f marks=%.2f carver=%.2f"
                         + " busy=%.1fms/chunk cover=%.1f%% maxconc=%d"
+                        + " margin_fills=%d margin_fill_cpu=%.1fms/ch"
                         + " deco_inside=%d deco_tail=%.0fms e2e_deco=%.2f",
                 WIN_MIN_X, WIN_MIN_X + WIN_N, WIN_MIN_Z, WIN_MIN_Z + WIN_N,
                 n, spanMs, rampMs, spanMs / n,
@@ -262,6 +271,8 @@ public final class GenStats {
                 wn > 0 ? busyMs / wn : 0.0,
                 cover,
                 maxconc,
+                WIN_OUTSIDE.get(),
+                WIN_OUTSIDE_NANOS.get() / n / 1e6,
                 WIN_DECO_INSIDE.get(),
                 decoTailMs,
                 e2eDeco);
@@ -344,6 +355,12 @@ public final class GenStats {
                 W_START[(int) wi] = tEnd - nanos;
                 W_WALL[(int) wi] = nanos;
             }
+        } else if (WIN_N > 0) {
+            // cont-142: margin-law accounting — dependency-margin fill work
+            // (outside the armed rect, dragged by the r8 STRUCTURE_STARTS /
+            // r2 BIOMES / r1 TERRAIN read radii).
+            WIN_OUTSIDE.incrementAndGet();
+            WIN_OUTSIDE_NANOS.addAndGet(nanos);
         }
     }
 
