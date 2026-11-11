@@ -209,7 +209,11 @@ fn main() {
             | FeatureCfg::Speleothem { .. }
             | FeatureCfg::LargeDripstone { .. }
             | FeatureCfg::SpeleothemCluster { .. }
-            | FeatureCfg::FreezeTopLayer => None,
+            | FeatureCfg::FreezeTopLayer
+            // deleg-ports-3: lake_lava_surface/underground + amethyst_geode are
+            // native place-fns now (CRUS_DELEG_PORT3 default ON) — no delegate.
+            | FeatureCfg::Lake { .. }
+            | FeatureCfg::Geode { .. } => None,
             FeatureCfg::BlockColumn { layers, allowed, .. } => {
                 if matches!(allowed, BlockPredicate::Unsupported(_)) {
                     return Some("bc-allowed".into());

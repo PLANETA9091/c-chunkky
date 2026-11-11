@@ -263,6 +263,41 @@ fn cfg_fully_supported(reg: &FeatureRegistry, cfg_name: &str, depth: u32) -> boo
         // biome/light checks ride the freezeChecks bridge upcall. Kill-switch:
         // CRUS_DELEG_NOGEN=1 restores the delegate lane for these types.
         FeatureCfg::MonsterRoom | FeatureCfg::FreezeTopLayer => !deleg_nogen(),
+        // deleg-ports-3: lake (lava only — the water-freeze branch has no
+        // native biome accessor) + geode (noise rides the world-seed static).
+        // CRUS_DELEG_PORT3=0 restores the delegate lane for these two types.
+        FeatureCfg::Lake {
+            can_place,
+            can_replace_air_or_fluid,
+            can_replace_barrier,
+            ..
+        } => {
+            !deleg_nogen()
+                && !deleg_port3_off()
+                && !matches!(can_place, BlockPredicate::Unsupported(_))
+                && !matches!(can_replace_air_or_fluid, BlockPredicate::Unsupported(_))
+                && !matches!(can_replace_barrier, BlockPredicate::Unsupported(_))
+        }
+        FeatureCfg::Geode {
+            filling,
+            inner_layer,
+            alternate_inner_layer,
+            middle_layer,
+            outer_layer,
+            cannot_replace,
+            invalid_blocks,
+            ..
+        } => {
+            !deleg_nogen()
+                && !deleg_port3_off()
+                && !matches!(cannot_replace, BlockPredicate::Unsupported(_))
+                && !matches!(invalid_blocks, BlockPredicate::Unsupported(_))
+                && state_src_supported(filling)
+                && state_src_supported(inner_layer)
+                && state_src_supported(alternate_inner_layer)
+                && state_src_supported(middle_layer)
+                && state_src_supported(outer_layer)
+        }
         // FallenTree: parse-time guarded — trunk provider + both decorator
         // lists are limited to the native set (trunk_vine/attached_to_logs);
         // shelf_mushroom (fallen_poplar) falls back to Unsupported at decode.
@@ -553,6 +588,75 @@ pub fn place_configured(
         FeatureCfg::Kelp => place_kelp(ctx, rng, pos, ops),
         FeatureCfg::MonsterRoom => place_monster_room(ctx, rng, pos, ops),
         FeatureCfg::FreezeTopLayer => place_freeze_top_layer(ctx, pos, ops),
+        // --- deleg-ports-3 (delegate lane 2.01ms/ch) ------------------------
+        FeatureCfg::Lake {
+            fluid,
+            barrier,
+            can_place,
+            can_replace_air_or_fluid,
+            can_replace_barrier,
+        } => place_lake(
+            ctx, rng, pos, ops, fluid, barrier, can_place, can_replace_air_or_fluid, can_replace_barrier,
+        ),
+        FeatureCfg::Geode {
+            filling,
+            inner_layer,
+            alternate_inner_layer,
+            middle_layer,
+            outer_layer,
+            inner_placements,
+            cannot_replace,
+            invalid_blocks,
+            use_potential_placements_chance,
+            use_alternate_layer0_chance,
+            placements_require_layer0_alternate,
+            outer_wall_distance,
+            distribution_points,
+            point_offset,
+            min_gen_offset,
+            max_gen_offset,
+            noise_multiplier,
+            invalid_blocks_threshold,
+            crack_generate_chance,
+            crack_base_size,
+            crack_point_offset,
+            layer_filling,
+            layer_inner,
+            layer_middle,
+            layer_outer,
+        } => place_geode(
+            ctx,
+            rng,
+            pos,
+            ops,
+            &GeodeCfg {
+                filling,
+                inner_layer,
+                alternate_inner_layer,
+                middle_layer,
+                outer_layer,
+                inner_placements,
+                cannot_replace,
+                invalid_blocks,
+                use_potential_placements_chance: *use_potential_placements_chance,
+                use_alternate_layer0_chance: *use_alternate_layer0_chance,
+                placements_require_layer0_alternate: *placements_require_layer0_alternate,
+                outer_wall_distance,
+                distribution_points,
+                point_offset,
+                min_gen_offset: *min_gen_offset,
+                max_gen_offset: *max_gen_offset,
+                noise_multiplier: *noise_multiplier,
+                invalid_blocks_threshold: *invalid_blocks_threshold,
+                crack_generate_chance: *crack_generate_chance,
+                crack_base_size: *crack_base_size,
+                crack_point_offset: *crack_point_offset,
+                layer_filling: *layer_filling,
+                layer_inner: *layer_inner,
+                layer_middle: *layer_middle,
+                layer_outer: *layer_outer,
+            },
+        ),
         FeatureCfg::UnderwaterMagma { floor_search_range, placement_radius, prob } => {
             place_underwater_magma(ctx, *floor_search_range, *placement_radius, *prob, rng, pos, ops)
         }
@@ -2933,6 +3037,681 @@ fn pred_ids(pred: &crate::features_deco::BlockPredicate) -> &[String] {
 fn deleg_nogen() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("CRUS_DELEG_NOGEN").as_deref() == Ok("1"))
+}
+
+/// CRUS_DELEG_PORT3=0: kill-switch restoring the vanilla-lane delegate for
+/// the deleg-ports-3 types (lake_lava_surface / lake_lava_underground /
+/// amethyst_geode). Default ON. PORT3_FORCE is the test/bench override
+/// (1 = port ON, 2 = delegate OFF-lane) evaluated FIRST so parity tests can
+/// pin both lanes in one process (H7_FORCE pattern).
+pub static PORT3_FORCE: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(0);
+static PORT3_OFF_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+fn deleg_port3_off() -> bool {
+    match PORT3_FORCE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => *PORT3_OFF_ENV.get_or_init(|| {
+            std::env::var("CRUS_DELEG_PORT3").ok().as_deref() == Some("0")
+        }),
+    }
+}
+
+/// World seed for the geode shell noise (vanilla constructs
+/// WorldgenRandom(LegacyRandomSource(level.getSeed())) inside GeodeFeature).
+/// The decoDecoSeed JNI crossing (called once per chunk by DecoDriver.runDeco
+/// on the SAME worker thread that then runs decoRunFeature/decoRunBatch)
+/// feeds it — no new upcall needed. Workers sequence their own
+/// set-then-run; the only cross-worker skew would be two DIFFERENT world
+/// seeds sharing a thread, which does not exist in the single-gen-world
+/// server topology.
+pub fn note_world_seed(seed: i64) {
+    WORLD_SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
+}
+static WORLD_SEED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+// ---------------------------------------------------------------------------
+// deleg-ports-3 batch: lake (LakeFeature) + amethyst geode (GeodeFeature).
+// Both transcribed from the CFR decompiles of paper-26.3.jar
+// (audit_deleg_ports/decomp/.../feature/{LakeFeature,GeodeFeature}.java).
+// RNG draw order is the parity-critical part; every level query maps 1:1
+// onto a vanilla BlockState read (snapshot-served or bridge upcall).
+// ---------------------------------------------------------------------------
+
+const LIQUID_IDS: [&str; 2] = ["minecraft:water", "minecraft:lava"];
+const LAVA_IDS: [&str; 1] = ["minecraft:lava"];
+
+/// String-set views of the ID consts (DecoLevelExt wants &[String];
+/// OnceLock so the hot validation path never allocates).
+fn liquid_ids() -> &'static [String] {
+    static V: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    V.get_or_init(|| LIQUID_IDS.iter().map(|s| s.to_string()).collect())
+}
+fn lava_ids() -> &'static [String] {
+    static V: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    V.get_or_init(|| LAVA_IDS.iter().map(|s| s.to_string()).collect())
+}
+
+/// LakeFeature.place (26.3). Vanilla draw order:
+///   1. spots = nextInt(4)+4 (ONE draw)
+///   2. per spot: 6x nextDouble (xr, yr, zr, xp, yp, zp)
+///   3. fluid provider draw — plain state (Simple) consumes NOTHING
+///   4. validation pass (boundary-neighbor cells): no RNG, early false
+///   5. place pass: fluid/CAVE_AIR writes; air also scheduleTick + markAbove
+///   6. barrier provider draw (no RNG) + barrier pass:
+///      boundary cell -> (yy>=4: nextInt(2) ALWAYS drawn; 0 skips the cell)
+///      -> isSolid -> canReplaceWithBarrier -> write + markAbove
+///   7. water-freeze pass — lava lakes never reach it (decode-gated)
+/// Returns vanilla's `true` once validation passed.
+#[allow(clippy::too_many_arguments)]
+fn place_lake(
+    ctx: &PlaceCtx,
+    rng: &mut WorldgenRandom,
+    origin: BlockPos,
+    ops: &mut Vec<DecoOp>,
+    fluid: &str,
+    barrier: &str,
+    can_place: &BlockPredicate,
+    can_replace_air_or_fluid: &BlockPredicate,
+    can_replace_barrier: &BlockPredicate,
+) -> bool {
+    let level = ctx.level;
+    if origin.y <= level.min_y() + 4 {
+        return false;
+    }
+    let origin = BlockPos::new(origin.x - 8, origin.y - 4, origin.z - 8);
+    let mut grid = [false; 2048];
+    let spots = rng.next_int_bound(4) + 4;
+    for _ in 0..spots {
+        let xr = rng.next_f64() * 6.0 + 3.0;
+        let yr = rng.next_f64() * 4.0 + 2.0;
+        let zr = rng.next_f64() * 6.0 + 3.0;
+        let xp = rng.next_f64() * (16.0 - xr - 2.0) + 1.0 + xr / 2.0;
+        let yp = rng.next_f64() * (8.0 - yr - 4.0) + 2.0 + yr / 2.0;
+        let zp = rng.next_f64() * (16.0 - zr - 2.0) + 1.0 + zr / 2.0;
+        for xx in 1..15usize {
+            for zz in 1..15usize {
+                for yy in 1..7usize {
+                    let xd = (xx as f64 - xp) / (xr / 2.0);
+                    let yd = (yy as f64 - yp) / (yr / 2.0);
+                    let zd = (zz as f64 - zp) / (zr / 2.0);
+                    let d = xd * xd + yd * yd + zd * zd;
+                    if d < 1.0 {
+                        grid[(xx * 16 + zz) * 8 + yy] = true;
+                    }
+                }
+            }
+        }
+    }
+    // fluid = fluidProvider.getState(level, random, origin): the decode gate
+    // pins this to a Simple provider (no RNG draw); the string is the
+    // resolved state ("minecraft:lava[level=0]").
+    //
+    // validation pass: for every non-grid cell with a grid neighbor, the
+    // vanilla aborts on the FIRST failing cell. liquid() = fluidState
+    // non-empty -> water|lava at worldgen (the snapshot fluid flags encode
+    // exactly these two incl. waterlogged blocks). `blockState != fluid`
+    // full-state equality is approximated by the block NAME test: at worldgen
+    // every lava is a level=0 source (fluids never tick during gen), so
+    // name==lava <=> state==fluid among non-solid cells.
+    let mut boundary = |grid: &[bool; 2048], xx: usize, zz: usize, yy: usize| -> bool {
+        !grid[(xx * 16 + zz) * 8 + yy]
+            && ((xx < 15 && grid[((xx + 1) * 16 + zz) * 8 + yy])
+                || (xx > 0 && grid[((xx - 1) * 16 + zz) * 8 + yy])
+                || (zz < 15 && grid[(xx * 16 + zz + 1) * 8 + yy])
+                || (zz > 0 && grid[(xx * 16 + (zz - 1)) * 8 + yy])
+                || (yy < 7 && grid[(xx * 16 + zz) * 8 + yy + 1])
+                || (yy > 0 && grid[(xx * 16 + zz) * 8 + (yy - 1)]))
+    };
+    for xx in 0..16usize {
+        for zz in 0..16usize {
+            for yy in 0..8usize {
+                if !boundary(&grid, xx, zz, yy) {
+                    continue;
+                }
+                let pos = BlockPos::new(origin.x + xx as i32, origin.y + yy as i32, origin.z + zz as i32);
+                if yy >= 4 && level.fluid_is(pos, liquid_ids()) {
+                    return false;
+                }
+                if yy < 4
+                    && !level.is_solid(pos)
+                    && !level.state_is(pos, lava_ids())
+                {
+                    return false;
+                }
+                if crate::features_deco::pred_matches(can_place, level, pos, level.state(pos))
+                    == Some(false)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    // canReplaceWithAirOrFluid / canReplaceWithBarrier evaluators (the
+    // vanilla config predicates are Not(MatchingTag(...)))
+    let repl_aof = |pos: BlockPos| -> bool {
+        crate::features_deco::pred_matches(can_replace_air_or_fluid, level, pos, level.state(pos))
+            != Some(false)
+    };
+    let repl_barrier = |pos: BlockPos| -> bool {
+        crate::features_deco::pred_matches(can_replace_barrier, level, pos, level.state(pos))
+            != Some(false)
+    };
+    // place pass
+    for xx in 0..16usize {
+        for zz in 0..16usize {
+            for yy in 0..8usize {
+                if !grid[(xx * 16 + zz) * 8 + yy] {
+                    continue;
+                }
+                let pos = BlockPos::new(origin.x + xx as i32, origin.y + yy as i32, origin.z + zz as i32);
+                if !repl_aof(pos) {
+                    continue;
+                }
+                if yy >= 4 {
+                    // vanilla: setBlock(CAVE_AIR, 2) + scheduleTick(cave_air, 0)
+                    // + markAboveForPostProcessing
+                    ctx.emit(ops, pos, "minecraft:cave_air", FLAG_TICK);
+                    mark_above(ctx, pos, ops);
+                } else {
+                    ctx.emit(ops, pos, fluid, 0);
+                }
+            }
+        }
+    }
+    // barrier pass — skipped entirely when the barrier state is air
+    if !is_air_name(crate::features_deco::state_block_name(barrier)) {
+        for xx in 0..16usize {
+            for zz in 0..16usize {
+                for yy in 0..8usize {
+                    if !boundary(&grid, xx, zz, yy) {
+                        continue;
+                    }
+                    // Java && / || short-circuit: the nextInt(2) is drawn for
+                    // EVERY boundary cell with yy>=4 (result 0 skips the cell,
+                    // result 1 falls through to the solidity test).
+                    if yy >= 4 && rng.next_int_bound(2) == 0 {
+                        continue;
+                    }
+                    let pos = BlockPos::new(
+                        origin.x + xx as i32,
+                        origin.y + yy as i32,
+                        origin.z + zz as i32,
+                    );
+                    if !level.is_solid(pos) || !repl_barrier(pos) {
+                        continue;
+                    }
+                    ctx.emit(ops, pos, barrier, 0);
+                    mark_above(ctx, pos, ops);
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Feature.markAboveForPostProcessing (26.3): up to 2 blocks above, stopping
+/// at the first air (the walk reads the live world incl. this feature's own
+/// writes via the overlay). Emits FLAG_POSTPROC mark ops (state 0 — Java
+/// marks without writing; the op is reported "dropped" and fed to
+/// decoOpsDropped exactly like the disk-feature marks).
+fn mark_above(ctx: &PlaceCtx, pos: BlockPos, ops: &mut Vec<DecoOp>) {
+    let mut m = pos;
+    for _ in 0..2 {
+        m = BlockPos::new(m.x, m.y + 1, m.z);
+        if ctx.level.is_air(m) {
+            return;
+        }
+        let (rx, rz) = ctx.rel(m);
+        ops.push(DecoOp {
+            x: rx,
+            y: m.y as i16,
+            z: rz,
+            state: 0,
+            flags: FLAG_POSTPROC,
+            aux: 0,
+        });
+    }
+}
+
+#[inline]
+fn is_air_name(name: &str) -> bool {
+    name == "minecraft:air" || name == "minecraft:cave_air" || name == "minecraft:void_air"
+}
+
+/// op emitted with FLAG_TICK + aux bit5 = TICK-ONLY (Java schedules the
+/// FLUID tick of the op's state and writes NOTHING) — the geode crack-air
+/// pass re-ticks non-empty fluid NEIGHBORS without writing them.
+const AUX_TICK_ONLY: u16 = 32;
+
+/// Flattened geode config (borrowed view of FeatureCfg::Geode).
+struct GeodeCfg<'a> {
+    filling: &'a StateSrc,
+    inner_layer: &'a StateSrc,
+    alternate_inner_layer: &'a StateSrc,
+    middle_layer: &'a StateSrc,
+    outer_layer: &'a StateSrc,
+    inner_placements: &'a [String],
+    cannot_replace: &'a BlockPredicate,
+    invalid_blocks: &'a BlockPredicate,
+    use_potential_placements_chance: f64,
+    use_alternate_layer0_chance: f64,
+    placements_require_layer0_alternate: bool,
+    outer_wall_distance: &'a crate::features_placement::IntProvider,
+    distribution_points: &'a crate::features_placement::IntProvider,
+    point_offset: &'a crate::features_placement::IntProvider,
+    min_gen_offset: i32,
+    max_gen_offset: i32,
+    noise_multiplier: f64,
+    invalid_blocks_threshold: i32,
+    crack_generate_chance: f64,
+    crack_base_size: f64,
+    crack_point_offset: i32,
+    layer_filling: f64,
+    layer_inner: f64,
+    layer_middle: f64,
+    layer_outer: f64,
+}
+
+/// Java String.hashCode (UTF-16 code units; ASCII ids are byte-exact).
+fn java_string_hash_code(s: &str) -> i32 {
+    let mut h: i32 = 0;
+    for u in s.encode_utf16() {
+        h = h.wrapping_mul(31).wrapping_add(u as i32);
+    }
+    h
+}
+
+/// LegacyRandomSource-fed GradientNoise ctor (offsets + permutation shuffle)
+/// — identical draw sequence to n263::GradientNoise263::new, typed to the
+/// java.util.Random LCG (the geode noise is seeded from
+/// WorldgenRandom(LegacyRandomSource(levelSeed))).
+fn legacy_gradient_noise(r: &mut crate::rng::LegacyRandom) -> crate::n263::GradientNoise263 {
+    let offset_x = r.next_f64() * 256.0;
+    let offset_y = r.next_f64() * 256.0;
+    let offset_z = r.next_f64() * 256.0;
+    let mut perms = [0u8; 256];
+    for (i, p) in perms.iter_mut().enumerate() {
+        *p = i as u8;
+    }
+    for i in 0..256usize {
+        let offset = r.next_int_bound((256 - i) as i32) as usize;
+        perms.swap(i, offset + i);
+    }
+    crate::n263::GradientNoise263 { perms, offset_x, offset_y, offset_z }
+}
+
+fn legacy_perlin_noise(r: &mut crate::rng::LegacyRandom) -> crate::n263::PerlinNoise263 {
+    let base = legacy_gradient_noise(r);
+    let mut p_adj = [0u16; 256];
+    for (i, a) in p_adj.iter_mut().enumerate() {
+        // Java: pAdj[i] = (char)(p(i) | p(i+1) << 8), permute() applies &0xFF
+        *a = (base.perms[i] as u16) | ((base.perms[(i + 1) & 0xFF] as u16) << 8);
+    }
+    crate::n263::PerlinNoise263 { base, p_adj }
+}
+
+/// The static GeodeFeature.NOISE_PARAMETERS =
+/// NormalNoise.createParity(-4, [1.0]) — seedless parameters — and its
+/// .create(WorldgenRandom(LegacyRandomSource(levelSeed))) evaluation stack:
+/// forkPositional() x2 (two LegacyRandom nextLong draws), per octave
+/// first/second PerlinNoise seeded from
+/// factory.fromHashOf("octave_-4") = (int)"octave_-4".hashCode() ^ factorySeed,
+/// layered at frequency 2^-4 and 2^-4*1.0181268882175227 with the shared
+/// (float)(normalizationFactor * amplitude) value factor.
+pub(crate) fn geode_noise_stack(level_seed: i64) -> crate::n263::NoiseStack263 {
+    let params = crate::n263::parity_base_amplitude_params(-4, vec![1.0]);
+    // build_octaves(-4, base_amplitude, 1, normalize=true, modifiers=[]):
+    // single octave, normalize factor = 1/(2-1) = 1 -> amplitude unchanged.
+    let octave_amplitude = params.base_amplitude
+        * (0.5f64.powf(-(1.0 - 1.0)) / (0.5f64.powf(-1.0) - 1.0));
+    // compute_normalization_factor: estimate_deviation over the single octave
+    // (variance += layer_deviation^2; sqrt) * sqrt(2), vs target*1/3.
+    let layer_deviation = 0.2702247831245211 * octave_amplitude.abs();
+    let mut variance = layer_deviation * layer_deviation;
+    let input_deviation = variance.sqrt();
+    variance = 0.0; // silence partial-move lint shape; keep math explicit
+    let _ = variance;
+    let target_amplitude = octave_amplitude.abs();
+    let normalization_factor = if input_deviation == 0.0 {
+        0.0
+    } else {
+        (target_amplitude * 0.3333333333333333) / (input_deviation * 2.0f64.sqrt())
+    };
+    let value_factor = (normalization_factor * octave_amplitude) as f32;
+    // WorldgenRandom(new LegacyRandomSource(levelSeed)).forkPositional() x2
+    let mut root = crate::rng::LegacyRandom::new(level_seed);
+    let f1 = root.next_long();
+    let f2 = root.next_long();
+    let octave_hash = java_string_hash_code("octave_-4") as i64;
+    let mut first = crate::rng::LegacyRandom::new(octave_hash ^ f1);
+    let mut second = crate::rng::LegacyRandom::new(octave_hash ^ f2);
+    let first_noise = legacy_perlin_noise(&mut first);
+    let second_noise = legacy_perlin_noise(&mut second);
+    let frequency = 2.0f64.powi(-4);
+    crate::n263::NoiseStack263 {
+        layers: vec![
+            (
+                crate::n263::Noise263::Perlin(Box::new(first_noise)),
+                frequency,
+                value_factor,
+            ),
+            (
+                crate::n263::Noise263::Perlin(Box::new(second_noise)),
+                frequency * 1.0181268882175227,
+                value_factor,
+            ),
+        ],
+    }
+}
+
+/// Mth.invSqrt(double) = org.joml.Math.invsqrt(double) = 1.0 / Math.sqrt(x)
+/// (bytecode-verified from the 26.3 jar — see the report).
+#[inline]
+fn inv_sqrt(x: f64) -> f64 {
+    1.0 / x.sqrt()
+}
+
+/// Vec3i.distSqr: exact integer squared distance in double.
+#[inline]
+fn dist_sqr(ax: i32, ay: i32, az: i32, bx: i32, by: i32, bz: i32) -> f64 {
+    let dx = (ax - bx) as f64;
+    let dy = (ay - by) as f64;
+    let dz = (az - bz) as f64;
+    dx * dx + dy * dy + dz * dz
+}
+
+/// Direction.values() order: down, up, north, south, west, east.
+const DIRECTIONS6: [(i32, i32, i32); 6] = [
+    (0, -1, 0),
+    (0, 1, 0),
+    (0, 0, -1),
+    (0, 0, 1),
+    (-1, 0, 0),
+    (1, 0, 0),
+];
+const DIR_NAMES: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
+
+/// GeodeFeature.place (26.3). Vanilla draw order:
+///   1. numPoints = distributionPoints.sample
+///   2. (noise construction — SEPARATE LegacyRandom(levelSeed) stream)
+///   3. crackSize: nextDouble
+///   4. shouldGenerateCrack: nextFloat
+///   5. per point: outerWallDistance x3 (x,y,z) -> state read (invalid-gate,
+///      may abort) -> pointOffset.sample
+///   6. crack points: nextInt(4) (only when shouldGenerateCrack)
+///   7. scan box (x outer, y mid, z inner; betweenClosed INCLUSIVE):
+///      alternate roll nextFloat per inner-layer cell; potential-placement
+///      roll nextFloat per (A&&!B || C) false-short-circuit
+///   8. per crystal: Util.getRandom(innerPlacements) = nextInt(4), then the
+///      first direction whose neighbor canClusterGrowAtState wins (no draw)
+/// Blocks-only (no biome / heightmap reads). Returns true always.
+fn place_geode(
+    ctx: &PlaceCtx,
+    rng: &mut WorldgenRandom,
+    origin: BlockPos,
+    ops: &mut Vec<DecoOp>,
+    g: &GeodeCfg,
+) -> bool {
+    let level = ctx.level;
+    let seed = WORLD_SEED.load(std::sync::atomic::Ordering::Relaxed);
+    if seed == 0 {
+        // bridge never fed the world seed (old jar): bail BEFORE any draw —
+        // every feature run re-seeds from the deco seed, so a zero-draw bail
+        // cannot desync any other feature's stream.
+        return false;
+    }
+    let noise = geode_noise_stack(seed);
+
+    let num_points = g.distribution_points.sample(rng);
+    // IntProvider.maxInclusive — the crackSizeAdjustment denominator
+    let outer_wall_max = match g.outer_wall_distance {
+        crate::features_placement::IntProvider::Uniform { hi, .. } => *hi,
+        crate::features_placement::IntProvider::Constant(v) => *v,
+        crate::features_placement::IntProvider::Clamped { hi, .. } => *hi,
+        crate::features_placement::IntProvider::WeightedList { entries } => entries
+            .iter()
+            .map(|(p, _)| int_provider_max(p))
+            .max()
+            .unwrap_or(0),
+        _ => return false, // exotic provider: bail before any further draw
+    };
+    let crack_size_adjustment = num_points as f64 / outer_wall_max as f64;
+    let inner_air = 1.0 / g.layer_filling.sqrt();
+    let innermost_block_layer = 1.0 / (g.layer_inner + crack_size_adjustment).sqrt();
+    let inner_crust = 1.0 / (g.layer_middle + crack_size_adjustment).sqrt();
+    let outer_crust = 1.0 / (g.layer_outer + crack_size_adjustment).sqrt();
+    let crack_size =
+        1.0 / (g.crack_base_size + rng.next_f64() / 2.0
+            + if num_points > 3 { crack_size_adjustment } else { 0.0 })
+        .sqrt();
+    let should_generate_crack = (rng.next_f32() as f64) < g.crack_generate_chance;
+
+    // canReplace (safeSetBlock predicate): !state.is(cannot_replace)
+    let can_replace = |pos: BlockPos| -> bool {
+        crate::features_deco::pred_matches(g.cannot_replace, level, pos, level.state(pos))
+            != Some(true)
+    };
+    // safeSetBlock: predicate test on the LIVE state (overlay included), then
+    // setBlock(state, 2). The provider draws ride sample_state (Simple = none).
+    let mut flags = 0u8;
+    let safe_set = |pos: BlockPos, state: Option<String>, ops: &mut Vec<DecoOp>| -> bool {
+        if !can_replace(pos) {
+            return false;
+        }
+        if let Some(s) = state {
+            ctx.emit(ops, pos, &s, 0);
+            return true;
+        }
+        false
+    };
+
+    let mut num_invalid_points = 0i32;
+    let mut points: Vec<(BlockPos, i32)> = Vec::with_capacity(num_points.max(0) as usize);
+    for _ in 0..num_points {
+        let x = g.outer_wall_distance.sample(rng);
+        let y = g.outer_wall_distance.sample(rng);
+        let z = g.outer_wall_distance.sample(rng);
+        let pos = BlockPos::new(origin.x + x, origin.y + y, origin.z + z);
+        if (level.is_air(pos)
+            || crate::features_deco::pred_matches(g.invalid_blocks, level, pos, level.state(pos))
+                == Some(true))
+            && {
+                num_invalid_points += 1;
+                num_invalid_points > g.invalid_blocks_threshold
+            }
+        {
+            return false;
+        }
+        let off = g.point_offset.sample(rng);
+        points.push((pos, off));
+    }
+    let mut crack_points: Vec<BlockPos> = Vec::new();
+    if should_generate_crack {
+        let offset_index = rng.next_int_bound(4);
+        let crack_offset = num_points * 2 + 1;
+        match offset_index {
+            0 => {
+                crack_points.push(BlockPos::new(origin.x + crack_offset, origin.y + 7, origin.z));
+                crack_points.push(BlockPos::new(origin.x + crack_offset, origin.y + 5, origin.z));
+                crack_points.push(BlockPos::new(origin.x + crack_offset, origin.y + 1, origin.z));
+            }
+            1 => {
+                crack_points.push(BlockPos::new(origin.x, origin.y + 7, origin.z + crack_offset));
+                crack_points.push(BlockPos::new(origin.x, origin.y + 5, origin.z + crack_offset));
+                crack_points.push(BlockPos::new(origin.x, origin.y + 1, origin.z + crack_offset));
+            }
+            2 => {
+                crack_points.push(BlockPos::new(
+                    origin.x + crack_offset,
+                    origin.y + 7,
+                    origin.z + crack_offset,
+                ));
+                crack_points.push(BlockPos::new(
+                    origin.x + crack_offset,
+                    origin.y + 5,
+                    origin.z + crack_offset,
+                ));
+                crack_points.push(BlockPos::new(
+                    origin.x + crack_offset,
+                    origin.y + 1,
+                    origin.z + crack_offset,
+                ));
+            }
+            _ => {
+                crack_points.push(BlockPos::new(origin.x, origin.y + 7, origin.z));
+                crack_points.push(BlockPos::new(origin.x, origin.y + 5, origin.z));
+                crack_points.push(BlockPos::new(origin.x, origin.y + 1, origin.z));
+            }
+        }
+    }
+    let mut potential_crystal_placements: Vec<BlockPos> = Vec::new();
+    // BlockPos.betweenClosed(origin.offset(min..), origin.offset(max..)):
+    // x outer, y middle, z inner, ALL INCLUSIVE
+    for cx in (origin.x + g.min_gen_offset)..=(origin.x + g.max_gen_offset) {
+        for cy in (origin.y + g.min_gen_offset)..=(origin.y + g.max_gen_offset) {
+            for cz in (origin.z + g.min_gen_offset)..=(origin.z + g.max_gen_offset) {
+                let noise_offset = noise.get(cx as f64, cy as f64, cz as f64) as f64
+                    * g.noise_multiplier;
+                let mut dist_sum_shell = 0.0f64;
+                for (pp, off) in &points {
+                    dist_sum_shell +=
+                        inv_sqrt(dist_sqr(cx, cy, cz, pp.x, pp.y, pp.z) + *off as f64)
+                            + noise_offset;
+                }
+                if dist_sum_shell < outer_crust {
+                    continue;
+                }
+                if dist_sum_shell >= inner_air {
+                    let st = sample_state(g.filling, level, BlockPos::new(cx, cy, cz), rng, &mut flags);
+                    safe_set(BlockPos::new(cx, cy, cz), st, ops);
+                    continue;
+                }
+                let mut dist_sum_crack = 0.0f64;
+                for cp in &crack_points {
+                    dist_sum_crack += inv_sqrt(
+                        dist_sqr(cx, cy, cz, cp.x, cp.y, cp.z) + g.crack_point_offset as f64,
+                    ) + noise_offset;
+                }
+                if should_generate_crack && dist_sum_crack >= crack_size {
+                    let pos = BlockPos::new(cx, cy, cz);
+                    if can_replace(pos) {
+                        ctx.emit(ops, pos, "minecraft:air", 0);
+                    }
+                    for (dx, dy, dz) in DIRECTIONS6 {
+                        let adj = BlockPos::new(cx + dx, cy + dy, cz + dz);
+                        // vanilla: scheduleTick(adj, fluidState.getType(), 0)
+                        // for any non-empty fluid neighbor; the worldgen
+                        // fluids are water/lava (exotic -> no native op)
+                        if level.fluid_is(adj, &["minecraft:water".to_string()]) {
+                            push_tick_only(ctx, adj, "minecraft:water", ops);
+                        } else if level.fluid_is(adj, &["minecraft:lava".to_string()]) {
+                            push_tick_only(ctx, adj, "minecraft:lava", ops);
+                        }
+                    }
+                    continue;
+                }
+                if dist_sum_shell >= innermost_block_layer {
+                    let pos = BlockPos::new(cx, cy, cz);
+                    let use_alternate = (rng.next_f32() as f64) < g.use_alternate_layer0_chance;
+                    let st = if use_alternate {
+                        sample_state(g.alternate_inner_layer, level, pos, rng, &mut flags)
+                    } else {
+                        sample_state(g.inner_layer, level, pos, rng, &mut flags)
+                    };
+                    safe_set(pos, st, ops);
+                    // (A && B) || C — Java short-circuit: the C roll is drawn
+                    // only when the A&&B branch is false
+                    let want = (g.placements_require_layer0_alternate && !use_alternate)
+                        || ((rng.next_f32() as f64) < g.use_potential_placements_chance);
+                    if want {
+                        potential_crystal_placements.push(pos);
+                    }
+                    continue;
+                }
+                if dist_sum_shell >= inner_crust {
+                    let st = sample_state(
+                        g.middle_layer,
+                        level,
+                        BlockPos::new(cx, cy, cz),
+                        rng,
+                        &mut flags,
+                    );
+                    safe_set(BlockPos::new(cx, cy, cz), st, ops);
+                    continue;
+                }
+                if dist_sum_shell >= outer_crust {
+                    let st = sample_state(
+                        g.outer_layer,
+                        level,
+                        BlockPos::new(cx, cy, cz),
+                        rng,
+                        &mut flags,
+                    );
+                    safe_set(BlockPos::new(cx, cy, cz), st, ops);
+                }
+            }
+        }
+    }
+    // crystal placements: ONE draw per candidate (Util.getRandom -> nextInt),
+    // then the first direction whose neighbor canGrow wins (no draw)
+    for crystal_pos in potential_crystal_placements {
+        let pick = rng.next_int_bound(g.inner_placements.len() as i32).max(0) as usize;
+        let Some(base) = g.inner_placements.get(pick) else {
+            continue;
+        };
+        for (di, (dx, dy, dz)) in DIRECTIONS6.iter().enumerate() {
+            let place_pos = BlockPos::new(
+                crystal_pos.x + dx,
+                crystal_pos.y + dy,
+                crystal_pos.z + dz,
+            );
+            // BuddingAmethystBlock.canClusterGrowAtState(placeState):
+            // state.isAir() || (state.is(WATER) && fluidState.isFull())
+            // (worldgen water is always a level=0 source)
+            let grows = level.is_air(place_pos) || level.state_is(place_pos, &["minecraft:water".to_string()]);
+            if !grows {
+                continue;
+            }
+            let waterlogged = level.fluid_is(place_pos, &["minecraft:water".to_string()]);
+            let state = format!(
+                "{}[facing={},waterlogged={}]",
+                base, DIR_NAMES[di], waterlogged
+            );
+            if can_replace(place_pos) {
+                ctx.emit(ops, place_pos, &state, 0);
+            }
+            break;
+        }
+    }
+    true
+}
+
+/// manual tick-only op (NO overlay write — nothing is placed)
+fn push_tick_only(ctx: &PlaceCtx, pos: BlockPos, state: &str, ops: &mut Vec<DecoOp>) {
+    let (rx, rz) = ctx.rel(pos);
+    ops.push(DecoOp {
+        x: rx,
+        y: pos.y as i16,
+        z: rz,
+        state: ctx.state_index.get(state).copied().unwrap_or(0),
+        flags: FLAG_TICK,
+        aux: AUX_TICK_ONLY,
+    });
+}
+
+fn int_provider_max(p: &crate::features_placement::IntProvider) -> i32 {
+    match p {
+        crate::features_placement::IntProvider::Uniform { hi, .. } => *hi,
+        crate::features_placement::IntProvider::Constant(v) => *v,
+        crate::features_placement::IntProvider::Clamped { hi, .. } => *hi,
+        crate::features_placement::IntProvider::BiasedToBottom { hi, .. } => *hi,
+        crate::features_placement::IntProvider::WeightedList { entries } => entries
+            .iter()
+            .map(|(p, _)| int_provider_max(p))
+            .max()
+            .unwrap_or(0),
+        _ => 0,
+    }
 }
 
 // ---------------------------------------------------------------------------

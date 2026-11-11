@@ -239,6 +239,9 @@ fn main() {
                     crussty_chunkgen::features_json::FeatureCfg::Speleothem { .. } => "Speleothem".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::LargeDripstone { .. } => "LargeDripstone".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::SpeleothemCluster { .. } => "SpeleothemCluster".to_string(),
+                    // deleg-ports-3: native lake/geode place-fns (CRUS_DELEG_PORT3).
+                    crussty_chunkgen::features_json::FeatureCfg::Lake { .. } => "Lake".to_string(),
+                    crussty_chunkgen::features_json::FeatureCfg::Geode { .. } => "Geode".to_string(),
                     crussty_chunkgen::features_json::FeatureCfg::Unsupported(e) => format!("Unsupported({e})"),
                 };
                 println!("  cfg {n}: {k}");

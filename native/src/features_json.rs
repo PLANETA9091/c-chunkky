@@ -199,10 +199,58 @@ pub enum FeatureCfg {
     },
     Kelp,
     MonsterRoom,
+    /// deleg-ports-3: minecraft:lake (LakeFeature, 26.3). 16x16x8 ellipsoid
+    /// fluid body + barrier shell around the owning-chunk origin. Native only
+    /// for LAVA fluids — the water branch adds the biome shouldFreeze ice cap
+    /// which has no native accessor (stays on the delegate lane there).
+    Lake {
+        /// resolved fluid state string ("minecraft:lava[level=0]")
+        fluid: String,
+        /// resolved barrier state string ("minecraft:stone")
+        barrier: String,
+        /// vanilla configs use `minecraft:true` — decode-gated (Unsupported
+        /// otherwise; the predicate is level/state free in that case)
+        can_place: BlockPredicate,
+        can_replace_air_or_fluid: BlockPredicate,
+        can_replace_barrier: BlockPredicate,
+    },
     /// minecraft:freeze_top_layer (26.3 class SnowAndFreezeFeature) — 16x16
     /// column pass over the owning chunk: ice-on-water + snow-on-top with the
     /// grass_block/mycelium snowy=true rewrite. NO RNG.
     FreezeTopLayer,
+    /// deleg-ports-3: minecraft:geode (GeodeFeature, 26.3) — amethyst geode.
+    /// Blocks-only; the shell noise rides NormalNoise.createParity(-4, 1.0)
+    /// seeded from the WORLD seed (features_place::world_seed_static, fed by
+    /// the decoDecoSeed crossing).
+    Geode {
+        filling: StateSrc,
+        inner_layer: StateSrc,
+        alternate_inner_layer: StateSrc,
+        middle_layer: StateSrc,
+        outer_layer: StateSrc,
+        /// the 4 bud/cluster default states (decode-gated to the amethyst set)
+        inner_placements: Vec<String>,
+        /// "state.is(set)" compiled to a MatchingTag/MatchingBlocks predicate
+        cannot_replace: BlockPredicate,
+        invalid_blocks: BlockPredicate,
+        use_potential_placements_chance: f64,
+        use_alternate_layer0_chance: f64,
+        placements_require_layer0_alternate: bool,
+        outer_wall_distance: IP,
+        distribution_points: IP,
+        point_offset: IP,
+        min_gen_offset: i32,
+        max_gen_offset: i32,
+        noise_multiplier: f64,
+        invalid_blocks_threshold: i32,
+        crack_generate_chance: f64,
+        crack_base_size: f64,
+        crack_point_offset: i32,
+        layer_filling: f64,
+        layer_inner: f64,
+        layer_middle: f64,
+        layer_outer: f64,
+    },
     UnderwaterMagma {
         floor_search_range: i32,
         placement_radius: i32,
@@ -1106,6 +1154,122 @@ fn decode_root_system(name: &str, cfg: &Json, reg: &mut FeatureRegistry) -> Feat
     }
 }
 
+/// deleg-ports-3: minecraft:geode decode (GeodeFeature codec). Strict: any
+/// field outside the native surface -> None (the caller maps that to
+/// Unsupported, keeping the feature on the vanilla delegate lane).
+fn decode_geode(cfg: &Json) -> Option<FeatureCfg> {
+    let bad = || None;
+    let src_of = |key: &str| -> Option<StateSrc> {
+        match cfg.get("blocks").and_then(|b| b.get(key)).map(decode_state_provider) {
+            Some(Some(s)) if !matches!(s, StateSrc::Unsupported(_)) => Some(s),
+            _ => None,
+        }
+    };
+    let filling = src_of("filling_provider")?;
+    let inner_layer = src_of("inner_layer_provider")?;
+    let alternate_inner_layer = src_of("alternate_inner_layer_provider")?;
+    let middle_layer = src_of("middle_layer_provider")?;
+    let outer_layer = src_of("outer_layer_provider")?;
+    // inner_placements: the crystal states written with FACING /
+    // WATERLOGGED overrides — the native side knows these properties only
+    // for the amethyst family; anything else stays on the delegate lane.
+    const BUD_SET: [&str; 4] = [
+        "minecraft:small_amethyst_bud",
+        "minecraft:medium_amethyst_bud",
+        "minecraft:large_amethyst_bud",
+        "minecraft:amethyst_cluster",
+    ];
+    let placement_arr = cfg
+        .get("blocks")
+        .and_then(|b| b.get("inner_placements"))
+        .and_then(|v| v.as_arr())?;
+    let mut inner_placements = Vec::with_capacity(placement_arr.len());
+    for p in placement_arr {
+        let norm = normalize_block_id(p.as_str()?.to_string());
+        if !BUD_SET.contains(&norm.as_str()) {
+            return bad();
+        }
+        inner_placements.push(norm);
+    }
+    // holder-set fields: "#tag" -> MatchingTag; block(s) -> MatchingBlocks
+    let holder_set = |key: &str| -> Option<BlockPredicate> {
+        let v = cfg.get("blocks").and_then(|b| b.get(key))?;
+        if let Some(s) = v.as_str() {
+            if let Some(tag) = s.strip_prefix('#') {
+                return Some(BlockPredicate::MatchingTag {
+                    tag: tag.to_string(),
+                    off: (0, 0, 0),
+                });
+            }
+            return Some(BlockPredicate::MatchingBlocks {
+                ids: vec![normalize_block_id(s.to_string())],
+                off: (0, 0, 0),
+            });
+        }
+        let arr = v.as_arr()?;
+        let mut ids = Vec::with_capacity(arr.len());
+        for e in arr {
+            ids.push(normalize_block_id(e.as_str()?.to_string()));
+        }
+        Some(BlockPredicate::MatchingBlocks { ids, off: (0, 0, 0) })
+    };
+    let cannot_replace = holder_set("cannot_replace")?;
+    let invalid_blocks = holder_set("invalid_blocks")?;
+    // crack + layers sub-objects (codec defaults per the 26.3 records)
+    let crack = cfg.get("crack").cloned().unwrap_or(Json::Obj(Vec::new()));
+    let layers = cfg.get("layers").cloned().unwrap_or(Json::Obj(Vec::new()));
+    let f64_of = |j: &Json, k: &str, d: f64| -> Option<f64> {
+        match j.get(k) {
+            Some(v) => v.as_f64(),
+            None => Some(d),
+        }
+    };
+    Some(FeatureCfg::Geode {
+        filling,
+        inner_layer,
+        alternate_inner_layer,
+        middle_layer,
+        outer_layer,
+        inner_placements,
+        cannot_replace,
+        invalid_blocks,
+        use_potential_placements_chance: f64_of(cfg, "use_potential_placements_chance", 0.35)?,
+        use_alternate_layer0_chance: f64_of(cfg, "use_alternate_layer0_chance", 0.0)?,
+        placements_require_layer0_alternate: match cfg.get("placements_require_layer0_alternate") {
+            Some(Json::Bool(b)) => *b,
+            Some(v) => v.as_i64()? != 0,
+            None => true,
+        },
+        outer_wall_distance: cfg
+            .get("outer_wall_distance")
+            .and_then(decode_int_provider)
+            .unwrap_or(IP::Uniform { lo: 4, hi: 5 }),
+        distribution_points: cfg
+            .get("distribution_points")
+            .and_then(decode_int_provider)
+            .unwrap_or(IP::Uniform { lo: 3, hi: 4 }),
+        point_offset: cfg
+            .get("point_offset")
+            .and_then(decode_int_provider)
+            .unwrap_or(IP::Uniform { lo: 1, hi: 2 }),
+        min_gen_offset: cfg.get("min_gen_offset").and_then(|v| v.as_i64()).unwrap_or(-16) as i32,
+        max_gen_offset: cfg.get("max_gen_offset").and_then(|v| v.as_i64()).unwrap_or(16) as i32,
+        noise_multiplier: f64_of(cfg, "noise_multiplier", 0.05)?,
+        // required field (fieldOf — no codec default)
+        invalid_blocks_threshold: cfg.get("invalid_blocks_threshold")?.as_i64()? as i32,
+        crack_generate_chance: f64_of(&crack, "generate_crack_chance", 1.0)?,
+        crack_base_size: f64_of(&crack, "base_crack_size", 2.0)?,
+        crack_point_offset: crack
+            .get("crack_point_offset")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(2) as i32,
+        layer_filling: f64_of(&layers, "filling", 1.7)?,
+        layer_inner: f64_of(&layers, "inner_layer", 2.2)?,
+        layer_middle: f64_of(&layers, "middle_layer", 3.2)?,
+        layer_outer: f64_of(&layers, "outer_layer", 4.2)?,
+    })
+}
+
 pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry) -> FeatureCfg {
     let t = match j.get("type").and_then(|v| v.as_str()) {
         Some(t) => t,
@@ -1554,6 +1718,60 @@ pub fn decode_configured_feature(name: &str, j: &Json, reg: &mut FeatureRegistry
         }
         "minecraft:kelp" => FeatureCfg::Kelp,
         "minecraft:monster_room" => FeatureCfg::MonsterRoom,
+        // --- deleg-ports-3: lake + geode (vanilla delegate killers) ---------
+        "minecraft:lake" => {
+            // LakeFeature codec: fluid/barrier are BlockStateProviders; the
+            // vanilla JSON writes plain states. Simple providers only — the
+            // state draw must consume NO rng (weighted/rotated would desync
+            // the stream ordering documented in place_lake).
+            let fluid = match cfg.get("fluid").map(decode_state_provider) {
+                Some(Some(crate::features_json::StateSrc::Simple(s))) => s,
+                _ => return FeatureCfg::Unsupported("lake-fluid"),
+            };
+            let barrier = match cfg.get("barrier").map(decode_state_provider) {
+                Some(Some(crate::features_json::StateSrc::Simple(s))) => s,
+                _ => return FeatureCfg::Unsupported("lake-barrier"),
+            };
+            // the water branch ends with the biome shouldFreeze ice cap (no
+            // native biome accessor) — keep water lakes on the delegate lane
+            if crate::features_deco::state_block_name(&fluid) != "minecraft:lava" {
+                return FeatureCfg::Unsupported("lake-water-freeze");
+            }
+            let bad_pred = |why: &'static str| -> FeatureCfg {
+                // helper: predicates must decode to something evaluable
+                FeatureCfg::Unsupported(why)
+            };
+            let Some(Some(can_place)) = cfg.get("can_place_feature").map(decode_predicate) else {
+                return bad_pred("lake-can-place");
+            };
+            if matches!(can_place, BlockPredicate::Unsupported(_)) {
+                return bad_pred("lake-can-place-unsup");
+            }
+            let Some(Some(can_replace_air_or_fluid)) =
+                cfg.get("can_replace_with_air_or_fluid").map(decode_predicate)
+            else {
+                return bad_pred("lake-repl-aof");
+            };
+            if matches!(can_replace_air_or_fluid, BlockPredicate::Unsupported(_)) {
+                return bad_pred("lake-repl-aof-unsup");
+            }
+            let Some(Some(can_replace_barrier)) =
+                cfg.get("can_replace_with_barrier").map(decode_predicate)
+            else {
+                return bad_pred("lake-repl-bar");
+            };
+            if matches!(can_replace_barrier, BlockPredicate::Unsupported(_)) {
+                return bad_pred("lake-repl-bar-unsup");
+            }
+            FeatureCfg::Lake {
+                fluid,
+                barrier,
+                can_place,
+                can_replace_air_or_fluid,
+                can_replace_barrier,
+            }
+        }
+        "minecraft:geode" => decode_geode(&cfg).unwrap_or(FeatureCfg::Unsupported("geode")),
         "minecraft:freeze_top_layer" => FeatureCfg::FreezeTopLayer,
         "minecraft:underwater_magma" => FeatureCfg::UnderwaterMagma {
             floor_search_range: cfg.get("floor_search_range").and_then(|v| v.as_i64()).unwrap_or(5) as i32,
