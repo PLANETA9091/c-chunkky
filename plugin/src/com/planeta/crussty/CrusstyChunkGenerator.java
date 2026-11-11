@@ -1538,18 +1538,34 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         }
         matFlags = flags;
         MethodHandles.Lookup L = MethodHandles.lookup();
-        newSimpleBit = spinCtor(L, Class.forName("net.minecraft.util.SimpleBitStorage"),
-                MethodTypeHolder.MT_I2AL, CtorI2AL.class, "make");
-        newZeroBit = spinCtor(L, Class.forName("net.minecraft.util.ZeroBitStorage"),
-                MethodTypeHolder.MT_I1, CtorI1.class, "make");
-        newData = spinCtor(L, Class.forName("net.minecraft.world.level.chunk.PalettedContainer$Data"),
-                MethodTypeHolder.MT_O3, CtorO3.class, "make");
+        // cont-143 fix: spin from the LEGACY-resolved Constructor objects
+        // (exact parameter types, already proven in production by the v3
+        // per-section path). The previous findConstructor(Class, MT) form
+        // failed on JDK 25: the MethodType must carry a VOID return (ctor
+        // descriptor) — an Object-return MT produced NoSuchMethodException
+        // for every ctor, and the palette factory is a vanilla lambda whose
+        // handle "is not direct or cannot be cracked" for unreflect+bind.
+        // Palette spins are now OPTIONAL: layoutBulkFast falls back to
+        // mPalCreate.invoke per section (1 reflective call, legacy cost).
+        newSimpleBit = ctorSimpleBit != null
+                ? spinCtorHandle(L, ctorSimpleBit, CtorI2AL.class, "make") : null;
+        newZeroBit = ctorZeroBit != null
+                ? spinCtorHandle(L, ctorZeroBit, CtorI1.class, "make") : null;
+        newData = ctorData != null
+                ? spinCtorHandle(L, ctorData, CtorO3.class, "make") : null;
         if (mPalCreate263) {
-            palCreateSingleton = spinPalCreate(L, factorySingleton);
-            palCreateLinear = spinPalCreate(L, factoryLinear);
+            try {
+                palCreateSingleton = spinPalCreate(L, factorySingleton);
+            } catch (Throwable tp1) {
+                palCreateSingleton = null;
+            }
+            try {
+                palCreateLinear = spinPalCreate(L, factoryLinear);
+            } catch (Throwable tp2) {
+                palCreateLinear = null;
+            }
         }
-        fastReady = newSimpleBit != null && newZeroBit != null && newData != null
-                && (!mPalCreate263 || (palCreateSingleton != null && palCreateLinear != null));
+        fastReady = newSimpleBit != null && newZeroBit != null && newData != null;
         if (!fastReady) {
             throw new IllegalStateException("spin produced null factory (simple=" + (newSimpleBit != null)
                     + " zero=" + (newZeroBit != null) + " data=" + (newData != null)
@@ -1567,20 +1583,39 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 .methodType(Object.class, Object.class, Object.class, Object.class);
     }
 
-    /** Spin a SAM interface over a public constructor (probe-verified on the
-     *  prod JVM: findConstructor type is (args)Class, LMF adapts to Object). */
-    private static <T> T spinCtor(MethodHandles.Lookup L, Class<?> cls,
-            java.lang.invoke.MethodType ctorSig, Class<T> samIf, String samName)
+    /** Spin a SAM interface over an already-resolved Constructor via
+     *  unreflectConstructor (cont-143: the findConstructor form needs a
+     *  void-return MethodType and exact param classes; unreflectConstructor
+     *  sidesteps both by reusing the legacy getConstructor results). */
+    private static <T> T spinCtorHandle(MethodHandles.Lookup L,
+            java.lang.reflect.Constructor<?> ctor, Class<T> samIf, String samName)
             throws Throwable {
         try {
-            MethodHandle target = L.findConstructor(cls, ctorSig);
+            MethodHandle target = L.unreflectConstructor(ctor);
+            java.lang.invoke.MethodType inst = target.type().changeReturnType(Object.class);
+            // cont-143 leg-ON #3: the 3rd metafactory arg is the SAM's ERASED
+            // abstract type (CtorO3 = (Object,Object,Object)Object), the 5th is
+            // the specialization (Cfg,BitStorage,Palette)Object. Passing the
+            // specialized type in BOTH slots builds a lambda whose only impl is
+            // the bridge -> AbstractMethodError on the abstract make().
+            java.lang.invoke.MethodType samErased = null;
+            for (java.lang.reflect.Method m : samIf.getMethods()) {
+                if (java.lang.reflect.Modifier.isAbstract(m.getModifiers())) {
+                    samErased = java.lang.invoke.MethodType.methodType(
+                            m.getReturnType(), m.getParameterTypes());
+                    break;
+                }
+            }
             java.lang.invoke.CallSite cs = java.lang.invoke.LambdaMetafactory.metafactory(
                     L, samName, java.lang.invoke.MethodType.methodType(samIf),
-                    ctorSig.changeReturnType(Object.class), target,
-                    ctorSig.changeReturnType(Object.class));
-            return samIf.cast(cs.getTarget().invokeExact());
+                    samErased != null ? samErased : inst, target, inst);
+            // invoke(), NOT invokeExact(): with a generic T the javac erasure
+            // types the exact call as ()Object and the CS target is ()Sam
+            // (WrongMethodTypeException at runtime, cont-143 leg-ON #2).
+            return samIf.cast(cs.getTarget().invoke());
         } catch (Throwable t) {
-            LOG.warning("[layout-fast] ctor spin failed for " + cls.getName() + ": " + t);
+            LOG.warning("[layout-fast] ctor spin failed for "
+                    + ctor.getDeclaringClass().getName() + ": " + t);
             return null;
         }
     }

@@ -67,3 +67,35 @@ refuted as <0.1 ms/ch.
 ## 5. Verdicts
 
 (filled in after implementation)
+
+## 3. Implementation — ORCHESTRATOR TAKEOVER + VERDICT (cont-143)
+
+Agent stream died post-implementation; orchestrator took over build/fix/measure.
+Three launch bugs found and fixed on the branch:
+1. findConstructor with Object-return MethodType → NoSuchMethodException on JDK 25
+   (must be void-return ctor descriptor; switched to unreflectConstructor over the
+   legacy-resolved ctors).
+2. generic T erasure made invokeExact() type as ()Object vs ()Sam
+   WrongMethodTypeException → invoke() with explicit cast.
+3. metafactory samMethodType must be the SAM's ERASED abstract type
+   ((Object,Object,Object)Object), not the specialization — otherwise the lambda
+   implements only the bridge → AbstractMethodError on make() (seen in prod as
+   swapfail).
+
+## 4. Headless/e2e evidence (server paired A/B, same jar per leg, WIPE, rect 11700)
+
+Leg OFF (legacy): honest 52.14, layout=0.27ms, bulk=ok, swapfail=null.
+Leg ON attempt 3 (engaged): **swapfail=ArrayIndexOutOfBoundsException:22@2270**
+AND **bulk verify CORRUPTION: want=AIR got=DEEPSLATE at x=15 y=-43 z=14**,
+layout mean inflated 4.76ms (global path glob=4.01), sections filled=5075
+(global-path wholesale swaps), honest e2e 59.75 (worse), max chunk 383ms.
+The production verify caught the wrong-block write — bit-exactness VIOLATED.
+
+## 5. Verdict: L1 = REJECTED (UNSAFE)
+
+The fast pack writes wrong blocks in the >15-distinct global path and throws AIOOBE
+in the linear path on real terrain. Bit-exactness is a HARD gate: the branch is NOT
+merged; kill-switch default OFF keeps main safe. Code preserved on branch
+cont143-structgrid (commit history: 035f07b4 + spin fixes) for future reference.
+Estimated win (0.3-0.6ms/ch) does not justify the correctness risk without a full
+rewrite of the global/linear packing paths with per-section verify.
