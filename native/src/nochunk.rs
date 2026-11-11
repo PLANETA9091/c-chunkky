@@ -1563,6 +1563,7 @@ pub static CELL_V1_FALLBACK: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 pub static CELL_V1_LAVA: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static CELL_V1_AIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static CELL_V1_CELLMAT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static CELL_V1_NOAQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static CELL_V2_STONE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static CELL_V2_FALLBACK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -1576,6 +1577,13 @@ pub fn cell_stats_on() -> bool {
 pub fn cell_mat_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var("CRUS_NO_CELLMAT").as_deref() != Ok("1"))
+}
+
+/// cont-142 kill-switch for the no-aquifer AllNeg cell gate (default ON;
+/// CRUS_MAT_V2=0 restores the exact cellfill + per-block material walk).
+pub fn mat_v2_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("CRUS_MAT_V2").as_deref() != Ok("0"))
 }
 
 #[inline]
@@ -2720,6 +2728,70 @@ impl<'e> ChunkGen<'e> {
                             }
                             _ => {}
                         }
+                    }
+                    // cont-142 (CRUS_MAT_V2, default on; =0 restores the exact
+                    // walk): the legacy 26.3 engine builds NO aquifer
+                    // (env.wg.aquifers_enabled=false for the vanilla router),
+                    // so material_from_substance's per-block decision
+                    // collapses to a sign test + global fluid:
+                    //   substance > 0 -> ore-if-enabled/STONE (unreachable in
+                    //     an AllNeg cell),
+                    //   substance <= 0 -> aquifer_at(global_fluid(y), y),
+                    // which is a per-ROW constant:
+                    //   y < lava_line (= min(-54, seaLevel)) -> LAVA-status
+                    //     at(y): LAVA iff y < -54 else AIR,
+                    //   y < seaLevel -> WATER, else AIR.
+                    // For an AllNeg cell (verdict==1: interval-eval proved
+                    // every in-cell substance < 0) every block is that row
+                    // constant, so the exact cellfill + 32-row per-block
+                    // material walk are dead work (measured ~531 cells/fill
+                    // on the reference window — the whole air zone + water
+                    // band, since air_zone_safe/cellmat require aquifer
+                    // summaries the legacy engine never populates).
+                    // Bit-exact: identical block formula to the no-aquifer
+                    // arm of material_from_substance; that arm never touches
+                    // sched or marks; ore is unreachable (state is Some for
+                    // every block, and ore needs state==None i.e. subst>0).
+                    if mat_v2_enabled()
+                        && verdict == 1
+                        && direct.is_none()
+                        && !self.aquifers_enabled
+                    {
+                        let sea = self.sea_level;
+                        for iy2 in 0..self.cell_height as i32 {
+                            let by = cell_start_block_y + iy2;
+                            let b = if by < lava_line {
+                                if by < -54 {
+                                    LAVA
+                                } else {
+                                    AIR
+                                }
+                            } else if by < sea {
+                                WATER
+                            } else {
+                                AIR
+                            };
+                            if b == AIR {
+                                continue;
+                            }
+                            let row_base = (((cell_start_block_y + iy2 - self.min_y) * 256
+                                + (cell_start_block_z - min_block_z) * 16
+                                + (cell_start_block_x - min_block_x)))
+                                as usize;
+                            for iz2 in 0..self.cell_width as usize {
+                                let rr = row_base + iz2 * 16;
+                                for ix2 in 0..self.cell_width as usize {
+                                    out[rr + ix2] = b;
+                                }
+                            }
+                        }
+                        if self.prof.enabled {
+                            let cell_blocks =
+                                (self.cell_width * self.cell_width * self.cell_height) as u64;
+                            self.prof.blocks_subst_neg += cell_blocks;
+                        }
+                        cell_stat(&CELL_V1_NOAQ);
+                        continue;
                     }
                     // Cell-level material fast path (water band): AllNeg cells
                     // between the lava line and the AIR zone. When every

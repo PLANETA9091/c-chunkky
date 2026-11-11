@@ -1713,6 +1713,18 @@ impl ImprovedNoise {
         #[cfg(target_arch = "x86_64")]
         {
             if crate::noise::avx512_selected() {
+                // cont-142 (CRUS_BLEND_V2, default on; =0 restores the gather
+                // kernel): slice y-lanes step 8 blocks apart while octave i's
+                // perlin y-cell spans 5*2^i blocks — every octave but i=0 has
+                // all 8 lanes in ONE y-cell. The gradient walk then resolves
+                // to a single corner set, so the per-lane gathers (12 x
+                // 8-lane vgatherd) collapse to 8 scalar GRADIENT lookups
+                // broadcast into the dot products. Per-lane op order is
+                // unchanged (t0/t1/t2 then (t0+t1)+t2, same lerp chain), so
+                // results are bit-identical (covered by col8 parity tests).
+                if blend_v2_enabled() && yi.iter().all(|&y| y == yi[0]) {
+                    unsafe { return self.noise_5_col8_samecell(st, &yi, &dy, &wdy) };
+                }
                 if blend_gather_enabled() {
                     unsafe { return self.noise_5_col8_gather(st, &yi, &dy, &wdy) };
                 }
@@ -1867,6 +1879,58 @@ impl ImprovedNoise {
             let gy = _mm512_cvtepi32_pd(_mm256_loadu_si256(gys.as_ptr() as *const __m256i));
             let gz = _mm512_cvtepi32_pd(_mm256_loadu_si256(gzs.as_ptr() as *const __m256i));
             let xv = if c & 1 != 0 { _mm512_sub_pd(dxv, one) } else { dxv };
+            let yv = if c & 2 != 0 { _mm512_sub_pd(wdyv, one) } else { wdyv };
+            let zv = if c & 4 != 0 { _mm512_sub_pd(dzv, one) } else { dzv };
+            let t0 = _mm512_mul_pd(gx, xv);
+            let t1 = _mm512_mul_pd(gy, yv);
+            let t2 = _mm512_mul_pd(gz, zv);
+            vc[c] = _mm512_add_pd(_mm512_add_pd(t0, t1), t2);
+        }
+        let r0 = lerp_v512(fxv, vc[0], vc[1]);
+        let r1 = lerp_v512(fxv, vc[2], vc[3]);
+        let r01 = lerp_v512(fy, r0, r1);
+        let r2 = lerp_v512(fxv, vc[4], vc[5]);
+        let r3 = lerp_v512(fxv, vc[6], vc[7]);
+        let r23 = lerp_v512(fy, r2, r3);
+        let res = lerp_v512(fzv, r01, r23);
+        let mut out = [0f64; 8];
+        _mm512_storeu_pd(out.as_mut_ptr(), res);
+        out
+    }
+
+    /// cont-142 same-y-cell col8 kernel (CRUS_BLEND_V2): all 8 lanes sit in
+    /// ONE perlin y-cell, so the corner gradient set is scalar — one
+    /// walk_y_cell replaces the 12 per-lane gathers, and the corner gradients
+    /// broadcast into the same t0/t1/t2 dot products. Per-lane arithmetic is
+    /// op-for-op the gather kernel's (GRADIENT[g&15] == G256X/Y/Z[g]).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f")]
+    unsafe fn noise_5_col8_samecell(
+        &self,
+        st: &OctColState,
+        yi: &[i32; 8],
+        dy: &[f64; 8],
+        wdy: &[f64; 8],
+    ) -> [f64; 8] {
+        use std::arch::x86_64::*;
+        let grads = self.walk_y_cell(st, yi[0]);
+        let dyv = _mm512_loadu_pd(dy.as_ptr());
+        let wdyv = _mm512_loadu_pd(wdy.as_ptr());
+        let fy = smoothstep_v512(dyv); // RAW dy (smear quirk: corner uses wdy)
+        let fxv = _mm512_set1_pd(st.fx);
+        let fzv = _mm512_set1_pd(st.fz);
+        let dxv = _mm512_set1_pd(st.dx);
+        let dzv = _mm512_set1_pd(st.dz);
+        let one = _mm512_set1_pd(1.0);
+        let mut vc = [_mm512_setzero_pd(); 8];
+        for c in 0..8usize {
+            let gv = &GRADIENT[(grads[c] & 15) as usize];
+            let gx = _mm512_set1_pd(gv[0] as f64);
+            let gy = _mm512_set1_pd(gv[1] as f64);
+            let gz = _mm512_set1_pd(gv[2] as f64);
+            let xv = if c & 1 != 0 { _mm512_sub_pd(dxv, one) } else { dxv };
+            // noise_5 quirk: the corner y term uses WDY (the weird-dy), the
+            // smoothstep interpolant uses RAW dy.
             let yv = if c & 2 != 0 { _mm512_sub_pd(wdyv, one) } else { wdyv };
             let zv = if c & 4 != 0 { _mm512_sub_pd(dzv, one) } else { dzv };
             let t0 = _mm512_mul_pd(gx, xv);
@@ -2410,6 +2474,13 @@ fn mixed_gather_enabled() -> bool {
 fn blend_gather_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var("CRUS_BLENDGATHER").as_deref() != Ok("0"))
+}
+
+/// cont-142: same-y-cell fast kernel for noise_5 col8 (default on;
+/// CRUS_BLEND_V2=0 restores the gather/walk kernels for all calls).
+fn blend_v2_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("CRUS_BLEND_V2").as_deref() != Ok("0"))
 }
 
 /// cont-130 A/B: column-state memo for the blend MAIN octaves on the 512
