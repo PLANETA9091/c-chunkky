@@ -82,6 +82,75 @@ public final class BiomeSwap {
             }
         }
         bf.set(gen, nbs);
+
+        // cont-142: structure-state reswap — ChunkGeneratorStructureState was
+        // built (createForNormal) BEFORE this swap and holds the PRE-swap
+        // vanilla MultiNoiseBiomeSource in its `biomeSource` field; its
+        // generateRingPositions -> findBiomeHorizontal then runs the vanilla
+        // climate search per ring candidate (JFR cont-142: Climate$RTree +
+        // NoiseStack$Perlin ~5.8-8ms/ch across the r8 margin ring). Refresh
+        // the field to the (grid-backed) native source: findBiomeHorizontal
+        // is base-class polymorphic over createResolver -> GridResolver (one
+        // JNI grid fill per touched chunk), and its RNG draw sequence
+        // (random.nextInt(found+1) per match) is identical when the biome
+        // answers are identical (native biome function is judge-verified
+        // bit-exact). DEFAULT OFF: paired A/B (10500,10500 wiped, back-to-back,
+        // same jar/.so): OFF 46.49/48.87 vs ON 51.68/57.69 e2e — REGRESSION
+        // x2 (+5.2/+8.8; gen +1.0/+2.4): the ring search touches 9-16 chunks,
+        // each triggering a full vertical JNI grid fill under the resolver
+        // lock, contending with the fill pool's native contexts; the vanilla
+        // caching climate sampler beats that shape. CRUS_STRUCT_RESWAP=1
+        // opts back in (code kept for a y-sliced/batched JNI grid variant).
+        if ("1".equals(System.getenv("CRUS_STRUCT_RESWAP"))) {
+            try {
+                Object chunkMap = null;
+                for (Field f : chunkSource.getClass().getDeclaredFields()) {
+                    if (f.getType().getSimpleName().equals("ChunkMap")) {
+                        f.setAccessible(true);
+                        chunkMap = f.get(chunkSource);
+                        break;
+                    }
+                }
+                if (chunkMap != null) {
+                    Field stf = null;
+                    for (Field f : chunkMap.getClass().getDeclaredFields()) {
+                        if (f.getType().getSimpleName().equals("ChunkGeneratorStructureState")) {
+                            stf = f;
+                            break;
+                        }
+                    }
+                    if (stf != null) {
+                        stf.setAccessible(true);
+                        final Object state = stf.get(chunkMap);
+                        if (state != null) {
+                            Field sbf = null;
+                            for (Field f : state.getClass().getDeclaredFields()) {
+                                if (f.getName().equals("biomeSource")) {
+                                    sbf = f;
+                                    break;
+                                }
+                            }
+                            if (sbf != null) {
+                                sbf.setAccessible(true);
+                                Object cur = sbf.get(state);
+                                if (cur != nbs) {
+                                    Field uf = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+                                    uf.setAccessible(true);
+                                    sun.misc.Unsafe U = (sun.misc.Unsafe) uf.get(null);
+                                    long off = U.objectFieldOffset(sbf);
+                                    U.putObject(state, off, nbs);
+                                    java.util.logging.Logger.getLogger("CrusstyGen").info(
+                                            "world: structure-state biomeSource refreshed to native grid source");
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                java.util.logging.Logger.getLogger("CrusstyGen").warning(
+                        "world: structure-state reswap failed (vanilla source stays): " + t);
+            }
+        }
     }
 
     private BiomeSwap() {

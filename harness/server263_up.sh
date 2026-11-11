@@ -48,7 +48,7 @@ HEAP_ARGS="-Xms2G -Xmx3G"
 # opt-in native carvers pass-through
 CRUS_NATIVE_CARVERS="${CRUS_NATIVE_CARVERS:-0}" CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" \
 echo "booting Paper 26.3 (JDK 25)..."
-CRUS_NATIVE_CARVERS="${CRUS_NATIVE_CARVERS:-0}" CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" \
+CRUS_NATIVE_CARVERS="${CRUS_NATIVE_CARVERS:-0}" CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" CRUS_BIOME_GRID="${CRUS_BIOME_GRID:-1}" \
 setsid $JAVA $HEAP_ARGS \
   -XX:FlightRecorderOptions=stackdepth=128 \
   -Djava.library.path="$ROOT/native/target/release" \
