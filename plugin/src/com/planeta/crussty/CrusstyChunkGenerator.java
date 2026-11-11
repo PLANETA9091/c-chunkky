@@ -1174,6 +1174,42 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     public static volatile String swapFail = null;
     static volatile boolean swapProbed = false;
 
+    // ------------------------------------------------------------------
+    // cont-143a2: FAST PACK (CRUS_LAYOUT_FAST=1, default OFF = legacy path).
+    // Window JFR (jfr_cont143) attributes ~1.08 ms/ch worker java to
+    // layoutBulk: 3 full 4096-passes per non-air section, 3 flag-array loads
+    // per block, and per-section Constructor.newInstance / Method.invoke.
+    // The fast path (a) fuses the any-scan + distinct-collect into ONE pass,
+    // (b) folds matTicking/matFluidTicking/matSpecial into one byte[] (bit0
+    // tickB, bit1 tickF, bit2 special), (c) reads the palette index with a
+    // single palIdxLoc[id] load (0 = air/unmapped, identical to the legacy
+    // ternary), (d) collects ticking-list indices during the pack loop (no
+    // 4th pass), (e) replaces the per-section reflective constructions with
+    // LambdaMetafactory-spun factories. Block results are identical: same
+    // collect order, same swap shapes, same counters — verified headless by
+    // agent-scratch/cont143a2/LayBench.java against the real NMS jar.
+    // ------------------------------------------------------------------
+    private static final boolean LAYOUT_FAST = "1".equals(System.getenv("CRUS_LAYOUT_FAST"));
+    static volatile boolean fastReady, fastBroken;
+    static volatile String fastFailReason = "not-initialized";
+    /** (int bits, int size, long[] data) -> SimpleBitStorage. */
+    interface CtorI2AL { Object make(int a, int b, long[] c); }
+    /** (int size) -> ZeroBitStorage. */
+    interface CtorI1 { Object make(int a); }
+    /** (Configuration, BitStorage, Palette) -> PalettedContainer$Data. */
+    interface CtorO3 { Object make(Object a, Object b, Object c); }
+    /** Palette$Factory.create(int bits, List values) with the factory bound. */
+    interface PalCreate2 { Object create(int bits, Object values); }
+    static CtorI2AL newSimpleBit;
+    static CtorI1 newZeroBit;
+    static CtorO3 newData;
+    static PalCreate2 palCreateSingleton, palCreateLinear;
+    /** per-material invariant flag fold (bit0 tickB, bit1 tickF, bit2 special). */
+    static volatile byte[] matFlags;
+    /** per-thread ticking-index scratch (bounded 4096 by the pack loop). */
+    private static final ThreadLocal<short[]> TL_TICK_IDX =
+            ThreadLocal.withInitial(() -> new short[4096]);
+
     private static boolean initBulk() {
         synchronized (BULK_LOCK) {
             if (bulkReady || bulkBroken) {
@@ -1459,6 +1495,18 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 }
                 bulkReady = true;
                 bulkFailReason = null;
+                if (LAYOUT_FAST) {
+                    try {
+                        initFast();
+                        LOG.info("[layout-fast] engaged: spun ctor factories + folded flags"
+                                + " (CRUS_LAYOUT_FAST=1)");
+                    } catch (Throwable tf) {
+                        fastBroken = true;
+                        fastFailReason = "init " + tf.getClass().getSimpleName() + ": "
+                                + tf.getMessage();
+                        LOG.warning("[layout-fast] init failed, staying on legacy pack: " + tf);
+                    }
+                }
             } catch (Throwable t) {
                 bulkBroken = true;
                 bulkFailReason = t.getClass().getSimpleName() + ": " + t.getMessage()
@@ -1466,6 +1514,91 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 LOG.warning("bulk section layout unavailable, using per-block path: " + t);
             }
             return bulkReady;
+        }
+    }
+
+    /** One-time fast-pack init: fold the per-material flag arrays and spin
+     *  constructor/palette factories via LambdaMetafactory. Any failure leaves
+     *  fastBroken=true and the legacy path serves forever. */
+    private static void initFast() throws Throwable {
+        int n = sectionStatesById.length;
+        byte[] flags = new byte[n];
+        for (int i = 0; i < n; i++) {
+            byte f = 0;
+            if (matTicking[i]) {
+                f |= 1;
+            }
+            if (matFluidTicking[i]) {
+                f |= 2;
+            }
+            if (matSpecial[i]) {
+                f |= 4;
+            }
+            flags[i] = f;
+        }
+        matFlags = flags;
+        MethodHandles.Lookup L = MethodHandles.lookup();
+        newSimpleBit = spinCtor(L, Class.forName("net.minecraft.util.SimpleBitStorage"),
+                MethodTypeHolder.MT_I2AL, CtorI2AL.class, "make");
+        newZeroBit = spinCtor(L, Class.forName("net.minecraft.util.ZeroBitStorage"),
+                MethodTypeHolder.MT_I1, CtorI1.class, "make");
+        newData = spinCtor(L, Class.forName("net.minecraft.world.level.chunk.PalettedContainer$Data"),
+                MethodTypeHolder.MT_O3, CtorO3.class, "make");
+        if (mPalCreate263) {
+            palCreateSingleton = spinPalCreate(L, factorySingleton);
+            palCreateLinear = spinPalCreate(L, factoryLinear);
+        }
+        fastReady = newSimpleBit != null && newZeroBit != null && newData != null
+                && (!mPalCreate263 || (palCreateSingleton != null && palCreateLinear != null));
+        if (!fastReady) {
+            throw new IllegalStateException("spin produced null factory (simple=" + (newSimpleBit != null)
+                    + " zero=" + (newZeroBit != null) + " data=" + (newData != null)
+                    + " palS=" + (palCreateSingleton != null) + " palL=" + (palCreateLinear != null) + ")");
+        }
+    }
+
+    /** reflection-shaped holder so spinCtor can stay generic */
+    private static final class MethodTypeHolder {
+        static final java.lang.invoke.MethodType MT_I2AL = java.lang.invoke.MethodType
+                .methodType(Object.class, int.class, int.class, long[].class);
+        static final java.lang.invoke.MethodType MT_I1 = java.lang.invoke.MethodType
+                .methodType(Object.class, int.class);
+        static final java.lang.invoke.MethodType MT_O3 = java.lang.invoke.MethodType
+                .methodType(Object.class, Object.class, Object.class, Object.class);
+    }
+
+    /** Spin a SAM interface over a public constructor (probe-verified on the
+     *  prod JVM: findConstructor type is (args)Class, LMF adapts to Object). */
+    private static <T> T spinCtor(MethodHandles.Lookup L, Class<?> cls,
+            java.lang.invoke.MethodType ctorSig, Class<T> samIf, String samName)
+            throws Throwable {
+        try {
+            MethodHandle target = L.findConstructor(cls, ctorSig);
+            java.lang.invoke.CallSite cs = java.lang.invoke.LambdaMetafactory.metafactory(
+                    L, samName, java.lang.invoke.MethodType.methodType(samIf),
+                    ctorSig.changeReturnType(Object.class), target,
+                    ctorSig.changeReturnType(Object.class));
+            return samIf.cast(cs.getTarget().invokeExact());
+        } catch (Throwable t) {
+            LOG.warning("[layout-fast] ctor spin failed for " + cls.getName() + ": " + t);
+            return null;
+        }
+    }
+
+    /** Spin PalCreate2 over Palette$Factory.create(int, List) bound to `factory`. */
+    private static PalCreate2 spinPalCreate(MethodHandles.Lookup L, Object factory)
+            throws Throwable {
+        try {
+            MethodHandle target = L.unreflect(mPalCreate).bindTo(factory);
+            java.lang.invoke.MethodType sam = java.lang.invoke.MethodType
+                    .methodType(Object.class, int.class, Object.class);
+            java.lang.invoke.CallSite cs = java.lang.invoke.LambdaMetafactory.metafactory(
+                    L, "create", java.lang.invoke.MethodType.methodType(PalCreate2.class),
+                    sam, target, sam);
+            return PalCreate2.class.cast(cs.getTarget().invokeExact());
+        } catch (Throwable t) {
+            LOG.warning("[layout-fast] palette-create spin failed: " + t);
+            return null;
         }
     }
 
@@ -1506,6 +1639,18 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     @SuppressWarnings("unchecked")
     private static void layoutBulk(ChunkData chunkData, int minY, int height, short[] out,
             Material[] mats) {
+        if (LAYOUT_FAST && fastReady && !fastBroken) {
+            try {
+                layoutBulkFast(chunkData, minY, height, out, mats);
+                return;
+            } catch (Throwable t) {
+                fastBroken = true;
+                fastFailReason = "runtime " + t.getClass().getSimpleName() + ": "
+                        + (t.getMessage() != null ? t.getMessage() : "");
+                LOG.warning("[layout-fast] failed once, disabling and re-running legacy pack: " + t);
+                // fall through: the exact legacy path lays this chunk out
+            }
+        }
         long tLay = System.nanoTime();
         // PER-CALL palette scratch. The original statics (valuesScratch /
         // palIdxScratch) were shared across threads: two concurrent fills
@@ -1868,6 +2013,363 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             }
         }
         return true;
+    }
+
+    // ------------------------------------------------------------------
+    // cont-143a2 FAST PACK. Structure-identical to layoutBulk (v3 Data-swap
+    // path) with the measured hot spots removed; the legacy body above is
+    // kept byte-for-byte and remains the DEFAULT (CRUS_LAYOUT_FAST unset/0).
+    // Equivalence contract (see LayBench for the headless proof):
+    //  - fused any+collect scan visits the same ids in the same order and
+    //    sets `any` for ANY id != 0 (unmapped included) — identical section
+    //    selection and identical (valuesLoc, palIdxLoc, usedIds) outcome;
+    //  - linear pack: palIdxLoc[id] == legacy ternary value for every id
+    //    (0 is never marked; unmapped ids are never marked);
+    //  - global pack: globalIdById[id] == legacy ternary (air slots and
+    //    unmapped ids resolve to airGlobalId at init time);
+    //  - folded matFlags bits == matTicking/matFluidTicking/matSpecial;
+    //  - ticking-list indices collected under the same predicate the legacy
+    //    4th pass applies (id != 0 && mapped && matTicking);
+    //  - singleton / null-section / per-block-fallback branches copied
+    //    verbatim (bug-for-bug), same GenStats path counters.
+    // ------------------------------------------------------------------
+    @SuppressWarnings("unchecked")
+    private static void layoutBulkFast(ChunkData chunkData, int minY, int height, short[] out,
+            Material[] mats) throws Throwable {
+        long tLay = System.nanoTime();
+        Object[] valuesLoc = new Object[valuesScratch.length];
+        int[] palIdxLoc = new int[sectionStatesById.length];
+        short[] tickIdx = TL_TICK_IDX.get();
+        try {
+            Object handle = mGetHandle.invoke(chunkData);
+            Object[] sections = (Object[]) mGetSectionsAcc.invoke(handle);
+            if (sections == null || sections.length == 0) {
+                GenStats.BULK_BROKEN_COUNT.incrementAndGet();
+                layoutV1(chunkData, minY, height, out, mats); // v1 fallback
+                return;
+            }
+            Object registry = bulkRegistryObj;
+            if (registry == null) {
+                GenStats.BULK_BROKEN_COUNT.incrementAndGet();
+                layoutV1(chunkData, minY, height, out, mats);
+                return;
+            }
+            GenStats.LAY_SETUP_TOTAL.addAndGet(System.nanoTime() - tLay);
+            long tSec = System.nanoTime();
+            int i = 0;
+            for (int sy = 0; sy < sections.length; sy++) {
+                Object section = sections[sy];
+                int base = i;
+                i += 4096;
+                // ---- fused any + distinct-collect: ONE pass (legacy: two) ----
+                int vn = 1;
+                int[] usedIds = new int[16];
+                int usedN = 0;
+                boolean over = false;
+                boolean any = false;
+                for (int k = 0; k < 4096; k++) {
+                    short id = out[base + k];
+                    if (id == 0) {
+                        continue;
+                    }
+                    any = true;
+                    if (over || sectionStatesById[id] == null || palIdxLoc[id] != 0) {
+                        continue;
+                    }
+                    if (vn >= 16) {
+                        over = true;
+                        continue;
+                    }
+                    valuesLoc[vn] = sectionStatesById[id];
+                    palIdxLoc[id] = vn;
+                    usedIds[usedN++] = id;
+                    vn++;
+                }
+                if (!any) {
+                    GenStats.BULK_AIR.incrementAndGet();
+                    continue; // all air — ChunkData default
+                }
+                if (section == null) {
+                    // null section: v1 per-block (creates the section lazily)
+                    int y0 = sy * 16;
+                    for (int yy = 0; yy < 16; yy++) {
+                        for (int z = 0; z < 16; z++) {
+                            for (int x = 0; x < 16; x++) {
+                                short id = out[base + (yy << 8) + (z << 4) + x];
+                                if (id != 0) {
+                                    if (id < mats.length) {
+                                        Material m = mats[id];
+                                        if (m != null) {
+                                            chunkData.setBlock(x, y0 + yy + minY, z, m);
+                                        }
+                                    } else {
+                                        org.bukkit.block.data.BlockData bdx = bdataById != null
+                                                && id < bdataById.length ? bdataById[id] : null;
+                                        if (bdx != null) {
+                                            chunkData.setRegion(x, y0 + yy + minY, z,
+                                                    x, y0 + yy + minY, z, bdx);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                Object pal = hGet(mhBulkStatesGet, bulkFieldStates, section);
+                // ---- v3 Data-swap fast path (spun factories, folded flags) ----
+                boolean swapped = false;
+                int nonEmptySwap = 0, tickBSwap = 0, tickFSwap = 0, specialSwap = 0;
+                int tickN = 0;
+                long tPath = System.nanoTime();
+                byte path = 0; // 1=singleton 2=linear 3=global 4=per-block
+                Object storage = null;
+                Object palette = null;
+                Object cfg = null;
+                try {
+                    if (over) {
+                        // >15 distinct states: GLOBAL configuration swap
+                        if (cfgGlobal != null) {
+                            int gb = globalBits;
+                            int vpl = 64 / gb;
+                            long[] raw = new long[(4096 + vpl - 1) / vpl];
+                            long mask = gb >= 64 ? -1L : ((1L << gb) - 1);
+                            for (int k = 0; k < 4096; k++) {
+                                short id = out[base + k];
+                                // globalIdById[id] == legacy ternary: air slots
+                                // and unmapped ids resolve to airGlobalId at init
+                                int gid = globalIdById[id];
+                                if (id != 0 && sectionStatesById[id] != null) {
+                                    nonEmptySwap++;
+                                    int fl = matFlags[id];
+                                    if (fl != 0) {
+                                        if ((fl & 1) != 0) {
+                                            tickBSwap++;
+                                            tickIdx[tickN++] = (short) k;
+                                        }
+                                        if ((fl & 2) != 0) {
+                                            tickFSwap++;
+                                        }
+                                        if ((fl & 4) != 0) {
+                                            specialSwap++;
+                                        }
+                                    }
+                                }
+                                raw[k / vpl] |= ((long) gid & mask)
+                                        << ((k % vpl) * gb);
+                            }
+                            storage = newSimpleBit.make(gb, 4096, raw);
+                            cfg = cfgGlobal;
+                            palette = globalPaletteObj;
+                            swapped = true;
+                            path = 3;
+                        }
+                        // reset the per-section palette scratch
+                        for (int u = 0; u < usedN; u++) {
+                            palIdxLoc[usedIds[u]] = 0;
+                        }
+                    } else {
+                        if (vn == 1) {
+                            // singleton (uniform non-air section) — verbatim legacy
+                            Object st0 = out[base] != 0
+                                    ? sectionStatesById[out[base]] : airState;
+                            if (st0 == null) {
+                                for (int u = 0; u < usedN; u++) {
+                                    palIdxLoc[usedIds[u]] = 0;
+                                }
+                                swapped = false;
+                            } else {
+                                cfg = cfgSingleton;
+                                if (mPalCreate263) {
+                                    palette = palCreateSingleton != null
+                                            ? palCreateSingleton.create(singletonBits,
+                                                    java.util.List.of(st0))
+                                            : mPalCreate.invoke(factorySingleton, singletonBits,
+                                                    java.util.List.of(st0));
+                                } else {
+                                    palette = mPalCreate.invoke(factorySingleton, singletonBits,
+                                            registry, pal, java.util.List.of(st0));
+                                }
+                                storage = newZeroBit.make(4096);
+                                swapped = true;
+                                path = 1;
+                                int sid = out[base];
+                                nonEmptySwap = 4096;
+                                if (sid != 0) {
+                                    if (matTicking[sid]) {
+                                        tickBSwap = 4096;
+                                    }
+                                    if (matFluidTicking[sid]) {
+                                        tickFSwap = 4096;
+                                    }
+                                    if (matSpecial[sid]) {
+                                        specialSwap = 4096;
+                                    }
+                                }
+                            }
+                        } else {
+                            cfg = cfgLinear;
+                            java.util.List<Object> vals = new java.util.ArrayList<>(vn);
+                            vals.add(airState);
+                            for (int v = 1; v < vn; v++) {
+                                vals.add(valuesLoc[v]);
+                            }
+                            if (mPalCreate263) {
+                                palette = palCreateLinear != null
+                                        ? palCreateLinear.create(linearBits, vals)
+                                        : mPalCreate.invoke(factoryLinear, linearBits, vals);
+                            } else {
+                                palette = mPalCreate.invoke(factoryLinear, linearBits,
+                                        registry, pal, vals);
+                            }
+                            long[] raw = new long[256]; // 4096 * 4 bits
+                            for (int k = 0; k < 4096; k++) {
+                                short id = out[base + k];
+                                // single load; 0 = air or unmapped (never marked)
+                                int pi = palIdxLoc[id];
+                                if (pi != 0) {
+                                    int word = k >> 4;
+                                    int shift = (k & 15) << 2;
+                                    raw[word] |= ((long) pi) << shift;
+                                    nonEmptySwap++;
+                                    int fl = matFlags[id];
+                                    if (fl != 0) {
+                                        if ((fl & 1) != 0) {
+                                            tickBSwap++;
+                                            tickIdx[tickN++] = (short) k;
+                                        }
+                                        if ((fl & 2) != 0) {
+                                            tickFSwap++;
+                                        }
+                                        if ((fl & 4) != 0) {
+                                            specialSwap++;
+                                        }
+                                    }
+                                }
+                            }
+                            storage = newSimpleBit.make(4, 4096, raw);
+                            swapped = true;
+                            path = 2;
+                            // reset the per-section palette scratch
+                            for (int u = 0; u < usedN; u++) {
+                                palIdxLoc[usedIds[u]] = 0;
+                            }
+                        }
+                    }
+                    if (swapped) {
+                        Object nd = newData.make(cfg, storage, palette);
+                        hSet(mhPalDataSet, fPalData, pal, nd);
+                    }
+                } catch (Throwable t3) {
+                    swapped = false; // degrade to per-block, remember why
+                    if (swapFail == null) {
+                        StackTraceElement st = t3.getStackTrace().length > 0
+                                ? t3.getStackTrace()[0] : null;
+                        swapFail = t3.getClass().getSimpleName()
+                                + (t3.getMessage() != null ? (": " + t3.getMessage()) : "")
+                                + " @ " + (st != null ? st.toString() : "?");
+                    }
+                }
+                GenStats.LAY_PATH_NS[path].addAndGet(System.nanoTime() - tPath);
+                if (!swapped) {
+                    path = 4;
+                }
+                GenStats.LAY_PATH_COUNT[path].incrementAndGet();
+                int nonEmpty, tickB, tickF, special;
+                if (swapped) {
+                    nonEmpty = nonEmptySwap;
+                    tickB = tickBSwap;
+                    tickF = tickFSwap;
+                    special = specialSwap;
+                } else {
+                    nonEmpty = 0;
+                    tickB = 0;
+                    tickF = 0;
+                    special = 0;
+                    for (int k = 0; k < 4096; k++) {
+                        short id = out[base + k];
+                        if (id == 0) {
+                            continue;
+                        }
+                        Object state = sectionStatesById[id];
+                        if (state == null) {
+                            continue;
+                        }
+                        mGetAndSetUnch.invoke(pal, k & 15, k >> 8, (k >> 4) & 15, state);
+                        nonEmpty++;
+                        if (matTicking[id]) {
+                            tickB++;
+                        }
+                        if (matFluidTicking[id]) {
+                            tickF++;
+                        }
+                        if (matSpecial[id]) {
+                            special++;
+                        }
+                    }
+                }
+                hSetShort(mhNonEmptySet, fNonEmpty, section, (short) nonEmpty);
+                hSetShort(mhTickingBlockSet, fTickingBlock, section, (short) tickB);
+                hSetShort(mhTickingFluidSet, fTickingFluid, section, (short) tickF);
+                hSetShort(mhSpecialSet, fSpecial, section, (short) special);
+                if (tickB > 0 && swapped) {
+                    // ticking indices collected during the pack loop (legacy
+                    // runs a 4th 4096-pass here); singleton set tickN=4096
+                    Object list = hGet(mhTickingListGet, fTickingList, section);
+                    if (path == 1) {
+                        for (int k = 0; k < 4096; k++) {
+                            mTickingAdd.invoke(list, (short) k);
+                        }
+                    } else {
+                        for (int t = 0; t < tickN; t++) {
+                            mTickingAdd.invoke(list, tickIdx[t]);
+                        }
+                    }
+                } else if (tickB > 0) {
+                    // per-block fallback: legacy full-section scan
+                    Object list = hGet(mhTickingListGet, fTickingList, section);
+                    for (int k = 0; k < 4096; k++) {
+                        short id = out[base + k];
+                        if (id != 0 && matTicking[id]) {
+                            mTickingAdd.invoke(list, (short) k);
+                        }
+                    }
+                }
+                if (path == 1) {
+                    GenStats.BULK_FILLED.incrementAndGet();
+                } else if (path == 4) {
+                    if (uniform2(out, base)) {
+                        GenStats.BULK_FILLED.incrementAndGet();
+                    } else {
+                        GenStats.BULK_MIXED.incrementAndGet();
+                    }
+                } else {
+                    GenStats.BULK_MIXED.incrementAndGet();
+                }
+            }
+            GenStats.LAY_SEC_TOTAL.addAndGet(System.nanoTime() - tSec);
+            long tHm = System.nanoTime();
+            rebuildHeightmaps(handle, out, minY);
+            GenStats.LAY_HMAP_TOTAL.addAndGet(System.nanoTime() - tHm);
+            String mismatch = null;
+            if (shouldSelfVerify()) {
+                long tV = System.nanoTime();
+                mismatch = verifyChunk(chunkData, minY, height, out);
+                GenStats.LAY_VER_TOTAL.addAndGet(System.nanoTime() - tV);
+            }
+            if (mismatch != null) {
+                bulkBroken = true;
+                bulkFailReason = "verify " + mismatch;
+                LOG.warning("bulk layout self-check failed, repairing chunk via v1: " + mismatch);
+                layoutFull(chunkData, minY, height, out, mats);
+                return;
+            }
+        } catch (Throwable t) {
+            bulkBroken = true;
+            bulkFailReason = "runtime " + t.getClass().getSimpleName() + ": " + t.getMessage();
+            LOG.warning("bulk layout failed once, disabling: " + t);
+            layoutV1(chunkData, minY, height, out, mats);
+        }
     }
 
     /** MethodHandle-first dispatch for the bulk-path hot sites (JFR 41194161059:
