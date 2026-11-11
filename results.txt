@@ -417,3 +417,178 @@ Marked 144 chunks in minecraft:overworld from [7200, 7200] to [7211, 7211] to be
   [E5b] t=31.2s inside=0 deco=0
   [E5b] t=31.9s inside=0 deco=0
   [E5b] t=32.7s inside=0 deco=0
+  [E5b] t=33.4s inside=0 deco=0
+  [E5b] t=34.2s inside=0 deco=0
+  [E5b] t=34.9s inside=0 deco=0
+  [E5b] t=35.6s inside=0 deco=0
+  [E5b] t=36.4s inside=0 deco=0
+  [E5b] t=37.1s inside=0 deco=0
+  [E5b] t=37.8s inside=0 deco=0
+  [E5b] t=38.6s inside=0 deco=0
+  [E5b] t=39.3s inside=0 deco=0
+  [E5b] t=40.1s inside=0 deco=0
+  [E5b] t=40.8s inside=0 deco=0
+  [E5b] t=41.5s inside=0 deco=0
+  [E5b] t=42.3s inside=0 deco=0
+  [E5b] t=43.0s inside=0 deco=0
+  [E5b] t=43.7s inside=0 deco=0
+  [E5b] t=44.5s inside=0 deco=0
+  [E5b] t=45.2s inside=0 deco=0
+  [E5b] t=46.0s inside=0 deco=0
+  [E5b] t=46.7s inside=0 deco=0
+  [E5b] t=47.4s inside=0 deco=0
+  [E5b] t=48.2s inside=0 deco=0
+  [E5b] t=48.9s inside=0 deco=0
+  [E5b] t=49.6s inside=0 deco=0
+  [E5b] t=50.4s inside=0 deco=0
+  [E5b] t=51.1s inside=0 deco=0
+  [E5b] t=51.9s inside=0 deco=0
+  [E5b] t=52.6s inside=0 deco=0
+  [E5b] t=53.3s inside=0 deco=0
+  [E5b] t=54.1s inside=0 deco=0
+  [E5b] t=54.8s inside=0 deco=0
+  [E5b] t=55.5s inside=0 deco=0
+  [E5b] t=56.3s inside=0 deco=0
+  [E5b] t=57.0s inside=0 deco=0
+  [E5b] t=57.9s inside=0 deco=0
+  [E5b] t=58.6s inside=0 deco=0
+  [E5b] t=59.3s inside=0 deco=0
+  [E5b] t=60.1s inside=0 deco=0
+  [E5b] t=60.8s inside=0 deco=0
+  [E5b] t=61.6s inside=0 deco=0
+  [E5b] t=62.3s inside=0 deco=0
+  [E5b] t=63.0s inside=0 deco=0
+  [E5b] t=63.8s inside=0 deco=0
+  [E5b] t=64.5s inside=0 deco=0
+  [E5b] t=65.2s inside=0 deco=0
+  [E5b] t=66.0s inside=0 deco=0
+  [E5b] t=66.7s inside=0 deco=0
+  [E5b] t=67.4s inside=0 deco=0
+  [E5b] t=68.2s inside=0 deco=0
+  [E5b] t=68.9s inside=0 deco=0
+  [E5b] t=69.7s inside=0 deco=0
+  [E5b] t=70.4s inside=0 deco=0
+  [E5b] t=71.1s inside=0 deco=0
+  [E5b] t=71.9s inside=0 deco=0
+  [E5b] t=72.6s inside=0 deco=0
+  [E5b] t=73.3s inside=0 deco=0
+  [E5b] t=74.1s inside=0 deco=0
+  [E5b] t=74.8s inside=0 deco=0
+  [E5b] t=75.5s inside=0 deco=0
+  [E5b] t=76.3s inside=0 deco=0
+  [E5b] t=77.0s inside=0 deco=0
+  [E5b] t=77.7s inside=0 deco=0
+  [E5b] t=78.5s inside=0 deco=0
+  [E5b] t=79.2s inside=0 deco=0
+  [E5b] t=80.0s inside=0 deco=0
+  [E5b] t=80.7s inside=0 deco=0
+  [E5b] t=81.4s inside=0 deco=0
+  [E5b] t=82.2s inside=0 deco=0
+  [E5b] t=82.9s inside=0 deco=0
+  [E5b] t=83.6s inside=0 deco=0
+  [E5b] t=84.4s inside=0 deco=0
+  [E5b] t=85.1s inside=0 deco=0
+  [E5b] t=85.9s inside=0 deco=0
+  [E5b] t=86.6s inside=0 deco=0
+  [E5b] t=87.3s inside=0 deco=0
+  [E5b] t=88.1s inside=0 deco=0
+  [E5b] t=88.8s inside=0 deco=0
+  [E5b] t=89.5s inside=0 deco=0
+  [E5b] t=90.3s inside=0 deco=0
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [carver-phases] n=0 acq=0.00 pack=0.00 carve=0.00 ops=0.00 apply=0.00 (ms/ch) | [CrusstyGen] native noise stage: no chunks generated yet | [CrusstyGen] honest window: window[7200..7211,7200..7211] inside=0 | [CrusstyGen] native deco stage: deco: no chunks decorated yet | [CrusstyGen] fill263 prof: fills=0 interp_cell=0.000ms interp_fill=0.000ms | stage[terrain=0.000 surface=0.000 hood=0.000 hood_compute=0.000 ncomp=0 park=0.000] surf_aux=0.000 surf_walk=0.000 terr_sample=0.000 terr_walk=0.000 terr_setup=0.000 terr_prefill=0.000 cc[hits=0 miss=0 box=0] nf[2d=0.000ms n=0 3d=0.000ms n=0 fb=0 shift=0.000 n=0 shiftB=0.000 n=0 blend=0.000 n=0 perlin=0.000ms pts=0 lay=0] | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00] | [CrusstyGen] [lightdivert off (env not set) diverted=0 skipped_status=0 fail=0]
+
+Unmarked all force loaded chunks in minecraft:overworld
+[12:38:32] --- EXP E5c-solo-7600: window(7600,7200,n=11) forceload [121600 115200]->[121791 115391] ---
+[CrusstyGen] window armed [7600..7611,7200..7211]
+
+window_inside=0 window_deco_inside=0
+
+Marked 144 chunks in minecraft:overworld from [7600, 7200] to [7611, 7211] to be force loaded
+  [E5c-solo-7600] t=1.7s inside=0 deco=0
+  [E5c-solo-7600] t=2.4s inside=0 deco=0
+  [E5c-solo-7600] t=3.2s inside=0 deco=0
+  [E5c-solo-7600] t=3.9s inside=0 deco=0
+  [E5c-solo-7600] t=4.7s inside=0 deco=0
+  [E5c-solo-7600] t=5.4s inside=0 deco=0
+  [E5c-solo-7600] t=6.1s inside=0 deco=0
+  [E5c-solo-7600] t=6.9s inside=0 deco=0
+  [E5c-solo-7600] t=7.6s inside=0 deco=0
+  [E5c-solo-7600] t=8.3s inside=0 deco=0
+  [E5c-solo-7600] t=9.1s inside=0 deco=0
+  [E5c-solo-7600] t=9.8s inside=0 deco=0
+  [E5c-solo-7600] t=10.5s inside=0 deco=0
+  [E5c-solo-7600] t=11.3s inside=0 deco=0
+  [E5c-solo-7600] t=12.0s inside=0 deco=0
+  [E5c-solo-7600] t=12.7s inside=0 deco=0
+  [E5c-solo-7600] t=13.5s inside=0 deco=0
+  [E5c-solo-7600] t=14.2s inside=0 deco=0
+  [E5c-solo-7600] t=14.9s inside=0 deco=0
+  [E5c-solo-7600] t=15.7s inside=0 deco=0
+  [E5c-solo-7600] t=16.4s inside=0 deco=0
+  [E5c-solo-7600] t=17.1s inside=0 deco=0
+  [E5c-solo-7600] t=17.9s inside=0 deco=0
+  [E5c-solo-7600] t=18.6s inside=0 deco=0
+  [E5c-solo-7600] t=19.4s inside=0 deco=0
+  [E5c-solo-7600] t=20.1s inside=0 deco=0
+  [E5c-solo-7600] t=20.8s inside=0 deco=0
+  [E5c-solo-7600] t=21.6s inside=0 deco=0
+  [E5c-solo-7600] t=22.3s inside=0 deco=0
+  [E5c-solo-7600] t=23.0s inside=0 deco=0
+  [E5c-solo-7600] t=23.8s inside=0 deco=0
+  [E5c-solo-7600] t=24.5s inside=0 deco=0
+  [E5c-solo-7600] t=25.2s inside=0 deco=0
+  [E5c-solo-7600] t=26.0s inside=0 deco=0
+  [E5c-solo-7600] t=26.7s inside=0 deco=0
+  [E5c-solo-7600] t=27.5s inside=0 deco=0
+  [E5c-solo-7600] t=28.2s inside=0 deco=0
+  [E5c-solo-7600] t=28.9s inside=0 deco=0
+  [E5c-solo-7600] t=29.7s inside=0 deco=0
+  [E5c-solo-7600] t=30.4s inside=0 deco=0
+  [E5c-solo-7600] t=31.1s inside=0 deco=0
+  [E5c-solo-7600] t=31.9s inside=0 deco=0
+  [E5c-solo-7600] t=32.6s inside=0 deco=0
+  [E5c-solo-7600] t=33.3s inside=0 deco=0
+  [E5c-solo-7600] t=34.1s inside=0 deco=0
+  [E5c-solo-7600] t=34.8s inside=0 deco=0
+  [E5c-solo-7600] t=35.5s inside=0 deco=0
+  [E5c-solo-7600] t=36.3s inside=0 deco=0
+  [E5c-solo-7600] t=37.0s inside=0 deco=0
+  [E5c-solo-7600] t=37.7s inside=0 deco=0
+  [E5c-solo-7600] t=38.5s inside=0 deco=0
+  [E5c-solo-7600] t=39.2s inside=0 deco=0
+  [E5c-solo-7600] t=40.0s inside=0 deco=0
+  [E5c-solo-7600] t=40.7s inside=0 deco=0
+  [E5c-solo-7600] t=41.4s inside=0 deco=0
+  [E5c-solo-7600] t=42.2s inside=0 deco=0
+  [E5c-solo-7600] t=42.9s inside=0 deco=0
+  [E5c-solo-7600] t=43.6s inside=0 deco=0
+  [E5c-solo-7600] t=44.4s inside=0 deco=0
+  [E5c-solo-7600] t=45.1s inside=0 deco=0
+  [E5c-solo-7600] t=45.8s inside=0 deco=0
+  [E5c-solo-7600] t=46.6s inside=0 deco=0
+  [E5c-solo-7600] t=47.3s inside=0 deco=0
+  [E5c-solo-7600] t=48.0s inside=0 deco=0
+  [E5c-solo-7600] t=48.8s inside=0 deco=0
+  [E5c-solo-7600] t=49.5s inside=0 deco=0
+  [E5c-solo-7600] t=50.3s inside=0 deco=0
+  [E5c-solo-7600] t=51.0s inside=0 deco=0
+  [E5c-solo-7600] t=51.7s inside=0 deco=0
+  [E5c-solo-7600] t=52.5s inside=0 deco=0
+  [E5c-solo-7600] t=53.2s inside=0 deco=0
+  [E5c-solo-7600] t=54.0s inside=0 deco=0
+  [E5c-solo-7600] t=54.7s inside=0 deco=0
+  [E5c-solo-7600] t=55.4s inside=0 deco=0
+  [E5c-solo-7600] t=56.2s inside=0 deco=0
+  [E5c-solo-7600] t=56.9s inside=0 deco=0
+  [E5c-solo-7600] t=57.6s inside=0 deco=0
+  [E5c-solo-7600] t=58.4s inside=0 deco=0
+  [E5c-solo-7600] t=59.1s inside=0 deco=0
+  [E5c-solo-7600] t=59.8s inside=0 deco=0
+[CrusstyGen] [cpu] Intel(R) Xeon(R) Processor cores=2 avx2=true avx512f=true | [carver-phases] n=0 acq=0.00 pack=0.00 carve=0.00 ops=0.00 apply=0.00 (ms/ch) | [CrusstyGen] native noise stage: no chunks generated yet | [CrusstyGen] honest window: window[7600..7611,7200..7211] inside=0 | [CrusstyGen] native deco stage: deco: no chunks decorated yet | [CrusstyGen] fill263 prof: fills=0 interp_cell=0.000ms interp_fill=0.000ms | stage[terrain=0.000 surface=0.000 hood=0.000 hood_compute=0.000 ncomp=0 park=0.000] surf_aux=0.000 surf_walk=0.000 terr_sample=0.000 terr_walk=0.000 terr_setup=0.000 terr_prefill=0.000 cc[hits=0 miss=0 box=0] nf[2d=0.000ms n=0 3d=0.000ms n=0 fb=0 shift=0.000 n=0 shiftB=0.000 n=0 blend=0.000 n=0 perlin=0.000ms pts=0 lay=0] | [CrusstyGen] jni_prof[fills=0 wall=0.00ms slice=0.00 cellfill=0.00 material=0.00 select=0.00 par_planes=0.00 par_strips=0.00] | [CrusstyGen] [lightdivert off (env not set) diverted=0 skipped_status=0 fail=0]
+
+[12:39:33] --- EXP E5c-solo-7600 done ---
+Unmarked all force loaded chunks in minecraft:overworld
+[12:39:33] === BATTERY A done; stopping server (JFR dumps on exit) ===
+server263 stopped
+-rw-rw-r-- 1 z z 7099570 Nov 11 12:39 /home/z/my-project/audit_idle263/rec.jfr
+[12:39:38] === BATTERY A complete ===
