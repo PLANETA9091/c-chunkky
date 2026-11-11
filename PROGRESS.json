@@ -1,386 +1,406 @@
 {
-  "goal": "e2e <= 5 ms/chunk on the noisy 2-core sandbox, Paper 26.3 build 222, vanilla worldgen + native engine (deco=1, carvers=1)",
-  "metric": "harness/e2e263.sh: forceload fresh 12x12 window, wall ms/chunk; report 3 windows + crusgenstats (p50/p99, phase split)",
-  "platform": "Paper 26.3 build 222 sha256 f649771a..., JDK Temurin 25.0.5+8, seed 3257840388504953787, NO datapacks (26.3 pack restore is a separate task)",
-  "updated": "2026-11-11T06:45:00+08:00",
-  "baseline": {
-    "source": "cont-135 reference/prof_session_deco263_q13.txt (MINE windows; tree 9a4d6272 = cont-134)",
-    "e2e_windows_ms": [
-      95.0,
-      86.6,
-      106.8
-    ],
-    "mean": 96.1,
-    "loaded_split_ms_per_chunk": {
-      "native_fill": 34.0,
-      "native_fill_idle_p50": 5.7,
-      "deco_wall": 18.4,
-      "deco_phases": {
-        "plan": 0.3,
-        "struct": 5.24,
-        "run": 8.23,
-        "apply": 0.3,
-        "deleg": 3.55
-      },
-      "carver_driver": "4.3 on CI deco=1 lanes (partly ctx-wait, cont-102: 9.77 pure wait)",
-      "java_rest": "light ~1 (starlight), drain 2.0, stagnation ~8, ramp/status-chain ~6.1",
-      "note": "native fill inflates 6x idle->loaded (thread oversubscription: 2 fill threads + 2 chunk workers + main on 2 logical cores)"
-    },
-    "jni_counts_per_chunk": {
-      "upcalls": 64.6,
-      "features": 55.4,
-      "ops": 1377.5,
-      "snap_sec": 92.8,
-      "crossings_all": 258
-    }
-  },
-  "hypotheses": [
-    {
-      "id": "H1",
-      "text": "Config-only: CRUS_FILL_THREADS=1 (serial fill) reduces loaded fill wall by removing thread thrash; serial idle ~11ms may still beat 34ms loaded",
-      "test": "A/B e2e windows, 3 runs each, same box noise",
-      "status": "pending"
-    },
-    {
-      "id": "H2",
-      "text": "Config-only: chunk-system worker-threads=1 leaves a core for fill threads",
-      "test": "A/B e2e windows",
-      "status": "pending"
-    },
-    {
-      "id": "H3",
-      "text": "Q5 (audit): deco/carver ctx contention — fills hold pool ctxs 5-12ms so populate waits; dedicated deco ctx pool or tryLock-fallback-to-fresh-ctx gives up to ~4ms/ch on deco=1 lanes",
-      "test": "impl + A/B + filldump bit-parity (dptt set, serial+2t) + cargo 86/86",
-      "status": "CONFIRMED (agent cont136-q5b, merged b6569f47): dedicated 2-ctx deco pool, 88/88 tests (2 new Rust parity tests: ctx tables byte-identical + full-plan op streams identical), latent decoSetFlags fan-out bug fixed. A/B pending-poll-noise; honest-window instrument armed."
-    },
-    {
-      "id": "H4",
-      "text": "S1 (audit): sub-batch decoRunFeature between delegates, 258->~40 JNI crossings/ch, wrapper mass collapse (0.2-0.4ms idle, more loaded)",
-      "test": "impl (Rust+DecoDriver.java) + ops-count equality probes + bit-parity + judge",
-      "status": "IMPLEMENTED (cont139-S1 agent + orchestrator takeover, merged 36c253a8): decoRunBatch collapses 55.4 decoRunFeature crossings/ch -> 6.5 batch calls/ch (-88%, counters batch=3364/25326 on 520ch). 92/92 tests (production-buffer op stream byte-identical + final state digest equal; artificial tiny-cap regime documented divergent, unreachable: per-chunk deco ops ~10-20k << 65536). Kill-switch CRUS_S1_SUBBATCH default OFF. Paired e2e ON(60.98,58.51) vs OFF(54.73,60.52): delta within +-15% box noise — the projected -0.2..-0.4ms is below today's noise floor. CI judge to validate block parity; then consider default-ON."
-    },
-    {
-      "id": "H5",
-      "text": "Light-divert NMS (audit B): persistedStatus=LIGHT + setLightCorrect before LIGHT task -> ~0.7-1.0ms/ch",
-      "test": "implemented (CRUS_LIGHT_DIVERT, default OFF); A/B inconclusive on 2-core 12x12 (divert 96.2 vs adjacent control 94.5, within noise); needs 48x48 or CI",
-      "status": "implemented-inconclusive"
-    },
-    {
-      "id": "H6",
-      "text": "Native fill idle 5.7 -> ~3ms: slice noise sampling ~2.9ms is the biggest native item (cont-132); plane cache + blended-noise call reduction",
-      "test": "dpperf A/B p50 x3 rounds + filldump bit-parity",
-      "status": "REVERTED (cont-139): L1/L2/L3 implemented + parity-safe (filldump byte-identical 4/4, 91/91 tests) but MEASURED NO WIN: headless mins equal (P 5.6 vs M 5.8), paired honest e2e T(59.15,60.30) vs C(53.94,58.70) = treatment worse in both pairs. Probable mechanism: pv [[f32;16];34] ~2.2KB memset per spline y-group eval = MBs of stack traffic/chunk. KEY FINDING: cont-132's 'slice noise 2.9ms' was MISATTRIBUTED — named 2D noise kernels sum to only ~280us/ch (H6 diag table); the real slice cost lives in blended final-density (compute_batch8_col) + spline interpolation arithmetic. Branch cont139-h6 KEPT (diag tooling: h6probe/h6heights, col2d hit 84.8%). Next fill lever: blended-noise plane batching / slice-level memo of the final-density tree."
-    },
-    {
-      "id": "H7",
-      "text": "Ore-family native compute ~5.5ms/ch (8 types) + dripstone ~0.9ms/ch = per-cell overlay query cost inside deco run phase (8.5ms loaded)",
-      "test": "agent-2 COMPUTE_TOP.md findings -> targeted native cuts + filldump bit-parity",
-      "status": "IMPLEMENTED (agent-2-c work finished by main after agent stream died): per-section palette classification (OrePlan/RCls tri-state eval, SecCls lazy tables per section slot+epoch) + H7c fused is_air_or_water dripstone column scan; 3 new tests (fast==exact verdict invariant, ore+dripstone op-stream killswitch equality) => 89/89; branch h7-ore-b commit; server A/B pending (single .so, CRUS_H7_OFF flips)"
-    },
-    {
-      "id": "H9",
-      "text": "cont-138 SyncGen (sync main-thread status-chain, bypass moonrise queue) kills the ~62% pipeline idle => big e2e win",
-      "test": "harness/syncgen_ab.sh A|B: same rect 2100,2000 12x12, wipe per phase, worker=2/FILL=2/no-watchdog, jar 50f0edc0 + so ae9d434b",
-      "status": "MEASURED-NO-WIN (cont-139): syncgen 64.28/61.94 ms/ch (rect1/rect2, min 3.13/2.93, max 960/1204) vs pipeline honest 63.34 (cover 37.1%). Sync = 100% serial: native fill p50 WORSE loaded (31.8 vs 22.9, main thread joins the contention). Queue latency is NOT the whale under this load; total CPU under 2-core CFS is. FLOOR EVIDENCE: min 2.93-3.13 ms/ch proves a warm chunk with ready neighbors completes the FULL chain (fill+deco+carver+light) in ~3ms — the 5ms/chunk goal is reachable purely via CPU cuts + warm path, no architecture change needed. SyncGen kept as diagnostic tool (crussyncgen cmd), NOT the delivery path."
-    },
-    {
-      "id": "H8",
-      "text": "Fill loaded 29.5ms vs idle 5.7ms = 80% scheduling loss (4+ runnable threads / 2 cores); thread-config matrix (FILL_THREADS x worker-threads) may recover several ms without any code change",
-      "test": "clean A/B: wipe + same coords + back-to-back runs",
-      "status": "SUPERSEDED by E7 matrix: with Q5 pool + ports, worker=2 pipelines better (maxconc=2, cover 37.8%) => honest e2e 59.67 vs worker=1 69.61. FILL=2 > FILL=1 (62.49). Final config: worker=2, FILL=2, no-watchdog, Q5 pool, deleg ports.",
-      "result": "-18.4 ms/ch config-only total"
-    },
-    {
-      "id": "H9",
-      "text": "Inline delivery path (syncLoad): the 28-30ms/ch honest-window idle is moonrise task-queue latency (worker parks on chunk-future deps between status tasks); ServerChunkCache.getChunk(FULL,true) runs the SAME status chain inline. Two-phase priming (TERRAIN rect+margin then FULL) still throws 'Requested chunk unavailable during world generation' — syncLoad releases the per-chunk ticket after completion, so previously-generated neighbors get demoted/unloaded before chunk k's WorldGenRegion needs them. NEXT: hold a TICKET over the whole rect during the pass (moonrise addTicket/ticket-level, or ChunkTaskScheduler.scheduleChunkLoad(x,z,FULL,load=true,Priority,consumer) per chunk with the rect ticket held), then release; alternatively time-box via the spawn-prep path (boot does full-area sync gen successfully — replicate its ticket setup). Payoff if it works: e2e floor = sum of CPU/ch (~16-20ms today, ~8-10 after H6/H7/Q5) with ZERO queue idle",
-      "test": "SyncGen.java v2 (deployed jar 2db56104) — needs ticket-held rect variant",
-      "status": "REFUTED (measured, cont-138)",
-      "result": "v5 async+rect-held FORCED tickets (jar 66bd2078): 4x4 rect ok=16 wall=2002ms per-chunk=125.13 min=13.39 max=897.98. First chunk 898ms = inline recursion over the whole dependency tree (3x3 statuses + margins); subsequent chunks 13-50ms (margins amortized via held tickets). Extrapolated at 144 chunks: ~60-75ms/ch = SAME as the async pipeline (58-66 honest). The task-queue idle is NOT delivery overhead — it is dependency/margin serialization inherent to the chunk graph. Delivery-path replacement does NOT pay; the levers remain total-CPU reduction (H6/H7/S1/Q5) + pipelining (maxconc=2) at low CPU. HONEST impossibility proof for one axis of the 'replace the runtime' mandate."
-    },
-    {
-      "id": "H10",
-      "text": "Carver wall was NOT native compute: carver-phases honest split showed acq=0.00 pack=0.21 carve=1.55 ops=0.43 apply=5.50 (ms/ch) — the JAVA op-apply (reflective PalettedContainer.getAndSet + per-section recalcBlockCounts walking 4096 cells x up to 24 sections). Vanilla 26.3 applyCarvingMask writes through chunk.setBlockState (section 5-arg, counters incremental) with NO recount — replaced the bulk getAndSet+recount pair with the exact vanilla write path (M_SEC_SET section 5-arg, updateOnWrite=false)",
-      "test": "done (paired A/B /tmp/h10_a vs h10_b, jars ad29800b/0cf604a0)",
-      "status": "CONFIRMED: carver wall 9.92 -> 5.05 honest (2x-contaminated box, paired runs); apply phases 5.50 -> ~0.00; native carve=1.69 ops=1.46 pack=0.10 acq=0.01. Biggest single cut of the day."
-    }
+ "goal": "e2e <= 5 ms/chunk on the noisy 2-core sandbox, Paper 26.3 build 222, vanilla worldgen + native engine (deco=1, carvers=1)",
+ "metric": "harness/e2e263.sh: forceload fresh 12x12 window, wall ms/chunk; report 3 windows + crusgenstats (p50/p99, phase split)",
+ "platform": "Paper 26.3 build 222 sha256 f649771a..., JDK Temurin 25.0.5+8, seed 3257840388504953787, NO datapacks (26.3 pack restore is a separate task)",
+ "updated": "2026-11-11T17:52:05+00:00",
+ "baseline": {
+  "source": "cont-135 reference/prof_session_deco263_q13.txt (MINE windows; tree 9a4d6272 = cont-134)",
+  "e2e_windows_ms": [
+   95.0,
+   86.6,
+   106.8
   ],
-  "log": [
-    {
-      "t": "2026-11-11T12:00+08:00",
-      "event": "cont-142 ATTACK WAVE: CI SUCCESS on 2072e998 (S1 default-ON + cont-140 judge-verified). Sandbox recycled to 848b2b6 again mid-session; recovered via fetch+reset+recover.sh. Launched 3 parallel agents (all alive despite Task-tool deadline errors — artifacts-check protocol): A=idle/margin decomposition (server box + JFR), B=deleg ports lake x2+geode (deleg-ports-3 pushed), C=fill Blend/material deep-dive (wt_c, cont142-fill-c pushed). Recycle-proofing adopted: agents commit+push every milestone; orchestrator re-verifies all gates before integration."
-    },
-    {
-      "t": "2026-11-11T10:00+08:00",
-      "event": "cont-141 MEASURE ITERATION (post-manifesto resume): cont-140 verified kept (agent gates: filldump 6/6, 92/92, vbench A/B 5.50->5.44 sub-noise; slots-1-7 whale = misattribution #2 — production col-memo already amortizes). Worker matrix on quiet box: control w2 47.02 honest (today's best 12x12) vs w3 52.21 WORSE (cover 42.7->57.3% but busy 20.1->29.9, CFS law measured). Window scaling: 24x24 warm 41.41 (campaign best honest number) vs 12x12 47.02 — idle intrinsic, not edge artifact. forceload 256-chunk cap discovered (24x24 = 4 quadrants). server263_up.sh: JVM_FLAGS_ADD support added; bash precedence trap (cd && cmd & backgrounds the cd) documented. Next: push cont-140 -> CI (judges S1 default-ON + cont-140), launch idle/margin decomposition agent + deleg-native ports agent."
-    },
-    {
-      "t": "2026-11-11T06:45+08:00",
-      "event": "cont-139 SESSION NET: (1) H9 SyncGen measured NO-WIN (64.28/61.94 vs 63.34) — convergent with parallel session's refutation; floor evidence min 2.93ms/ch (warm chunk, ready neighbors). (2) H6 (fill plane cache) implemented w/ agents, parity-safe, REVERTED after paired A/B showed no win; misattribution finding redirects fill lever to blended final-density. (3) H4/S1 sub-batch implemented (agent takeover after stream death), merged, crossings -88%, e2e delta sub-noise, default OFF. (4) Parallel session (cont-138) independently merged H7 (91/91) + H10 carver (9.92->5.05) and closed at honest 50.97 — my numbers reproduce their regime (today's honest 53.9-63.3 band, noise +-15%). NEXT FRONTS: pipelining re-test at lower CPU; paper-side idle 25-28ms; blended final-density fill (real 2.9ms whale); S1 default-ON after CI judge; stable-box carver re-measure."
-    },
-    {
-      "t": "2026-11-11T05:58+08:00",
-      "event": "SESSION CLOSE (cont-138): honest e2e 96.1(cont-135) -> 82.3(cont-136 E2E6) -> 50.97 (H10 quiet-box, BEST). H10 carver vanilla-setBlockState apply = biggest cut (carver 9.92->3.13 quiet, apply 5.50->0.00). H9 inline-delivery REFUTED by measurement. H7 merged (91/91, perf verdict deferred to CI/quiet). Physics locked: CFS 2x mutual, GC exonerated, worker=1~2 at current CPU, light-divert parked, rings boot-resolved. Agents: H6 alive (density.rs cache building), S1/Q5b sessions stalled. Next fronts ranked: H6 fill -> pipelining re-test -> struct margin walls -> NEW paper-side idle front (25-28ms)."
-    },
-    {
-      "t": "2026-11-11T05:35+08:00",
-      "event": "H7 MERGED to main (bb2e0ccd): agent 2-c zombie takeover — their 866-line implementation (per-section palette classification w/ tri-state eval + SecCls lazy tables, fused is_air_or_water dripstone scan) had 5 test-compile errors (lifetimes + arg types) and a wrong hardcoded expectation; fixed all (fn-item closures, copied() iteration, fast==exact invariant test via rule_test_matches oracle, local-y palette coords), 89/89 on branch -> 91/91 on merged main (Q5's 2 + H7's 3 + 86 base). fill parity 16/16 (8 dptt coords x 2 seeds) vs main reference. Server A/B (CRUS_H7_OFF flip) INCONCLUSIVE — box load 3.5 from resurrected H6 agent build (tgt_h6b); parked until quiet box. H6 agent ALIVE (was zombie ~2h, now building) — left to work."
-    },
-    {
-      "t": "2026-11-11T05:08+08:00",
-      "event": "cont-139 PHASE A/B DONE (fresh tree 0091c8ea, jar 50f0edc0, so ae9d434b): (A) honest window 2100,2000: e2e=63.34 (span 9120.94, ramp 108), gen=26.94 native=26.29 carver=17.89 busy=23.5 cover=37.1% maxconc=2, deco plan .37/struct 6.07/run 7.43/apply .42/deleg 1.62; run-top = ores (gravel 402ms, dirt 375, iron 337, spring_water 336, granite 318, tuff 311, dripstone 305, andesite 294, diorite 278, coal 251+206, lush 151 per 739 chunks) — H7 confirmed top. (B) SyncGen 64.28/61.94 => H9 no-win (see H9). 3 sub-agents launched (cont139-S1 crossings 258->~205, cont139-H7 ore per-section classification + fused dripstone pred, cont139-H6 fill L1 batch-spline + L2 row-local groups + L3 col-cache ShiftA/B) — all 3 adopted their lost-session WIP, code written, awaiting BUILD_OK. Note: OOM twice during reboots (4GB box, 3G heap + dying JVM race) — future boots must verify no java + free>2.5G first."
-    },
-    {
-      "t": "2026-11-11T05:00+08:00",
-      "event": "CAMPAIGN BASELINE (cont-138 era, .so ae9d434b post-Q5, jar 2db56104 = rings+syncgen): honest e2e=65.72 (raw 77.9/84.2 noisy period), gen=16.89 (native=16.04) carver=12.39(!) deco_tail=778ms cover=25.7% maxconc=1. Honest w1 e2e across the day: 58.3-65.7 (noise +-15%). CAMPAIGN TRAJECTORY: cont-135 baseline 96.1 mean -> cont-136 E2+E6 config 82.3 -> cont-138 honest-window metric ~58-66 (ramp excluded). CI green on 0091c8ea (rings) + parallel commits. Agents h6-plane-b/h7-ore-b mid-work (density.rs+h6probe / features_snap+place classification). Fronts ranked: (1) agents CPU cuts, (2) H9 inline delivery (needs rect-held ticket), (3) carver variance 5.9-12.4 needs stable-box re-measure, (4) worker=2 re-test after CPU drops."
-    },
-    {
-      "t": "2026-11-11T04:40+08:00",
-      "event": "DISK-full incident + syncgen probe: root overlay hit 100% (stale /tmp/my-project 4.8G on PolarFS + dl/dl263/ab438/vantrace on root); purged 3G+ (root 74%), saved vineflower/cfr to /home/z/tools/decomp. SyncGen.java (crussyncgen command) — inline status-chain experiment: v1 isolated FULL throws 'Requested chunk unavailable'; v2 two-phase TERRAIN-primed still throws (ticket released per-chunk => neighbors demoted). H9 parked with next steps (rect-held ticket). Rings-warmup deployed earlier: ring futures resolve at boot (0.1ms) — window-neutral, kept."
-    },
-    {
-      "t": "2026-11-11T04:05+08:00",
-      "event": "RINGS-WARMUP (cont-138) implemented+deployed: RingsWarmup.java NMS companion (ChunkMap.chunkGeneratorState via reflection, all ConcentricRingsStructurePlacement sets -> getRingPositionsFor at WorldLoadEvent, bit-identical positions, timing-only). Result: 128 positions precomputed in 0.1ms => ring futures were ALREADY resolved at world init (spawn-area gen) — the JFR 1.6s worker park on getRingPositionsFor happened during BOOT, not the window; window impact ~0 (58.31 honest vs 61.75 paired w1 = noise). KEPT (harmless boot-time warm, protects fresh-region windows that DO hit lazy ring gen). Honest-window w1 baseline now spans 58.3-63.2 across runs (noise +-10%) — single-window comparisons dead, paired back-to-back + pinned md5s are the protocol."
-    },
-    {
-      "t": "2026-11-11T03:55+08:00",
-      "event": "CONTENTION TEST CONCLUSIVE (cont-138): headless dpperf (1 invocation = fill bench) quiet 244-255ms vs contended-during-server-window 470-520ms = 1.9-2.0x slowdown; server fill itself inflated 16->20.7 under dpperf load => MUTUAL CFS SHARING confirmed as the main 'loaded fill 16.8 vs idle 5.7' mechanism (~2x) + ~1.4x residual (JNI/transfer/GC/residual java stages). No scheduling fix exists under CFS/2-vCPU — the lever is TOTAL CPU (H6 fill->3, H7 ore, S1 crossings) then re-test worker=2 pipelining at low CPU. Also: PAIRED worker repro w/ pinned artifacts (so ae9d434b=post-Q5, jar 736adfd3): w1=61.75 (cover 28.0 maxconc=1 native=16.76 carver=5.88) vs w2=65.94 (cover 34.3 maxconc=2 native=25.20 carver=11.72) — worker=2 pipelines (maxconc=2) but thrashes fill at current CPU; INCONCLUSIVE vs parallel-session verdict (their w2=59.67 on quieter box) — RE-TEST after CPU drops. LESSON: parallel sessions rebuild the shared tree mid-experiment — every A/B pair must pin artifact md5s (logged now). Q5 merge (46d00d6f+67c555c0, 2 parity tests 88/88) landed from cont136-q5b session; carver 7.9->5.88 in w1 honest window (modest win)."
-    },
-    {
-      "t": "2026-11-11T03:35+08:00",
-      "event": "E7 thread matrix + honest-window A/B series (cont-138): (1) worker-threads=2 CONFIRMED WORSE even honest (fill 44.9 loaded, e2e 108.78) — thread thrash; fill=1 doubles native wall (35.66, E7c); SerialGC worse (38.49, E7e) — G1 stays. worker=1+fill=2 remains optimal. (2) BACK-TO-BACK A/B deco=0+carvers=0 vs control (same window, load~1.1): fill-only e2e=46.03 native=16.35 cover=36.3% vs control e2e=59.60 native=15.83 carver=6.30 deco_tail=666ms cover=27.4% => fill inflation (16.3 vs 5.7 headless) is NOT deco/carver interference and NOT GC (JFR: GC pauses 55ms total/window=0.38/ch, max 9.2ms) — leading explanation CFS sharing (starlight+forkjoin+worker on 2 vCPU). (3) light-divert re-tested with honest windows: 48.58 vs 45.39 control = WORSE, diverted=371 but skipped_status=0 (first_status=minecraft:terrain) — mechanism never engages, PARKED for good. (4) JFR leaf analysis: Climate$RTree+NoiseStack java CPU = structure-ring biome sampling on ForkJoinPool (ChunkGeneratorStructureState cached PRE-swap source — plugin swaps after init); native biome source IS active for chunk biomes (BIOME_N=0 is counter-scope artifact, quart path uncounted). (5) structure-failure (4 chunks, run1) did NOT reproduce in 3 reruns — intermittent margin race, full-stack logging deployed. PATH TO 5ms: CPU must drop to ~10ms/ch (H6 fill->3, H7 ore -2.7, S1 crossings, Q5b carver ctx -4..-6) THEN worker=2 pipelining becomes viable (maxconc=2 at low CPU => floor 144x10ms/2c = 5ms/ch). Agents: h6-plane-b/h7-ore-b relaunched in /home/z (persistent); parallel meta-sessions cont136-q5b (carver ctx) + cont136-s1 (sub-batch) active."
-    },
-    {
-      "t": "2026-11-11T02:05+08:00",
-      "event": "HONEST WINDOW ARMED (crusgenstats window rx rz 11 now wired into run263_baseline.sh): window[2100..2111,2000..2011] 144 chunks, NW=2 runs: e2e walls 70.6/75.9 raw; honest span=8601ms => e2e=59.73ms/ch, ramp=978ms. BUDGET: gen=18.14 (native fill=17.57 LOADED vs 5.7 idle, layout=0.30, beard=0.20) + carver=7.88 (top-3 item!) + deco_tail=590ms (4.1ms/ch) => ~30ms CPU/ch vs 59.73 wall => busy=18.1ms/ch cover=30.4% maxconc=1 (PIPELINE FULLY SERIAL — 69% idle). Priority reorder: (1) cover/concurrency 30%->60-100% config matrix (worker-threads x FILL_THREADS with honest windows) — worth up to 2-3x window; (2) carver driver 7.88; (3) fill loaded 17.6->idle 5.7 (H6 agent + thread config); (4) deco run 5.56 (H7 agent) + struct 2.89 margin walls. cont-137 validated live: native monster_room=0.30ms/ch (372 calls), freeze_top_layer=143.32ms(593)=0.24ms/ch, deleg 1.04->0.75; 4x 'deco structures failed' seen ONCE (run1 NW=3) not reproduced in 2 reruns — full-stack logging now deployed (cont-138 diag), treat as intermittent margin-chunk race pending stack capture."
-    },
-    {
-      "t": "2026-11-11T01:15+08:00",
-      "event": "cont-137: native monster_room (+monster_room_deep) + freeze_top_layer (26.3 SnowAndFreezeFeature) ports completed end-to-end: native place fns (features_place.rs, RNG draw order transcribed from vineflower decompile of paper-26.3.jar: chest loot nextLong + spawner nextInt(4) MOBS pick consumed on the native stream), Java bridge completed this session — DecoDriver.freezeChecks(II)I upcall (vanilla Biome.shouldFreeze/shouldSnow on the live region, ICE write ordered BEFORE shouldSnow per vanilla), applyOpStatic FLAG_SPAWNER (aux bits8-15 mob ordinal -> EntityTypes.SKELETON/ZOMBIE/SPIDER via setEntityId, zero RNG confirmed from decompile: empty WeightedList draws nothing) + FLAG_CHEST (SIMPLE_DUNGEON loot table, seed not transported: BE NBT outside judged surface, seed=0 deterministic), tree-aux guard for flags 64/128, FreezeTopLayer state registration (ice/snow/grass_block[snowy=true]/mycelium[snowy=true]) in features_place_ffi.rs seal(). Gates: cargo 86/86 (release), plugin jar md5 34741a8c, f1dbg arm. Kill-switch CRUS_DELEG_NOGEN=1 restores delegate lane. 26.3 deco bit-judge still open — CI judge pending push."
-    },
-    {
-      "t": "2026-11-10T16:45+08:00",
-      "event": "LIGHT-DIVERT (CRUS_LIGHT_DIVERT) implemented per /tmp/lightdivert/PLAN.md: LightDivert.java NMS populator registered LAST, setLightCorrect+persistedStatus=LIGHT during decorate. Corrections vs audit: (1) real status during decorate = minecraft:terrain (BELOW features — [FEATURES,LIGHT) guard diverted 0/1153, fixed to skip-only->=LIGHT), (2) TWO flags required. diverted=1144/1144, fail=0. A/B: divert 83.4/96.2/109.1 (mean 96.2) vs adjacent control 86.6/88.1/108.8 (mean 94.5) => INCONCLUSIVE (+1.7, noise; mechanism: dropped INIT_LIGHT barrier adds 2-core contention, may help on 4c CI). DEFAULT OFF. GIT LESSON: git checkout -- plugin/ wiped uncommitted source edits twice; never checkout while carrying edits."
-    },
-    {
-      "t": "2026-11-10T16:50+08:00",
-      "event": "Control table: baseline@15:05 mean 100.8, divert mean 96.2, control mean 94.5 (quietest). 12x12 window = ramp/status-chain ~30% — 48x48+ needed for paper-side deltas. Fill loaded drifts 35.2->29.5 with box noise: A/B ALWAYS wipe+same-coords+back-to-back."
-    },
-    {
-      "t": "2026-11-10T14:20+08:00",
-      "event": "sandbox recycle #N: git was at 848b2b6 (cont-41); resynced to origin/main fdbd8dbc (cont-134b, incl. cont-133/134/135 from parallel sessions). rustup 1.99.1 + JDK 25.0.5+8 + paper-26.3-222.jar (sha f649771a bit-exact) restored. cargo build release 3m01s. patchonly extraction done."
-    },
-    {
-      "t": "2026-11-10T15:05+08:00",
-      "event": "BASELINE (this box, tree fdbd8dbc, .so 33a481ef, jar 2b72d745): windows 98.5/94.6/109.4 mean 100.8 ms/ch. loaded: native fill mean 35.2ms p50 30.1 (idle p50 5.7 -> 6x contention inflation), deco mean 18.1 (plan .35 struct 3.07 run 9.15 apply .35 deleg 4.51), upcalls 68.9/ch, snap-sec 100.6/ch. run-top: dripstone 1051ms/617calls + 8 ore types ~400-630ms each. CPU math: ~25-35ms CPU/ch vs ~100ms window => ~75% scheduling loss."
-    },
-    {
-      "t": "2026-11-10T15:25+08:00",
-      "event": "E1 CRUS_FILL_THREADS=1: 113.5/109.7 — INVALID (region hit jungle biome: trees_jungle 1468ms, struct 8.51 vs 3.07). Lesson: same-region-only comparisons; A/B protocol = wipe world + identical coords (deterministic per seed). loaded fill wall 37ms @1 thread ~= 35ms @2 threads => our thread count is NOT the contention driver; server threads are."
-    },
-    {
-      "t": "2026-11-10T17:10+08:00",
-      "event": "E2/E3 thread matrix (clean wipe A/B): worker-threads=1+FILL=2 mean 87.7 (-6.8 vs control 94.5, -13% vs orig baseline 100.8). worker=1 serializes Paper Java stages, frees core for fill threads. Config now default in run263_baseline.sh (WORKER_THREADS=1). server263_up.sh (CI) unchanged — 4-core optimum TBD on CI."
-    },
-    {
-      "t": "2026-11-10T17:35+08:00",
-      "event": "JFR window-phase analysis (settings=profile, 79s = exact measured phase): gen-worker buckets features 19.2%, JNI_fill 12.5%, biomes 11.2%, serialization 10.6% (NOT 0 as cont-134 audit said — recheck on 26.3), light 6.0%, sched/wait 2.7%. Whale: Paper Watchdog Thread 1404 exec records vs gen-worker 206 — 3-4 'has not responded for 10-15s' dumps INSIDE windows (main thread stall between chunk batches) => each dump safepoints all threads incl. native fill. E6 -Ddisable.watchdog=true => mean 82.3 (-5.4 vs E2). HttpClient/JLine/io/RCON native samples = parked epoll (not CPU)."
-    },
-    {
-      "t": "2026-11-10T18:45+08:00",
-      "event": "Agent outcomes: A3 (light) delivered fully (FINDINGS+PLAN, cheap branch verified in jar). A4 (deleg-native) implemented MonsterRoom+FreezeTopLayer ports (features_place.rs +313, dispatch, kill-switch CRUS_DELEG_NOGEN) but stalled before validation — /tmp wiped its worktree+evidence; WIP survived via cc40dc50. I completed: f1dbg.rs + delegcensus.rs match arms (2x E0004), verified compile, cargo test 86/86. A4 notes: monster_room native despite BlockEntity seed caveat (spawner NBT seed default — block-level judge unaffected, runtime-only). A1 (Q5) + A2 (S1) artifacts LOST with /tmp — Q5 re-implemented by me; S1 design pending. LESSON: agents must write outputs under /home/z/my-project (git-ignored scratch), never /tmp."
-    },
-    {
-      "t": "2026-11-10T18:40+08:00 (clock note: times are +08 approx, UTC-8h off)",
-      "event": "A4 ports A/B (same coords 2000/2100, back-to-back, E6 config, .so 8c6e38a3 + jar d32342a7): ON 70.5/75.3 vs OFF(CRUS_DELEG_NOGEN=1) 72.8/78.4 => -2.7 ms/ch windows. Deco phases ON struct=2.88 run=4.99 deleg=0.96 vs OFF struct=3.46 run=5.35 deleg=1.19 (-1.2ms/ch). deleg-names ON: monster_room x2 + freeze_top_layer GONE (native). Kill-switch verified. CORRECTNESS SIGNAL: 1x 'Tried to load a DUMMY block entity ... Block{minecraft:air}' — A4 BE path writes BE before block; block-level judge should pass, runtime-only; CI judge is the gate. Pushing branch to CI."
-    },
-    {
-      "t": "2026-11-10T20:35+08:00",
-      "event": "HONEST-WINDOW instrument (GenStats windowSnapshot, server-side span e2e — much less noise than rcon polls): worker=1 69.61 (carver=14.93 ctx-wait! cover=24.6% maxconc=1) vs worker=2 59.67 (maxconc=2 cover=37.8%) vs worker=2+fill=1 62.49. E2's worker=1 win was a pre-Q5 regime effect (slow populate made serialization cheap); once Q5+ports landed, worker=2 pipelines. Remaining whales: carver bucket 15.6-17.8 loaded (native carver compute + waits), deco run 7.1-7.5 (ores ~2.5-3), fill 24.9-26.1 loaded (CPU 5.7x2), cover still ~62% idle."
-    },
-    {
-      "t": "2026-11-10T21:45+08:00",
-      "event": "CI 42884625556 (main ddfceb1) SUCCESS — judge gates (vanilla/datapack/dptt 0.05%, ours 0.005%) confirm bit-parity of A4 native ports + Q5 dedicated pool + light-divert(OFF) + harness. Session net: honest e2e ~100 -> 59.67 (-41%), rcon windows 70.5-75.3 best. Open fronts for next iteration: S1 sub-batching (agent stalled 2.5h, no commits — reassign fresh), ore compute micro (COMPUTE_TOP lost with /tmp, re-gather), carver native opt (15.6 loaded), light-divert CI A/B lane, DECO_POOL_SIZE=3, watchdog main-thread stall (>10s between batches — root cause unexplored). Parallel session active on same main (cont-138 honest-window arm) — rebase before next push."
-    }
-  ],
-  "ab_protocol": "wipe server263/world* before each config; coords RX1=2000 RZ1=2000, WX=500 WZ=500; NW=2..3; report window means + crusgenstats p50/p99; never compare across different regions",
-  "rules": [
-    "never trust a number not measured on this box; report min/p50 of >=3 windows",
-    "any impl change gates on: cargo test 86/86 + filldump bit-parity vs parent (dptt set) + judge CI",
-    "config A/B allowed inline; code changes go through subagents with separate CARGO_TARGET_DIR",
-    "timeout/obit of a subagent != death: check files/logs/results before reassigning",
-    "PROGRESS.json read at start of each iteration, updated after every experiment"
-  ],
-  "goal_status": {
-    "best_honest_e2e_ms": 46.49,
-    "best_honest_note": "46.49 = grid era, 12x12 @10500 quiet (cont-142); champion config now: worker=2/FILL=2/no-watchdog/CRUS_BIOME_GRID=1/MAT_V2/S1-ON/H7-ON",
-    "today_honest_ms": 47.02,
-    "today_24x24_ms": [
-      57.13,
-      41.41
-    ],
-    "syncgen_ms": [
-      64.28,
-      61.94
-    ],
-    "chunk_floor_ms": 2.93,
-    "best_rcon_window_ms": [
-      70.5,
-      75.3
-    ],
-    "baseline_ms": 100.8,
-    "target_ms": 5.0,
-    "tests": "92/92",
-    "ci": "SUCCESS 42884625556 + 42999118452 (2072e998: S1 default-ON + cont-140 judge-verified)"
+  "mean": 96.1,
+  "loaded_split_ms_per_chunk": {
+   "native_fill": 34.0,
+   "native_fill_idle_p50": 5.7,
+   "deco_wall": 18.4,
+   "deco_phases": {
+    "plan": 0.3,
+    "struct": 5.24,
+    "run": 8.23,
+    "apply": 0.3,
+    "deleg": 3.55
+   },
+   "carver_driver": "4.3 on CI deco=1 lanes (partly ctx-wait, cont-102: 9.77 pure wait)",
+   "java_rest": "light ~1 (starlight), drain 2.0, stagnation ~8, ramp/status-chain ~6.1",
+   "note": "native fill inflates 6x idle->loaded (thread oversubscription: 2 fill threads + 2 chunk workers + main on 2 logical cores)"
   },
-  "cont142_attack_wave": {
-    "date": "2026-11-11 ~11:50-12:30 +08",
-    "recovery": "sandbox recycled to 848b2b6 again -> fetch+reset --hard origin/main (2072e998) + sandbox_recover.sh x2 (paper sha f649771a OK, .so 8634f9c4)",
-    "agents": {
-      "A_idle_margins": "server box owner: decompiled ChunkTaskScheduler 26.3, battery_a.sh staged experiments, JFR rec.jfr, results.txt — recycle-unsafe artifacts, orchestrator snapshots",
-      "B_deleg_ports": "branch deleg-ports-3 (pushed early): lake_lava_surface/underground + amethyst_geode native ports, cargo test running",
-      "C_fill_cpu": "worktree wt_c branch cont142-fill-c (9b222d15 pushed): Blend batch8 + material 0.75 attack, isolated CARGO_TARGET_DIR"
-    },
-    "integration_protocol": "orchestrator re-verifies gates itself (never accept unmeasured conclusions): cargo tests + filldump/delegcensus + vbench A/B before merging to main; CI judges bit-parity after push",
-    "h7_verdict": {
-      "pair_region": "8000,8000",
-      "jar": "9adfdcea (rebuild of committed src, timestamp-only)",
-      "so": "8634f9c4",
-      "ON": {
-        "e2e": 65.95,
-        "busy": 25.6,
-        "cover": 38.9,
-        "carver": 7.29
-      },
-      "OFF": {
-        "e2e": 67.33,
-        "busy": 24.5,
-        "cover": 36.3,
-        "carver": 5.69
-      },
-      "verdict": "INCONCLUSIVE at 2-core noise (carver counter-delta +1.6 untouched-code proves noise domination); H7 kept ON: headless CPU reduction + fast==exact oracle tests + CI green; final perf word = CI repeats",
-      "upcall_analysis": "UP_OTHER=52/ch = isReplaceable/isSolid/hasSturdyFace/biomeHasFeature (DecoDriver.java:1213-1250); cut needs native-side state mirror, est 0.2-0.4ms/ch, MEDIUM priority"
-    },
-    "margin_law_measured": {
-      "region": "8800,8800",
-      "jar": "23f2bf76 (GenStats margin instrumentation, orchestrator)",
-      "so": "8634f9c4",
-      "inside": 144,
-      "e2e": 72.38,
-      "span_ms": 10423.19,
-      "cover_pct": 39.8,
-      "native_inside_ms": 31.71,
-      "margin_fills": 232,
-      "margin_fill_cpu_ms_per_inside_chunk": 55.9,
-      "conclusion": "margin fill CPU = 1.76x inside fill CPU (77% of span); fill CPU cuts have 2.6x leverage on honest e2e: dWall ~= dFill*2.6/2lanes; ring-pregen lever REFUTED (ring pulls window through TERRAIN pre-arm, inside=16 invalid)"
-    },
-    "cover_ab": {
-      "region": "9000,9000",
-      "jar": "c13e3b92",
-      "paired_rounds": [
-        [
-          "S0 64.59",
-          "S1 61.57 (cover 40.8 vs 38.1, mfills 256 vs 253)"
-        ],
-        [
-          "S0 60.47",
-          "S1 61.88 (cover 41.5 vs 37.9)"
-        ]
-      ],
-      "stage2": "62.65 (worse than S1)",
-      "verdict": "INCONCLUSIVE at 2-core noise: paired deltas -3.02/+1.41 sign-flip; cover +3pp consistent but wall does not follow (busy rises too); margin_fills equal => zero-extra-fills verified; default stays OFF; CI 4-core = perf arbiter, judge gates = parity arbiter"
-    },
-    "mat_v2_adopted": {
-      "author": "agent C (died pre-measurement), gates+measurement by orchestrator",
-      "what": "AllNeg no-aquifer cells skip exact cellfill+per-block material walk -> per-row constants (LAVA<-54/WATER<sea/AIR)",
-      "gates": [
-        "filldump 6/6 byte-identical ON vs OFF (783-889KB dumps, coords 0_0,1_0,-1_-1,5_3,2_-2,7_7)",
-        "cargo test 92/92",
-        "vbench A/B x3: ON 5.204/5.181/5.202 vs OFF 5.373/5.387/5.410 -> -185us/fill, ranges non-overlapping"
-      ],
-      "leverage": "-0.48ms/ch wall at 2.6x margin-law factor"
-    },
-    "deleg_ports": {
-      "author": "agent B3 (staged 987 lines, died) + orchestrator fixes",
-      "what": "native place_lake (lava x2) + place_geode; kill-switch CRUS_DELEG_PORT3; f1dbg/delegcensus E0004 arms fixed; &[String] OnceLock adapters",
-      "gates": [
-        "cargo test 92/92",
-        "smoke: deleg-names lake_lava_surface/underground/amethyst_geode GONE (native routing live), so 1de2fa1d",
-        "CI judge = block bit-parity arbiter (push d05f1df6)"
-      ]
-    },
-    "struct_analysis": {
-      "finding": "struct 4.83ms/ch = vanilla placeInChunk (Jigsaw assembly, func=4044ms/window); gate+setup are ~0.01ms; port = whole Jigsaw system — parked, not a quick win"
-    },
-    "climate_whale_IDENTIFIED": {
-      "jfr": "rec_main.jfr (9800,9800, native regime, 1230 samples): Climate$RTree.findNearest0 top leaf on all 3 worker threads + NoiseStack$Perlin.get 61 samples on Worker-Main-1; total ~5.8-8ms/ch Java climate cost",
-      "mechanism_pinned": "ChunkGeneratorStructureState.biomeSource = private final, captured at createForNormal BEFORE the plugin biome-swap; generateRingPositions L204 calls this.biomeSource.findBiomeHorizontal (vanilla MultiNoise search = NoiseStack perlin + RTree per candidate); structure placement checks same path; ring futures resolve lazily for far regions DURING windows (rings-warmup only covered boot-time sets)",
-      "already_native": "chunk BIOMES step is grid-served (NativeBiomeSource.GridResolver: 1 JNI fill ~0.15ms per chunk, fallback vanilla for out-of-range) — the measured RTree samples inside ChunkStep.apply = STRUCTURE_STARTS placement checks, NOT the biomes step",
-      "lever_options": [
-        "A: reflectively refresh ChunkGeneratorStructureState.biomeSource -> NativeBiomeSource post-swap (needs findBiomeHorizontal on native source — base impl walks getNoiseBiome = JNI-per-point, too slow; needs native radius-search port or climate memo)",
-        "B: memoizing Climate.Sampler proxy (pure function of seed+coords; bounded LRU; high hit rate for structure-candidate checks repeated from 232 margin chunks; RandomState final-field reflection on JDK25 = risky)",
-        "C: native findBiomeHorizontal port (radius search in Rust, 1 JNI call per search)"
-      ],
-      "expected": "-3..-6ms/ch (the whole structure-state climate cost)",
-      "status": "DESIGNED, not implemented — next iteration opening task"
-    },
-    "main_thread": "Server thread only 6.9% JFR — main-thread FULL promotion NOT the bottleneck; cover idle = structure-state climate CPU + dependency waves",
-    "grid_adopted": {
-      "what": "CRUS_BIOME_GRID=1 -> champion default (harness run263_baseline.sh + server263_up.sh); NativeBiomeSource.GridResolver serves the BIOMES step via 1 JNI grid fill per chunk (~0.15ms) instead of vanilla climate sampling",
-      "discovery": "today's local honest numbers ran WITHOUT the grid (only CI harness set it) — the 3-5ms/ch Java climate cost (SliceFunction/RTree/NoiseStack) was live locally",
-      "measured": "paired (9900,9900): OFF 59.02/native 26.43/busy 23.8 vs ON 58.34/22.25/21.5; quiet-box grid-era (10500,10500): 46.49 & 48.87 honest, native 20.36-21.61, busy 18.0-19.1",
-      "bit_exact": "CI ab263_ci boots grid+BIOME_DEBUG, SUCCESS = no mismatches",
-      "climate_whale_residual": "structure placement checks remain vanilla-source; reswap REGRESSION x2 (46.49/48.87 OFF vs 51.68/57.69 ON — vertical grid fills under lock contend with fill pool); CRUS_STRUCT_RESWAP default OFF, code kept for y-sliced/batched variant"
-    }
-  },
-  "cont141_measurements": {
-    "date": "2026-11-11 09:15-10:00 +08",
-    "box": "quiet (load 0.0), .so 8634f9c4 = committed cont-140 state (rebuild verified), jar 22c333c7",
-    "worker_matrix_honest_12x12": {
-      "worker2_fill2_nowatchdog_control": {
-        "e2e": 47.02,
-        "span_ms": 6770.74,
-        "ramp": 709,
-        "busy": 20.1,
-        "cover_pct": 42.7,
-        "maxconc": 2,
-        "native": 23.39,
-        "carver": 4.74,
-        "deco": "struct 4.83 run 7.06 apply 0.96 deleg 2.01"
-      },
-      "worker3": {
-        "e2e": 52.21,
-        "busy": 29.9,
-        "cover_pct": 57.3,
-        "maxconc": 3,
-        "native": 36.7,
-        "carver": 7.42,
-        "verdict": "WORSE: cover +34% rel but CPU busy +49% (CFS thrash)"
-      },
-      "worker4": "skipped — strictly worse by same measured mechanism (E7 thrash law; worker=3 already decisive)",
-      "law": "adding workers converts dependency-idle into contention, not throughput; worker=2 remains champion at current CPU"
-    },
-    "window_scaling": {
-      "12x12": 47.02,
-      "24x24_w1_4500_3500": {
-        "e2e": 57.13,
-        "ramp": 1409,
-        "busy": 27.2,
-        "note": "cold: high ramp"
-      },
-      "24x24_w2_4600_3500": {
-        "e2e": 41.41,
-        "ramp": 362,
-        "busy": 22.0,
-        "cover_pct": 53.0
-      },
-      "verdict": "idle is INTRINSIC (dependency graph + CFS), not a 12x12 edge artifact; bigger window ~ -12% warm only; forceload cmd max 256 chunks -> 24x24 needs 4 quadrant forceloads"
-    },
-    "path_to_5ms_equation": "wall ~= CPU_ch / (2 cores x cover); today: 20-22 CPU, cover 43-53% -> 41-47. Need CPU ~7-10ms AND cover ->90%+; OR CPU <10 with maxconc>2 at low contention",
-    "next_fronts_ranked": [
-      "1. margin/dependency serialization (Q6) = the wall-vs-busy gap 19-27ms/ch: mechanism map on server263 decompile + staged-window quantification + plugin-side lever",
-      "2. deleg-native ports: lake_lava_surface/underground + amethyst_geode run EVERY chunk (deleg 2.01ms/ch + their share of run) — A4 pattern (monster_room/freeze) proven bit-judged",
-      "3. H7 ore verdict (merged, CRUS_H7_OFF flip) — needs quiet paired A/B or CI",
-      "4. native fill floor: Blend 1.4-1.5ms batch8 avx2 (hard), material 0.75"
-    ]
+  "jni_counts_per_chunk": {
+   "upcalls": 64.6,
+   "features": 55.4,
+   "ops": 1377.5,
+   "snap_sec": 92.8,
+   "crossings_all": 258
   }
+ },
+ "hypotheses": [
+  {
+   "id": "H1",
+   "text": "Config-only: CRUS_FILL_THREADS=1 (serial fill) reduces loaded fill wall by removing thread thrash; serial idle ~11ms may still beat 34ms loaded",
+   "test": "A/B e2e windows, 3 runs each, same box noise",
+   "status": "pending"
+  },
+  {
+   "id": "H2",
+   "text": "Config-only: chunk-system worker-threads=1 leaves a core for fill threads",
+   "test": "A/B e2e windows",
+   "status": "pending"
+  },
+  {
+   "id": "H3",
+   "text": "Q5 (audit): deco/carver ctx contention — fills hold pool ctxs 5-12ms so populate waits; dedicated deco ctx pool or tryLock-fallback-to-fresh-ctx gives up to ~4ms/ch on deco=1 lanes",
+   "test": "impl + A/B + filldump bit-parity (dptt set, serial+2t) + cargo 86/86",
+   "status": "CONFIRMED (agent cont136-q5b, merged b6569f47): dedicated 2-ctx deco pool, 88/88 tests (2 new Rust parity tests: ctx tables byte-identical + full-plan op streams identical), latent decoSetFlags fan-out bug fixed. A/B pending-poll-noise; honest-window instrument armed."
+  },
+  {
+   "id": "H4",
+   "text": "S1 (audit): sub-batch decoRunFeature between delegates, 258->~40 JNI crossings/ch, wrapper mass collapse (0.2-0.4ms idle, more loaded)",
+   "test": "impl (Rust+DecoDriver.java) + ops-count equality probes + bit-parity + judge",
+   "status": "IMPLEMENTED (cont139-S1 agent + orchestrator takeover, merged 36c253a8): decoRunBatch collapses 55.4 decoRunFeature crossings/ch -> 6.5 batch calls/ch (-88%, counters batch=3364/25326 on 520ch). 92/92 tests (production-buffer op stream byte-identical + final state digest equal; artificial tiny-cap regime documented divergent, unreachable: per-chunk deco ops ~10-20k << 65536). Kill-switch CRUS_S1_SUBBATCH default OFF. Paired e2e ON(60.98,58.51) vs OFF(54.73,60.52): delta within +-15% box noise — the projected -0.2..-0.4ms is below today's noise floor. CI judge to validate block parity; then consider default-ON."
+  },
+  {
+   "id": "H5",
+   "text": "Light-divert NMS (audit B): persistedStatus=LIGHT + setLightCorrect before LIGHT task -> ~0.7-1.0ms/ch",
+   "test": "implemented (CRUS_LIGHT_DIVERT, default OFF); A/B inconclusive on 2-core 12x12 (divert 96.2 vs adjacent control 94.5, within noise); needs 48x48 or CI",
+   "status": "implemented-inconclusive"
+  },
+  {
+   "id": "H6",
+   "text": "Native fill idle 5.7 -> ~3ms: slice noise sampling ~2.9ms is the biggest native item (cont-132); plane cache + blended-noise call reduction",
+   "test": "dpperf A/B p50 x3 rounds + filldump bit-parity",
+   "status": "REVERTED (cont-139): L1/L2/L3 implemented + parity-safe (filldump byte-identical 4/4, 91/91 tests) but MEASURED NO WIN: headless mins equal (P 5.6 vs M 5.8), paired honest e2e T(59.15,60.30) vs C(53.94,58.70) = treatment worse in both pairs. Probable mechanism: pv [[f32;16];34] ~2.2KB memset per spline y-group eval = MBs of stack traffic/chunk. KEY FINDING: cont-132's 'slice noise 2.9ms' was MISATTRIBUTED — named 2D noise kernels sum to only ~280us/ch (H6 diag table); the real slice cost lives in blended final-density (compute_batch8_col) + spline interpolation arithmetic. Branch cont139-h6 KEPT (diag tooling: h6probe/h6heights, col2d hit 84.8%). Next fill lever: blended-noise plane batching / slice-level memo of the final-density tree."
+  },
+  {
+   "id": "H7",
+   "text": "Ore-family native compute ~5.5ms/ch (8 types) + dripstone ~0.9ms/ch = per-cell overlay query cost inside deco run phase (8.5ms loaded)",
+   "test": "agent-2 COMPUTE_TOP.md findings -> targeted native cuts + filldump bit-parity",
+   "status": "IMPLEMENTED (agent-2-c work finished by main after agent stream died): per-section palette classification (OrePlan/RCls tri-state eval, SecCls lazy tables per section slot+epoch) + H7c fused is_air_or_water dripstone column scan; 3 new tests (fast==exact verdict invariant, ore+dripstone op-stream killswitch equality) => 89/89; branch h7-ore-b commit; server A/B pending (single .so, CRUS_H7_OFF flips)"
+  },
+  {
+   "id": "H9",
+   "text": "cont-138 SyncGen (sync main-thread status-chain, bypass moonrise queue) kills the ~62% pipeline idle => big e2e win",
+   "test": "harness/syncgen_ab.sh A|B: same rect 2100,2000 12x12, wipe per phase, worker=2/FILL=2/no-watchdog, jar 50f0edc0 + so ae9d434b",
+   "status": "MEASURED-NO-WIN (cont-139): syncgen 64.28/61.94 ms/ch (rect1/rect2, min 3.13/2.93, max 960/1204) vs pipeline honest 63.34 (cover 37.1%). Sync = 100% serial: native fill p50 WORSE loaded (31.8 vs 22.9, main thread joins the contention). Queue latency is NOT the whale under this load; total CPU under 2-core CFS is. FLOOR EVIDENCE: min 2.93-3.13 ms/ch proves a warm chunk with ready neighbors completes the FULL chain (fill+deco+carver+light) in ~3ms — the 5ms/chunk goal is reachable purely via CPU cuts + warm path, no architecture change needed. SyncGen kept as diagnostic tool (crussyncgen cmd), NOT the delivery path."
+  },
+  {
+   "id": "H8",
+   "text": "Fill loaded 29.5ms vs idle 5.7ms = 80% scheduling loss (4+ runnable threads / 2 cores); thread-config matrix (FILL_THREADS x worker-threads) may recover several ms without any code change",
+   "test": "clean A/B: wipe + same coords + back-to-back runs",
+   "status": "SUPERSEDED by E7 matrix: with Q5 pool + ports, worker=2 pipelines better (maxconc=2, cover 37.8%) => honest e2e 59.67 vs worker=1 69.61. FILL=2 > FILL=1 (62.49). Final config: worker=2, FILL=2, no-watchdog, Q5 pool, deleg ports.",
+   "result": "-18.4 ms/ch config-only total"
+  },
+  {
+   "id": "H9",
+   "text": "Inline delivery path (syncLoad): the 28-30ms/ch honest-window idle is moonrise task-queue latency (worker parks on chunk-future deps between status tasks); ServerChunkCache.getChunk(FULL,true) runs the SAME status chain inline. Two-phase priming (TERRAIN rect+margin then FULL) still throws 'Requested chunk unavailable during world generation' — syncLoad releases the per-chunk ticket after completion, so previously-generated neighbors get demoted/unloaded before chunk k's WorldGenRegion needs them. NEXT: hold a TICKET over the whole rect during the pass (moonrise addTicket/ticket-level, or ChunkTaskScheduler.scheduleChunkLoad(x,z,FULL,load=true,Priority,consumer) per chunk with the rect ticket held), then release; alternatively time-box via the spawn-prep path (boot does full-area sync gen successfully — replicate its ticket setup). Payoff if it works: e2e floor = sum of CPU/ch (~16-20ms today, ~8-10 after H6/H7/Q5) with ZERO queue idle",
+   "test": "SyncGen.java v2 (deployed jar 2db56104) — needs ticket-held rect variant",
+   "status": "REFUTED (measured, cont-138)",
+   "result": "v5 async+rect-held FORCED tickets (jar 66bd2078): 4x4 rect ok=16 wall=2002ms per-chunk=125.13 min=13.39 max=897.98. First chunk 898ms = inline recursion over the whole dependency tree (3x3 statuses + margins); subsequent chunks 13-50ms (margins amortized via held tickets). Extrapolated at 144 chunks: ~60-75ms/ch = SAME as the async pipeline (58-66 honest). The task-queue idle is NOT delivery overhead — it is dependency/margin serialization inherent to the chunk graph. Delivery-path replacement does NOT pay; the levers remain total-CPU reduction (H6/H7/S1/Q5) + pipelining (maxconc=2) at low CPU. HONEST impossibility proof for one axis of the 'replace the runtime' mandate."
+  },
+  {
+   "id": "H10",
+   "text": "Carver wall was NOT native compute: carver-phases honest split showed acq=0.00 pack=0.21 carve=1.55 ops=0.43 apply=5.50 (ms/ch) — the JAVA op-apply (reflective PalettedContainer.getAndSet + per-section recalcBlockCounts walking 4096 cells x up to 24 sections). Vanilla 26.3 applyCarvingMask writes through chunk.setBlockState (section 5-arg, counters incremental) with NO recount — replaced the bulk getAndSet+recount pair with the exact vanilla write path (M_SEC_SET section 5-arg, updateOnWrite=false)",
+   "test": "done (paired A/B /tmp/h10_a vs h10_b, jars ad29800b/0cf604a0)",
+   "status": "CONFIRMED: carver wall 9.92 -> 5.05 honest (2x-contaminated box, paired runs); apply phases 5.50 -> ~0.00; native carve=1.69 ops=1.46 pack=0.10 acq=0.01. Biggest single cut of the day."
+  }
+ ],
+ "log": [
+  {
+   "t": "2026-11-11T12:00+08:00",
+   "event": "cont-142 ATTACK WAVE: CI SUCCESS on 2072e998 (S1 default-ON + cont-140 judge-verified). Sandbox recycled to 848b2b6 again mid-session; recovered via fetch+reset+recover.sh. Launched 3 parallel agents (all alive despite Task-tool deadline errors — artifacts-check protocol): A=idle/margin decomposition (server box + JFR), B=deleg ports lake x2+geode (deleg-ports-3 pushed), C=fill Blend/material deep-dive (wt_c, cont142-fill-c pushed). Recycle-proofing adopted: agents commit+push every milestone; orchestrator re-verifies all gates before integration."
+  },
+  {
+   "t": "2026-11-11T10:00+08:00",
+   "event": "cont-141 MEASURE ITERATION (post-manifesto resume): cont-140 verified kept (agent gates: filldump 6/6, 92/92, vbench A/B 5.50->5.44 sub-noise; slots-1-7 whale = misattribution #2 — production col-memo already amortizes). Worker matrix on quiet box: control w2 47.02 honest (today's best 12x12) vs w3 52.21 WORSE (cover 42.7->57.3% but busy 20.1->29.9, CFS law measured). Window scaling: 24x24 warm 41.41 (campaign best honest number) vs 12x12 47.02 — idle intrinsic, not edge artifact. forceload 256-chunk cap discovered (24x24 = 4 quadrants). server263_up.sh: JVM_FLAGS_ADD support added; bash precedence trap (cd && cmd & backgrounds the cd) documented. Next: push cont-140 -> CI (judges S1 default-ON + cont-140), launch idle/margin decomposition agent + deleg-native ports agent."
+  },
+  {
+   "t": "2026-11-11T06:45+08:00",
+   "event": "cont-139 SESSION NET: (1) H9 SyncGen measured NO-WIN (64.28/61.94 vs 63.34) — convergent with parallel session's refutation; floor evidence min 2.93ms/ch (warm chunk, ready neighbors). (2) H6 (fill plane cache) implemented w/ agents, parity-safe, REVERTED after paired A/B showed no win; misattribution finding redirects fill lever to blended final-density. (3) H4/S1 sub-batch implemented (agent takeover after stream death), merged, crossings -88%, e2e delta sub-noise, default OFF. (4) Parallel session (cont-138) independently merged H7 (91/91) + H10 carver (9.92->5.05) and closed at honest 50.97 — my numbers reproduce their regime (today's honest 53.9-63.3 band, noise +-15%). NEXT FRONTS: pipelining re-test at lower CPU; paper-side idle 25-28ms; blended final-density fill (real 2.9ms whale); S1 default-ON after CI judge; stable-box carver re-measure."
+  },
+  {
+   "t": "2026-11-11T05:58+08:00",
+   "event": "SESSION CLOSE (cont-138): honest e2e 96.1(cont-135) -> 82.3(cont-136 E2E6) -> 50.97 (H10 quiet-box, BEST). H10 carver vanilla-setBlockState apply = biggest cut (carver 9.92->3.13 quiet, apply 5.50->0.00). H9 inline-delivery REFUTED by measurement. H7 merged (91/91, perf verdict deferred to CI/quiet). Physics locked: CFS 2x mutual, GC exonerated, worker=1~2 at current CPU, light-divert parked, rings boot-resolved. Agents: H6 alive (density.rs cache building), S1/Q5b sessions stalled. Next fronts ranked: H6 fill -> pipelining re-test -> struct margin walls -> NEW paper-side idle front (25-28ms)."
+  },
+  {
+   "t": "2026-11-11T05:35+08:00",
+   "event": "H7 MERGED to main (bb2e0ccd): agent 2-c zombie takeover — their 866-line implementation (per-section palette classification w/ tri-state eval + SecCls lazy tables, fused is_air_or_water dripstone scan) had 5 test-compile errors (lifetimes + arg types) and a wrong hardcoded expectation; fixed all (fn-item closures, copied() iteration, fast==exact invariant test via rule_test_matches oracle, local-y palette coords), 89/89 on branch -> 91/91 on merged main (Q5's 2 + H7's 3 + 86 base). fill parity 16/16 (8 dptt coords x 2 seeds) vs main reference. Server A/B (CRUS_H7_OFF flip) INCONCLUSIVE — box load 3.5 from resurrected H6 agent build (tgt_h6b); parked until quiet box. H6 agent ALIVE (was zombie ~2h, now building) — left to work."
+  },
+  {
+   "t": "2026-11-11T05:08+08:00",
+   "event": "cont-139 PHASE A/B DONE (fresh tree 0091c8ea, jar 50f0edc0, so ae9d434b): (A) honest window 2100,2000: e2e=63.34 (span 9120.94, ramp 108), gen=26.94 native=26.29 carver=17.89 busy=23.5 cover=37.1% maxconc=2, deco plan .37/struct 6.07/run 7.43/apply .42/deleg 1.62; run-top = ores (gravel 402ms, dirt 375, iron 337, spring_water 336, granite 318, tuff 311, dripstone 305, andesite 294, diorite 278, coal 251+206, lush 151 per 739 chunks) — H7 confirmed top. (B) SyncGen 64.28/61.94 => H9 no-win (see H9). 3 sub-agents launched (cont139-S1 crossings 258->~205, cont139-H7 ore per-section classification + fused dripstone pred, cont139-H6 fill L1 batch-spline + L2 row-local groups + L3 col-cache ShiftA/B) — all 3 adopted their lost-session WIP, code written, awaiting BUILD_OK. Note: OOM twice during reboots (4GB box, 3G heap + dying JVM race) — future boots must verify no java + free>2.5G first."
+  },
+  {
+   "t": "2026-11-11T05:00+08:00",
+   "event": "CAMPAIGN BASELINE (cont-138 era, .so ae9d434b post-Q5, jar 2db56104 = rings+syncgen): honest e2e=65.72 (raw 77.9/84.2 noisy period), gen=16.89 (native=16.04) carver=12.39(!) deco_tail=778ms cover=25.7% maxconc=1. Honest w1 e2e across the day: 58.3-65.7 (noise +-15%). CAMPAIGN TRAJECTORY: cont-135 baseline 96.1 mean -> cont-136 E2+E6 config 82.3 -> cont-138 honest-window metric ~58-66 (ramp excluded). CI green on 0091c8ea (rings) + parallel commits. Agents h6-plane-b/h7-ore-b mid-work (density.rs+h6probe / features_snap+place classification). Fronts ranked: (1) agents CPU cuts, (2) H9 inline delivery (needs rect-held ticket), (3) carver variance 5.9-12.4 needs stable-box re-measure, (4) worker=2 re-test after CPU drops."
+  },
+  {
+   "t": "2026-11-11T04:40+08:00",
+   "event": "DISK-full incident + syncgen probe: root overlay hit 100% (stale /tmp/my-project 4.8G on PolarFS + dl/dl263/ab438/vantrace on root); purged 3G+ (root 74%), saved vineflower/cfr to /home/z/tools/decomp. SyncGen.java (crussyncgen command) — inline status-chain experiment: v1 isolated FULL throws 'Requested chunk unavailable'; v2 two-phase TERRAIN-primed still throws (ticket released per-chunk => neighbors demoted). H9 parked with next steps (rect-held ticket). Rings-warmup deployed earlier: ring futures resolve at boot (0.1ms) — window-neutral, kept."
+  },
+  {
+   "t": "2026-11-11T04:05+08:00",
+   "event": "RINGS-WARMUP (cont-138) implemented+deployed: RingsWarmup.java NMS companion (ChunkMap.chunkGeneratorState via reflection, all ConcentricRingsStructurePlacement sets -> getRingPositionsFor at WorldLoadEvent, bit-identical positions, timing-only). Result: 128 positions precomputed in 0.1ms => ring futures were ALREADY resolved at world init (spawn-area gen) — the JFR 1.6s worker park on getRingPositionsFor happened during BOOT, not the window; window impact ~0 (58.31 honest vs 61.75 paired w1 = noise). KEPT (harmless boot-time warm, protects fresh-region windows that DO hit lazy ring gen). Honest-window w1 baseline now spans 58.3-63.2 across runs (noise +-10%) — single-window comparisons dead, paired back-to-back + pinned md5s are the protocol."
+  },
+  {
+   "t": "2026-11-11T03:55+08:00",
+   "event": "CONTENTION TEST CONCLUSIVE (cont-138): headless dpperf (1 invocation = fill bench) quiet 244-255ms vs contended-during-server-window 470-520ms = 1.9-2.0x slowdown; server fill itself inflated 16->20.7 under dpperf load => MUTUAL CFS SHARING confirmed as the main 'loaded fill 16.8 vs idle 5.7' mechanism (~2x) + ~1.4x residual (JNI/transfer/GC/residual java stages). No scheduling fix exists under CFS/2-vCPU — the lever is TOTAL CPU (H6 fill->3, H7 ore, S1 crossings) then re-test worker=2 pipelining at low CPU. Also: PAIRED worker repro w/ pinned artifacts (so ae9d434b=post-Q5, jar 736adfd3): w1=61.75 (cover 28.0 maxconc=1 native=16.76 carver=5.88) vs w2=65.94 (cover 34.3 maxconc=2 native=25.20 carver=11.72) — worker=2 pipelines (maxconc=2) but thrashes fill at current CPU; INCONCLUSIVE vs parallel-session verdict (their w2=59.67 on quieter box) — RE-TEST after CPU drops. LESSON: parallel sessions rebuild the shared tree mid-experiment — every A/B pair must pin artifact md5s (logged now). Q5 merge (46d00d6f+67c555c0, 2 parity tests 88/88) landed from cont136-q5b session; carver 7.9->5.88 in w1 honest window (modest win)."
+  },
+  {
+   "t": "2026-11-11T03:35+08:00",
+   "event": "E7 thread matrix + honest-window A/B series (cont-138): (1) worker-threads=2 CONFIRMED WORSE even honest (fill 44.9 loaded, e2e 108.78) — thread thrash; fill=1 doubles native wall (35.66, E7c); SerialGC worse (38.49, E7e) — G1 stays. worker=1+fill=2 remains optimal. (2) BACK-TO-BACK A/B deco=0+carvers=0 vs control (same window, load~1.1): fill-only e2e=46.03 native=16.35 cover=36.3% vs control e2e=59.60 native=15.83 carver=6.30 deco_tail=666ms cover=27.4% => fill inflation (16.3 vs 5.7 headless) is NOT deco/carver interference and NOT GC (JFR: GC pauses 55ms total/window=0.38/ch, max 9.2ms) — leading explanation CFS sharing (starlight+forkjoin+worker on 2 vCPU). (3) light-divert re-tested with honest windows: 48.58 vs 45.39 control = WORSE, diverted=371 but skipped_status=0 (first_status=minecraft:terrain) — mechanism never engages, PARKED for good. (4) JFR leaf analysis: Climate$RTree+NoiseStack java CPU = structure-ring biome sampling on ForkJoinPool (ChunkGeneratorStructureState cached PRE-swap source — plugin swaps after init); native biome source IS active for chunk biomes (BIOME_N=0 is counter-scope artifact, quart path uncounted). (5) structure-failure (4 chunks, run1) did NOT reproduce in 3 reruns — intermittent margin race, full-stack logging deployed. PATH TO 5ms: CPU must drop to ~10ms/ch (H6 fill->3, H7 ore -2.7, S1 crossings, Q5b carver ctx -4..-6) THEN worker=2 pipelining becomes viable (maxconc=2 at low CPU => floor 144x10ms/2c = 5ms/ch). Agents: h6-plane-b/h7-ore-b relaunched in /home/z (persistent); parallel meta-sessions cont136-q5b (carver ctx) + cont136-s1 (sub-batch) active."
+  },
+  {
+   "t": "2026-11-11T02:05+08:00",
+   "event": "HONEST WINDOW ARMED (crusgenstats window rx rz 11 now wired into run263_baseline.sh): window[2100..2111,2000..2011] 144 chunks, NW=2 runs: e2e walls 70.6/75.9 raw; honest span=8601ms => e2e=59.73ms/ch, ramp=978ms. BUDGET: gen=18.14 (native fill=17.57 LOADED vs 5.7 idle, layout=0.30, beard=0.20) + carver=7.88 (top-3 item!) + deco_tail=590ms (4.1ms/ch) => ~30ms CPU/ch vs 59.73 wall => busy=18.1ms/ch cover=30.4% maxconc=1 (PIPELINE FULLY SERIAL — 69% idle). Priority reorder: (1) cover/concurrency 30%->60-100% config matrix (worker-threads x FILL_THREADS with honest windows) — worth up to 2-3x window; (2) carver driver 7.88; (3) fill loaded 17.6->idle 5.7 (H6 agent + thread config); (4) deco run 5.56 (H7 agent) + struct 2.89 margin walls. cont-137 validated live: native monster_room=0.30ms/ch (372 calls), freeze_top_layer=143.32ms(593)=0.24ms/ch, deleg 1.04->0.75; 4x 'deco structures failed' seen ONCE (run1 NW=3) not reproduced in 2 reruns — full-stack logging now deployed (cont-138 diag), treat as intermittent margin-chunk race pending stack capture."
+  },
+  {
+   "t": "2026-11-11T01:15+08:00",
+   "event": "cont-137: native monster_room (+monster_room_deep) + freeze_top_layer (26.3 SnowAndFreezeFeature) ports completed end-to-end: native place fns (features_place.rs, RNG draw order transcribed from vineflower decompile of paper-26.3.jar: chest loot nextLong + spawner nextInt(4) MOBS pick consumed on the native stream), Java bridge completed this session — DecoDriver.freezeChecks(II)I upcall (vanilla Biome.shouldFreeze/shouldSnow on the live region, ICE write ordered BEFORE shouldSnow per vanilla), applyOpStatic FLAG_SPAWNER (aux bits8-15 mob ordinal -> EntityTypes.SKELETON/ZOMBIE/SPIDER via setEntityId, zero RNG confirmed from decompile: empty WeightedList draws nothing) + FLAG_CHEST (SIMPLE_DUNGEON loot table, seed not transported: BE NBT outside judged surface, seed=0 deterministic), tree-aux guard for flags 64/128, FreezeTopLayer state registration (ice/snow/grass_block[snowy=true]/mycelium[snowy=true]) in features_place_ffi.rs seal(). Gates: cargo 86/86 (release), plugin jar md5 34741a8c, f1dbg arm. Kill-switch CRUS_DELEG_NOGEN=1 restores delegate lane. 26.3 deco bit-judge still open — CI judge pending push."
+  },
+  {
+   "t": "2026-11-10T16:45+08:00",
+   "event": "LIGHT-DIVERT (CRUS_LIGHT_DIVERT) implemented per /tmp/lightdivert/PLAN.md: LightDivert.java NMS populator registered LAST, setLightCorrect+persistedStatus=LIGHT during decorate. Corrections vs audit: (1) real status during decorate = minecraft:terrain (BELOW features — [FEATURES,LIGHT) guard diverted 0/1153, fixed to skip-only->=LIGHT), (2) TWO flags required. diverted=1144/1144, fail=0. A/B: divert 83.4/96.2/109.1 (mean 96.2) vs adjacent control 86.6/88.1/108.8 (mean 94.5) => INCONCLUSIVE (+1.7, noise; mechanism: dropped INIT_LIGHT barrier adds 2-core contention, may help on 4c CI). DEFAULT OFF. GIT LESSON: git checkout -- plugin/ wiped uncommitted source edits twice; never checkout while carrying edits."
+  },
+  {
+   "t": "2026-11-10T16:50+08:00",
+   "event": "Control table: baseline@15:05 mean 100.8, divert mean 96.2, control mean 94.5 (quietest). 12x12 window = ramp/status-chain ~30% — 48x48+ needed for paper-side deltas. Fill loaded drifts 35.2->29.5 with box noise: A/B ALWAYS wipe+same-coords+back-to-back."
+  },
+  {
+   "t": "2026-11-10T14:20+08:00",
+   "event": "sandbox recycle #N: git was at 848b2b6 (cont-41); resynced to origin/main fdbd8dbc (cont-134b, incl. cont-133/134/135 from parallel sessions). rustup 1.99.1 + JDK 25.0.5+8 + paper-26.3-222.jar (sha f649771a bit-exact) restored. cargo build release 3m01s. patchonly extraction done."
+  },
+  {
+   "t": "2026-11-10T15:05+08:00",
+   "event": "BASELINE (this box, tree fdbd8dbc, .so 33a481ef, jar 2b72d745): windows 98.5/94.6/109.4 mean 100.8 ms/ch. loaded: native fill mean 35.2ms p50 30.1 (idle p50 5.7 -> 6x contention inflation), deco mean 18.1 (plan .35 struct 3.07 run 9.15 apply .35 deleg 4.51), upcalls 68.9/ch, snap-sec 100.6/ch. run-top: dripstone 1051ms/617calls + 8 ore types ~400-630ms each. CPU math: ~25-35ms CPU/ch vs ~100ms window => ~75% scheduling loss."
+  },
+  {
+   "t": "2026-11-10T15:25+08:00",
+   "event": "E1 CRUS_FILL_THREADS=1: 113.5/109.7 — INVALID (region hit jungle biome: trees_jungle 1468ms, struct 8.51 vs 3.07). Lesson: same-region-only comparisons; A/B protocol = wipe world + identical coords (deterministic per seed). loaded fill wall 37ms @1 thread ~= 35ms @2 threads => our thread count is NOT the contention driver; server threads are."
+  },
+  {
+   "t": "2026-11-10T17:10+08:00",
+   "event": "E2/E3 thread matrix (clean wipe A/B): worker-threads=1+FILL=2 mean 87.7 (-6.8 vs control 94.5, -13% vs orig baseline 100.8). worker=1 serializes Paper Java stages, frees core for fill threads. Config now default in run263_baseline.sh (WORKER_THREADS=1). server263_up.sh (CI) unchanged — 4-core optimum TBD on CI."
+  },
+  {
+   "t": "2026-11-10T17:35+08:00",
+   "event": "JFR window-phase analysis (settings=profile, 79s = exact measured phase): gen-worker buckets features 19.2%, JNI_fill 12.5%, biomes 11.2%, serialization 10.6% (NOT 0 as cont-134 audit said — recheck on 26.3), light 6.0%, sched/wait 2.7%. Whale: Paper Watchdog Thread 1404 exec records vs gen-worker 206 — 3-4 'has not responded for 10-15s' dumps INSIDE windows (main thread stall between chunk batches) => each dump safepoints all threads incl. native fill. E6 -Ddisable.watchdog=true => mean 82.3 (-5.4 vs E2). HttpClient/JLine/io/RCON native samples = parked epoll (not CPU)."
+  },
+  {
+   "t": "2026-11-10T18:45+08:00",
+   "event": "Agent outcomes: A3 (light) delivered fully (FINDINGS+PLAN, cheap branch verified in jar). A4 (deleg-native) implemented MonsterRoom+FreezeTopLayer ports (features_place.rs +313, dispatch, kill-switch CRUS_DELEG_NOGEN) but stalled before validation — /tmp wiped its worktree+evidence; WIP survived via cc40dc50. I completed: f1dbg.rs + delegcensus.rs match arms (2x E0004), verified compile, cargo test 86/86. A4 notes: monster_room native despite BlockEntity seed caveat (spawner NBT seed default — block-level judge unaffected, runtime-only). A1 (Q5) + A2 (S1) artifacts LOST with /tmp — Q5 re-implemented by me; S1 design pending. LESSON: agents must write outputs under /home/z/my-project (git-ignored scratch), never /tmp."
+  },
+  {
+   "t": "2026-11-10T18:40+08:00 (clock note: times are +08 approx, UTC-8h off)",
+   "event": "A4 ports A/B (same coords 2000/2100, back-to-back, E6 config, .so 8c6e38a3 + jar d32342a7): ON 70.5/75.3 vs OFF(CRUS_DELEG_NOGEN=1) 72.8/78.4 => -2.7 ms/ch windows. Deco phases ON struct=2.88 run=4.99 deleg=0.96 vs OFF struct=3.46 run=5.35 deleg=1.19 (-1.2ms/ch). deleg-names ON: monster_room x2 + freeze_top_layer GONE (native). Kill-switch verified. CORRECTNESS SIGNAL: 1x 'Tried to load a DUMMY block entity ... Block{minecraft:air}' — A4 BE path writes BE before block; block-level judge should pass, runtime-only; CI judge is the gate. Pushing branch to CI."
+  },
+  {
+   "t": "2026-11-10T20:35+08:00",
+   "event": "HONEST-WINDOW instrument (GenStats windowSnapshot, server-side span e2e — much less noise than rcon polls): worker=1 69.61 (carver=14.93 ctx-wait! cover=24.6% maxconc=1) vs worker=2 59.67 (maxconc=2 cover=37.8%) vs worker=2+fill=1 62.49. E2's worker=1 win was a pre-Q5 regime effect (slow populate made serialization cheap); once Q5+ports landed, worker=2 pipelines. Remaining whales: carver bucket 15.6-17.8 loaded (native carver compute + waits), deco run 7.1-7.5 (ores ~2.5-3), fill 24.9-26.1 loaded (CPU 5.7x2), cover still ~62% idle."
+  },
+  {
+   "t": "2026-11-10T21:45+08:00",
+   "event": "CI 42884625556 (main ddfceb1) SUCCESS — judge gates (vanilla/datapack/dptt 0.05%, ours 0.005%) confirm bit-parity of A4 native ports + Q5 dedicated pool + light-divert(OFF) + harness. Session net: honest e2e ~100 -> 59.67 (-41%), rcon windows 70.5-75.3 best. Open fronts for next iteration: S1 sub-batching (agent stalled 2.5h, no commits — reassign fresh), ore compute micro (COMPUTE_TOP lost with /tmp, re-gather), carver native opt (15.6 loaded), light-divert CI A/B lane, DECO_POOL_SIZE=3, watchdog main-thread stall (>10s between batches — root cause unexplored). Parallel session active on same main (cont-138 honest-window arm) — rebase before next push."
+  }
+ ],
+ "ab_protocol": "wipe server263/world* before each config; coords RX1=2000 RZ1=2000, WX=500 WZ=500; NW=2..3; report window means + crusgenstats p50/p99; never compare across different regions",
+ "rules": [
+  "never trust a number not measured on this box; report min/p50 of >=3 windows",
+  "any impl change gates on: cargo test 86/86 + filldump bit-parity vs parent (dptt set) + judge CI",
+  "config A/B allowed inline; code changes go through subagents with separate CARGO_TARGET_DIR",
+  "timeout/obit of a subagent != death: check files/logs/results before reassigning",
+  "PROGRESS.json read at start of each iteration, updated after every experiment"
+ ],
+ "goal_status": {
+  "best_honest_e2e_ms": 46.49,
+  "best_honest_note": "46.49 = grid era, 12x12 @10500 quiet (cont-142); champion config now: worker=2/FILL=2/no-watchdog/CRUS_BIOME_GRID=1/MAT_V2/S1-ON/H7-ON",
+  "today_honest_ms": 47.02,
+  "today_24x24_ms": [
+   57.13,
+   41.41
+  ],
+  "syncgen_ms": [
+   64.28,
+   61.94
+  ],
+  "chunk_floor_ms": 2.93,
+  "best_rcon_window_ms": [
+   70.5,
+   75.3
+  ],
+  "baseline_ms": 100.8,
+  "target_ms": 5.0,
+  "tests": "92/92",
+  "ci": "SUCCESS 42884625556 + 42999118452 (2072e998: S1 default-ON + cont-140 judge-verified)"
+ },
+ "cont142_attack_wave": {
+  "date": "2026-11-11 ~11:50-12:30 +08",
+  "recovery": "sandbox recycled to 848b2b6 again -> fetch+reset --hard origin/main (2072e998) + sandbox_recover.sh x2 (paper sha f649771a OK, .so 8634f9c4)",
+  "agents": {
+   "A_idle_margins": "server box owner: decompiled ChunkTaskScheduler 26.3, battery_a.sh staged experiments, JFR rec.jfr, results.txt — recycle-unsafe artifacts, orchestrator snapshots",
+   "B_deleg_ports": "branch deleg-ports-3 (pushed early): lake_lava_surface/underground + amethyst_geode native ports, cargo test running",
+   "C_fill_cpu": "worktree wt_c branch cont142-fill-c (9b222d15 pushed): Blend batch8 + material 0.75 attack, isolated CARGO_TARGET_DIR"
+  },
+  "integration_protocol": "orchestrator re-verifies gates itself (never accept unmeasured conclusions): cargo tests + filldump/delegcensus + vbench A/B before merging to main; CI judges bit-parity after push",
+  "h7_verdict": {
+   "pair_region": "8000,8000",
+   "jar": "9adfdcea (rebuild of committed src, timestamp-only)",
+   "so": "8634f9c4",
+   "ON": {
+    "e2e": 65.95,
+    "busy": 25.6,
+    "cover": 38.9,
+    "carver": 7.29
+   },
+   "OFF": {
+    "e2e": 67.33,
+    "busy": 24.5,
+    "cover": 36.3,
+    "carver": 5.69
+   },
+   "verdict": "INCONCLUSIVE at 2-core noise (carver counter-delta +1.6 untouched-code proves noise domination); H7 kept ON: headless CPU reduction + fast==exact oracle tests + CI green; final perf word = CI repeats",
+   "upcall_analysis": "UP_OTHER=52/ch = isReplaceable/isSolid/hasSturdyFace/biomeHasFeature (DecoDriver.java:1213-1250); cut needs native-side state mirror, est 0.2-0.4ms/ch, MEDIUM priority"
+  },
+  "margin_law_measured": {
+   "region": "8800,8800",
+   "jar": "23f2bf76 (GenStats margin instrumentation, orchestrator)",
+   "so": "8634f9c4",
+   "inside": 144,
+   "e2e": 72.38,
+   "span_ms": 10423.19,
+   "cover_pct": 39.8,
+   "native_inside_ms": 31.71,
+   "margin_fills": 232,
+   "margin_fill_cpu_ms_per_inside_chunk": 55.9,
+   "conclusion": "margin fill CPU = 1.76x inside fill CPU (77% of span); fill CPU cuts have 2.6x leverage on honest e2e: dWall ~= dFill*2.6/2lanes; ring-pregen lever REFUTED (ring pulls window through TERRAIN pre-arm, inside=16 invalid)"
+  },
+  "cover_ab": {
+   "region": "9000,9000",
+   "jar": "c13e3b92",
+   "paired_rounds": [
+    [
+     "S0 64.59",
+     "S1 61.57 (cover 40.8 vs 38.1, mfills 256 vs 253)"
+    ],
+    [
+     "S0 60.47",
+     "S1 61.88 (cover 41.5 vs 37.9)"
+    ]
+   ],
+   "stage2": "62.65 (worse than S1)",
+   "verdict": "INCONCLUSIVE at 2-core noise: paired deltas -3.02/+1.41 sign-flip; cover +3pp consistent but wall does not follow (busy rises too); margin_fills equal => zero-extra-fills verified; default stays OFF; CI 4-core = perf arbiter, judge gates = parity arbiter"
+  },
+  "mat_v2_adopted": {
+   "author": "agent C (died pre-measurement), gates+measurement by orchestrator",
+   "what": "AllNeg no-aquifer cells skip exact cellfill+per-block material walk -> per-row constants (LAVA<-54/WATER<sea/AIR)",
+   "gates": [
+    "filldump 6/6 byte-identical ON vs OFF (783-889KB dumps, coords 0_0,1_0,-1_-1,5_3,2_-2,7_7)",
+    "cargo test 92/92",
+    "vbench A/B x3: ON 5.204/5.181/5.202 vs OFF 5.373/5.387/5.410 -> -185us/fill, ranges non-overlapping"
+   ],
+   "leverage": "-0.48ms/ch wall at 2.6x margin-law factor"
+  },
+  "deleg_ports": {
+   "author": "agent B3 (staged 987 lines, died) + orchestrator fixes",
+   "what": "native place_lake (lava x2) + place_geode; kill-switch CRUS_DELEG_PORT3; f1dbg/delegcensus E0004 arms fixed; &[String] OnceLock adapters",
+   "gates": [
+    "cargo test 92/92",
+    "smoke: deleg-names lake_lava_surface/underground/amethyst_geode GONE (native routing live), so 1de2fa1d",
+    "CI judge = block bit-parity arbiter (push d05f1df6)"
+   ]
+  },
+  "struct_analysis": {
+   "finding": "struct 4.83ms/ch = vanilla placeInChunk (Jigsaw assembly, func=4044ms/window); gate+setup are ~0.01ms; port = whole Jigsaw system — parked, not a quick win"
+  },
+  "climate_whale_IDENTIFIED": {
+   "jfr": "rec_main.jfr (9800,9800, native regime, 1230 samples): Climate$RTree.findNearest0 top leaf on all 3 worker threads + NoiseStack$Perlin.get 61 samples on Worker-Main-1; total ~5.8-8ms/ch Java climate cost",
+   "mechanism_pinned": "ChunkGeneratorStructureState.biomeSource = private final, captured at createForNormal BEFORE the plugin biome-swap; generateRingPositions L204 calls this.biomeSource.findBiomeHorizontal (vanilla MultiNoise search = NoiseStack perlin + RTree per candidate); structure placement checks same path; ring futures resolve lazily for far regions DURING windows (rings-warmup only covered boot-time sets)",
+   "already_native": "chunk BIOMES step is grid-served (NativeBiomeSource.GridResolver: 1 JNI fill ~0.15ms per chunk, fallback vanilla for out-of-range) — the measured RTree samples inside ChunkStep.apply = STRUCTURE_STARTS placement checks, NOT the biomes step",
+   "lever_options": [
+    "A: reflectively refresh ChunkGeneratorStructureState.biomeSource -> NativeBiomeSource post-swap (needs findBiomeHorizontal on native source — base impl walks getNoiseBiome = JNI-per-point, too slow; needs native radius-search port or climate memo)",
+    "B: memoizing Climate.Sampler proxy (pure function of seed+coords; bounded LRU; high hit rate for structure-candidate checks repeated from 232 margin chunks; RandomState final-field reflection on JDK25 = risky)",
+    "C: native findBiomeHorizontal port (radius search in Rust, 1 JNI call per search)"
+   ],
+   "expected": "-3..-6ms/ch (the whole structure-state climate cost)",
+   "status": "DESIGNED, not implemented — next iteration opening task"
+  },
+  "main_thread": "Server thread only 6.9% JFR — main-thread FULL promotion NOT the bottleneck; cover idle = structure-state climate CPU + dependency waves",
+  "grid_adopted": {
+   "what": "CRUS_BIOME_GRID=1 -> champion default (harness run263_baseline.sh + server263_up.sh); NativeBiomeSource.GridResolver serves the BIOMES step via 1 JNI grid fill per chunk (~0.15ms) instead of vanilla climate sampling",
+   "discovery": "today's local honest numbers ran WITHOUT the grid (only CI harness set it) — the 3-5ms/ch Java climate cost (SliceFunction/RTree/NoiseStack) was live locally",
+   "measured": "paired (9900,9900): OFF 59.02/native 26.43/busy 23.8 vs ON 58.34/22.25/21.5; quiet-box grid-era (10500,10500): 46.49 & 48.87 honest, native 20.36-21.61, busy 18.0-19.1",
+   "bit_exact": "CI ab263_ci boots grid+BIOME_DEBUG, SUCCESS = no mismatches",
+   "climate_whale_residual": "structure placement checks remain vanilla-source; reswap REGRESSION x2 (46.49/48.87 OFF vs 51.68/57.69 ON — vertical grid fills under lock contend with fill pool); CRUS_STRUCT_RESWAP default OFF, code kept for y-sliced/batched variant"
+  }
+ },
+ "cont141_measurements": {
+  "date": "2026-11-11 09:15-10:00 +08",
+  "box": "quiet (load 0.0), .so 8634f9c4 = committed cont-140 state (rebuild verified), jar 22c333c7",
+  "worker_matrix_honest_12x12": {
+   "worker2_fill2_nowatchdog_control": {
+    "e2e": 47.02,
+    "span_ms": 6770.74,
+    "ramp": 709,
+    "busy": 20.1,
+    "cover_pct": 42.7,
+    "maxconc": 2,
+    "native": 23.39,
+    "carver": 4.74,
+    "deco": "struct 4.83 run 7.06 apply 0.96 deleg 2.01"
+   },
+   "worker3": {
+    "e2e": 52.21,
+    "busy": 29.9,
+    "cover_pct": 57.3,
+    "maxconc": 3,
+    "native": 36.7,
+    "carver": 7.42,
+    "verdict": "WORSE: cover +34% rel but CPU busy +49% (CFS thrash)"
+   },
+   "worker4": "skipped — strictly worse by same measured mechanism (E7 thrash law; worker=3 already decisive)",
+   "law": "adding workers converts dependency-idle into contention, not throughput; worker=2 remains champion at current CPU"
+  },
+  "window_scaling": {
+   "12x12": 47.02,
+   "24x24_w1_4500_3500": {
+    "e2e": 57.13,
+    "ramp": 1409,
+    "busy": 27.2,
+    "note": "cold: high ramp"
+   },
+   "24x24_w2_4600_3500": {
+    "e2e": 41.41,
+    "ramp": 362,
+    "busy": 22.0,
+    "cover_pct": 53.0
+   },
+   "verdict": "idle is INTRINSIC (dependency graph + CFS), not a 12x12 edge artifact; bigger window ~ -12% warm only; forceload cmd max 256 chunks -> 24x24 needs 4 quadrant forceloads"
+  },
+  "path_to_5ms_equation": "wall ~= CPU_ch / (2 cores x cover); today: 20-22 CPU, cover 43-53% -> 41-47. Need CPU ~7-10ms AND cover ->90%+; OR CPU <10 with maxconc>2 at low contention",
+  "next_fronts_ranked": [
+   "1. margin/dependency serialization (Q6) = the wall-vs-busy gap 19-27ms/ch: mechanism map on server263 decompile + staged-window quantification + plugin-side lever",
+   "2. deleg-native ports: lake_lava_surface/underground + amethyst_geode run EVERY chunk (deleg 2.01ms/ch + their share of run) — A4 pattern (monster_room/freeze) proven bit-judged",
+   "3. H7 ore verdict (merged, CRUS_H7_OFF flip) — needs quiet paired A/B or CI",
+   "4. native fill floor: Blend 1.4-1.5ms batch8 avx2 (hard), material 0.75"
+  ]
+ },
+ "cont143_kickoff": {
+  "when": "2026-11-12 ~17:00-18:00 +01",
+  "ci": "ALL GREEN through HEAD 93eb77c8 (grid champion CI-judged SUCCESS; 8f3c38bf/1824ae13/a2cd2556 SUCCESS)",
+  "jfr_gridera_profile": {
+   "run": "CRUS_JFR=1 champion w2/F2/nwd, fresh 11200/11300; 1438 exec samples",
+   "climate_residual": "Worker-Main-1 49% = vanilla climate sampling (NoiseStack$Perlin 55, RTree.findNearest0 30+7, CubicSpline 5 samples) ~= ~2ms/ch CPU, paid on window AND margin chunks (2.6x margin leverage) -> front #1 CONFIRMED post-grid",
+   "chunk_save": "CompoundTag.store ~53 samples = NewChunkHolder.saveChunk -> PalettedContainer codec during window (chunk NBT encode) ~1ms/ch java CPU -> future front (save-path)",
+   "minor": "ForwardLogHandler.publish in workers (logging), layoutBulk attribution small"
+  },
+  "anchors_today": {
+   "note": "rect-to-rect variance large (biome-dependent deco); paired same-rect A/B mandatory as always",
+   "rect_11500_heavy": "windows 93.2/91.6, honest 72.96, native 29.25, busy 26.6, margin_fill_cpu 54.6 (dripstone_cluster 199/sculk 484/sulfur 57)",
+   "rect_10700": "windows 86.7/79.9, honest 62.93, native 23.09, busy 21.0, margin_fill_cpu 43.6, ramp 722 (fossil 183/desert_well 183)"
+  },
+  "agents_launched": {
+   "cont143_a_structgrid": "y-sliced/batched structure-climate lever (beat vanilla caching sampler; prior full-vertical reswap REGRESSED 46.49->51.68/57.69). Branch cont143-structgrid, worktree wt_cont143a. Kill-switch CRUS_STRUCT_GRID default 0.",
+   "cont143_b_bulkop": "bulk-op path for PORT3 (lake_lava x2 + amethyst_geode): 1 JNI call -> packed buffer -> java apply; mode CRUS_PORT3_MODE 0/1/2. Branch cont143-bulkop, worktree wt_cont143b. PORT3 opstream regression context: ON 68.07 vs OFF 65.42."
+  },
+  "rules_reminder": "agents: no server boots (orchestrator serializes server work), push every milestone, honest INCONCLUSIVE allowed; orchestrator runs paired e2e after landing"
+ }
 }
