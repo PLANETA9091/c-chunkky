@@ -294,6 +294,15 @@ public final class ChunkGenNative {
     /** carveMarks(ctx, marks) -> int — the fluid-update marks of the last carve. */
     public static native int carveMarks(long ctx, long[] marks);
 
+    /**
+     * cont-143 carver fuse: carve + op/marks fetch in ONE native call.
+     * Returns (opsLen &lt;&lt; 12) | marksLen, or MIN_VALUE when native declined.
+     * Byte-identical transport to carve()+carveOps()+carveMarks().
+     */
+    public static native int carveApply(long ctx, int cx, int cz, long seed,
+                                        int[] meta, long[] raw, short[] pal,
+                                        long[] ops, long[] marks);
+
     private ChunkGenNative() {
     }
 }

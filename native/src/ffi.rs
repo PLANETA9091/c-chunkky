@@ -776,6 +776,64 @@ pub fn carve(
     }
 }
 
+/// cont-143 carver fuse: carve + op/marks fetch in ONE sessions_lock hold and
+/// ONE JNI crossing. Byte-identical transport to carve()+carveOps()+carveMarks()
+/// (same carve_chunk computation, same stashed Vec contents copied out) — the
+/// only change is WHEN the copies happen (inside the carve lock) and that the
+/// caller reuses thread-local buffers instead of allocating per chunk.
+/// Returns (ops_len, marks_len); FAIL on any error.
+pub fn carve_fetch(
+    id: i64,
+    cx: i32,
+    cz: i32,
+    seed: i64,
+    bits: &[i32],
+    raw: &[i64],
+    raw_off: &[i32],
+    pal: &[i16],
+    pal_off: &[i32],
+    io: &mut [u16; OUT_LEN],
+    ops_out: &mut [i64],
+    marks_out: &mut [i64],
+) -> (i32, i32) {
+    const FAIL: i32 = i32::MIN;
+    let mut map_guard = match SESSIONS.lock() {
+        Ok(g) => g,
+        Err(_) => return (FAIL, FAIL),
+    };
+    let Some(map) = map_guard.as_mut() else {
+        return (FAIL, FAIL);
+    };
+    let Some(ctx) = map.get_mut(&id) else {
+        return (FAIL, FAIL);
+    };
+    let Some(st) = ctx.v263.as_mut() else {
+        return (FAIL, FAIL);
+    };
+    let pack = crate::fill263::SectionPack { bits, raw, raw_off, pal, pal_off };
+    let g = &st.g;
+    let (marks_buf, ops_buf) = (&mut st.marks, &mut st.ops);
+    let sf = st.surface.as_ref();
+    let b263 = st.biomes.as_ref();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        g.carve_chunk(cx, cz, seed, &pack, io, marks_buf, ops_buf, sf, b263);
+    }));
+    match res {
+        Ok(()) => {
+            // Return the COPIED counts (legacy carveMarks caps at the java
+            // buffer and returns the copied count; the apply loop indexes the
+            // buffer up to the returned count, so reporting the full len would
+            // read past the buffer when marks > 1024).
+            let n = st.ops.len().min(ops_out.len());
+            ops_out[..n].copy_from_slice(&st.ops[..n]);
+            let nm = st.marks.len().min(marks_out.len());
+            marks_out[..nm].copy_from_slice(&st.marks[..nm]);
+            (n as i32, nm as i32)
+        }
+        Err(_) => (FAIL, FAIL),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // C ABI
 // ---------------------------------------------------------------------------
@@ -1896,6 +1954,65 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_carveMarks
     std::ptr::copy_nonoverlapping(n.marks.as_ptr() as *const u64, ptr as *mut u64, count);
     ((*tbl).v1_1.ReleaseLongArrayElements)(env, marks, ptr, 0);
     count as i32
+}
+
+/// cont-143 carver fuse: carveApply(long ctx, int cx, int cz, long seed,
+/// int[] meta, long[] raw, short[] pal, long[] ops, long[] marks) -> int
+/// packed (opsLen << 12) | marksLen, or i32::MIN when native declined.
+/// Same computation + same op/marks encoding as carve()+carveOps()+carveMarks(),
+/// fetched inside ONE sessions_lock hold (kills 2 lock re-contents + 2 crossings).
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_carveApply(
+    env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jni_sys::jlong,
+    cx: jni_sys::jint,
+    cz: jni_sys::jint,
+    seed: jni_sys::jlong,
+    meta: jni_sys::jintArray,
+    raw: jni_sys::jlongArray,
+    pal: jni_sys::jshortArray,
+    ops: jni_sys::jlongArray,
+    marks: jni_sys::jlongArray,
+) -> jni_sys::jint {
+    let tbl = *env;
+    let mlen = ((*tbl).v1_1.GetArrayLength)(env, meta as jni_sys::jarray) as usize;
+    let rlen = ((*tbl).v1_1.GetArrayLength)(env, raw as jni_sys::jarray) as usize;
+    let plen = ((*tbl).v1_1.GetArrayLength)(env, pal as jni_sys::jarray) as usize;
+    let olen = ((*tbl).v1_1.GetArrayLength)(env, ops as jni_sys::jarray) as usize;
+    let mklen = ((*tbl).v1_1.GetArrayLength)(env, marks as jni_sys::jarray) as usize;
+    if mlen < 72 {
+        return i32::MIN;
+    }
+    let mp = ((*tbl).v1_1.GetIntArrayElements)(env, meta, std::ptr::null_mut());
+    let rp = ((*tbl).v1_1.GetLongArrayElements)(env, raw, std::ptr::null_mut());
+    let pp = ((*tbl).v1_1.GetShortArrayElements)(env, pal, std::ptr::null_mut());
+    let op = ((*tbl).v1_1.GetLongArrayElements)(env, ops, std::ptr::null_mut());
+    let mkp = ((*tbl).v1_1.GetLongArrayElements)(env, marks, std::ptr::null_mut());
+    if mp.is_null() || rp.is_null() || pp.is_null() || op.is_null() || mkp.is_null() {
+        return i32::MIN;
+    }
+    let bits = std::slice::from_raw_parts(mp, 24);
+    let raw_off = std::slice::from_raw_parts(mp.add(24), 24);
+    let pal_off = std::slice::from_raw_parts(mp.add(48), 24);
+    let raw_slice = std::slice::from_raw_parts(rp, rlen);
+    let pal_slice = std::slice::from_raw_parts(pp as *const i16, plen);
+    let ops_slice = std::slice::from_raw_parts_mut(op as *mut i64, olen);
+    let marks_slice = std::slice::from_raw_parts_mut(mkp as *mut i64, mklen);
+    let mut io = [0u16; OUT_LEN];
+    let (n, nm) = carve_fetch(
+        ctx as i64, cx as i32, cz as i32, seed as i64, bits, raw_slice, raw_off,
+        pal_slice, pal_off, &mut io, ops_slice, marks_slice,
+    );
+    ((*tbl).v1_1.ReleaseIntArrayElements)(env, meta, mp, 0);
+    ((*tbl).v1_1.ReleaseLongArrayElements)(env, raw, rp, 0);
+    ((*tbl).v1_1.ReleaseShortArrayElements)(env, pal, pp, 0);
+    ((*tbl).v1_1.ReleaseLongArrayElements)(env, ops, op, 0);
+    ((*tbl).v1_1.ReleaseLongArrayElements)(env, marks, mkp, 0);
+    if n == i32::MIN {
+        return i32::MIN;
+    }
+    (n << 12) | (nm & 0xFFF)
 }
 
 // ---------------------------------------------------------------------------
