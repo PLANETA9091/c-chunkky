@@ -7802,3 +7802,11 @@ Work Log:
 
 Stage Summary:
 - margin_law = главный декомпозиционный результат дня: честный e2e это В ОСНОВНОМ маржинальная генерация + dependency-волны, не «простой». Приоритеты пересчитаны: (1) fill CPU (2.6x leverage), (2) deleg ports B3 (−1.3 CPU x 2.6 leverage на fill-часть... deleg — populate, leverage 1x), (3) UP_OTHER зеркало, (4) worker-matrix re-test при низком CPU.
+
+---
+Task ID: cont-142 addendum (14:55-15:25 +08). Orchestrator: cover A/B + integration.
+
+Work Log:
+- E-агент (cover lever) ПУШНУЛ d795527f: CoverStage.java (374 строки, полностью рефлективный NMS-companion, CRUS_COVER_STAGE=0/1/2) — margin staging через ПУБЛИЧНЫЙ ChunkTaskScheduler.beginChunkLoadForNonFullSync (без тикетов, unload-eligible, тот же путь что walk); staged-множество = СТРОГОЕ ПОДМНОЖЕСТВО контрольной работы (zero extra fills); Priority.LOW заполняет паркинг-паузы; writeRadius 0 у staged-статусов => контент-нейтрально.
+- Оркестратор верифицировал сам: мерж в рабочую ветку, jar c13e3b92, парный A/B (9000,9000, wipe, back-to-back): R1 S0 64.59 / S1 61.57 (cover 38.1->40.8), R2 S0 60.47 / S1 61.88 (cover 37.9->41.5). Дельты -3.02/+1.41 — ЗНАК ПЕРЕВЕРНУЛСЯ => INCONCLUSIVE (2-core шум); cover +3pp стабилен, но wall не следует (busy растёт тоже); margin_fills 253/256/256 = zero-extra-fills ПОДТВЕРЖДЁН. Stage2 (62.65) хуже S1. Вердикт: default OFF, CI 4-core арбитр перфа, судьи — арбитры паритета. Merged в main d795527f, push -> CI.
+- Продолжение: B3 (deleg ports) в работе; fill CPU фронт припаркован с квантованным полом (normalnoise 1.45 = perlin core post-hoist).

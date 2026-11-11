@@ -272,6 +272,22 @@
       "margin_fills": 232,
       "margin_fill_cpu_ms_per_inside_chunk": 55.9,
       "conclusion": "margin fill CPU = 1.76x inside fill CPU (77% of span); fill CPU cuts have 2.6x leverage on honest e2e: dWall ~= dFill*2.6/2lanes; ring-pregen lever REFUTED (ring pulls window through TERRAIN pre-arm, inside=16 invalid)"
+    },
+    "cover_ab": {
+      "region": "9000,9000",
+      "jar": "c13e3b92",
+      "paired_rounds": [
+        [
+          "S0 64.59",
+          "S1 61.57 (cover 40.8 vs 38.1, mfills 256 vs 253)"
+        ],
+        [
+          "S0 60.47",
+          "S1 61.88 (cover 41.5 vs 37.9)"
+        ]
+      ],
+      "stage2": "62.65 (worse than S1)",
+      "verdict": "INCONCLUSIVE at 2-core noise: paired deltas -3.02/+1.41 sign-flip; cover +3pp consistent but wall does not follow (busy rises too); margin_fills equal => zero-extra-fills verified; default stays OFF; CI 4-core = perf arbiter, judge gates = parity arbiter"
     }
   },
   "cont141_measurements": {
