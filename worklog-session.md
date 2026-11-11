@@ -7840,3 +7840,18 @@ Work Log:
 
 Stage Summary:
 - Кампейная позиция: honest 100.8 (cont-135 baseline) -> 47.02 (cont-141) -> 46.49 grid-era; native inside-window 23.4 -> 20.4; busy 20.1 -> 18.0. Все решения — замерами; две честные отмены за сессию (PORT3, reswap).
+
+---
+Task ID: cont-143 (2026-11-11 17:05-19:50 +01). Orchestrator: kickoff + attribution corrections + 2 agents.
+
+Work Log:
+- CI ALL GREEN through HEAD 93eb77c8 (grid champion judged). Kickoff pushed (257562f9).
+- GRidera JFR re-profile (CRUS_JFR=1, fresh 11200/11300, 1438 samples): window-time cut (>=17:11:00) reveals MISATTRIBUTION #4 — the climate whale (RTree/NoiseStack 5.8-8ms/ch) = BOOT time (spawn + stronghold rings findBiomeHorizontal + datapack load), NOT window. Window climate residual ~0.07ms/ch (findNearest0=0 window samples). Structure-climate lever REFUTED for windows; agent a2's original brief corrected on the fly (relaunched as a2 with corrected profile).
+- MARGIN MECHANISM SOLVED (arithmetic on measured counters): margin_fills=252-256/window = fill footprint 20x20 (12x12 window + r4) — cont-123 fills=400@inside=144 matches EXACTLY (400=20x20). r4 = light/spawn chain (INIT_LIGHT needs TERRAIN r2, LIGHT r1, SPAWN r1). Margin native-fill CPU ~1.3-1.5s/window vs inside 0.9s. Ideal wall at 100% cover ~= 15ms/ch; today 62-93 => cover 33-36% = second whale.
+- WINDOW JAVA WHALES (a2 reproduced+corrected): layoutBulk 31/1.08ms (OURS, L1 impl), save-path 57/1.98ms (REFUTED plugin-side: Paper FastNBT already fast; Paper-fork item), streams=vanilla EnvironmentAttributeSystem re-run per WorldGenRegion ctor (5/ch) 36/1.25ms (REFUTED plugin-side; Paper-fork item), NoiseStack 19 = 8 geode crack (agent b) + 11 aquifer ctor (vanilla), starlight 0.45, CarverDriver.populate 0.10.
+- CARVER OPS phase analysis: carveOps/carveMarks = pure session memcpy (ffi.rs:1855/1879) — the 2.1-4.3ms/ch ops phase = java long[] alloc + 2 JNI crossings + ReleaseLongArrayElements mode-0 copy-back suspicion. Fuse candidate (single carve->ops+marks JNI, JNI_ABORT) est 0.3-1ms/ch — front #4 behind agents.
+- Agents: (a2, wt_cont143a/cont143-structgrid) window java costs — attribution committed 0440a604, L1 layoutBulk fast pack in progress; (b2, wt_cont143b/cont143-bulkop) adopted dead b1's census WIP (fccfd7c5), bulk-op JNI impl in progress (features_jni.rs, DecoDriver.java). b1 census (stone mock): lakes rare placements (8+111/1024) @1200-1700 ops; geode mock-artifact 0 (h=64 clips y-range) — real geode = every chunk ~0.6ms/ch vanilla (JFR).
+- Baselines today (rect-variance large, paired A/B mandatory): 11500 heavy-biome honest 72.96 (dripstone 199/sculk 484/sulfur 57); 10700 honest 62.93 (fossil 183/desert_well 183); anchor zone 10500 (yesterday 46.49) burned.
+
+Stage Summary:
+- Attribution hygiene: 4-я misattribution поймана ДО траты агент-часов (brief исправлен на лету). Margin law получил точный механизм (20x20 через light/spawn). Все новые фронты раздаются агентам с измеренными числами; orchestrator не верит профилю без window-cut.
