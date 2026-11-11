@@ -2,7 +2,7 @@
  "goal": "e2e <= 5 ms/chunk on the noisy 2-core sandbox, Paper 26.3 build 222, vanilla worldgen + native engine (deco=1, carvers=1)",
  "metric": "harness/e2e263.sh: forceload fresh 12x12 window, wall ms/chunk; report 3 windows + crusgenstats (p50/p99, phase split)",
  "platform": "Paper 26.3 build 222 sha256 f649771a..., JDK Temurin 25.0.5+8, seed 3257840388504953787, NO datapacks (26.3 pack restore is a separate task)",
- "updated": "2026-11-11T21:11:16+00:00",
+ "updated": "2026-11-11T21:18:06+00:00",
  "baseline": {
   "source": "cont-135 reference/prof_session_deco263_q13.txt (MINE windows; tree 9a4d6272 = cont-134)",
   "e2e_windows_ms": [
@@ -211,9 +211,9 @@
   "PROGRESS.json read at start of each iteration, updated after every experiment"
  ],
  "goal_status": {
-  "best_honest_e2e_ms": 46.49,
-  "best_honest_note": "46.49 = grid era, 12x12 @10500 quiet (cont-142); champion config now: worker=2/FILL=2/no-watchdog/CRUS_BIOME_GRID=1/MAT_V2/S1-ON/H7-ON",
-  "today_honest_ms": 47.02,
+  "best_honest_e2e_ms": 43.34,
+  "best_honest_note": "43.34 = cont-143 CORRECT-carving + carver-fuse, 12x12 @14600 (w2/F2/no-watchdog/grid/fuse-ON); carver wall 6.36 (apply 4.38 real work, opsApplied 76K/ch); PRIOR 46.49 measured an UN-CARVED world (finding #5)",
+  "today_honest_ms": 43.34,
   "today_24x24_ms": [
    57.13,
    41.41
