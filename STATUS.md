@@ -2,7 +2,31 @@
 
 Компактная карточка состояния кампании. Полная хроника — `worklog-session.md`
 (записи cont-XX по датам). Этот файл обновляется при изменении КАРТЫ, не при
-каждом тике. Последнее обновление: cont-129.
+каждом тике. Последнее обновление: cont-143.
+
+## CONT-143 КАРТА (главное)
+
+- **HONEST BEST: 43.34 ms/ch** (12x12 @14600, w2/F2/no-watchdog/grid/fuse-ON)
+  — с КОРРЕКТНЫМ карвингом (vanilla-parity world). Все номера cont-138..142
+  (46.49-50.97) измеряли мир БЕЗ карвинг-применения — см. FINDING #5.
+- **FINDING #5 (CRITICAL, исправлен e861e4d4)**: carver apply loop звал
+  4-арг invoke на 5-параметровом setBlockState с cont-138 → каждый
+  вырезанный чанк терял carve ops (caves/topMaterial/marks) молча; CI
+  carvers lane была вакуумной (probe-генератор, delta=15). Чинить: 5-й
+  boolean + MethodHandle (apply 10.24→9.68→4.38 c TL-буферами фьюза).
+- **CARVER FUSE DEFAULT ON (68aa8efc)**: carveApply JNI = carve+fetch в
+  ОДНОЙ sessions_lock + TL-буферы; byte-идентичный транспорт; парный A/B
+  ×2: e2e −2.97/−7.44, carver wall 20.2→5.4-6.6. CRUS_CARVER_FUSE=0 = legacy.
+- **L1 layoutBulk fast pack REJECTED (UNSAFE)**: bulk verify поймал
+  want=AIR got=DEEPSLATE + AIOOBE в global-пути; ветка cont143-structgrid
+  не смержена, дефолт OFF.
+- **SerialGC REFUTED** для перф-конфига (60.11 vs 39.91; паузы стопорят
+  пайплайн без параллельных GC-потоков).
+- **MARGIN MECHANISM**: fill footprint 20x20 (r4 = light/spawn chain),
+  256 margin fills/window × ~5-6ms CPU — главный остаточный whale вместе
+  с cover 33-41%.
+- Ненулевые счётчики непустоты: carver-phases печатает
+  opsApplied/declined/applyFailed/fuse (контроль против вакуумных гейтов).
 
 ## Цель и инвариант
 
