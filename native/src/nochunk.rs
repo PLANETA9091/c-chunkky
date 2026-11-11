@@ -411,6 +411,9 @@ pub struct ChunkGen<'e> {
     /// Spare pre-allocated plane buffers recycled across fills (parallel
     /// graph path): avoids a 31KB alloc+zero per plane evaluation.
     plane_pool: Vec<Vec<f64>>,
+    /// cont-140: reusable all-slots plane buffer for fill_slice (batched
+    /// plane eval writes it, then it scatters into interp slices).
+    plane_scratch: Vec<f64>,
     aquifer: std::sync::Arc<AquiferState>,
     /// Per-point DAG memo (see MemoCtx). Every evaluation context (corner
     /// point / block / probe) bumps the serial; shared subtrees then evaluate
@@ -902,6 +905,7 @@ impl<'e> ChunkGen<'e> {
             plane_cache_z: i32::MIN,
             plane_cache: Vec::new(),
             plane_pool: Vec::new(),
+            plane_scratch: Vec::new(),
             aquifer: std::sync::Arc::new(AquiferState::new(env.wg.min_y, env.wg.height)),
             memo: MemoCtx::new(compiled.arena.len()),
             env,
@@ -1709,6 +1713,7 @@ impl<'e> ChunkGen<'e> {
             plane_cache_z: i32::MIN,
             plane_cache: Vec::new(),
             plane_pool: Vec::new(),
+            plane_scratch: Vec::new(),
             aquifer: std::sync::Arc::clone(&self.aquifer),
             memo: MemoCtx::new(self.compiled.arena.len()),
             prof: Prof {
@@ -3290,148 +3295,48 @@ impl<'e> ChunkGen<'e> {
             }
             return;
         }
-        // Slot 0 (final_density) is ~88% of the slice cost: evaluate it in
-        // 4-corner batches through eval4 (lane-identical arithmetic + SIMD
-        // noise kernels — bit-identical to the scalar eval, verified by
-        // eval4_matches_scalar_eval and the fill out_hash checks). Slots 1-7
-        // stay on the scalar memoized path: they are single-noise children
-        // that reuse slot 0's per-point CSE context.
-        let nthr = self.slice_threads.min(total);
-        if nthr > 1 {
-            // Parallel: corners are pure functions of (x, y, z); slot 0
-            // batches go through eval4 (no mutable state), slots 1-7 use
-            // per-thread MemoCtx instances (bit-identical, disjoint ranges).
-            let env = self.env;
-            let compiled = &self.compiled;
-            let children = &self.interp_children;
-            let interp = &self.interp;
-            let cell_noise_min_y = self.cell_noise_min_y;
-            let child0 = self.interp_children[0];
-            let lanes = self.slice_lanes;
-            let mut slot0 = vec![0f64; total];
-            let mut results = vec![0.0f64; nslots * total];
-            let per = total.div_ceil(nthr);
-            let chunk_len = per * nslots;
-            let result_chunks: Vec<&mut [f64]> = results.chunks_mut(chunk_len).collect();
-            let slot0_chunks: Vec<&mut [f64]> = slot0.chunks_mut(per).collect();
-            std::thread::scope(|s| {
-                for (t, (out, slot0_out)) in result_chunks.into_iter().zip(slot0_chunks).enumerate() {
-                    let lo = t * per;
-                    if lo >= total {
-                        break;
-                    }
-                    let hi = (lo + per).min(total);
-                    s.spawn(move || {
-                        let mut memo = MemoCtx::new(compiled.arena.len());
-                        // slot 0 in groups of G corners (tail-padded duplicates)
-                        match lanes {
-                            8 => Self::slice_slot0::<8>(
-                                env, compiled, child0, interp, corner_x, first_cell_z,
-                                cw, ch, ny, cell_noise_min_y, lo, hi, slot0_out,
-                            ),
-                            _ => Self::slice_slot0::<4>(
-                                env, compiled, child0, interp, corner_x, first_cell_z,
-                                cw, ch, ny, cell_noise_min_y, lo, hi, slot0_out,
-                            ),
-                        }
-                        for p in lo..hi {
-                            let i = p / ny;
-                            let y = p % ny;
-                            let corner_z = (first_cell_z + i as i32) * cw;
-                            let corner_y = (y as i32 + cell_noise_min_y) * ch;
-                            let pt = Pt { x: corner_x, y: corner_y, z: corner_z };
-                            memo.next_serial();
-                            for slot in 1..nslots {
-                                let child = children[slot];
-                                // y-range constant slots (ore veins above y=51):
-                                // the in-place eval would take the same constant
-                                // branch — bit-exact skip of the noise subtree.
-                                let v = match slot_corner_const(compiled, slot, child, corner_y) {
-                                    Some(c) => c,
-                                    None => env.eval(compiled, child, pt, Mode::Slice, interp, Some(&memo)),
-                                };
-                                out[(p - lo) * nslots + slot] = v;
-                            }
-                        }
-                    });
-                }
-            });
-            for p in 0..total {
-                let i = p / ny;
-                let y = p % ny;
-                if is_first {
-                    self.interp.slice0_set(0, i, y, slot0[p]);
-                } else {
-                    self.interp.slice1_set(0, i, y, slot0[p]);
-                }
-                for slot in 1..nslots {
-                    let v = results[p * nslots + slot];
-                    let slot = slot as u16;
+        // cont-140: ALL slots go through the production batched plane path
+        // (eval_plane_batched — the same function the plane graph, the
+        // pipeline/prefetch workers and the strip clones use for every
+        // plane). Previously slot 0 was batched here but slots 1-7 ran the
+        // scalar per-corner loops (~1.2-2.0ms/ch measured by the cont140
+        // per-WKind probe). Bit-exact: plane values are pure functions of
+        // the corner points; this is the CI-judged production eval path
+        // (eval4/8 lane-identical arithmetic + eval4_matches_scalar_eval).
+        let plane_len = nslots * total;
+        let mut buf = std::mem::take(&mut self.plane_scratch);
+        buf.clear();
+        buf.resize(plane_len, 0.0);
+        Self::eval_plane_into_pub(
+            self.env,
+            &self.compiled,
+            &self.interp_children,
+            corner_x,
+            first_cell_z,
+            self.cell_count_xz as usize,
+            self.cell_count_y as usize,
+            self.cell_noise_min_y,
+            cw,
+            ch,
+            self.slice_lanes,
+            &mut buf,
+        );
+        // scatter into interp slices (layout [slot][z][y] matches exactly)
+        for slot in 0..nslots {
+            let slot_id = slot as u16;
+            let base = slot * total;
+            for i in 0..nz {
+                for y in 0..ny {
+                    let v = buf[base + i * ny + y];
                     if is_first {
-                        self.interp.slice0_set(slot, i, y, v);
+                        self.interp.slice0_set(slot_id, i, y, v);
                     } else {
-                        self.interp.slice1_set(slot, i, y, v);
-                    }
-                }
-            }
-            return;
-        }
-        // Serial: slot 0 via batch groups, slots 1-7 scalar with memo.
-        let mut slot0 = vec![0f64; total];
-        {
-            let env = self.env;
-            let compiled = &self.compiled;
-            let interp = &self.interp;
-            let child0 = self.interp_children[0];
-            let cell_noise_min_y = self.cell_noise_min_y;
-            let lanes = self.slice_lanes;
-            match lanes {
-                8 => Self::slice_slot0::<8>(
-                    env, compiled, child0, interp, corner_x, first_cell_z,
-                    cw, ch, ny, cell_noise_min_y, 0, total, &mut slot0,
-                ),
-                _ => Self::slice_slot0::<4>(
-                    env, compiled, child0, interp, corner_x, first_cell_z,
-                    cw, ch, ny, cell_noise_min_y, 0, total, &mut slot0,
-                ),
-            }
-        }
-        for i in 0..=self.cell_count_xz {
-            let corner_z = (first_cell_z + i as i32) * cw;
-            for y in 0..=self.cell_count_y {
-                let corner_y = (y as i32 + self.cell_noise_min_y) * ch;
-                let pt = Pt { x: corner_x, y: corner_y, z: corner_z };
-                let p = i * ny + y;
-                {
-                    let slot = 0u16;
-                    if is_first {
-                        self.interp.slice0_set(slot, i as usize, y, slot0[p]);
-                    } else {
-                        self.interp.slice1_set(slot, i as usize, y, slot0[p]);
-                    }
-                }
-                // The batch slot0 eval does not touch self.memo; slots 1-7
-                // read it — bump the context once per corner point exactly
-                // like the pre-batch eval_fresh did, otherwise slots 1-7
-                // resolve stale stamps from an older point (silently wrong
-                // plane values -> wrong substances).
-                self.memo.next_serial();
-                for slot in 1..nslots {
-                    let child = self.interp_children[slot];
-                    // y-range constant slots (see the parallel path note)
-                    let v = match slot_corner_const(&self.compiled, slot, child, corner_y) {
-                        Some(c) => c,
-                        None => self.eval(child, pt, Mode::Slice),
-                    };
-                    let slot = slot as u16;
-                    if is_first {
-                        self.interp.slice0_set(slot, i as usize, y, v);
-                    } else {
-                        self.interp.slice1_set(slot, i as usize, y, v);
+                        self.interp.slice1_set(slot_id, i, y, v);
                     }
                 }
             }
         }
+        self.plane_scratch = buf;
         if let Some(want) = self.dump_planes_want {
             if start_cell_x == want {
                 let nz = self.cell_count_xz + 1;
