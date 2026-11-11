@@ -7855,3 +7855,20 @@ Work Log:
 
 Stage Summary:
 - Attribution hygiene: 4-я misattribution поймана ДО траты агент-часов (brief исправлен на лету). Margin law получил точный механизм (20x20 через light/spawn). Все новые фронты раздаются агентам с измеренными числами; orchestrator не верит профилю без window-cut.
+
+---
+Task ID: cont-143 (2026-11-11 17:05-22:00 +01). Orchestrator: attribution + CORRUPTION FINDING + carver fuse. 2 agent streams (a2 dead post-attribution, b3 adopt-pending).
+
+Work Log:
+- CI ALL GREEN through 93eb77c8 (grid champion). Gridera JFR re-profile (1438 samples): MISATTRIBUTION #4 — climate whale (RTree/NoiseStack) = BOOT time (spawn + stronghold rings + datapack load); window residual ~0.07ms/ch. Structure-climate lever REFUTED for windows; brief corrected on the fly.
+- MARGIN MECHANISM SOLVED: margin_fills 252-256/window = fill footprint 20x20 (r4 via INIT_LIGHT/LIGHT/SPAWN chain); margin native-fill CPU 1.3-1.5s/window vs inside 0.9s; ideal wall ~15ms/ch at 100% cover.
+- WINDOW JAVA WHALES (a2 reproduced, committed 0440a604): layoutBulk 1.08, save-path 1.98 (REFUTED plugin-side: Paper FastNBT; fork item), streams=vanilla envattr 1.25 (REFUTED; fork item), NoiseStack=8 geode+11 aquifer-ctor, starlight 0.45.
+- L1 layoutBulk fast pack (a2 502-line impl, orchestrator takeover): 3 launch bugs fixed (findConstructor void-return, generic-T invokeExact erasure, metafactory samErased) — engaged but CORRUPTS: bulk verify want=AIR got=DEEPSLATE + AIOOBE@2270 in global path. REJECTED (UNSAFE); branch cont143-structgrid kept unmerged, default OFF.
+- FINDING #5 (CORRUPTION, CRITICAL): carver apply loop invoked 4-arg on the resolved 5-param setBlockState since cont-138 (ab97461b) → IllegalArgumentException on FIRST op of EVERY carved chunk → carve ops (caves/topMaterial/fluid marks) SILENTLY DROPPED in ALL local CRUS_NATIVE_CARVERS=1 runs. apply=0.00 in stats = the loop never completed (was read as the H10 win!). CI carvers lane vacuous (probe generator, delta=15, zero failures — verifies nothing). Honest anchor RESET: 46.49 'best' measured an un-carved world.
+- FIX (e861e4d4): 5th boolean arg + typed MethodHandle (apply 10.24 reflection → 9.68 mh; smoke 827 failures → 0). Native carve-vs-vanilla carve deltas now visible: AIR -30K/9.9M (0.3%), ANDESITE +3.8K on rect 20480 — gate now DETECTS; block-level carve parity vs vanilla ref = follow-up.
+- CARVER FUSE (68aa8efc): carveApply JNI = carve + op/marks fetch in ONE sessions_lock hold + TL buffers. Byte-identical transport; cargo 92/92. Paired A/B ×2 (fixed apply both legs): e2e OFF 54.63/54.63 vs ON 51.66/47.19; carver wall 20.16/20.28 → 6.55/5.43 (the 3-call path's lock re-acquisitions contend brutally once apply does real work). DEFAULT ON.
+- BASELINE ARITHMETIC TRAPS: run263_baseline re-deploys $ROOT/plugin jar every run (worktree jars must be copied to $ROOT first — 2 wasted A/B pairs); EXTRA_ENV needed for env flips (plain env vars don't reach the JVM).
+
+Stage Summary:
+- Honest e2e: 46.49 (broken world) → 47.19 @13700 (CORRECT carving + fuse) = new honest best; anchor ~47-52. Вся кампания cont-138..142 измеряла мир без карвинга — все относительные сравнения валидны (одинаково сломанный бейзлайн), абсолютные номера — нет.
+- Next: (1) b3 bulk-op adoption (agent WIP 402 lines), (2) carve-activity counters + non-vacuous carvers CI gate, (3) apply-path optimization (getAndSet+recount ≈ 5.50 vs vanilla-path 9.68 — restore old path for -4ms/ch IF bit-parity proven), (4) margin/serialization Q6 with the r4 mechanism map.
