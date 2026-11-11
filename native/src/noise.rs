@@ -2890,6 +2890,58 @@ unsafe fn blend_minmax_loop_avx2(
     }
 }
 
+// cont-142 blend micro-profiler (CRUS_BLENDPROF=1): decompose
+// compute_batch8_col512 into setup / main-octave loop / min+max-octave loop.
+// Zero cost when the env is unset.
+pub static BP_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static BP_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static BP_TOTAL_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static BP_MAIN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static BP_MINMAX_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static BP_MAIN_KERNEL_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static BP_MINMAX_KERNEL_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static BP_GENERIC_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static BP4_COL_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static BP4_COL_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static BP4_GENERIC_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static BP4_GENERIC_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub fn blend_prof_init() {
+    let on = std::env::var("CRUS_BLENDPROF").as_deref() == Ok("1");
+    BP_ON.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn blend_prof_reset() {
+    for c in [
+        &BP_CALLS,
+        &BP_TOTAL_NS,
+        &BP_MAIN_NS,
+        &BP_MINMAX_NS,
+        &BP_MAIN_KERNEL_CALLS,
+        &BP_MINMAX_KERNEL_CALLS,
+        &BP_GENERIC_CALLS,
+        &BP4_COL_CALLS,
+        &BP4_COL_NS,
+        &BP4_GENERIC_CALLS,
+        &BP4_GENERIC_NS,
+    ] {
+        c.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+/// One-line snapshot of which blended-noise code path is live (diagnostics).
+pub fn blend_path_snapshot() -> String {
+    format!(
+        "blend_path[avx512={} gather={} maincol={} veccol={} mixgather={}]",
+        avx512_selected(),
+        std::env::var("CRUS_BLENDGATHER").as_deref() != Ok("0"),
+        std::env::var("CRUS_BLEND_MAINCOL").as_deref() != Ok("0"),
+        std::env::var("CRUS_BLEND_VECCOL").as_deref() == Ok("1"),
+        std::env::var("CRUS_MIXGATHER").as_deref() != Ok("0"),
+    )
+}
+
 impl BlendedNoise {
     pub fn create(
         rng: &mut XoroshiroRandomSource,
@@ -3012,6 +3064,22 @@ impl BlendedNoise {
     /// skip_min/skip_max decision is per lane (skipped lanes keep their
     /// accumulator at 0.0, matching vanilla's never-run loop). Bit-exact.
     pub fn compute_batch(
+        &self,
+        bx: &[i32; 4],
+        by: &[i32; 4],
+        bz: &[i32; 4],
+    ) -> [f64; 4] {
+        let bp = crate::noise::BP_ON.load(std::sync::atomic::Ordering::Relaxed);
+        let t0 = if bp { Some(std::time::Instant::now()) } else { None };
+        let r = self.compute_batch_inner(bx, by, bz);
+        if bp {
+            BP4_GENERIC_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            BP4_GENERIC_NS.fetch_add(t0.unwrap().elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        r
+    }
+
+    fn compute_batch_inner(
         &self,
         bx: &[i32; 4],
         by: &[i32; 4],
@@ -3253,6 +3321,9 @@ impl BlendedNoise {
         by: &[i32; 8],
         bz: &[i32; 8],
     ) -> [f64; 8] {
+        if crate::noise::BP_ON.load(std::sync::atomic::Ordering::Relaxed) {
+            BP_GENERIC_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut d0 = [0f64; 8];
         let mut d1 = [0f64; 8];
         let mut d2 = [0f64; 8];
@@ -3561,6 +3632,23 @@ impl BlendedNoise {
         bz: i32,
         col_base: usize,
     ) -> [f64; 4] {
+        let bp = crate::noise::BP_ON.load(std::sync::atomic::Ordering::Relaxed);
+        let t0 = if bp { Some(std::time::Instant::now()) } else { None };
+        let r = self.compute_batch_col_inner(bx, by, bz, col_base);
+        if bp {
+            BP4_COL_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            BP4_COL_NS.fetch_add(t0.unwrap().elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        r
+    }
+
+    fn compute_batch_col_inner(
+        &self,
+        bx: i32,
+        by: &[i32; 4],
+        bz: i32,
+        col_base: usize,
+    ) -> [f64; 4] {
         let d0 = bx as f64 * self.xz_multiplier;
         let d2 = bz as f64 * self.xz_multiplier;
         let d3 = d0 / self.xz_factor;
@@ -3687,10 +3775,17 @@ impl BlendedNoise {
         bz: i32,
         col_base: usize,
     ) -> [f64; 8] {
+        let bp = crate::noise::BP_ON.load(std::sync::atomic::Ordering::Relaxed);
+        let t0 = if bp { Some(std::time::Instant::now()) } else { None };
         #[cfg(target_arch = "x86_64")]
         {
             if crate::noise::avx512_selected() {
-                return self.compute_batch8_col512(bx, by, bz, col_base);
+                let r = self.compute_batch8_col512(bx, by, bz, col_base);
+                if bp {
+                    BP_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    BP_TOTAL_NS.fetch_add(t0.unwrap().elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                }
+                return r;
             }
         }
         let mut lo = [0i32; 4];
@@ -3702,6 +3797,10 @@ impl BlendedNoise {
         let mut out = [0f64; 8];
         out[..4].copy_from_slice(&a);
         out[4..].copy_from_slice(&b);
+        if bp {
+            BP_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            BP_TOTAL_NS.fetch_add(t0.unwrap().elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         out
     }
 
@@ -3737,6 +3836,8 @@ impl BlendedNoise {
         // is lane-identical to the generic one (blended_col8 parity tests).
         let mut d10 = [0f64; 8];
         let mut amp = 1.0f64;
+        let bp = crate::noise::BP_ON.load(std::sync::atomic::Ordering::Relaxed);
+        let t_main = if bp { Some(std::time::Instant::now()) } else { None };
         BLEND_COL_CACHE.with(|m| {
             let mut m = m.borrow_mut();
             let need = col_base + BLEND_COL_STRIDE;
@@ -3754,6 +3855,9 @@ impl BlendedNoise {
                     let wx = wrap(d3 * amp);
                     let wz = wrap(d5 * amp);
                     let st = &mut m[col_base + 32 + i];
+                    if bp {
+                        BP_MAIN_KERNEL_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     let v = if blend_maincol_enabled() {
                         oct.noise_5_batch_col8(st, wx, wz, &wy, d7 * amp, &ymax)
                     } else {
@@ -3766,6 +3870,9 @@ impl BlendedNoise {
                 amp /= 2.0;
             }
         });
+        if bp {
+            BP_MAIN_NS.fetch_add(t_main.unwrap().elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut d11b = [0f64; 8];
         let mut skip_min = [false; 8];
         let mut skip_max = [false; 8];
@@ -3784,6 +3891,7 @@ impl BlendedNoise {
             let mut d8 = [0f64; 8];
             let mut d9 = [0f64; 8];
             let mut amp = 1.0f64;
+            let t_mm = if bp { Some(std::time::Instant::now()) } else { None };
             for i in 0..16usize {
                 // column-constant wrapped inputs (shared by min and max)
                 let kx = wrap(d0 * amp);
@@ -3798,6 +3906,9 @@ impl BlendedNoise {
                 if !skip_min.iter().all(|s| *s) {
                     if let Some(oct) = self.min_noise.get_octave_noise(i) {
                         let st = &mut m[col_base + i];
+                        if bp {
+                            BP_MINMAX_KERNEL_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         let v = oct.noise_5_batch_col8(st, kx, kz, &dy, dyy, &ymax);
                         for l in 0..8 {
                             if !skip_min[l] {
@@ -3809,6 +3920,9 @@ impl BlendedNoise {
                 if !skip_max.iter().all(|s| *s) {
                     if let Some(oct) = self.max_noise.get_octave_noise(i) {
                         let st = &mut m[col_base + 16 + i];
+                        if bp {
+                            BP_MINMAX_KERNEL_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         let v = oct.noise_5_batch_col8(st, kx, kz, &dy, dyy, &ymax);
                         for l in 0..8 {
                             if !skip_max[l] {
@@ -3818,6 +3932,9 @@ impl BlendedNoise {
                     }
                 }
                 amp /= 2.0;
+            }
+            if bp {
+                BP_MINMAX_NS.fetch_add(t_mm.unwrap().elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
             }
             let mut out = [0f64; 8];
             for l in 0..8 {

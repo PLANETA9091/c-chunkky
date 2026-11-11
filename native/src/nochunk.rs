@@ -527,6 +527,14 @@ pub static JP_SELECT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 pub static JP_PAR_PLANES_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static JP_PAR_STRIPS_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+// cont-142 material micro-profiler (timers run when gen.prof.enabled, i.e.
+// CRUS_PROFILE=1): split the material walk into the material_row4 fast path
+// and the per-block fallback. JP_MATERIAL_NS - MT_ROW4_NS = fallback time.
+pub static MT_ROW4_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static MT_ROW4_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static MT_ROW4_TAKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static MT_FB_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Accumulate one fill's phase deltas into the global JNI prof.
 fn jni_prof_accum(before: &Prof, after: &Prof, wall_ns: u64) {
     use std::sync::atomic::Ordering::Relaxed;
@@ -3368,6 +3376,35 @@ impl<'e> ChunkGen<'e> {
     /// needs the per-block path (any subst > 0 -> ore per block, uncached
     /// summary, mixed statuses, beard, or the y == -54 water case).
     fn material_row4(
+        &mut self,
+        block_x: i32,
+        block_y: i32,
+        block_z0: i32,
+        iy: i32,
+        ix: i32,
+        base_out: usize,
+        out: &mut [u16; OUT_LEN],
+    ) -> bool {
+        // cont-142 micro-profiler: wrap the fast path so its wall time and
+        // taken/fallback split are visible (JP_MATERIAL_NS - MT_ROW4_NS =
+        // per-block fallback time). Zero cost when prof is off.
+        let prof_on = self.prof.enabled;
+        let t0 = if prof_on { Some(std::time::Instant::now()) } else { None };
+        let r = self.material_row4_inner(block_x, block_y, block_z0, iy, ix, base_out, out);
+        if let Some(t0) = t0 {
+            use std::sync::atomic::Ordering::Relaxed;
+            MT_ROW4_NS.fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
+            MT_ROW4_ROWS.fetch_add(1, Relaxed);
+            if r {
+                MT_ROW4_TAKEN.fetch_add(1, Relaxed);
+            } else {
+                MT_FB_ROWS.fetch_add(1, Relaxed);
+            }
+        }
+        r
+    }
+
+    fn material_row4_inner(
         &mut self,
         block_x: i32,
         block_y: i32,
