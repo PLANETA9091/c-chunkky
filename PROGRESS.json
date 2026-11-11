@@ -2,7 +2,7 @@
  "goal": "e2e <= 5 ms/chunk on the noisy 2-core sandbox, Paper 26.3 build 222, vanilla worldgen + native engine (deco=1, carvers=1)",
  "metric": "harness/e2e263.sh: forceload fresh 12x12 window, wall ms/chunk; report 3 windows + crusgenstats (p50/p99, phase split)",
  "platform": "Paper 26.3 build 222 sha256 f649771a..., JDK Temurin 25.0.5+8, seed 3257840388504953787, NO datapacks (26.3 pack restore is a separate task)",
- "updated": "2026-11-11T17:52:05+00:00",
+ "updated": "2026-11-11T19:06:56+00:00",
  "baseline": {
   "source": "cont-135 reference/prof_session_deco263_q13.txt (MINE windows; tree 9a4d6272 = cont-134)",
   "e2e_windows_ms": [
@@ -402,5 +402,19 @@
    "cont143_b_bulkop": "bulk-op path for PORT3 (lake_lava x2 + amethyst_geode): 1 JNI call -> packed buffer -> java apply; mode CRUS_PORT3_MODE 0/1/2. Branch cont143-bulkop, worktree wt_cont143b. PORT3 opstream regression context: ON 68.07 vs OFF 65.42."
   },
   "rules_reminder": "agents: no server boots (orchestrator serializes server work), push every milestone, honest INCONCLUSIVE allowed; orchestrator runs paired e2e after landing"
+ },
+ "cont143_margin_mechanism": {
+  "finding": "margin_fills=252-256/window EXPLAINED: fill footprint = 20x20 (window r4) — inside 144 + margin 256; r4 = light/spawn chain (INIT_LIGHT needs TERRAIN r2, LIGHT r1 more, SPAWN r1 more) — matches cont-123 fills=400@inside=144 (400=20x20 exactly)",
+  "cost": "margin native-fill CPU ~256 x 5-6ms = 1.3-1.5s/window vs inside 0.9s; loaded fill wall 22-28ms = CFS contention (4+ threads on 2 cores), not native cost",
+  "arithmetic": "ideal wall at 100% cover ~= total native CPU ~4.3s / 2 cores ~ 15ms/ch; today 62-93 -> cover 33-36% is the second whale (dependency waves + light-chain serialization)",
+  "attribution_hygiene": "misattribution #4 caught: window-time climate residual = ~0.07ms/ch only (NoiseStack 19 samples, likely geode crack noise); the 5.8-8ms/ch climate whale = BOOT time (spawn + stronghold rings findBiomeHorizontal + datapack load) — refuted as window lever; JFR artifacts kept at reference/jfr_cont143/",
+  "window_java_items": [
+   "layoutBulk ~1.0ms/ch (ours, agent a2)",
+   "save-path NBT ~1.1ms/ch (agent a2)",
+   "geode vanilla ~0.45-1.1ms/ch incl crack noise (agent b bulk-op)",
+   "starlight ~0.5ms/ch (parked, H5 was inconclusive)",
+   "streams/spliterators ~1.2ms/ch attribution TBD (agent a2)"
+  ],
+  "agents": "a2 (window java costs) alive+building plugin; b (PORT3 bulk-op) alive+building probe bins"
  }
 }
