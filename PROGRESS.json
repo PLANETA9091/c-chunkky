@@ -2,7 +2,7 @@
  "goal": "e2e <= 5 ms/chunk on the noisy 2-core sandbox, Paper 26.3 build 222, vanilla worldgen + native engine (deco=1, carvers=1)",
  "metric": "harness/e2e263.sh: forceload fresh 12x12 window, wall ms/chunk; report 3 windows + crusgenstats (p50/p99, phase split)",
  "platform": "Paper 26.3 build 222 sha256 f649771a..., JDK Temurin 25.0.5+8, seed 3257840388504953787, NO datapacks (26.3 pack restore is a separate task)",
- "updated": "2026-11-11T19:06:56+00:00",
+ "updated": "2026-11-11T21:11:16+00:00",
  "baseline": {
   "source": "cont-135 reference/prof_session_deco263_q13.txt (MINE windows; tree 9a4d6272 = cont-134)",
   "e2e_windows_ms": [
@@ -416,5 +416,14 @@
    "streams/spliterators ~1.2ms/ch attribution TBD (agent a2)"
   ],
   "agents": "a2 (window java costs) alive+building plugin; b (PORT3 bulk-op) alive+building probe bins"
+ },
+ "cont143_carver_fuse": {
+  "CRITICAL_FINDING": "carver apply loop (ab97461b, cont-138 H10) invoked 4-arg on the resolved 5-param LevelChunkSection.setBlockState -> IllegalArgumentException on the FIRST op of EVERY carved chunk -> carve ops (caves/topMaterial/fluid marks) SILENTLY DROPPED in all local CRUS_NATIVE_CARVERS=1 runs since cont-138. CI carvers lane vacuous (runs probe generator / no driver activity: delta=15, zero failures). The cont-138 'carver wall 9.92->5.05' was the bug (apply=0 = loop never completed). Honest e2e anchor RESET: broken-world 46.49 was not a vanilla-parity world.",
+  "FIX": "5th boolean arg + typed MethodHandle (apply 10.24 reflection -> 9.68 mh). Smoke: failures 827->0, apply real work.",
+  "FUSE": "carveApply JNI = carve + op/marks fetch in ONE sessions_lock hold + TL buffers (ffi.rs carve_fetch; ChunkGenNative.carveApply). Byte-identical transport. Cargo 92/92.",
+  "FUSE_AB": "2 paired A/B (rects 13100/13700, wipe, back-to-back, fixed apply both legs): e2e OFF 54.63/54.63 vs ON 51.66/47.19 (-2.97/-7.44); carver wall 20.16/20.28 -> 6.55/5.43 (3-call lock re-acquisition contention eliminated). DEFAULT FLIPPED ON (CRUS_CARVER_FUSE=0 restores legacy).",
+  "NEW_HONEST_ANCHOR": "e2e ~47-52 with CORRECT carving (vanilla-parity); pair at 13700: 47.19 = new honest best",
+  "L1_LAYOUT_FAST": "REJECTED (UNSAFE): verify caught want=AIR got=DEEPSLATE + AIOOBE in global path; branch cont143-structgrid kept unmerged, default OFF",
+  "GATE_FOLLOWUP": "carvers CI lane must be made non-vacuous (carve-activity counters + block-level carve parity vs vanilla ref = follow-up task)"
  }
 }

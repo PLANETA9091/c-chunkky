@@ -29,9 +29,12 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
     private static final Logger LOG = Logger.getLogger("CrusstyGen");
     private static volatile boolean ACTIVE = false;
     private static volatile long SEED;
-    /** cont-143 carver fuse: ONE JNI carve+fetch, thread-local op/marks buffers
-     *  (byte-identical transport; CRUS_CARVER_FUSE=1 enables, default legacy). */
-    private static final boolean CARVER_FUSE = "1".equals(System.getenv("CRUS_CARVER_FUSE"));
+    /** cont-143 carver fuse: ONE JNI carve+fetch, thread-local op/marks buffers.
+     *  Byte-identical transport; DEFAULT ON after 2 paired A/B wins
+     *  (e2e -2.97/-7.44 ms/ch, carver wall 20.2 -> 5.4-6.6 — the 3-call path's
+     *  sessions_lock re-acquisitions contend brutally once apply does real
+     *  work). CRUS_CARVER_FUSE=0 restores the legacy 3-call path. */
+    private static final boolean CARVER_FUSE = !"0".equals(System.getenv("CRUS_CARVER_FUSE"));
     /** ops buffer: worst case = every cell of 24 sections changed (98304). */
     private static final ThreadLocal<long[]> TL_OPS = ThreadLocal.withInitial(() -> new long[98304]);
     private static final ThreadLocal<long[]> TL_MARKS = ThreadLocal.withInitial(() -> new long[1024]);
