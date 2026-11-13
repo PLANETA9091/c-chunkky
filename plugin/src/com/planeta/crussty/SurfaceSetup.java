@@ -19,6 +19,9 @@ import net.minecraft.world.level.block.state.BlockState;
 public final class SurfaceSetup {
 
     public static void apply(long[] ctxs, org.bukkit.World world, String[] states) throws Exception {
+        java.util.logging.Logger HLOG = java.util.logging.Logger.getLogger("CrusstyGen");
+        HLOG.info("surface handshake: " + states.length + " states -> "
+                + ctxs.length + " pool ctxs");
         short[] ids = CrusstyChunkGenerator.extendPalette(states, (String st) -> {
             try {
                 return resolveBlockState(st);
@@ -27,6 +30,10 @@ public final class SurfaceSetup {
             }
         });
         if (ids == null) {
+            // Distinct, greppable reason: extendPalette returns null only when
+            // the bulk palette globals are unusable (initBulk failed).
+            HLOG.warning("surface handshake: extendPalette returned null"
+                    + " (bulk palette unavailable)");
             throw new IllegalStateException("palette unavailable (bulk init failed)");
         }
         String[] names = ChunkGenNative.ctxBiomeNames(ctxs[0]);

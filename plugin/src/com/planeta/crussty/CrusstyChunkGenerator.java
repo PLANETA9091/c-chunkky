@@ -88,6 +88,13 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         private final ReentrantLock[] locks;
         private final java.util.concurrent.atomic.AtomicInteger rr =
                 new java.util.concurrent.atomic.AtomicInteger();
+        /** Datapack assets present: gate for the surface-handshake retry —
+         *  the native surface tail's proven win case is PACK surface rules
+         *  (Terralith+Tectonic: -17% e2e on 1.21.8). On the plain vanilla
+         *  world JDK25's Java surface stage costs ~0.4ms/ch while the native
+         *  tail adds +7.4ms to the fill (paired A/B @14600 on 26.3: ON 75.70
+         *  vs OFF 68.62) — leave vanilla surface to Paper. */
+        final boolean hasPacks;
 
         // Q5: creation inputs kept so the dedicated deco pool can spawn from
         // the SAME seed/sea/pack assets (identical deco tables by construction).
@@ -131,6 +138,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             this.height = height;
             this.sea = sea;
             this.packs = packs;
+            this.hasPacks = packs != null;
             this.ctxs = new long[n];
             this.locks = new ReentrantLock[n];
             for (int i = 0; i < n; i++) {
@@ -262,6 +270,19 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
      * is skipped. Flipped once at world load by {@link #setupSurface}.
      */
     private static volatile boolean NATIVE_SURFACE = false;
+
+    // One-shot surface-handshake retry from generateNoise: the world-load
+    // attempt runs initBulk() itself, but if THAT fails (no runtime chunk-data
+    // class yet, companion absent, transient registry hiccup) the takeover
+    // used to stay dead for the whole run — vanilla Java surface re-running
+    // on top of the native fill costs ~30% of the generation window. The
+    // retry is SERIALIZED with setupSurface on the same lock and idempotent:
+    // Paper generates spawn chunks BEFORE the WorldLoadEvent fires, so the
+    // retry can win the race and onWorldLoad would otherwise re-run apply
+    // and double-append the surface palette (ids remapping the same NMS
+    // states — parity survived only by luck of the id mapping).
+    private static final Object SURFACE_RETRY_LOCK = new Object();
+    private static volatile boolean surfaceRetried;
 
     @Override
     public boolean shouldGenerateSurface() {
@@ -1009,6 +1030,12 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             long tb0 = System.nanoTime();
             beard = collectBeard(worldInfo, chunkX, chunkZ, chunkData);
             tBeard = System.nanoTime() - tb0;
+        }
+        // Retry the surface handshake BEFORE the fill that would consume it.
+        // Pack worlds only: on the vanilla world the Java surface stage is
+        // the measured winner on 26.3 (see CtxPool.hasPacks).
+        if (!NATIVE_SURFACE && !surfaceRetried && pool.hasPacks) {
+            retrySurface(pool, worldInfo);
         }
         long tNat0 = System.nanoTime();
         int nMarks;
@@ -2189,6 +2216,13 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static volatile boolean beardBroken;
     private static volatile boolean beardReady;
     private static final Object BEARD_LOCK = new Object();
+    // 8-strike tolerance: transient reflection/IO hiccups (neighbour chunk
+    // briefly unavailable mid-load) must NOT kill the beardifier for the rest
+    // of the run — vanilla fills caves under structures, losing it costs
+    // ~25k judge diffs. Break only after 8 strikes.
+    private static final java.util.concurrent.atomic.AtomicInteger BEARD_FAILURES
+            = new java.util.concurrent.atomic.AtomicInteger();
+    private static final int BEARD_MAX_FAILURES = 8;
     private static final ThreadLocal<int[]> BEARD_BUF = ThreadLocal.withInitial(() -> new int[256]);
     private static final int[] BEARD_EMPTY = new int[1];
     private static final boolean BEARD_ENABLED = System.getenv("CRUS_NO_BEARD") == null;
@@ -2408,13 +2442,17 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             GenStats.BEARD_CHUNKS.incrementAndGet();
             return out;
         } catch (Throwable t) {
-            beardBroken = true;
+            int n = BEARD_FAILURES.incrementAndGet();
+            if (n >= BEARD_MAX_FAILURES) {
+                beardBroken = true;
+            }
             StackTraceElement[] st = t.getStackTrace();
             StringBuilder at = new StringBuilder();
             for (int i = 0; i < 3 && i < st.length; i++) {
                 at.append(" | at ").append(st[i]);
             }
-            LOG.warning("beard collection failed, disabling: " + t + at);
+            LOG.warning("beard collection failed " + n + "/" + BEARD_MAX_FAILURES
+                    + (beardBroken ? ", disabling" : ", tolerated") + ": " + t + at);
             return EMPTY_BEARD;
         }
     }
@@ -2779,6 +2817,35 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     }
 
     private static void setupSurface(CtxPool pool, org.bukkit.World w) {
+        // SERIALIZED + IDEMPOTENT: Paper generates spawn chunks BEFORE the
+        // WorldLoadEvent fires, so the generateNoise retry can win the race
+        // and onWorldLoad would then re-run apply — extendPalette would
+        // append a SECOND copy of the surface states (ids remapping the same
+        // NMS states; parity survives only by luck of the id mapping) and
+        // every reload grows the palette. Hold the same lock as the retry
+        // and bail when the takeover is already live.
+        synchronized (SURFACE_RETRY_LOCK) {
+            if (NATIVE_SURFACE) {
+                return;
+            }
+            // VANILLA-WORLD GATE: the native surface tail's proven win case is
+            // PACK surface rules (Terralith+Tectonic, -17% e2e on 1.21.8). On
+            // the plain vanilla 26.3 world JDK25's Java surface stage costs
+            // ~0.4ms/ch while the native tail adds +7.4ms to the fill (paired
+            // A/B @14600: ON 75.70 vs OFF 68.62) — leave vanilla surface to
+            // Paper. CRUS_FORCE_NATIVE_SURFACE=1 re-engages it for A/B.
+            if (!pool.hasPacks
+                    && !"1".equals(System.getenv("CRUS_FORCE_NATIVE_SURFACE"))) {
+                Logger.getLogger("CrusstyGen").info(
+                        "native surface: vanilla world — Java surface stays (measured"
+                        + " winner on 26.3; CRUS_FORCE_NATIVE_SURFACE=1 overrides)");
+                return;
+            }
+            applySurfaceHandshake(pool, w);
+        }
+    }
+
+    private static void applySurfaceHandshake(CtxPool pool, org.bukkit.World w) {
         // A/B kill-switch: CRUS_NO_NATIVE_SURFACE=1 restores the vanilla Java
         // surface pass on top of the native noise fill (pre-stage-C behavior).
         if ("1".equals(System.getenv("CRUS_NO_NATIVE_SURFACE"))) {
@@ -2827,6 +2894,38 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         }
     }
 
+    /** One-shot retry of the surface handshake from generateNoise (before the
+     *  fill that would consume it): safety net for the case where the
+     *  world-load attempt failed before initBulk could produce the palette.
+     *  Serialized with setupSurface on SURFACE_RETRY_LOCK and idempotent. */
+    private static void retrySurface(CtxPool pool, WorldInfo worldInfo) {
+        if (surfaceRetried || NATIVE_SURFACE) {
+            return;
+        }
+        surfaceRetried = true; // one-shot; setupSurface re-checks under the lock
+        try {
+            if (!bulkReady && !bulkBroken) {
+                initBulk();
+            }
+            if (!bulkReady) {
+                Logger.getLogger("CrusstyGen").warning(
+                        "surface retry skipped: bulk init unavailable (reason="
+                                + bulkFailReason + ")");
+                return;
+            }
+            org.bukkit.World w = Bukkit.getWorld(worldInfo.getName());
+            if (w == null) {
+                return;
+            }
+            setupSurface(pool, w);
+            Logger.getLogger("CrusstyGen").info(
+                    "surface handshake retry -> NATIVE_SURFACE=" + NATIVE_SURFACE);
+        } catch (Throwable t) {
+            Logger.getLogger("CrusstyGen").warning(
+                    "surface retry failed (vanilla surface stays): " + t);
+        }
+    }
+
     /** Grows the material palette with the surface states and returns the
      *  assigned material ids (append order). Synchronized: world load is
      *  single-threaded, but the fill workers read these arrays live. */
@@ -2850,6 +2949,32 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     + " bulkReady=" + bulkReady + " bulkBroken=" + bulkBroken
                     + " reason=" + bulkFailReason + ")");
             return null;
+        }
+        // IDEMPOTENCE: if these exact states are ALREADY appended (a second
+        // handshake for the same pack — e.g. a world reload), return the
+        // existing ids instead of re-appending a duplicate palette copy.
+        int prevBase = cur.length - stateStrings.length;
+        if (prevBase > 0) {
+            boolean same = true;
+            try {
+                for (int i = 0; i < stateStrings.length && same; i++) {
+                    if (cur[prevBase + i] != resolver.apply(stateStrings[i])) {
+                        same = false;
+                    }
+                }
+            } catch (Throwable t) {
+                same = false;
+            }
+            if (same) {
+                short[] ids = new short[stateStrings.length];
+                for (int i = 0; i < stateStrings.length; i++) {
+                    ids[i] = (short) (prevBase + i);
+                }
+                Logger.getLogger("CrusstyGen").info(
+                        "extendPalette: surface states already present (ids " + prevBase
+                                + ".." + (prevBase + stateStrings.length - 1) + ")");
+                return ids;
+            }
         }
         int base = cur.length;
         int n2 = base + stateStrings.length;
