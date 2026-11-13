@@ -2,7 +2,37 @@
 
 Компактная карточка состояния кампании. Полная хроника — `worklog-session.md`
 (записи cont-XX по датам). Этот файл обновляется при изменении КАРТЫ, не при
-каждом тике. Последнее обновление: cont-143.
+каждом тике. Последнее обновление: cont-144.
+
+## CONT-144 КАРТА (главное)
+
+- **26.3-ONLY PURGE (882685eb)**: Paper 1.21.8 выведен полностью — legacy
+  `server/` (355MB) удалён, `server263/` = единственный сервер; 4 легаси
+  workflow (bench5k/judge_ab/oracle_selfcheck/recapture) и judge-кластер
+  (probe/{agent,src}, oracle/, diff_dumps/verify_dumps/judge_gate,
+  server_up/server_down/plugin_bench/bench/mini_judge/f1_probe/...) удалены;
+  ВСЕ harness-скрипты ретаргечены на server263 + paper.jar (canon-имя,
+  fallback paper-26.3-222.jar), порт 25576, CrusstyProbe263.jar; ci.yml
+  cache key v2. worklog/reference — исторические записи, не тронуты.
+- **F1 ВЕРДИКТ (af1875e0)**: CRUS_FILL_THREADS default 2→1 для ваниль-
+  протокола — fuse+surface-gate изменили режим cont-136 (стены окон F1
+  выигрывают 2/2 регионов: 69.25 vs 70.2; 81.35 vs 92.7 ms/ch; honest e2e
+  в шуме маржин-счёта). Паки держат F2 (prof_session).
+- **ЯКОРЬ ВОСПРОИЗВЕДЁН post-purge**: honest e2e=43.75 @14600 (якорь 43.34,
+  margin_fills=159 идентичны), bulk=ok, v1fallback=0, fuse=true.
+- **MARGIN = ПОЛНАЯ ГЕНЕРАЦИЯ (уточнение cont-144)**: margin-чанки не только
+  fill (159-203/window, margin_fill_cpu 12.3-16.7ms/ch) — они и ДЕКОРЯТСЯ
+  (deco chunks=495-627 vs 144 в окне) и карвятся (carver n=495-628): полная
+  нативная CPU на марджины ≈ 1.5-3.4x от окна. margin_fill_cpu в honest-
+  строке считает ТОЛЬКО fill — реальный марджин-кит ≈ (fill+deco+carver) ×
+  счёт марджинов. Deco mean 10.6-11.7ms/ch loaded (struct 2.3-3.4, run
+  5.7-6.4, deleg 1.4) — крупнейший нативный item после surface-gate.
+- fill263bench (idle, реальное дерево): fill_chunk 2.39 warm / 3.41 COLD,
+  server_fill JNI wall 2.36 warm / 5.16 COLD / 5.28 WAVE; exclusive split:
+  interp cell-grid 3.17, noise-family 2.08 (perlin 1.73 @1.93ns/pt),
+  shell 1.29, interp-shell 1.02. Loaded-инфляция 3-4x = SMT+GC+марджины.
+- ramp (1.1-1.6с/окно) = Paper-side планирование ДО первого fill — в span
+  НЕ входит, e2e не надувает (стены окон надувает).
 
 ## CONT-143 КАРТА (главное)
 
