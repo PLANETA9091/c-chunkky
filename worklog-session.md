@@ -7970,3 +7970,10 @@ unavailable" из placeInChunk → MineshaftPiece.postProcess → isInInvalidLoc
 платит ИДЕНТИЧНУЮ цену (байткод addVanillaDecorations: ТЕЖЕ
 startsForStructure(IILStructure)+placeInChunk, тот же catch→rethrow "Feature
 placement"). Проглатывание = недостающие куски мин → бит-ломает. НЕ фронт.
+
+### Lever WT2+F1 — REJECTED (cont-144 addendum)
+@15700 fresh, WT=2/F=1: honest e2e 58.43 (≈58.24 @15600 F1/WT1 — в меж-
+регионном шуме), НО gen 13.67 vs 7.64 и carver 6.85 vs 5.29: два параллельных
+chunk-пайплайна WT2 стоят в очереди к ОДНОМУ серийному fill-потоку → per-fill
+wall x2. Стены окон хуже (92.55 vs 86.1 средн). maxconc=1 при WT1 — здоровая
+форма для 2 ядер. WT1+F1 = финальный дефолт; WT2 не реабилитирован даже с F1.
