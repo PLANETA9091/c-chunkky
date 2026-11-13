@@ -9,12 +9,16 @@ export JAVA=/home/z/tools/jdk-25.0.5+8/bin/java
 RX1=${RX1:-2000}; RZ1=${RZ1:-2000}
 WX=${WX:-500}; WZ=${WZ:-500}
 NW=${NW:-2}
-FILL_THREADS=${FILL_THREADS:-2}
+FILL_THREADS=${FILL_THREADS:-1}
 WORKER_THREADS=${WORKER_THREADS:-1}
 EXTRA_ENV=${EXTRA_ENV:-}
 # cont-136 E2/E3: on 2 cores, chunk-system worker-threads=1 + native fill
-# threads=2 is the optimum (87.7 vs 94.5 control mean; E3 fill=1 worse at
-# window level 93.2 despite equal fill wall — parallel fill overlaps Java).
+# threads=2 was the pre-fuse optimum. REVERSED cont-144 (paired WIPE A/B,
+# regions 14600+15200, post carver-fuse + vanilla-surface gate): F1 walls win
+# both regions (69.25 vs 70.2; 81.35 vs 92.7 ms/ch) — with the native surface
+# tail OFF on vanilla worlds the parallel fill no longer pays for itself and
+# the freed core overlaps the Paper light/margin chain. F2 stays available
+# via CRUS_FILL_THREADS=2 (pack-world sessions keep F2 in prof_session.sh).
 sed -i -E "s/^([[:space:]]*)worker-threads:.*$/\1worker-threads: ${WORKER_THREADS}/" config/paper-global.yml
 # WIPE=1: rm world dirs first — REQUIRED for same-region config A/B
 # (fresh generation is deterministic per seed+coords, saved-chunk reload is not)
