@@ -33,6 +33,17 @@
   shell 1.29, interp-shell 1.02. Loaded-инфляция 3-4x = SMT+GC+марджины.
 - ramp (1.1-1.6с/окно) = Paper-side планирование ДО первого fill — в span
   НЕ входит, e2e не надувает (стены окон надувает).
+- **FINDING #7 (struct-исключения — PARITY-MANDATED, не оптимизировать)**:
+  80×/session `deco structures failed` = ReportedException "Requested chunk
+  unavailable" из placeInChunk → MineshaftPiece.postProcess → isInInvalid
+  Location → biome-чек в чанке ЗА пределами 3x3 decorate-региона margin-
+  чанка. Это ТРАНЗИЕНТНАЯ недоступность соседа (генерится параллельно) —
+  Paper ChunkStep перезапускает decorate до успеха; ваниль платит идентичную
+  цену (байткод addVanillaDecorations: ТЕЖЕ startsForStructure(IILStructure)
+  + placeInChunk, тот же catch→rethrow "Feature placement"). Бит-точность
+  требует пропускать исключение вверх (проглатывание = недостающие куски
+  мин). Стоимость ~20ms/бросок × ~27/окно — part of the vanilla pipeline.
+  Никакой дельты против ванили здесь нет и быть не может.
 
 ## CONT-143 КАРТА (главное)
 
