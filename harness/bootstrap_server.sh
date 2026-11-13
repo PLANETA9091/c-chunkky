@@ -74,7 +74,7 @@ enable-command-block=false
 motd=crussty judge
 EOF
 
-# --- bukkit.yml (generator wiring is rewritten by plugin_bench.sh per world) --
+# --- bukkit.yml (generator wiring is rewritten by profiling sessions per world) --
 cat > "$SRV/bukkit.yml" <<EOF
 settings:
   allow-end: false
