@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# Bootstrap a headless Paper server dir for the parity judge (CI or fresh local env).
-# Creates ./server with paper.jar (paperclip), eula, server.properties, bukkit.yml.
-# Idempotent: skips download if paper.jar exists.
+# Bootstrap a headless Paper 26.3 server dir (CI or fresh local env).
+# Creates ./server263 with paper.jar (paperclip), eula, server.properties,
+# bukkit.yml. Idempotent: skips download if paper.jar exists.
 #
 # Usage: harness/bootstrap_server.sh [paper_build]
-#   paper_build: pin a Paper 1.21.8 build number (default: pin used for the
-#                reference dumps, fallback latest if that build disappears).
+#   paper_build: pin a Paper 26.3 build number (default: 222).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRV="$ROOT/server"
+SRV="$ROOT/server263"
 BUILD="${1:-222}"
 VERSION="26.3"
 SEED=3257840388504953787

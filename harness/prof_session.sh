@@ -20,8 +20,8 @@ cd "$ROOT"
 WORLD="${1:?usage: prof_session.sh <world> <tag> [datapacks_dir]}"
 TAG="${2:?usage: prof_session.sh <world> <tag> [datapacks_dir]}"
 DPDIR="${3:-}"
-SRV=server
-HOST=127.0.0.1 PORT=25575 PASS=crussty
+SRV=server263
+HOST=127.0.0.1 PORT=25576 PASS=crussty
 SEED=3257840388504953787
 REPORT="reference/prof_session_${TAG}.txt"
 
@@ -45,8 +45,8 @@ rcon() {
 blockof() { echo $(( $1 * 16 )); }
 
 # --- fresh world ------------------------------------------------------------
-bash harness/server_down.sh >/dev/null 2>&1 || true
-pkill -9 -f 'paper\.jar' 2>/dev/null || true
+bash harness/server263_down.sh >/dev/null 2>&1 || true
+pkill -9 -f 'paper-26\.3\|paper\.jar' 2>/dev/null || true
 sleep 3
 rm -rf "$SRV/$WORLD" "$SRV/${WORLD}_nether" "$SRV/${WORLD}_the_end"
 if [ -n "$DPDIR" ]; then
@@ -62,8 +62,9 @@ grep -qE "^allow-nether=false" "$SRV/server.properties" || echo "allow-nether=fa
 
 # --- deploy: only Gen + Probe + spark (oracle hygiene lesson) ----------------
 mkdir -p "$SRV/plugins"
-find "$SRV/plugins" -maxdepth 1 -name '*.jar' ! -name 'CrusstyProbe.jar' ! -name 'spark*.jar' -delete
+find "$SRV/plugins" -maxdepth 1 -name '*.jar' ! -name 'CrusstyProbe263.jar' ! -name 'spark*.jar' -delete
 cp plugin/CrusstyGen.jar "$SRV/plugins/CrusstyGen.jar"
+[ -f probe263/CrusstyProbe263.jar ] && cp probe263/CrusstyProbe263.jar "$SRV/plugins/" || true
 SO="native/target/release/libcrussty_chunkgen.so"
 [ -f "$SO" ] || { echo "no $SO" >&2; exit 1; }
 
@@ -76,7 +77,7 @@ SO="native/target/release/libcrussty_chunkgen.so"
 cat "$REPORT"
 
 # --- boot --------------------------------------------------------------------
-bash harness/server_up.sh
+bash harness/server263_up.sh
 rcon "gamerule spawnChunkRadius 0" >/dev/null 2>&1 || true
 
 wait_full() { # wait_full <x1> <z1> <x2> <z2> <expect> [reissue_sec force_sec]
@@ -158,5 +159,5 @@ fi
 } >> "$REPORT"
 echo "=== final stats ==="; tail -8 "$REPORT"
 
-bash harness/server_down.sh >/dev/null 2>&1 || true
+bash harness/server263_down.sh >/dev/null 2>&1 || true
 echo "=== report: $REPORT ==="

@@ -40,19 +40,24 @@ mkfifo run.in
 ( sleep 28800 > run.in ) >/dev/null 2>&1 &
 echo $! > fifo.pid
 
+# boot jar: canonical name paper.jar (bootstrap/sandbox_recover download it);
+# fall back to the build-pinned paperclip name if only that is present.
+BOOT_JAR=paper.jar
+[ -f "$BOOT_JAR" ] || BOOT_JAR="$(ls paper-26.3-*.jar 2>/dev/null | sort | tail -1)"
+[ -n "$BOOT_JAR" ] && [ -f "$BOOT_JAR" ] || { echo "no Paper 26.3 jar in $SRV" >&2; exit 1; }
+
 HEAP_ARGS="-Xms2G -Xmx3G"
 # cont-134 (paper-levers audit): PGEN_FLAG (-Dpaper.chunk-system.gen-parallelism)
 # REMOVED — the key was dropped in Paper 26.3 (string survives only in
 # RemovedConfigurations; nothing reads the property). Was a dead no-op.
 
 # opt-in native carvers pass-through
-CRUS_NATIVE_CARVERS="${CRUS_NATIVE_CARVERS:-0}" CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" \
 echo "booting Paper 26.3 (JDK 25)..."
 CRUS_NATIVE_CARVERS="${CRUS_NATIVE_CARVERS:-0}" CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" CRUS_BIOME_GRID="${CRUS_BIOME_GRID:-1}" \
 setsid $JAVA $HEAP_ARGS \
   -XX:FlightRecorderOptions=stackdepth=128 \
   -Djava.library.path="$ROOT/native/target/release" \
   ${JVM_FLAGS_ADD:-} \
-  -jar paper-26.3-222.jar nogui < run.in > run.out 2>&1 &
+  -jar "$BOOT_JAR" nogui < run.in > run.out 2>&1 &
 echo $! > server.pid
 echo "server263 pid: $(cat server.pid)"

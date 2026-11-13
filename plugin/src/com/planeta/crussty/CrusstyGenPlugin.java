@@ -6,13 +6,14 @@ import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.plugin.java.JavaPlugin;
 
 /**
- * CrusstyGen: native noise-stage generator for Paper 1.21.8.
+ * CrusstyGen: native chunk-gen stages for Paper 26.3.
  * Worlds are wired via bukkit.yml:
  *   worlds:
  *     vanilla:
  *       generator: CrusstyGen
- * Only generateNoise is overridden — vanilla surface/carvers/features/lighting
- * run on top, preserving parity with the vanilla reference dumps.
+ * Native stages cover fill/surface/carvers/deco; vanilla Java paths remain as
+ * kill-switch fallbacks (CRUS_NO_NATIVE_SURFACE_263, CRUS_NATIVE_CARVERS=0,
+ * CRUS_NATIVE_DECO=0).
  */
 public final class CrusstyGenPlugin extends JavaPlugin {
 

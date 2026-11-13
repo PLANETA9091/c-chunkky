@@ -1,13 +1,23 @@
 # c-faster
 
-Vanilla-exact chunk generation for Paper 1.21.8, targeting **1 ms/chunk for the native decoration stage end-to-end** (p50, incl. all JNI bridges), even with custom-generation datapacks.
+Vanilla-exact chunk generation for **Paper 26.3** (build 222, JDK 25), native Rust
+takeover of the chunk-gen stages — fill, surface, carvers, decoration — targeting
+the minimum honest end-to-end ms/chunk (12x12 forceload window, incl. layout,
+lighting and server plumbing). Paper 1.21.8 is RETIRED: all harness, CI and
+servers are 26.3-only (`harness/server263_up.sh`, `server263/`).
 
-Measurement precision (what the 1 ms numbers are and are NOT):
-- **Reached** (2026-10-21): deco-stage p50 0.96-1.01 ms on the f1 probe pack; 1.77 ms on the heavy Terralith+Tectonic track (cont-58: 2.9 -> 1.77 ms via fused snapshot queries, native env-scan build-height arithmetic, water-matching parity fix, native glow_lichen; still shrinking). These are DecoStats `populate` wall numbers for the FEATURES pipeline only.
-- **NOT covered by the 1 ms claim**: the native noise/fill stage (~10 ms/chunk p50) and the full-chunk generation wall (~40-85 ms/chunk incl. layout, lighting and server plumbing). "1 ms / full chunk" was the original aspirational wording; the honest current split is documented above and in `worklog-session.md`.
+Measurement precision (what the numbers are):
+- **Anchor (cont-143)**: HONEST BEST 43.34 ms/ch (12x12 @14600, w2/F2,
+  no-watchdog, carver fuse ON, vanilla-parity world); pack-world lever A/B
+  (cont-144): native surface ON 75.70 vs OFF 68.62 ms/ch @14600.
+- Per-stage splits (fill p50, deco phases, carver wall) live in
+  `PROGRESS.json` and `STATUS.md`; harness `run263_baseline.sh` reproduces
+  the number on a fresh region.
 
-Judge: block-for-block equality against reference dumps captured from a REAL vanilla server.
-An optimization is accepted only if the block match percentage does NOT drop.
+Parity: NOT block-diff against 1.21.8 reference dumps (that judge was removed
+with the 26.3 retarget) — the honest 26.3 protocol is A/B kill-switch gates
+(`harness/ab263_ci.sh`): ore signature max(4%,500) + orebase strict bit-equal
++ blockdump fingerprint for the deco-noise class, native stage ON vs OFF.
 
 ## Distribution: a CRUSSTY module (not standalone)
 
@@ -29,7 +39,7 @@ At boot, before the kernel starts, the module's `cplugin_init`:
    library (which carries BOTH `cplugin_init` and every JNI native), binding
    natives to the plugin's ClassLoader — no `-Djava.library.path`.
 
-Verified end-to-end (2026-10-21, runtime v2.7.0 + Paper 1.21.8-60): module loads
+Verified end-to-end: module loads
 (`init rc=0`), jar+marker installed, `CrusstyGen enabled`, natives bound via the
 marker, world generated with the native ctx pool. Options: `plugin=off` skips the
 install (natives-only mode); `plugin_dir=<path>` overrides the target plugins dir.
@@ -42,12 +52,13 @@ with `-Djava.library.path`: without the marker file `ChunkGenNative` falls back 
 
 Layout:
 - `native/`   — Rust cdylib `crussty_chunkgen` (C-ABI v2 + JNI natives) + `cplugin.rs` (CRUSSTY module entry, vendored `cplug-abi`/`cplug-sdk`)
-- `probe/`    — Paper probe plugin: dumps fully-generated chunks as `.crsf` reference files
 - `plugin/`   — production ChunkGenerator plugin (JNI bridge)
+- `probe263/` — Paper 26.3 probe plugin (crusfull/crusgenstats/statdump RCON commands)
+- `oracle263/` — 26.3 fill/oracle verification classes
 - `module.json` + `build.sh` — CRUSSTY module manifest and module build (dist/faster/)
-- `harness/`  — benchmark scripts (RCON, single-invocation protocol, md5 deploy check)
-- `reference/` — vanilla reference dumps + block registry
-- `.github/workflows/` — CI
+- `harness/`  — 26.3 benchmark/CI scripts (RCON, single-invocation protocol, md5 deploy check)
+- `reference/` — historical analysis docs + datapack/oracle fixtures
+- `.github/workflows/` — CI (26.3 only)
 
 Rules (frozen):
 - Same block in the same place; vanilla math may be skipped ONLY when it cannot affect final blocks.

@@ -16,7 +16,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-SRV="${SRV_DIR:-$ROOT/server}"
+SRV="${SRV_DIR:-$ROOT/server263}"
 PORT="${RCON_PORT:-25576}"
 SEED="${SEED:-3257840388504953787}"
 RX="${RX:-16384}"; RZ="${RZ:-16384}"; N="${N:-8}"

@@ -79,15 +79,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            server/paper.jar
-            server/versions
-            server/libraries
-          key: paper-26.3-b222-v1
+            server263/paper.jar
+            server263/versions
+            server263/libraries
+          key: paper-26.3-b222-v2
       - name: Bootstrap + extract Paper 26.3 (fill v3, patchonly)
         run: |
           chmod +x harness/bootstrap_server.sh
           LEVEL_NAME=world bash harness/bootstrap_server.sh 222
-          cd server
+          cd server263
           if [ ! -f versions/26.3/paper-26.3.jar ]; then
             java -Dpaperclip.patchonly=true -jar paper.jar
           fi
@@ -96,10 +96,10 @@ jobs:
       - name: Build plugin (full jar incl. NMS companions)
         run: |
           chmod +x plugin/build.sh
-          SRV_DIR="$GITHUB_WORKSPACE/server" ./plugin/build.sh
+          SRV_DIR="$GITHUB_WORKSPACE/server263" ./plugin/build.sh
       - name: Dump NMS biome-source signatures (grounding for the grid-backed resolver)
         run: |
-          javap -classpath server/versions/26.3/paper-26.3.jar -p \
+          javap -classpath server263/versions/26.3/paper-26.3.jar -p \
             net.minecraft.world.level.biome.BiomeSource \
             net.minecraft.world.level.biome.MultiNoiseBiomeSource \
             'net.minecraft.world.level.biome.Climate$Sampler' \
@@ -147,10 +147,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            server/paper.jar
-            server/versions
-            server/libraries
-          key: paper-26.3-b222-v1
+            server263/paper.jar
+            server263/versions
+            server263/libraries
+          key: paper-26.3-b222-v2
       - name: Build native (release)
         working-directory: native
         run: cargo build --release --locked || cargo build --release
@@ -158,7 +158,7 @@ jobs:
         run: |
           chmod +x harness/bootstrap_server.sh
           LEVEL_NAME=world bash harness/bootstrap_server.sh 222
-          cd server
+          cd server263
           if [ ! -f versions/26.3/paper-26.3.jar ]; then
             java -Dpaperclip.patchonly=true -jar paper.jar
           fi
@@ -167,30 +167,30 @@ jobs:
       - name: Build plugin (full jar incl. NMS companions)
         run: |
           chmod +x plugin/build.sh
-          SRV_DIR="$GITHUB_WORKSPACE/server" ./plugin/build.sh
+          SRV_DIR="$GITHUB_WORKSPACE/server263" ./plugin/build.sh
       - name: Build probe263
         run: |
           chmod +x probe263/build.sh
-          SRV_DIR="$GITHUB_WORKSPACE/server" ./probe263/build.sh
+          SRV_DIR="$GITHUB_WORKSPACE/server263" ./probe263/build.sh
       - name: Sanity .so
         run: file native/target/release/libcrussty_chunkgen.so
       - name: A/B surface (native vs Java surface path, carvers off)
         run: |
           set -o pipefail
           chmod +x harness/ab263_ci.sh
-          SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh surface 2>&1 | tee ab263_surface.log
+          SRV_DIR=server263 RCON_PORT=25576 bash harness/ab263_ci.sh surface 2>&1 | tee ab263_surface.log
       - name: A/B carvers (vanilla vs native carvers + topMaterial)
         run: |
           set -o pipefail
-          SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh carvers 2>&1 | tee ab263_carvers.log
+          SRV_DIR=server263 RCON_PORT=25576 bash harness/ab263_ci.sh carvers 2>&1 | tee ab263_carvers.log
       - name: A/B biome (grid-backed native biome source vs vanilla preset, exact gate)
         run: |
           set -o pipefail
-          SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh biome 2>&1 | tee ab263_biome.log
+          SRV_DIR=server263 RCON_PORT=25576 bash harness/ab263_ci.sh biome 2>&1 | tee ab263_biome.log
       - name: A/B orebase (vanilla-vs-vanilla baseline for the ore gate epsilon)
         run: |
           set -o pipefail
-          SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh orebase 2>&1 | tee ab263_orebase.log
+          SRV_DIR=server263 RCON_PORT=25576 bash harness/ab263_ci.sh orebase 2>&1 | tee ab263_orebase.log
       - name: A/B ore (native ore expansion inside vanilla decorate, CRUS_NATIVE_ORE=1)
         # cont-102: Front 3 REJECTED on the same-runner pair verdict (CI
         # 41585182091: ore=1 e2e=43.70 vs ore=0 e2e=24.60 — the hook's
@@ -206,7 +206,7 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-          SRV_DIR=server RCON_PORT=25576 bash harness/ab263_ci.sh ore 2>&1 | tee ab263_ore.log
+          SRV_DIR=server263 RCON_PORT=25576 bash harness/ab263_ci.sh ore 2>&1 | tee ab263_ore.log
       - name: E2E par4 + native ore PAIR (same-runner ore=1 vs ore=0; runs even when the STRICT ore gate fails)
         if: always()
         continue-on-error: true
@@ -226,9 +226,9 @@ jobs:
           # conservative AGAINST the ore hook. The accept-drift decision
           # (worklog cont-100) hangs on this pair.
           echo "=== ore=1 leg ==="
-          CRUS_NATIVE_ORE=1 CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4ore.log
+          CRUS_NATIVE_ORE=1 CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server263 RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4ore.log
           echo "=== ore=0 leg (comparator) ==="
-          CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4ore_off.log
+          CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server263 RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4ore_off.log
           echo "=== ore PAIR verdict (same runner) ==="
           grep -h "honest window" e2e263_par4ore.log e2e263_par4ore_off.log || true
       - name: E2E per-chunk timing (fresh 12x12, par4 workers, GenStats window)
@@ -244,7 +244,7 @@ jobs:
           # despite the native fill degrading to gen~40 under the 2-physical-
           # core CPU contention (the pin is lane-local: the next lanes boot
           # with the reset worker-threads=-1).
-          CRUS_FILL263_PROF=1 CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_timing.log
+          CRUS_FILL263_PROF=1 CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 SRV_DIR=server263 RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_timing.log
       - name: E2E par6 timing (fresh 12x12, CRUS_WORKER_THREADS=6 — pool-headroom experiment, cont-109)
         continue-on-error: true
         run: |
@@ -264,19 +264,19 @@ jobs:
           # fresh world on a warm page cache — the warm-cache bias favors
           # par6, i.e. the comparison is conservative AGAINST par4 winning.
           # The pin is lane-local: unset below, later lanes reset to -1.
-          CRUS_FILL263_PROF=1 CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=6 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par6timing.log
+          CRUS_FILL263_PROF=1 CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=6 SRV_DIR=server263 RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par6timing.log
           echo "=== par4 vs par6 verdict (same runner, same commit) ==="
           grep -h "honest window" e2e263_timing.log e2e263_par6timing.log || true
       - name: E2E native-deco probe (DecoDriver vs vanilla deco delta)
         continue-on-error: true
         run: |
           set -o pipefail
-          SRV_DIR=server RCON_PORT=25576 CRUS_NATIVE_DECO=1 bash harness/e2e_ci.sh 2>&1 | tee e2e263_deco.log
+          SRV_DIR=server263 RCON_PORT=25576 CRUS_NATIVE_DECO=1 bash harness/e2e_ci.sh 2>&1 | tee e2e263_deco.log
       - name: E2E no-beard discriminator (structure-start cost of the bridge)
         continue-on-error: true
         run: |
           set -o pipefail
-          CRUS_NO_BEARD=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_nobeard.log
+          CRUS_NO_BEARD=1 SRV_DIR=server263 RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_nobeard.log
       - name: E2E par4 + native deco (CRUS_NATIVE_DECO=1 on the par4 timing lane — the default-candidate A/B)
         continue-on-error: true
         run: |
@@ -288,7 +288,7 @@ jobs:
           # put vanilla deco at ~12-13% of gen-worker duty — in the par4
           # CPU-saturated regime CRUS_NATIVE_DECO=1 frees that CPU for the
           # JNI fills. Same-run comparator = the timing lane (par4, deco=0).
-          CRUS_NATIVE_DECO=1 CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4deco.log
+          CRUS_NATIVE_DECO=1 CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server263 RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4deco.log
       - name: E2E JFR hot-methods of the window (Paper-side split probe)
         continue-on-error: true
         run: |
@@ -299,7 +299,7 @@ jobs:
           # the honest e2e number lumps together. N=15 -> 16x16 = 256 chunks:
           # ~230 profile samples (vs ~130 at 144 chunks) for a stable
           # deco/light/convert/save split of the post-gen span.
-          N=15 CRUS_JFR=1 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_jfr.log
+          N=15 CRUS_JFR=1 CRUS_FILL263_PROF=1 SRV_DIR=server263 RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_jfr.log
       - name: E2E parallel-gen probe (Paper default chunk-system parallelism)
         continue-on-error: true
         run: |
@@ -310,7 +310,7 @@ jobs:
           # lock-guarded). Judge lanes keep serial RNG semantics — this lane
           # is WALL-TIME only. Expect the 144-chunk window to collapse toward
           # the per-fill wall on multi-core runners.
-          CRUS_GEN_PARALLEL=1 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par.log
+          CRUS_GEN_PARALLEL=1 CRUS_FILL263_PROF=1 SRV_DIR=server263 RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par.log
       - name: E2E JFR of the PARALLEL-gen window (does gen actually spread across workers?)
         continue-on-error: true
         run: |
@@ -324,7 +324,7 @@ jobs:
           # "who blocks workers inside JNI under 4-concurrency" (front 1).
           # Pin leak to later lanes is reset by e2e_ci.sh when unset;
           # par4 stability verified cont-74/81 (twice per run, rev1+rev2).
-          CRUS_JFR=1 CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_jfr_par.log
+          CRUS_JFR=1 CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server263 RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_jfr_par.log
       - name: E2E large window 48x48 (amortized per-chunk at scale)
         continue-on-error: true
         run: |
@@ -334,13 +334,13 @@ jobs:
           # the same ramp over 16x more chunks — the e2e/chunk trend line
           # toward the streaming asymptote (fills back-to-back ~21ms today).
           # Same code path, WN stays 3 for the warmup pregen; N=47 = 48x48.
-          N=47 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_big.log
+          N=47 CRUS_FILL263_PROF=1 SRV_DIR=server263 RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_big.log
       - name: Far-coords native-gen probe (stall cliff bisect)
         continue-on-error: true
         run: |
           set -o pipefail
           chmod +x harness/farprobe_ci.sh
-          SRV_DIR=server RCON_PORT=25576 bash harness/farprobe_ci.sh 2>&1 | tee farprobe263.log
+          SRV_DIR=server263 RCON_PORT=25576 bash harness/farprobe_ci.sh 2>&1 | tee farprobe263.log
       - name: E2E parallel-gen with 4 pinned worker threads (runs LAST — see below)
         continue-on-error: true
         run: |
@@ -362,7 +362,7 @@ jobs:
           # (FILL_THREADS=1: e2e 21.70 -> 19.33 same-run) — fixed by the
           # sticky CONCURRENT_SEEN in fill_threads (baa8ee78), so the lane
           # runs UNPINNED now and verifies the default path.
-          CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4.log
+          CRUS_GEN_PARALLEL=1 CRUS_WORKER_THREADS=4 CRUS_FILL263_PROF=1 SRV_DIR=server263 RCON_PORT=25576 bash harness/e2e_ci.sh 2>&1 | tee e2e263_par4.log
       - name: Upload judge artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -390,6 +390,6 @@ jobs:
             e2e263_window.jfr
             e2e263_window_par.jfr
             ab263_out/
-            server/run.out
+            server263/run.out
           retention-days: 14
           if-no-files-found: warn

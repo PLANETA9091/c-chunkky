@@ -21,10 +21,8 @@
 #   7. probe   — jetbrains-annotations must pre-come from the aliyun mirror:
 #                repo1.maven.org rate-limits (HTTP 429) and build.sh's
 #                internal fallback dies silently under set -e
-#   8. server  — versions+libraries copied with sentinels (no cp nesting),
-#                then LEVEL_NAME=world bootstrap_server.sh <build>
-#   9. sanity  — tool versions + artifact hashes printed for the worklog
-#  10. health  — optional (--health): the full ab263_ci.sh ore pair as an
+#   8. sanity  — tool versions + artifact hashes printed for the worklog
+#   9. health  — optional (--health): the full ab263_ci.sh ore pair as an
 #                end-to-end generation check; the script FAILS unless the
 #                gate prints "gate verdict: PASS" (cont-122)
 #
@@ -149,34 +147,7 @@ file "$JB" | grep -q "Zip archive" || die probe "jb-annotations not a zip"
 git checkout -- probe263/ 2>/dev/null || true
 echo "probe built: $(md5sum probe263/CrusstyProbe263.jar | cut -d' ' -f1)"
 
-# ---- 8. server/ bootstrap ---------------------------------------------------
-stage server
-NEED_BOOT=0
-if [ ! -f server/versions/26.3/paper-26.3.jar ]; then
-  rm -rf server/versions; cp -rT "$SRV263/versions" server/versions
-  NEED_BOOT=1
-fi
-if [ ! -d server/libraries/io/papermc/paper/paper-api ]; then
-  rm -rf server/libraries; cp -rT "$SRV263/libraries" server/libraries
-  NEED_BOOT=1
-fi
-if [ ! -f server/paper.jar ] || [ "$(md5sum < server/paper.jar | cut -d' ' -f1)" != "$PAPER_MD5" ]; then
-  cp "$SRV263/paper.jar" server/paper.jar; NEED_BOOT=1
-fi
-# bootstrap_server.sh pins the build ONLY when it downloads the jar itself;
-# with a pre-placed jar it prints the existing marker — so force the pin here
-if [ ! -f server/paper.build ] || [ "$(cat server/paper.build)" != "$PAPER_BUILD" ]; then
-  echo "$PAPER_BUILD" > server/paper.build; NEED_BOOT=1
-fi
-if [ "$NEED_BOOT" = "1" ] || [ ! -f server/crussty-boot-ok ]; then
-  LEVEL_NAME=world bash harness/bootstrap_server.sh "$PAPER_BUILD" || die server "bootstrap"
-  touch server/crussty-boot-ok
-  echo "server/ bootstrapped (build $PAPER_BUILD)"
-else
-  echo "server/ already bootstrapped"
-fi
-
-# ---- 9. sanity ---------------------------------------------------------------
+# ---- 8. sanity ---------------------------------------------------------------
 stage sanity
 echo "git:     $(git rev-parse --short HEAD) $(git status --short | wc -l) dirty"
 echo "cargo:   $(cargo --version)"
@@ -192,7 +163,7 @@ echo ""
 # gate must print "gate verdict: PASS". Takes ~8 min on the 2-core sandbox.
 if [ "$DO_HEALTH" = "1" ]; then
   stage health
-  OUT=$(JAVA_HOME="$JDK_DIR" SRV_DIR="$ROOT/server" bash harness/ab263_ci.sh ore 2>&1) \
+  OUT=$(JAVA_HOME="$JDK_DIR" SRV_DIR="$ROOT/server263" bash harness/ab263_ci.sh ore 2>&1) \
     || { echo "$OUT" | tail -20; die health "ore pair run failed"; }
   echo "$OUT" | tail -6
   echo "$OUT" | grep -q "gate verdict: PASS" \

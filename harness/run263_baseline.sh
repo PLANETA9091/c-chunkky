@@ -38,6 +38,11 @@ rm -f run.in; mkfifo run.in
 ( sleep 28800 > run.in ) >/dev/null 2>&1 &
 echo $! > fifo.pid
 
+# boot jar: canonical paper.jar, fallback to build-pinned paperclip name
+BOOT_JAR=paper.jar
+[ -f "$BOOT_JAR" ] || BOOT_JAR="$(ls paper-26.3-*.jar 2>/dev/null | sort | tail -1)"
+[ -n "$BOOT_JAR" ] && [ -f "$BOOT_JAR" ] || { echo "no Paper 26.3 jar in server263" >&2; exit 1; }
+
 HEAP="-Xms2G -Xmx3G"
 # CRUS_SERIAL_GC=1: judge-mode GC (no parallel GC threads stealing cores on 2c)
 GC_FLAGS=""
@@ -61,7 +66,7 @@ echo "booting with CRUS_NATIVE_DECO=1 CRUS_NATIVE_CARVERS=1 CRUS_BIOME_GRID=${CR
 env CRUS_NATIVE_DECO=1 CRUS_NATIVE_CARVERS=1 CRUS_BIOME_GRID="${CRUS_BIOME_GRID:-1}" CRUS_FILL_THREADS="$FILL_THREADS" $EXTRA_ENV \
   setsid $JAVA $HEAP $GC_FLAGS \
   -Djava.library.path="$ROOT/native/target/release" \
-  -jar paper-26.3-222.jar nogui < run.in > run.out 2>&1 &
+  -jar "$BOOT_JAR" nogui < run.in > run.out 2>&1 &
 SPID=$!
 echo $SPID > server.pid
 

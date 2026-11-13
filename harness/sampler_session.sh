@@ -14,8 +14,8 @@ cd "$ROOT"
 WORLD="${1:?usage: sampler_session.sh <world> <tag> <crussty|vanilla>}"
 TAG="${2:?usage: sampler_session.sh <world> <tag> <crussty|vanilla>}"
 GEN="${3:-crussty}"
-SRV=server
-HOST=127.0.0.1 PORT=25575 PASS=crussty
+SRV=server263
+HOST=127.0.0.1 PORT=25576 PASS=crussty
 SEED=3257840388504953787
 REPORT="reference/sampler_${TAG}.txt"
 DUMPDIR="reference/jstack_${TAG}"
@@ -37,8 +37,8 @@ rcon() {
 blockof() { echo $(( $1 * 16 )); }
 
 # --- wiring (no wipe; datapacks must already be in the world dir) ------------
-bash harness/server_down.sh >/dev/null 2>&1 || true
-pkill -9 -f 'paper\.jar' 2>/dev/null || true
+bash harness/server263_down.sh >/dev/null 2>&1 || true
+pkill -9 -f 'paper-26\.3\|paper\.jar' 2>/dev/null || true
 sleep 3
 if [ "$GEN" = "crussty" ]; then
   printf 'worlds:\n  %s:\n    generator: CrusstyGen\n' "$WORLD" > "$SRV/bukkit.yml"
@@ -48,12 +48,13 @@ fi
 sed -i "s/^level-name=.*/level-name=$WORLD/; s/^level-seed=.*/level-seed=$SEED/; s/^allow-nether=.*/allow-nether=false/" "$SRV/server.properties"
 
 mkdir -p "$SRV/plugins" "$DUMPDIR"
-find "$SRV/plugins" -maxdepth 1 -name '*.jar' ! -name 'CrusstyProbe.jar' ! -name 'spark*.jar' -delete
+find "$SRV/plugins" -maxdepth 1 -name '*.jar' ! -name 'CrusstyProbe263.jar' ! -name 'spark*.jar' -delete
 cp plugin/CrusstyGen.jar "$SRV/plugins/CrusstyGen.jar"
+[ -f probe263/CrusstyProbe263.jar ] && cp probe263/CrusstyProbe263.jar "$SRV/plugins/" || true
 echo "# sampler session $TAG $(date -u +%Y-%m-%dT%H:%M:%SZ) world=$WORLD gen=$GEN" > "$REPORT"
 ls "$SRV/$WORLD/datapacks/" 2>/dev/null >> "$REPORT" || echo "(no datapacks)" >> "$REPORT"
 
-bash harness/server_up.sh
+bash harness/server263_up.sh
 rcon "gamerule spawnChunkRadius 0" >/dev/null 2>&1 || true
 
 wait_full() { # wait_full <x1> <z1> <x2> <z2> <expect>
@@ -83,7 +84,7 @@ rcon "crusgenstats reset" >/dev/null
 # --- sampled window ----------------------------------------------------------
 # JFR around the window via jcmd attach (started AFTER warmup => clean slice).
 # profile settings: ExecutionSample 10ms, NativeMethodSample 20ms (JNI fills).
-JC="$(ls -d /home/z/tools/jdk-21*/bin/jcmd 2>/dev/null | tail -1)"
+JC="$(ls /home/z/tools/jdk-*/bin/jcmd 2>/dev/null | sort | tail -1)"
 [ -z "$JC" ] && JC=jcmd
 JPID="$(cat "$SRV/server.pid")"
 $JC "$JPID" JFR.configure stackdepth=128 >/dev/null 2>&1 || echo "[sampler] JFR.configure (stackdepth) FAILED"
@@ -112,5 +113,5 @@ echo "=== window: ${WIN_MS} ms / 144 chunks = $(( WIN_MS / 144 )).$(( WIN_MS * 1
 } >> "$REPORT"
 echo "--- final stats ---"; cat "$REPORT"
 
-bash harness/server_down.sh >/dev/null 2>&1 || true
+bash harness/server263_down.sh >/dev/null 2>&1 || true
 echo "=== report: $REPORT | jfr: reference/jfr_${TAG}.jfr ==="

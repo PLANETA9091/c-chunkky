@@ -1,14 +1,14 @@
 # CrusstyGen plugin
 
-Takes over ONLY the noise stage of chunk generation on Paper 1.21.8 via a
-single JNI call into `libcrussty_chunkgen.so` (ABI v2). Vanilla continues on
-top of our terrain: surface rules, carvers, features, lighting — that is what
-preserves block-for-block parity with the vanilla reference dumps
-(`reference/dumps/*`).
+Takes over the chunk-gen stages of **Paper 26.3** (build 222, JDK 25) via JNI
+calls into `libcrussty_chunkgen.so`: native fill (noise), native surface rules,
+native carvers, native decoration — each stage behind a kill-switch env
+(CRUS_NO_NATIVE_SURFACE_263 / CRUS_NATIVE_CARVERS / CRUS_NATIVE_DECO), gated by
+the A/B parity protocol in `harness/ab263_ci.sh`.
 
 ## Wiring worlds
 
-`server/bukkit.yml` (gitignored, maintained by harness):
+`server263/bukkit.yml` (gitignored, maintained by harness):
 
 ```yaml
 worlds:
@@ -25,12 +25,12 @@ dumps).
 ## Deploy
 
 1. `plugin/build.sh` -> `plugin/CrusstyGen.jar`
-2. copy jar to `server/plugins/`
+2. copy jar to `server263/plugins/`
 3. put `libcrussty_chunkgen.so` where the JVM finds it: `-Djava.library.path`
-   in the server start command (harness/server_up.sh) or copy into
+   in the server start command (harness/server263_up.sh) or copy into
    `$JAVA_HOME/lib` (not recommended). Harness passes
    `-Djava.library.path=/home/z/my-project/c-faster/native/target/release`.
-4. record md5s in `server/deployed.md5` (deploy-hygiene rule)
+4. record md5s in `server263/deployed263.md5` (deploy-hygiene rule)
 
 ## Commands
 
