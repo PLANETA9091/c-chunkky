@@ -7899,3 +7899,74 @@ Work Log:
 
 Stage Summary:
 - Bridge robustness pack landed on cont-143: beardifier survives transient failures (8-strike), surface handshake is recoverable (pack worlds), idempotent (race-proof), observable (entry/gate logs). 26.3 vanilla world now runs the MEASURED-WINNER config (Java surface) instead of the accidental silent-no-op; pack worlds keep the native surface win. Next fronts unchanged: bulk-op b4 adoption, apply-path (getAndSet+recount 5.50 vs 9.68, IF bit-parity), margin/serialization Q6 with r4 map.
+
+## cont-144 (2026-11-13): 26.3-ONLY PURGE + F1 вердикт + якорь post-purge
+
+Директива пользователя: «всегда 26.3! убери полностью 1.21.8, оптимизируй на максимум».
+
+### Purge (882685eb + d7ca5ce4)
+- УДАЛЕНО: legacy `server/` (355MB, 1.21.8-60 + миры всех эпох), 4 легаси
+  workflow (bench5k/judge_ab/oracle_selfcheck/recapture — все на bootstrap 60
+  = 1.21.8), judge-кластер целиком: probe/{agent,src,build.sh,CrusstyProbe.jar,
+  paper-api.jar}, oracle/ (1.21.8 OracleNoiseStagePlugin), harness/{server_up,
+  server_down,plugin_bench,bench,mini_judge,judge_dptt,vanilla_base_ref,
+  vanilla_dptt_ref,oracle_marks,oracle_surface_dp,oracle_walk,oracle_walk_ours,
+  smoke_dp,f1_probe,gold_probe,ab54_fiddle,ab54b,diag54,pregen_radius,bootdiag,
+  diff_dumps.py,verify_dumps.py,detail_diff.py,judge_gate.py}.
+  Оставлено в probe/: libs/ (jni-зависимости plugin/build.sh) + datapacks/
+  (контент пак-тестов).
+- РЕТАРГЕТ: bootstrap_server.sh → server263; ab263_ci/e2e_ci/farprobe_ci →
+  SRV default server263; prof_session/sampler_session → server263, порт 25576,
+  exclusion CrusstyProbe263.jar (+ авто-деплой probe jar), jcmd = jdk-25;
+  syncgen_ab/server263_up/run263_baseline → boot `paper.jar` (canon-имя;
+  fallback paper-26.3-*.jar); sandbox_recover.sh — stage-8 server/ bootstrap
+  удалён (был dual-dir костыль), health → SRV_DIR=server263; ci.yml — cache
+  path/key v2 (server263/), SRV_DIR=server263 везде, javap classpath.
+  server263/paper.jar = symlink → paper-26.3-222.jar.
+- Доки: README.md + plugin/README.md + CrusstyGenPlugin.java = Paper 26.3
+  (build 222, JDK 25), честный протокол паритета = A/B гейты (не 1.21.8-diff).
+  worklog/reference — исторические записи (эра 1.21.8 помечена в шапке), НЕ
+  переписывались.
+- Push origin (ecda6090..18c7ebdf); CI c-chunkky 43424091374 на 18c7ebdf —
+  валидация ретаргеченного ci.yml (26.3-only lanes).
+
+### F1 вердикт (af1875e0): CRUS_FILL_THREADS 2→1 (ваниль-протокол)
+Paired WIPE A/B на пост-fuse + surface-gate билде (обе ноги fresh-regen,
+WT=1, no-watchdog, 2 окна):
+- @14600: F2 стены 80.2/60.2 (средн 70.2) vs F1 75.3/63.2 (69.25) — F1 −1.4%
+- @15200: F2 101.2/84.2 (92.7) vs F1 82.2/80.5 (81.35) — F1 −12.2%
+- honest e2e: 43.75 vs 46.10 (@14600; F1 поймал +4 маржина 163 vs 159),
+  64.62 vs 59.51 (@15200) — в шуме маржин-счёта, стены 2/2 за F1.
+Механика: с Java-surface на ванильных мирах (pack-gate ecda6090) параллельный
+филл не окупается; свободное ядро перекрывается с Paper light/margin-цепочкой.
+cont-136 измерялся ДО fuse/surface-gate (нативный surface надувал филлы).
+Пак-сессии держат F2 (prof_session.sh не менялся). Kill-switch: FILL_THREADS=2.
+
+### Якорь воспроизведён post-purge
+@14600 WIPE, дефолт-протокол: honest e2e=43.75 (якорь 43.34, margin_fills=159
+обеих ног), bulk=ok, v1fallback=0, bridge_err=0, fuse=true, opsApplied=45.3M.
+Греп "native height service ready" в run263_baseline УСТАРЕЛ (лог теперь
+"NMS fluid-update marking bridge ready" + "beardifier bridge ready") — заменить
+при следующем касании скрипта (fail-fast греп дал ложный NO NATIVE BRIDGE).
+
+### fill263bench (idle, реальное дерево, этот сандбокс)
+fill_chunk 2.39 warm / 3.41 COLD; server_fill JNI 2.36 warm / 5.16 COLD /
+5.28 WAVE. Exclusive: interp cell-grid 3.17, noise-family 2.08 (perlin 1.73
+@1.93ns/pt), shell 1.29, interp-shell 1.02, spline 0.14. Loaded-инфляция 3-4x
+(SMT+GC+маржины). bench_dpnoise: спец-ядра 16-17ns/oct/pt, GENERIC 29.7 —
+специализации уже покрывают боевые октавы.
+
+### Уточнение маржин-бухгалтерии (STATUS cont-144)
+margin-чанки = ПОЛНАЯ генерация: fill (margin_fill_cpu 12.3-16.7ms/ch — ТОЛЬКО
+fill!) + deco (chunks=495-627 на окно 144 → марджины декорируются, deco mean
+10.6-11.7ms/ch loaded) + carver (n=495-628). Полная маржин-CPU ≈ 1.5-3.4x от
+окна. ramp 1.1-1.6с = Paper-side планирование (в span НЕ входит).
+
+### FINDING #7: struct ReportedException walls = PARITY-MANDATED
+80×/session `deco structures failed` — ReportedException "Requested chunk
+unavailable" из placeInChunk → MineshaftPiece.postProcess → isInInvalidLocation
+→ biome-чек в чанке за пределами 3x3 decorate-региона margin-чанка. Транзиент
+(сосед генерится параллельно), Paper ChunkStep перезапускает decorate; ваниль
+платит ИДЕНТИЧНУЮ цену (байткод addVanillaDecorations: ТЕЖЕ
+startsForStructure(IILStructure)+placeInChunk, тот же catch→rethrow "Feature
+placement"). Проглатывание = недостающие куски мин → бит-ломает. НЕ фронт.
