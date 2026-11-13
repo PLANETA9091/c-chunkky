@@ -87,7 +87,7 @@ t1=$(date +%s)
 echo "boot: $((t1-t0))s"
 
 # native bridge + generator sanity (fail fast if plugin missing)
-grep -m1 "native height service ready" run.out || { echo "NO NATIVE BRIDGE"; tail -5 run.out; }
+grep -m1 "bridge ready" run.out || { echo "NO NATIVE BRIDGE"; tail -5 run.out; }
 grep -m2 "CrusstyGen" run.out | head -2 || { echo "GENERATOR NOT WIRED"; exit 1; }
 
 # warmup 8x8 @ (WX,WZ) — fresh region
