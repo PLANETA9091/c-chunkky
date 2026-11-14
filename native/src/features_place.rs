@@ -3162,6 +3162,13 @@ fn place_lake(
     // pins this to a Simple provider (no RNG draw); the string is the
     // resolved state ("minecraft:lava[level=0]").
     //
+    // RAW-op lane gate (see place_geode for the no-op proof; the barrier
+    // pass below is the only lake op class that is opaque->opaque).
+    let raw_ok_lake = *PORT3_RAW_ENV.get_or_init(|| {
+        std::env::var("CRUS_PORT3_RAW").ok().as_deref() != Some("0")
+    });
+    //
+    //
     // validation pass: for every non-grid cell with a grid neighbor, the
     // vanilla aborts on the FIRST failing cell. liquid() = fluidState
     // non-empty -> water|lava at worldgen (the snapshot fluid flags encode
@@ -3256,7 +3263,17 @@ fn place_lake(
                     if !level.is_solid(pos) || !repl_barrier(pos) {
                         continue;
                     }
-                    ctx.emit(ops, pos, barrier, 0);
+                    // RAW-op lane (same provable no-op class as the geode
+                    // layer writes): opaque barrier into opaque old state.
+                    // The vanilla barrier set is stone (full cube, opacity
+                    // 15, emission 0); any other barrier keeps the vanilla
+                    // path.
+                    let fl = if raw_ok_lake && barrier == "minecraft:stone" && level.is_solid_render(pos) {
+                        FLAG_RAW
+                    } else {
+                        0
+                    };
+                    ctx.emit(ops, pos, barrier, fl);
                     mark_above(ctx, pos, ops);
                 }
             }
