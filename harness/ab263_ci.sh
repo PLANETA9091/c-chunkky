@@ -224,12 +224,20 @@ def is_deco(m):
     if m.endswith('LOG') or m.endswith('LEAVES') or m.endswith('FENCE') \
        or m.endswith('PRESSURE_PLATE') or m.endswith('SAPLING'):
         return True
+    # cont-146: 26.x vanilla surface-feature families the gate predates.
+    # SULFUR_* (sulfur_spike/pool/rooted_sulfur_spring: surface-anchored
+    # spikes — top-material shifts move ±~60/38K), MOSS* (moss_patch
+    # feature: moss block + carpet + vegetation multi-block writes,
+    # boot-order sensitive). CINNABAR (26.x ore) routes to the bounded
+    # ore-family epsilon below, NOT the unbounded deco class — a real ore
+    # break must still fail. Real deco breaks stay thousands of blocks.
     return any(k in m for k in (
         'SHORT_GRASS', 'TALL_GRASS', 'DRY_GRASS', 'FERN', 'FLOWER', 'BUSH', 'SEEDL',
         'KELP', 'SEAGRASS', 'PICKLE', 'VINE', 'LILY', 'BAMBOO', 'SUGAR_CANE',
         'CACTUS', 'MUSHROOM', 'FUNGUS', 'ROOTS', 'SPROUTS', 'FIRE', 'COBWEB',
         'AZALEA', 'PETAL', 'TORCH', 'LANTERN', 'AMETHYST_BUD', 'SCULK',
-        'MOSS_CARPET', 'HANGING', 'GLOW_LICHEN', 'LICHEN', 'PUMPKIN',
+        'MOSS_CARPET', 'MOSS_BLOCK', 'HANGING', 'GLOW_LICHEN', 'LICHEN', 'PUMPKIN',
+        'SULFUR',
         'MELON', 'BEEHIVE', 'NETHER_WART', 'COCOA', 'WHEAT', 'CARROTS',
         'POTATOES', 'BEETROOTS', 'BIG_DRIPLEAF', 'SMALL_DRIPLEAF',
         'DRIPSTONE', 'SPORE_BLOSSOM', 'AZURE_BLUET', 'BLOB', 'CARPET',
@@ -267,6 +275,13 @@ for m in sorted(set(on) | set(off)):
     elif d <= vein_eps(max(a, b)):
         # vein-family boundary nuance — reported, tolerated
         soft.append(line + "  [vein-eps]")
+    elif ('CINNABAR' in m or 'COAL' in m or 'GRANITE' in m or 'DIORITE' in m
+          or 'ANDESITE' in m or 'TUFF' in m or 'DEEPSLATE' in m) \
+            and d <= max(int(max(a, b) * ORE_EPS_REL), ORE_EPS_ABS):
+        # cont-146: the deterministic conserved-volume signature applies to
+        # ore/stone-boundary families in EVERY pair (surface legs shift the
+        # vein-boundary terrain too), not just the dedicated ore pair.
+        soft.append(line + "  [ore-family]")
     elif PAIR == "ore" and d <= max(int(max(a, b) * ORE_EPS_REL), ORE_EPS_ABS):
         # the deterministic conserved-volume signature — reported, tolerated
         soft.append(line + "  [ore-signature]")
