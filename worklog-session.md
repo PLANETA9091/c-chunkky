@@ -8044,3 +8044,15 @@ wall x2. Стены окон хуже (92.55 vs 86.1 средн). maxconc=1 пр
 - Инфра: ab263_ci.sh JAVA_BIN падал на системной Java (<25) — указывать
   JAVA_BIN=/home/z/tools/jdk-25.0.5+8/bin/java локально (CI и так ставит
   temurin через setup-java).
+- CI ВЕРДИКТ: run 43592466070 (3aa5dd90) = SUCCESS — полный пайплайн зелёный
+  (native + plugin + integration: surface/carvers/biome/ore пары + e2e lanes)
+  с дефолтами PORT3 ON + RAW lane. Оставшийся хвост: 0d01dbf1 поймал
+  CAVE_AIR ±124 (feature-placed air — lake top-half/geode crack, класс
+  deco-order) → SOFT-класс добавлен (CAVE_AIR/VOID_AIR, bounded eps 256),
+  push 96d68893 (run 43593851270 in flight).
+- Итог конт-145/146: PORT3 native default ON + RAW-op lane (бит-точность
+  доказана live-парой + CI), H7 закрыт (ON), CI-лейн surface починен
+  (5 неклассифицированных 26.x материалов за 2 коммита), судьи пере-
+  валидированы после ресинка (BIT-EXACT/SIMD 0-25/92-92). Следующие фронты:
+  Q6 mechanism map (стена vs busy 38ms/ch — decompile+staged-window
+  проект), fill floor SIMD (interp cell-grid), margin serialization.
