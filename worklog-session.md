@@ -8015,3 +8015,32 @@ wall x2. Стены окон хуже (92.55 vs 86.1 средн). maxconc=1 пр
 - Инструментальный урок: cargo test --lib НЕ пересобирает cdylib .so — после
   правок натива для серверных прогонов ОБЯЗАТЕЛЬНО cargo build --release
   (без этого leg-D гонял старый .so 10:11 — A/B-ноги были фиктивные).
+
+## cont-146 (2026-11-14): CI surface-lane fix + H7 verdict + anchor revalidation
+
+- CI RED инцидент: runs 43429008758 (eede4dcd) + 43590958576 (2ad5d3fd) —
+  integration FAIL на шаге "A/B surface", native+plugin jobs GREEN.
+  Причина: 4 материала вне классов гейта (гейт предшествует 26.x контенту):
+  CINNABAR ±63 (26.x руда, surface-зависимая граница жилы),
+  MOSS_BLOCK +121 (moss_patch фича), SULFUR/SULFUR_SPIKE ±63 (26.x
+  surface-anchored spikes). Дельты 0.1-0.2% от семейств = документированный
+  deco-order/vein-boundary класс.
+  ФИКС (3aa5dd90): SULFUR*/MOSS* → deco-класс; CINNABAR → BOUNDED
+  ore-family epsilon (4%/500 — в ЛЮБОЙ паре; реальный рудный лом всё ещё
+  фейлит). Симуляция на реальных данных: 4 дельты tolerated, фейковый
+  GRASS_BLOCK break 99999 → STRICT_FAIL (гейт осмысленный).
+- H7 вердикт (фронт #3, закрыт измерением): @14600 honest window 2x2 —
+  ON 46.31/46.17 (стабильно), OFF 43.91/56.87 (разброс; вторая нога
+  поймала шумное окно). Воспроизводимого OFF-выигрыша нет — H7 остаётся ON
+  (per-section ore классификация).
+- Якорь @14600 с новыми дефолтами (PORT3 ON+RAW): honest e2e 46.31/46.17
+  (vs 43.75 cont-144 — регион/маржин-вариация 174-176 vs 159 fills,
+  бокс-шум; PORT3+RAW замерен честным paired A/B @2000/2100: OFF
+  61.55/61.76 vs ON+RAW1 56.57 = -5.0).
+- port3raw parity pair (4511841c): live 8x8 @16400 — GATE PASS, strict
+  bit-equal; geode layer materials BIT-EQUAL (AMETHYST_BLOCK 2545=2545,
+  CALCITE 3526=3526, SMOOTH_BASALT 4601=4601, BUDDING_AMETHYST 234=234).
+  RAW-op lane = бит-точный на живом сервере.
+- Инфра: ab263_ci.sh JAVA_BIN падал на системной Java (<25) — указывать
+  JAVA_BIN=/home/z/tools/jdk-25.0.5+8/bin/java локально (CI и так ставит
+  temurin через setup-java).

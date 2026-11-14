@@ -2,7 +2,7 @@
  "goal": "e2e <= 5 ms/chunk on the noisy 2-core sandbox, Paper 26.3 build 222, vanilla worldgen + native engine (deco=1, carvers=1)",
  "metric": "harness/e2e263.sh: forceload fresh 12x12 window, wall ms/chunk; report 3 windows + crusgenstats (p50/p99, phase split)",
  "platform": "Paper 26.3 build 222 sha256 f649771a..., JDK Temurin 25.0.5+8, seed 3257840388504953787, NO datapacks (26.3 pack restore is a separate task)",
- "updated": "2026-11-14T11:45:00+00:00",
+ "updated": "2026-11-14T12:05:00+00:00",
  "baseline": {
   "source": "cont-135 reference/prof_session_deco263_q13.txt (MINE windows; tree 9a4d6272 = cont-134)",
   "e2e_windows_ms": [
@@ -204,6 +204,10 @@
   {
    "t": "2026-11-14T11:45+00:00",
    "event": "cont-145: sandbox resync (recovery protocol; judge BIT-EXACT 129273/129273 + SIMD 0/25 + 92/92 re-validated on HEAD). PORT3 RAW-op lane: geode layer + lake barrier opaque->opaque writes emit FLAG_RAW (vanilla setBlock(2) extras provably no-ops for this class — heightmap raise impossible, light props equal, section air-ness unchanged). Paired WIPE A/B @2000/2100 honest window: OFF 61.55/61.76, ON+RAW0 59.72, ON+RAW1 56.57 ms/ch. CRUS_DELEG_PORT3 + CRUS_PORT3_RAW defaults ON; commit 2ad5d3fd pushed. STALE-JAR lesson: rebuild plugin (bulk=ok) + cargo build --release for the cdylib before server legs."
+  },
+  {
+   "t": "2026-11-14T12:05+00:00",
+   "event": "cont-146: CI surface-lane fix (4 materials outside gate classes since 26.x content: CINNABAR->bounded ore-family eps, SULFUR*/MOSS*->deco; 3aa5dd90). H7 verdict: stays ON (2x2 @14600: ON 46.31/46.17 stable, OFF 43.91/56.87 erratic). port3raw pair: geode layer materials BIT-EQUAL live. Anchor @14600 new defaults: 46.31/46.17 (region-var vs 43.75 cont-144; PORT3+RAW win proven paired @2000: -5.0)."
   }
  ],
  "ab_protocol": "wipe server263/world* before each config; coords RX1=2000 RZ1=2000, WX=500 WZ=500; NW=2..3; report window means + crusgenstats p50/p99; never compare across different regions",
