@@ -2,7 +2,7 @@
  "goal": "e2e <= 5 ms/chunk on the noisy 2-core sandbox, Paper 26.3 build 222, vanilla worldgen + native engine (deco=1, carvers=1)",
  "metric": "harness/e2e263.sh: forceload fresh 12x12 window, wall ms/chunk; report 3 windows + crusgenstats (p50/p99, phase split)",
  "platform": "Paper 26.3 build 222 sha256 f649771a..., JDK Temurin 25.0.5+8, seed 3257840388504953787, NO datapacks (26.3 pack restore is a separate task)",
- "updated": "2026-11-14T12:05:00+00:00",
+ "updated": "2026-11-14T12:55:00+00:00",
  "baseline": {
   "source": "cont-135 reference/prof_session_deco263_q13.txt (MINE windows; tree 9a4d6272 = cont-134)",
   "e2e_windows_ms": [
@@ -208,6 +208,10 @@
   {
    "t": "2026-11-14T12:05+00:00",
    "event": "cont-146: CI surface-lane fix (4 materials outside gate classes since 26.x content: CINNABAR->bounded ore-family eps, SULFUR*/MOSS*->deco; 3aa5dd90). H7 verdict: stays ON (2x2 @14600: ON 46.31/46.17 stable, OFF 43.91/56.87 erratic). port3raw pair: geode layer materials BIT-EQUAL live. Anchor @14600 new defaults: 46.31/46.17 (region-var vs 43.75 cont-144; PORT3+RAW win proven paired @2000: -5.0)."
+  },
+  {
+   "t": "2026-11-14T12:55+00:00",
+   "event": "CI GREEN x2 (3aa5dd90, 96d68893) on PORT3+RAW defaults. Campaign position: judge BIT-EXACT, SIMD 0/25, cargo 92/92, honest 46.2 @14600. Remaining fronts: Q6 mechanism map (wall-vs-busy 38ms/ch), fill floor (interp cell-grid SIMD), margin serialization."
   }
  ],
  "ab_protocol": "wipe server263/world* before each config; coords RX1=2000 RZ1=2000, WX=500 WZ=500; NW=2..3; report window means + crusgenstats p50/p99; never compare across different regions",
@@ -238,7 +242,8 @@
   "baseline_ms": 100.8,
   "target_ms": 5.0,
   "tests": "92/92",
-  "ci": "SUCCESS 42884625556 + 42999118452 (2072e998: S1 default-ON + cont-140 judge-verified)"
+  "ci": "SUCCESS 42884625556 + 42999118452 (2072e998: S1 default-ON + cont-140 judge-verified)",
+  "cont146_note": "CI SUCCESS 3aa5dd90+96d68893 with PORT3 native default ON + RAW-op lane (geode layer + lake barrier, bit-exact live-pair + CI); H7 closed ON; surface lane fixed (5 unclassified 26.x materials: CINNABAR/SULFUR*/MOSS_BLOCK/CAVE_AIR/VOID_AIR). Honest anchors: 46.2 @14600 (H7 ON, new defaults; region-var vs 43.75 cont-144), 56.6 @2000/2100; PORT3+RAW paired win -5.0 vs delegate @2000/2100."
  },
  "cont142_attack_wave": {
   "date": "2026-11-11 ~11:50-12:30 +08",
