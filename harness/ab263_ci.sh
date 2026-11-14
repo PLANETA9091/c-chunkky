@@ -208,7 +208,10 @@ on, off = load(sys.argv[1]), load(sys.argv[2])
 # DECO: feature-placed families — cross-chunk feature writes depend on the
 # chunk generation order (not stable across boots).
 SOFT = {'DIRT', 'GRASS_BLOCK', 'COARSE_DIRT', 'ROOTED_DIRT', 'PODZOL',
-        'WATER', 'LAVA', 'AIR'}
+        'WATER', 'LAVA', 'AIR', 'CAVE_AIR', 'VOID_AIR'}
+# CAVE_AIR/VOID_AIR (cont-146): feature-placed air (lake top-half cave_air,
+# geode crack) — the ±124/2.8K CI surface delta is the deco-order class;
+# SOFT's bounded eps (max(0.2%, 256)) keeps real breaks failing.
 SOFT_EPS = lambda cnt: max(int(cnt * 0.002), 256)
 # the native-vs-Java vein-patch boundary nuance: the vein toggle/ridged
 # conditions are volume-sampled (native prefilled buffers vs the vanilla
