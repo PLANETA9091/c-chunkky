@@ -153,7 +153,19 @@ case "$PAIR" in
     boot_run "ab_on"  "CRUS_NATIVE_CARVERS=0" || exit 1
     boot_run "ab_off" "CRUS_NATIVE_CARVERS=0" || exit 1
     ;;
-  *) echo "unknown pair: $PAIR (surface|carvers|biome|ore|orebase)" >&2; exit 1;;
+  port3raw)
+    # cont-145: the RAW-op lane parity pair — geode layer + lake barrier ops
+    # applied via the section-RAW path (FLAG_RAW) vs the vanilla per-op path.
+    # Both legs run the SAME native ports (CRUS_DELEG_PORT3 default ON) and
+    # carvers=0 so the carve-op noise does not mask the deco families. The
+    # op STREAMS are identical (same RNG draws — features/ops counters equal);
+    # only the Java apply path differs. Bit-exactness expectation: statdump
+    # material counts equal up to the documented deco-order noise; blockdump
+    # diff = 0 or the deco-order class.
+    boot_run "ab_on"  "CRUS_NATIVE_CARVERS=0 CRUS_PORT3_RAW=1" || exit 1
+    boot_run "ab_off" "CRUS_NATIVE_CARVERS=0 CRUS_PORT3_RAW=0" || exit 1
+    ;;
+  *) echo "unknown pair: $PAIR (surface|carvers|biome|ore|orebase|port3raw)" >&2; exit 1;;
 esac
 
 cp "$SRV"/ab_on_stat.txt "$SRV"/ab_off_stat.txt "$SRV"/ab_on_block.txt "$SRV"/ab_off_block.txt \
