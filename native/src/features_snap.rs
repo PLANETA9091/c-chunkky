@@ -1050,6 +1050,22 @@ impl crate::features_deco::EnvColScan for ChunkLevel<'_> {
 }
 
 impl DecoLevelExt for ChunkLevel<'_> {
+    fn is_solid_render(&self, pos: BlockPos) -> bool {
+        // snapshot SOLID_RENDER flag (free palette lookup): the geode RAW-op
+        // gate needs the OLD state's opacity at emit time; the JNI upcall
+        // (~1us) would eat the RAW-op apply savings.
+        let ov = self.ov.borrow();
+        if !ov.is_empty() && ov.contains_key(&(pos.x, pos.y, pos.z)) {
+            drop(ov);
+            // a newer feature write lives here: the live state decides (the
+            // vanilla read is live); the rare upcall is confined to overlay
+            // positions.
+            return self.inner.is_solid_render(pos);
+        }
+        drop(ov);
+        self.snap_flag(pos.x, pos.y, pos.z, flags::SOLID_RENDER)
+            .unwrap_or_else(|| self.inner.is_solid_render(pos))
+    }
     fn state_is(&self, pos: BlockPos, ids: &[String]) -> bool {
         {
             let ov = self.ov.borrow();

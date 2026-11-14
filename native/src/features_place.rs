@@ -3041,22 +3041,33 @@ fn deleg_nogen() -> bool {
 
 /// CRUS_DELEG_PORT3: kill-switch for the deleg-ports-3 types
 /// (lake_lava_surface / lake_lava_underground / amethyst_geode).
-/// DEFAULT OFF (delegate lane) — cont-142 paired A/B (9500,9500 wiped,
-/// same jar/.so): ON 68.07 vs OFF 65.42 e2e (+2.65 REGRESSION: lake+geode
-/// emit thousands of ops/chunk through the op stream; per-op apply overhead
-/// beats the vanilla Java lane; A4's small-op features won, high-volume
-/// ones need a bulk-op path first). CRUS_DELEG_PORT3=1 opts back in.
+/// DEFAULT ON (native ports) since cont-145: the cont-142 op-stream
+/// regression (+2.65ms/ch, vanilla per-op apply on thousands of lake+geode
+/// ops) is reversed by the RAW-op lane — paired WIPE A/B @2000/2100 honest
+/// window: PORT3+RAW 58.28 vs delegate 61.55 ms/ch (-3.3), rcon windows
+/// 74.5/75.3 vs 79.9/81.0. CRUS_DELEG_PORT3=0 restores the delegate lane.
 /// PORT3_FORCE is the test/bench override (1 = port ON, 2 = delegate
 /// OFF-lane) evaluated FIRST so parity tests can pin both lanes in one
 /// process (H7_FORCE pattern).
 pub static PORT3_FORCE: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(0);
 static PORT3_OFF_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+/// RAW-op lane gate (cont-145): geode layer writes flagged FLAG_RAW when the
+/// old state is opaque (provably no-op vanilla extras — see place_geode).
+/// CRUS_PORT3_RAW=0 = all-vanilla-path emission (honest A/B leg).
+static PORT3_RAW_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 fn deleg_port3_off() -> bool {
     match PORT3_FORCE.load(std::sync::atomic::Ordering::Relaxed) {
         1 => false,
         2 => true,
         _ => *PORT3_OFF_ENV.get_or_init(|| {
-            std::env::var("CRUS_DELEG_PORT3").ok().as_deref() != Some("1")
+            // cont-145: DEFAULT ON. The cont-142 op-stream regression
+            // (+2.65ms/ch: thousands of lake/geode ops through the vanilla
+            // per-op apply) is REVERSED by the RAW-op lane (geode layer
+            // writes skip the provably-no-op vanilla extras): paired WIPE
+            // A/B @2000/2100 honest window — PORT3+RAW 58.28 vs delegate
+            // lane 61.55 ms/ch (-3.3), rcon windows 74.5/75.3 vs 79.9/81.0.
+            // CRUS_DELEG_PORT3=0 restores the vanilla delegate lane.
+            std::env::var("CRUS_DELEG_PORT3").ok().as_deref() == Some("0")
         }),
     }
 }
@@ -3498,13 +3509,43 @@ fn place_geode(
     };
     // safeSetBlock: predicate test on the LIVE state (overlay included), then
     // setBlock(state, 2). The provider draws ride sample_state (Simple = none).
+    //
+    // RAW-op lane (cont-145, PORT3 bulk-op front): geode LAYER writes whose
+    // old state is opaque-full-cube are section-RAW eligible. Vanilla
+    // ProtoChunk.setBlockState(2) per-op extras are ALL provably no-ops for
+    // opaque->opaque: (a) heightmapsAfter(FEATURES) = FINAL_HEIGHTMAPS and an
+    // opaque write below/at the peak of every type that counts it raises
+    // nothing (Heightmap.update raises only when localY >= firstAvailable and
+    // the pos was already opaque-terrain); (b) hasDifferentLightProperties =
+    // false (opacity 15/emission 0 both sides); (c) updateSectionStatus fires
+    // only on section air-ness change (none); (d) POI/BE hooks change nothing.
+    // The Java FLAG_RAW apply (the OreFeature-verified path) writes the same
+    // palette cell and skips the rest. Kill-switch CRUS_PORT3_RAW=0 restores
+    // the all-vanilla-path emission for honest A/B.
     let mut flags = 0u8;
+    let raw_ok = *PORT3_RAW_ENV.get_or_init(|| {
+        std::env::var("CRUS_PORT3_RAW").ok().as_deref() != Some("0")
+    });
     let safe_set = |pos: BlockPos, state: Option<String>, ops: &mut Vec<DecoOp>| -> bool {
         if !can_replace(pos) {
             return false;
         }
         if let Some(s) = state {
-            ctx.emit(ops, pos, &s, 0);
+            let fl = if raw_ok
+                && matches!(
+                    s.as_str(),
+                    "minecraft:amethyst_block"
+                        | "minecraft:calcite"
+                        | "minecraft:smooth_basalt"
+                        | "minecraft:budding_amethyst"
+                )
+                && level.is_solid_render(pos)
+            {
+                FLAG_RAW
+            } else {
+                0
+            };
+            ctx.emit(ops, pos, &s, fl);
             return true;
         }
         false
