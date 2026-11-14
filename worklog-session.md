@@ -7977,3 +7977,41 @@ placement"). Проглатывание = недостающие куски ми
 chunk-пайплайна WT2 стоят в очереди к ОДНОМУ серийному fill-потоку → per-fill
 wall x2. Стены окон хуже (92.55 vs 86.1 средн). maxconc=1 при WT1 — здоровая
 форма для 2 ядер. WT1+F1 = финальный дефолт; WT2 не реабилитирован даже с F1.
+
+## cont-145 (2026-11-14): RESYNC + judge re-validation + PORT3 RAW-op lane
+
+- РЕСИНК песочницы: локальный main был на cont-41 (848b2b6) — recovery protocol
+  (git fetch + reset --hard origin/main = eede4dcd cont-144) + sandbox_recover
+  stages вручную (rustup 1.100, JDK 25.0.5+8, server263 mirror из /tmp: paper.jar
+  sha256 f649771a OK, versions/libraries/cache; eula+props на месте).
+- Стейты судьи на пост-ресинк боксе (HEAD eede4dcd): fill263golden +
+  diff_fill263 vs reference/oracle263_fill.txt = BIT-EXACT (129273/129273,
+  marks MATCH); fill263bench SIMD parity fails 0/25; fill_chunk 2.30ms warm
+  median / 3.86 COLD; cargo 92/92.
+- Порт263-schema находки: aquifers уже читается из settings.aquifers объекта
+  (worldgen.rs 4b), NoiseStack/NormalNoise263 в n263.rs бит-точны, f32-SIMD
+  (vecf.rs AVX-512/AVX2) в проде — фаза 2 из директивы юзера закрыта ранее;
+  этот конт подтверждает гейты.
+- STALE-JAR инцидент: plugin/CrusstyGen.jar был от 16.10 (1.21.8-эра) —
+  bulk=NoSuchFieldException: registry, deco/carver драйверы отсутствовали.
+  Пересобран (SRV_DIR=server263) → bulk=ok, fuse=true, honest-window инструмент
+  жив. (jar в git трекается старым — CI собирает свой; конвенция сохранена.)
+- PORT3 RAW-op lane (geode + lake barrier): эмит FLAG_RAW для opaque->opaque
+  записей. ДОКАЗАТЕЛЬСТВО паритета: ProtoChunk.setBlockState(2) экстра-работа
+  = heightmapsAfter(FEATURES)=FINAL_HEIGHTMAPS обновления (Heightmap.update
+  поднимает только при localY>=firstAvailable — позиция уже opaque-terrain,
+  значит ни одна из 4 карт не меняется), light-хуки (hasDifferentLightProperties
+  =false: opacity 15/emission 0 с обеих сторон), updateSectionStatus (air-ность
+  секции не меняется), POI/BE хуки инертны. Java FLAG_RAW apply = проверенный
+  Ore-путь (section setBlockState(...,false)). ChunkLevel.is_solid_render —
+  бесплатный snap_flag(SOLID_RENDER) (overlay-позиция → live upcall).
+- A/B (paired WIPE @2000/2100, honest window, fresh .so+jar):
+  PORT3 OFF 61.55/61.76 | ON+RAW0 59.72 | ON+RAW1 56.57 ms/ch (rcon окна
+  79.9/81.0 | 74.0/79.8 | 79.3/76.5 — бокс-шум, honest решает). Прирост
+  ~-5.0 ms/ch vs delegate-леера; регрессия cont-142 развёрнута.
+- ДЕФОЛТЫ: CRUS_DELEG_PORT3 default ON (native lake/geode), CRUS_PORT3_RAW
+  default ON; kill-switches =0. Коммит 2ad5d3fd push (CI гейты: cargo+SIMD
+  parity+fill263golden oracle+ab263 material gates).
+- Инструментальный урок: cargo test --lib НЕ пересобирает cdylib .so — после
+  правок натива для серверных прогонов ОБЯЗАТЕЛЬНО cargo build --release
+  (без этого leg-D гонял старый .so 10:11 — A/B-ноги были фиктивные).

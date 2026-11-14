@@ -2,7 +2,7 @@
  "goal": "e2e <= 5 ms/chunk on the noisy 2-core sandbox, Paper 26.3 build 222, vanilla worldgen + native engine (deco=1, carvers=1)",
  "metric": "harness/e2e263.sh: forceload fresh 12x12 window, wall ms/chunk; report 3 windows + crusgenstats (p50/p99, phase split)",
  "platform": "Paper 26.3 build 222 sha256 f649771a..., JDK Temurin 25.0.5+8, seed 3257840388504953787, NO datapacks (26.3 pack restore is a separate task)",
- "updated": "2026-11-11T21:18:06+00:00",
+ "updated": "2026-11-14T11:45:00+00:00",
  "baseline": {
   "source": "cont-135 reference/prof_session_deco263_q13.txt (MINE windows; tree 9a4d6272 = cont-134)",
   "e2e_windows_ms": [
@@ -200,6 +200,10 @@
   {
    "t": "2026-11-10T21:45+08:00",
    "event": "CI 42884625556 (main ddfceb1) SUCCESS — judge gates (vanilla/datapack/dptt 0.05%, ours 0.005%) confirm bit-parity of A4 native ports + Q5 dedicated pool + light-divert(OFF) + harness. Session net: honest e2e ~100 -> 59.67 (-41%), rcon windows 70.5-75.3 best. Open fronts for next iteration: S1 sub-batching (agent stalled 2.5h, no commits — reassign fresh), ore compute micro (COMPUTE_TOP lost with /tmp, re-gather), carver native opt (15.6 loaded), light-divert CI A/B lane, DECO_POOL_SIZE=3, watchdog main-thread stall (>10s between batches — root cause unexplored). Parallel session active on same main (cont-138 honest-window arm) — rebase before next push."
+  },
+  {
+   "t": "2026-11-14T11:45+00:00",
+   "event": "cont-145: sandbox resync (recovery protocol; judge BIT-EXACT 129273/129273 + SIMD 0/25 + 92/92 re-validated on HEAD). PORT3 RAW-op lane: geode layer + lake barrier opaque->opaque writes emit FLAG_RAW (vanilla setBlock(2) extras provably no-ops for this class — heightmap raise impossible, light props equal, section air-ness unchanged). Paired WIPE A/B @2000/2100 honest window: OFF 61.55/61.76, ON+RAW0 59.72, ON+RAW1 56.57 ms/ch. CRUS_DELEG_PORT3 + CRUS_PORT3_RAW defaults ON; commit 2ad5d3fd pushed. STALE-JAR lesson: rebuild plugin (bulk=ok) + cargo build --release for the cdylib before server legs."
   }
  ],
  "ab_protocol": "wipe server263/world* before each config; coords RX1=2000 RZ1=2000, WX=500 WZ=500; NW=2..3; report window means + crusgenstats p50/p99; never compare across different regions",
