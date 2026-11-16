@@ -2,7 +2,7 @@
  "goal": "e2e <= 5 ms/chunk on the noisy 2-core sandbox, Paper 26.3 build 222, vanilla worldgen + native engine (deco=1, carvers=1)",
  "metric": "harness/e2e263.sh: forceload fresh 12x12 window, wall ms/chunk; report 3 windows + crusgenstats (p50/p99, phase split)",
  "platform": "Paper 26.3 build 222 sha256 f649771a..., JDK Temurin 25.0.5+8, seed 3257840388504953787, NO datapacks (26.3 pack restore is a separate task)",
- "updated": "2026-11-16T14:37:15+00:00",
+ "updated": "2026-11-16T14:43:26+00:00",
  "baseline": {
   "source": "cont-135 reference/prof_session_deco263_q13.txt (MINE windows; tree 9a4d6272 = cont-134)",
   "e2e_windows_ms": [
@@ -451,6 +451,8 @@
    "F1-vs-F2 A/B on vanilla 26.3 (cont-144 said F1 walls win pre-PORT3)",
    "native surface tail for vanilla 26.3 (JFR: 14% wall in ConditionRule/SequenceRule)",
    "ramp amortization / scheduler latency (Q6 core)"
-  ]
+  ],
+  "ab_fillthreads": "paired F1/F2 honest @14600/14700 wipe-per-leg: F1 72.86/51.28 vs F2 76.31/56.58 \u2014 F1 wins both (-3.5/-5.3), margin_fill_cpu 19.0 vs 19.6. VERDICT: F1 adopted for vanilla 26.3 (re-confirms cont-144 REVERSED note; run263_baseline default FILL_THREADS=1 was already right \u2014 cont-143's F2 champion applies to PACK worlds only).",
+  "ab_surface263": "paired FORCE_NATIVE_SURFACE=1/0 (F1 fixed): S1 74.23/63.47 busy 13.6/13.2 vs S0 75.64/56.96 busy 14.2/10.4 \u2014 native surface ADDS busy (+2.8) and loses w1 (+6.5). JFR's 14% Java surface CPU is real but native-in-fill surface costs MORE under 2-core contention. VERDICT: Java surface stays on vanilla 26.3 (re-confirms cont-144, now post-PORT3). CRUS_FORCE_NATIVE_SURFACE remains off."
  }
 }
