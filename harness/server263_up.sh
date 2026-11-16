@@ -4,7 +4,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRV="$ROOT/server263"
-JAVA=/home/z/tools/jdk-25.0.5+8/bin/java
+JAVA=/home/z/my-project/tools/jdk-25.0.5+8/bin/java
 cd "$SRV"
 
 if pgrep -f 'java .*paper-26\.3.*\.jar' >/dev/null 2>&1; then

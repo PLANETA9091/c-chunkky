@@ -84,7 +84,7 @@ rcon "crusgenstats reset" >/dev/null
 # --- sampled window ----------------------------------------------------------
 # JFR around the window via jcmd attach (started AFTER warmup => clean slice).
 # profile settings: ExecutionSample 10ms, NativeMethodSample 20ms (JNI fills).
-JC="$(ls /home/z/tools/jdk-*/bin/jcmd 2>/dev/null | sort | tail -1)"
+JC="$(ls /home/z/my-project/tools/jdk-*/bin/jcmd 2>/dev/null | sort | tail -1)"
 [ -z "$JC" ] && JC=jcmd
 JPID="$(cat "$SRV/server.pid")"
 $JC "$JPID" JFR.configure stackdepth=128 >/dev/null 2>&1 || echo "[sampler] JFR.configure (stackdepth) FAILED"

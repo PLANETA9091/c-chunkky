@@ -4,7 +4,7 @@
 set -uo pipefail
 ROOT=/home/z/my-project/c-faster
 cd "$ROOT/server263"
-export JAVA=/home/z/tools/jdk-25.0.5+8/bin/java
+export JAVA=/home/z/my-project/tools/jdk-25.0.5+8/bin/java
 
 RX1=${RX1:-2000}; RZ1=${RZ1:-2000}
 WX=${WX:-500}; WZ=${WZ:-500}

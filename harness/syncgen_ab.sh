@@ -9,7 +9,7 @@ ROOT=/home/z/my-project/c-faster
 SRV="$ROOT/server263"
 PH="${1:?usage: syncgen_ab.sh A|B}"
 RX=2100; RZ=2000; N=11
-export JAVA=/home/z/tools/jdk-25.0.5+8/bin/java
+export JAVA=/home/z/my-project/tools/jdk-25.0.5+8/bin/java
 cd "$SRV"
 
 pgrep -f 'java .*paper-26\.3.*\.jar' >/dev/null 2>&1 && { echo "ERROR: server already running"; exit 1; }
