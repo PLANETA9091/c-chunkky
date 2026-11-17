@@ -16,6 +16,7 @@ pub mod density;
 pub mod biomes;
 pub mod surface;
 pub mod surface_fill;
+pub mod carve;
 pub mod beard;
 pub mod nochunk;
 pub mod ffi;

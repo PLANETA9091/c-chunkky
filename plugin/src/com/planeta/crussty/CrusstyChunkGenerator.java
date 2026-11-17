@@ -163,15 +163,26 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         return true;
     }
 
-    /** Vanilla carvers (caves/ravines) cut into our blocks. */
+    /**
+     * Native carve engine active: configured_carver + biome carver lists +
+     * replaceable tags were parsed by the native ctx AND the native surface
+     * engine runs (the carve pass is the CARVERS stage inside the native
+     * fill). Flipped once at world load by {@link #onWorldLoad}; when true
+     * the vanilla Java carver stage is skipped (shouldGenerateCaves false).
+     */
+    private static volatile boolean NATIVE_CAVES = false;
+
     @Override
     public boolean shouldGenerateCaves() {
-        return true;
+        return !NATIVE_CAVES;
     }
+
+    private static final boolean DECORATIONS_ENABLED =
+            System.getenv("CRUS_NO_DECOR") == null;
 
     @Override
     public boolean shouldGenerateDecorations() {
-        return true;
+        return DECORATIONS_ENABLED;
     }
 
     @Override
@@ -362,7 +373,9 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     }
 
     /** "data/<ns>/worldgen/<...>.json" (or the overworld dimension override)
-     *  -> "<ns>/worldgen/<...>.json"; null for irrelevant entries. */
+     *  -> "<ns>/worldgen/<...>.json"; null for irrelevant entries. Block tags
+     *  (overworld_carver_replaceables etc.) and configured_carver configs are
+     *  collected for the native carve engine. */
     private static String packRel(String entry) {
         if (!entry.startsWith("data/") || !entry.endsWith(".json")) {
             return null;
@@ -372,6 +385,8 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 || rel.contains("/worldgen/density_function/")
                 || rel.contains("/worldgen/noise/")
                 || rel.contains("/worldgen/biome/")
+                || rel.contains("/worldgen/configured_carver/")
+                || rel.contains("/tags/block/")
                 || rel.endsWith("/dimension/overworld.json");
         return keep ? rel : null;
     }
@@ -544,6 +559,14 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             int height = w.getMaxHeight() - w.getMinHeight();
             CtxPool pool = poolForNamed(w.getName(), seed, minY, height);
             setupSurface(pool, w);
+            // Native carve handshake: armed only when the native surface
+            // engine is active too (carve runs after the surface tail inside
+            // the native fill; vanilla carvers see the same data that way).
+            if (NATIVE_SURFACE && ChunkGenNative.carverActive(pool.firstCtx())) {
+                NATIVE_CAVES = true;
+                Logger.getLogger("CrusstyGen").info(
+                        "native carve engine active (vanilla Java carvers disabled)");
+            }
             String[] names = ChunkGenNative.ctxBiomeNames(pool.firstCtx());
             if (names == null) {
                 Logger.getLogger("CrusstyGen").info(
@@ -802,7 +825,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 // the backing ChunkAccess (getHandle().getSections()).
                 Class<?> cCraftChunkData = Class.forName(
                         "org.bukkit.craftbukkit.generator.CraftChunkData");
-                mGetHandle = cCraftChunkData.getMethod("getHandle");
+                mChunkDataHandle = cCraftChunkData.getMethod("getHandle");
                 Class<?> cChunkAccess = Class.forName(
                         "net.minecraft.world.level.chunk.ChunkAccess");
                 mGetSectionsAcc = cChunkAccess.getMethod("getSections");
@@ -1033,6 +1056,17 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         }
     }
 
+    /** Ensures the bulk layout arrays exist. SurfaceSetup.extendPalette needs
+     *  them to extend the palette; at the world-load hook generateNoise may
+     *  not have run yet (spawn chunk pregen races the hook), so the handshake
+     *  must be able to arm the bulk path itself. */
+    static synchronized boolean ensureBulk() {
+        if (!bulkReady && !bulkBroken) {
+            initBulk();
+        }
+        return bulkReady;
+    }
+
     private static volatile Class<?> cachedChunkDataClass;
     private static Class<?> chunkDataClass() {
         // resolved from a live instance by the first generateNoise caller;
@@ -1071,7 +1105,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             Material[] mats) {
         long tLay = System.nanoTime();
         try {
-            Object handle = mGetHandle.invoke(chunkData);
+            Object handle = mChunkDataHandle.invoke(chunkData);
             Object[] sections = (Object[]) mGetSectionsAcc.invoke(handle);
             if (sections == null || sections.length == 0) {
                 GenStats.BULK_BROKEN_COUNT.incrementAndGet();
@@ -1648,6 +1682,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     // cached NMS handles
     private static Class<?> cChunkPos, cStructureStart, cStructurePiece, cPoolPiece, cBoundingBox,
             cJunction, cStructure, cChunkStatus;
+    private static Method mChunkDataHandle;
     private static Method mGetHandle, mGetChunkSource, mGetChunkAtIfLoaded, mGetChunkFull,
             mGetAllRefs, mGetStartForStructure, mTerrainAdapt, mStartGetPieces, mStartIsValid,
             mPieceGetBox, mPieceIsClose, mPoolGetElement, mElementProjection, mPoolGetDelta,
@@ -1717,6 +1752,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
      * follows the vanilla map iteration so the f64 summation matches.
      */
     private static int[] collectBeard(WorldInfo worldInfo, int chunkX, int chunkZ, ChunkData chunkData) {
+        Object wObj = null;
         if (beardBroken) {
             return EMPTY_BEARD;
         }
@@ -1725,6 +1761,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         }
         try {
             World w = Bukkit.getWorld(worldInfo.getName());
+            wObj = w;
             if (w == null) {
                 return EMPTY_BEARD;
             }
@@ -1854,7 +1891,19 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             return out;
         } catch (Throwable t) {
             beardBroken = true;
-            LOG.warning("beard collection failed, disabling: " + t);
+            StringBuilder sb = new StringBuilder("beard collection failed, disabling: " + t);
+            for (StackTraceElement f : t.getStackTrace()) {
+                if (f.getClassName().contains("CrusstyChunkGenerator")) {
+                    sb.append(" | at ").append(f);
+                    break;
+                }
+            }
+            try {
+                sb.append(" | w=").append(wObj == null ? "null" : wObj.getClass().getName())
+                  .append(" mDecl=").append(mGetHandle.getDeclaringClass().getName());
+            } catch (Throwable ignored) {
+            }
+            LOG.warning(sb.toString());
             return EMPTY_BEARD;
         }
     }
@@ -2025,7 +2074,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
             Method mGetFluid = cBlockState.getMethod("getFluidState");
             // Bukkit BlockData per surface state (for the v1/verify paths that
             // speak Material/BlockData, not NMS states)
-            Class<?> cCraftBlockData = Class.forName("org.bukkit.craftbukkit.block.CraftBlockData");
+            Class<?> cCraftBlockData = Class.forName("org.bukkit.craftbukkit.block.data.CraftBlockData");
             Method mFromData = cCraftBlockData.getMethod("fromData", cBlockState);
             Class<?> cFluidState = Class.forName("net.minecraft.world.level.material.FluidState");
             Method mFluidRand = cFluidState.getMethod("isRandomlyTicking");

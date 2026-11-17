@@ -443,6 +443,104 @@ public final class OracleNoiseStagePlugin extends JavaPlugin {
                         getLogger().info("walk " + cx + "," + cz + " surface blocks dumped: " + surf.length());
                     }
 
+                    // At CARVERS status: dump every non-air block (same format
+                    // as SURFACEBLOCKS) — the ground truth for the native
+                    // carve engine (vanilla surface + vanilla carvers).
+                    if (st[1].equals("carvers")) {
+                        Class<?> stateClass3 = Class.forName(
+                                "net.minecraft.world.level.block.state.BlockState");
+                        Class<?> blockPosClass3 = Class.forName(
+                                "net.minecraft.core.BlockPos$MutableBlockPos");
+                        Object blockPos3 = blockPosClass3.getDeclaredConstructor().newInstance();
+                        Method getBlockState3 = accessClass.getMethod("getBlockState",
+                                Class.forName("net.minecraft.core.BlockPos"));
+                        Method mIsAir3 = stateClass3.getMethod("isAir");
+                        Method mGetBlock3 = stateClass3.getMethod("getBlock");
+                        Object blockRegistry3 = Class.forName(
+                                "net.minecraft.core.registries.BuiltInRegistries")
+                                .getField("BLOCK").get(null);
+                        Method mKey3 = blockRegistry3.getClass()
+                                .getMethod("getKey", Object.class);
+                        Method mGetValues3 = stateClass3.getMethod("getValues");
+                        Class<?> cProperty3 = Class.forName(
+                                "net.minecraft.world.level.block.state.properties.Property");
+                        Method mPropName3 = cProperty3.getMethod("getName", Comparable.class);
+                        StringBuilder cv = new StringBuilder();
+                        for (int y = -64; y < 320; y++) {
+                            for (int lz = 0; lz < 16; lz++) {
+                                for (int lx = 0; lx < 16; lx++) {
+                                    blockPosClass3.getMethod("set", int.class, int.class, int.class)
+                                            .invoke(blockPos3, cx * 16 + lx, y, cz * 16 + lz);
+                                    Object state = getBlockState3.invoke(chunk, blockPos3);
+                                    if ((Boolean) mIsAir3.invoke(state)) continue;
+                                    Object block = mGetBlock3.invoke(state);
+                                    Object rl = mKey3.invoke(blockRegistry3, block);
+                                    String name = rl.toString();
+                                    java.util.Map<?, ?> values = (java.util.Map<?, ?>) mGetValues3.invoke(state);
+                                    if (!values.isEmpty()) {
+                                        java.util.TreeMap<String, String> kv = new java.util.TreeMap<>();
+                                        for (java.util.Map.Entry<?, ?> e : values.entrySet()) {
+                                            Object pn = e.getKey().getClass()
+                                                    .getMethod("getName").invoke(e.getKey());
+                                            kv.put(pn.toString(), mPropName3.invoke(e.getKey(), e.getValue()).toString());
+                                        }
+                                        StringBuilder pb = new StringBuilder("[");
+                                        boolean first = true;
+                                        for (java.util.Map.Entry<String, String> e : kv.entrySet()) {
+                                            if (!first) pb.append(',');
+                                            pb.append(e.getKey()).append('=').append(e.getValue());
+                                            first = false;
+                                        }
+                                        pb.append(']');
+                                        name = name + pb;
+                                    }
+                                    cv.append(cx * 16 + lx).append(' ').append(y).append(' ')
+                                            .append(cz * 16 + lz).append(' ').append(name).append('\n');
+                                }
+                            }
+                        }
+                        w.write("CARVERSBLOCKS\n");
+                        w.write(cv.toString());
+                        getLogger().info("walk " + cx + "," + cz + " carvers blocks dumped: " + cv.length());
+                    }
+
+                    // At FEATURES status: dump every non-air block — exposes
+                    // whether the feature stage reverts carver-written fluids.
+                    if (st[1].equals("features")) {
+                        Class<?> stateClass4 = Class.forName(
+                                "net.minecraft.world.level.block.state.BlockState");
+                        Class<?> blockPosClass4 = Class.forName(
+                                "net.minecraft.core.BlockPos$MutableBlockPos");
+                        Object blockPos4 = blockPosClass4.getDeclaredConstructor().newInstance();
+                        Method getBlockState4 = accessClass.getMethod("getBlockState",
+                                Class.forName("net.minecraft.core.BlockPos"));
+                        Method mIsAir4 = stateClass4.getMethod("isAir");
+                        Method mGetBlock4 = stateClass4.getMethod("getBlock");
+                        Object blockRegistry4 = Class.forName(
+                                "net.minecraft.core.registries.BuiltInRegistries")
+                                .getField("BLOCK").get(null);
+                        Method mKey4 = blockRegistry4.getClass()
+                                .getMethod("getKey", Object.class);
+                        StringBuilder fv = new StringBuilder();
+                        for (int y = -64; y < 320; y++) {
+                            for (int lz = 0; lz < 16; lz++) {
+                                for (int lx = 0; lx < 16; lx++) {
+                                    blockPosClass4.getMethod("set", int.class, int.class, int.class)
+                                            .invoke(blockPos4, cx * 16 + lx, y, cz * 16 + lz);
+                                    Object state = getBlockState4.invoke(chunk, blockPos4);
+                                    if ((Boolean) mIsAir4.invoke(state)) continue;
+                                    Object block = mGetBlock4.invoke(state);
+                                    Object rl = mKey4.invoke(blockRegistry4, block);
+                                    fv.append(cx * 16 + lx).append(' ').append(y).append(' ')
+                                            .append(cz * 16 + lz).append(' ').append(rl.toString()).append('\n');
+                                }
+                            }
+                        }
+                        w.write("FEATURESBLOCKS\n");
+                        w.write(fv.toString());
+                        getLogger().info("walk " + cx + "," + cz + " features blocks dumped: " + fv.length());
+                    }
+
                     // At NOISE status: dump the noise-stage blocks of the deep
                     // region (y -64..0) for direct comparison with the native fill.
                     if (st[1].equals("noise")) {

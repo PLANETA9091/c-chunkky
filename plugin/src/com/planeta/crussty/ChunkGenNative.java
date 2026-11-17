@@ -80,6 +80,16 @@ public final class ChunkGenNative {
     /** Global per-fill phase snapshot from the native (JNI diagnostics). */
     public static native String profStatsGlobal();
 
+    /**
+     * carverActive(ctx) -> boolean — world-load handshake: true when the
+     * native carve engine is armed (configured_carver + biome carver lists +
+     * replaceable tags parsed AND the native surface engine present — the
+     * carve pass runs inside fillBeard right after the native surface tail,
+     * so vanilla Java carvers must be disabled via shouldGenerateCaves()).
+     * Call once per pool on ctx[0]; all pool ctxs are built identically.
+     */
+    public static native boolean carverActive(long ctx);
+
     private ChunkGenNative() {
     }
 }

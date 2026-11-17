@@ -19,6 +19,9 @@ import net.minecraft.world.level.block.state.BlockState;
 public final class SurfaceSetup {
 
     public static void apply(long[] ctxs, org.bukkit.World world, String[] states) throws Exception {
+        if (!CrusstyChunkGenerator.ensureBulk()) {
+            throw new IllegalStateException("palette unavailable (bulk init failed)");
+        }
         short[] ids = CrusstyChunkGenerator.extendPalette(states, (String st) -> {
             try {
                 return resolveBlockState(st);
@@ -27,7 +30,7 @@ public final class SurfaceSetup {
             }
         });
         if (ids == null) {
-            throw new IllegalStateException("palette unavailable (bulk init failed)");
+            throw new IllegalStateException("palette unavailable (extend failed)");
         }
         String[] names = ChunkGenNative.ctxBiomeNames(ctxs[0]);
         if (names == null || names.length == 0) {

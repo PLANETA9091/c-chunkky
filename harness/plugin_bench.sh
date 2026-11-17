@@ -31,7 +31,7 @@ PROBE_JAR="probe/CrusstyProbe.jar"
 
 rcon() {
   local tries=0
-  while [ "$tries" -lt 30 ]; do
+  while [ "$tries" -lt 60 ]; do
     if python3 harness/rcon.py "$HOST" "$PORT" "$PASS" "$1"; then return 0; fi
     tries=$((tries + 1))
     sleep 2

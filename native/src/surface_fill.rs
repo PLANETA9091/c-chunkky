@@ -514,6 +514,51 @@ impl<'a> ColWalk<'a> {
     }
 }
 
+/// vanilla SurfaceSystem.topMaterial (WorldCarver.carveBlock path):
+/// a FRESH SurfaceRules.Context per call, updateXZ(x, z), then
+/// updateY(1, 1, hasFluid ? y+1 : MIN_VALUE, x, y, z), then tryApply(x, y, z).
+#[allow(clippy::too_many_arguments)]
+pub fn top_material_at(
+    env: &Env,
+    compiled: &super::density::Compiled,
+    cfg: &SurfaceConfig,
+    noise_handles: [u32; 3],
+    temps: &[f32],
+    frozen: &[bool],
+    temps_noises: &TempNoises,
+    names: &[String],
+    biome_grid: &[i32],
+    heightmap: &[i32; 256],
+    bx: i32,
+    by: i32,
+    bz: i32,
+    has_fluid: bool,
+) -> Option<u16> {
+    let cond_count = cfg.conds.len();
+    let mut interp = InterpState::new(compiled.interp_slots, 4, env.wg.height as usize / 8);
+    let mut memo = MemoCtx::new(compiled.arena.len()).with_cols(compiled.col_count as usize);
+    let root_factory = super::surface::root_factory(env.seed);
+    let mut walk = ColWalk::new(
+        cfg,
+        env,
+        &root_factory,
+        temps_noises,
+        compiled,
+        &mut interp,
+        &mut memo,
+        biome_grid,
+        temps,
+        frozen,
+        names,
+        cond_count,
+        heightmap,
+        &noise_handles,
+    );
+    walk.update_xz(bx, bz);
+    walk.update_y(1, 1, if has_fluid { by + 1 } else { MIN_LEVEL }, by);
+    walk.try_apply(cfg.root)
+}
+
 /// Apply the surface rules to a filled chunk buffer. `biome_grid` is the
 /// fillBiomes output for this chunk (sections x 64 quart entries) or None
 /// (native computes it as a fallback — slow path).

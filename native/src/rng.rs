@@ -4,17 +4,43 @@
 #[derive(Clone)]
 pub struct LegacyRandom {
     seed: u64, // 48 bits used
+    // MarsagliaPolarGaussian state (vanilla LegacyRandomSource owns one):
+    // reset on setSeed, consumed by nextGaussian.
+    gauss_have: bool,
+    gauss_next: f64,
 }
 
 impl LegacyRandom {
     pub fn new(seed: i64) -> Self {
-        let mut r = LegacyRandom { seed: 0 };
+        let mut r = LegacyRandom { seed: 0, gauss_have: false, gauss_next: 0.0 };
         r.set_seed(seed);
         r
     }
 
     pub fn set_seed(&mut self, seed: i64) {
         self.seed = ((seed as u64) ^ 0x5DEECE66Du64) & ((1u64 << 48) - 1);
+        self.gauss_have = false;
+        self.gauss_next = 0.0;
+    }
+
+    /// vanilla MarsagliaPolarGaussian.nextGaussian over this LCG.
+    pub fn next_gaussian(&mut self) -> f64 {
+        if self.gauss_have {
+            self.gauss_have = false;
+            return self.gauss_next;
+        }
+        loop {
+            let d1 = 2.0 * self.next_f64() - 1.0;
+            let d2 = 2.0 * self.next_f64() - 1.0;
+            let sum = d1 * d1 + d2 * d2;
+            if sum >= 1.0 || sum == 0.0 {
+                continue;
+            }
+            let r = (-2.0 * sum.ln() / sum).sqrt();
+            self.gauss_next = d2 * r;
+            self.gauss_have = true;
+            return d1 * r;
+        }
     }
 
     #[inline]

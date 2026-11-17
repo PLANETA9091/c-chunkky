@@ -23,6 +23,12 @@ struct Ctx {
     /// Native SurfaceRules engine (pack surface_rule). None = vanilla Java
     /// surface stage stays active.
     surface: Option<SurfaceState>,
+    /// Native carver engine (configured_carver + biome carver lists +
+    /// replaceable tags). None = vanilla Java carvers stay active.
+    carve: Option<crate::carve::CarveState>,
+    /// Biome quart grid of the last filled chunk (produced by the surface
+    /// tail, consumed by the carve tail for topMaterial biome lookups).
+    last_grid: Option<Vec<i32>>,
 }
 
 /// Native surface engine state (config parsed from the pack noise_settings;
@@ -133,12 +139,13 @@ fn build_surface_state(
 
 /// Surface pass after the noise-stage fill (shared by fill/fillMarked/
 /// fillBeard — vanilla applies surface at the SURFACE status, right after
-/// NOISE, before carvers).
-fn surface_tail(ctx: &Ctx, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
-    let Some(s) = ctx.surface.as_ref() else { return };
+/// NOISE, before carvers). Returns the consumed biome quart grid (reused by
+/// the carve tail) or None.
+fn surface_tail(ctx: &mut Ctx, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) -> Option<Vec<i32>> {
+    let Some(s) = ctx.surface.as_ref() else { return None };
     if s.cfg.ids.len() != s.cfg.states.len() || s.cfg.bandlands.len() != 192 || s.temps.is_empty()
     {
-        return;
+        return None;
     }
     let grid = s.grid_cache.lock().unwrap().remove(&(cx, cz));
     let bs = ctx.biomes.as_ref().map(|b| (&b.src, &b.climate));
@@ -163,6 +170,102 @@ fn surface_tail(ctx: &Ctx, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
         out,
         grid.as_deref(),
     );
+    grid.map(|g| g.to_vec())
+}
+
+/// Carve pass after the surface tail (vanilla CARVERS status). Requires the
+/// native surface engine (the carve sees surface-stage data) and a native
+/// biome source; otherwise vanilla Java carvers stay active.
+fn carve_tail(ctx: &mut Ctx, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
+    if std::env::var("CRUS_NO_CARVE").is_ok() {
+        return;
+    }
+    let Some(carve) = ctx.carve.as_mut() else { return };
+    let Some(b) = ctx.biomes.as_ref() else { return };
+    let Some(s) = ctx.surface.as_ref() else { return };
+    if s.cfg.ids.len() != s.cfg.states.len() || s.cfg.bandlands.len() != 192 || s.temps.is_empty()
+    {
+        return;
+    }
+    // center-chunk biome quart grid (from fillBiomes via the surface tail)
+    let sections = s.env.wg.height as usize / 16;
+    let mut owned: Vec<i32>;
+    let grid: &[i32] = match ctx.last_grid.as_deref() {
+        Some(g) => g,
+        None => {
+            owned = vec![0i32; sections * 64];
+            crate::biomes::fill_biomes(
+                &b.src,
+                &b.climate,
+                b.env,
+                &b.compiled,
+                cx,
+                cz,
+                &mut owned,
+            );
+            &owned
+        }
+    };
+    // WORLD_SURFACE_WG heightmap snapshot (topmost non-air per column)
+    let min_y = s.env.wg.min_y;
+    let sections = s.env.wg.height as usize / 16;
+    let mut hm = [0i32; 256];
+    for lz in 0..16i32 {
+        for lx in 0..16i32 {
+            let mut top = min_y - 1;
+            for sy in (0..sections).rev() {
+                let base = sy * 256 + (lz * 16 + lx) as usize;
+                let y0 = min_y + (sy as i32) * 16;
+                let mut found = false;
+                for yy in (0..16).rev() {
+                    if out[base + yy * 256] != 0 {
+                        top = y0 + yy as i32;
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    break;
+                }
+            }
+            hm[(lz * 16 + lx) as usize] = top;
+        }
+    }
+    let env = s.env;
+    let compiled = &s.compiled;
+    let cfg = &s.cfg;
+    let noise_handles = s.noise_handles;
+    let temps = &s.temps;
+    let frozen = &s.frozen;
+    let temps_noises = &s.temps_noises;
+    let names: &[String] = &b.src.biome_names;
+    let mut kit = crate::carve::CarveKit {
+        seed: env.seed,
+        min_gen_y: env.wg.min_y,
+        gen_depth: env.wg.height,
+        biome_lookup: Some(crate::carve::BiomeLookup {
+            src: &b.src,
+            climate: &b.climate,
+            env,
+            compiled,
+        }),
+        top_mat: Some(crate::carve::TopMat {
+            env,
+            compiled,
+            cfg,
+            noise_handles,
+            temps,
+            frozen,
+            temps_noises,
+            names,
+            biome_grid: grid,
+            heightmap: &hm,
+        }),
+        gen: &mut ctx.gen,
+        surface_states: &s.cfg.states,
+        surface_ids: &s.cfg.ids,
+    };
+    crate::carve::carve_chunk(carve, &mut kit, cx, cz, out);
 }
 
 /// Compiled biome resolution state (source tree + climate DFs + arena).
@@ -202,7 +305,7 @@ pub fn ctx_new(seed: i64, _min_y: i32, _height: i32, sea_level: i32) -> i64 {
     let env: &'static DEnv = Box::leak(env);
     let gen = ChunkGen::new(env);
     let mut map = SESSIONS.lock().unwrap();
-    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes: None, surface: None });
+    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes: None, surface: None, carve: None, last_grid: None });
     id
 }
 
@@ -227,9 +330,13 @@ pub fn ctx_new_assets(
         let surface = biomes
             .as_ref()
             .and_then(|b| build_surface_state(&assets, b.env, Some(b)));
-        (ChunkGen::new(env), biomes, surface)
+        let carve = crate::carve::CarveState::from_assets(
+            &assets,
+            biomes.as_ref().map(|b| b.src.biome_names.as_slice()),
+        );
+        (ChunkGen::new(env), biomes, surface, carve)
     });
-    let (gen, biomes, surface) = match result {
+    let (gen, biomes, surface, carve) = match result {
         Ok(v) => v,
         Err(p) => {
             let msg = if let Some(s) = p.downcast_ref::<String>() {
@@ -243,7 +350,7 @@ pub fn ctx_new_assets(
         }
     };
     let mut map = SESSIONS.lock().unwrap();
-    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes, surface });
+    map.get_or_insert_with(HashMap::new).insert(id, Ctx { gen, biomes, surface, carve, last_grid: None });
     Ok(id)
 }
 
@@ -258,7 +365,10 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
     let map = map_guard.as_mut().expect("sessions map");
     let ctx = map.get_mut(&id).expect("ctx id");
     ctx.gen.fill(cx, cz, out);
-    surface_tail(ctx, cx, cz, out);
+    let grid = surface_tail(ctx, cx, cz, out);
+    ctx.last_grid = grid;
+    carve_tail(ctx, cx, cz, out);
+    ctx.last_grid = None;
 }
 
 // ---------------------------------------------------------------------------
@@ -847,6 +957,32 @@ pub fn surface_states_of(id: i64) -> Option<Vec<String>> {
         .and_then(|m| m.get(&id))
         .and_then(|c| c.surface.as_ref())
         .map(|s| s.cfg.states.clone())
+}
+
+/// Rust-side helper: is the native carver engine active for a ctx (carve
+/// state built AND the native surface engine present — the carve pass sees
+/// surface-stage data, so without it vanilla Java carvers stay).
+pub fn carver_active_of(id: i64) -> bool {
+    if std::env::var("CRUS_NO_CARVE").is_ok() {
+        return false;
+    }
+    let guard = SESSIONS.lock().unwrap();
+    guard
+        .as_ref()
+        .and_then(|m| m.get(&id))
+        .map(|c| c.carve.is_some() && c.surface.is_some())
+        .unwrap_or(false)
+}
+
+/// carverActive(long ctx) -> boolean — world-load handshake: the plugin
+/// flips shouldGenerateCaves() to false when true (one-time, ctx[0]).
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_carverActive(
+    _env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jni_sys::jlong,
+) -> jni_sys::jboolean {
+    carver_active_of(ctx as i64) as jni_sys::jboolean
 }
 
 pub(crate) fn log_warn(msg: &str) {

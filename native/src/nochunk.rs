@@ -4009,6 +4009,36 @@ impl<'e> ChunkGen<'e> {
         &self.marks
     }
 
+    /// vanilla carve getCarveState aquifer step:
+    /// aquifer.computeSubstance(SinglePointContext(x,y,z), 0.0).
+    /// When aquifers are DISABLED the vanilla aquifer is Aquifer.Disabled:
+    /// substance > 0 ? null : globalFluid.at(y), sched = false. With
+    /// substance = 0.0 the > 0 branch is dead either way.
+    pub fn carve_substance(&mut self, x: i32, y: i32, z: i32) -> Option<u16> {
+        if !self.aquifers_enabled {
+            self.sched = false;
+            let g = self.global_fluid(y);
+            return Some(aquifer_at(g, y));
+        }
+        self.aquifer_compute_substance(Pt { x, y, z }, 0.0)
+    }
+
+    /// The aquifer's shouldScheduleFluidUpdate flag (persistent across
+    /// calls exactly like the vanilla field — carveBlock reads it after
+    /// computeSubstance, including the stale value when the lava shortcut
+    /// skipped the aquifer for this position).
+    pub fn sched_flag(&self) -> bool {
+        self.sched
+    }
+
+    /// ChunkAccess.markPosForPostprocessing — packed BlockPos append with
+    /// the fill-path cap.
+    pub fn push_mark(&mut self, x: i32, y: i32, z: i32) {
+        if self.marks.len() < MARK_CAP {
+            self.marks.push(block_pos_as_long(x, y, z));
+        }
+    }
+
     /// Ship the per-chunk structure beardifier (vanilla Beardifier piece
     /// list, collected by the plugin via the real vanilla collection loop).
     /// Call BEFORE fill; fill() clears any previous list first.
