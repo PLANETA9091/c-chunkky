@@ -8056,3 +8056,30 @@ wall x2. Стены окон хуже (92.55 vs 86.1 средн). maxconc=1 пр
   валидированы после ресинка (BIT-EXACT/SIMD 0-25/92-92). Следующие фронты:
   Q6 mechanism map (стена vs busy 38ms/ch — decompile+staged-window
   проект), fill floor SIMD (interp cell-grid), margin serialization.
+
+## cont-148 (2026-11-20): ресинк + восстановление 26.3 стенда + свежая carver-база
+
+- РЕСИНК: локальный checkout был на cont-41 (848b2b6) + на нём была начата (по устаревшему
+  брифу) бит-точная 1.21.8-native-carve ветка — ДУБЛИРУЮЩАЯ уже сделанный на main конт-143
+  ops-lane подход. Ветка сохранена: cont-144-wip-legacy121-carver (4a17c458, не пушится,
+  референс); main = origin/main 78be28ef (cont-147).
+- sandbox_recover.sh (после пересбора JDK25 в /home/z/tools/jdk-25.0.5+8, cargo 1.100):
+  paper 222 sha f649771a OK, plugin jar ПЕРЕСОБРАН (SRV_DIR=server263) — СТАРЫЙ jar-левовер
+  (1.21.8-эры, untracked, md5 25258775) давал ClassNotFoundException
+  net.minecraft.resources.ResourceLocation + "bulk init failed" на буте; новый 55685c76.
+  ab263_ci.sh ore: GATE PASS (strict bit-equal), blockdump 90 divergent (deco-order noise).
+- ИНСТРУМЕНТАЛЬНЫЙ УРОК: java-процессы НЕ живут между сообщениями песочницы — boot+окна+stats
+  одним вызовом; под 26.3 java ОБЯЗАН стартовать с CWD=$SRV263 (иначе eula.txt не читается:
+  "Failed to load eula.txt" при валидном eula — сервер читает eula из CWD).
+- СВЕЖАЯ БАЗА на ЭТОМ боксе (2-core Xeon, @15000, 12x12, F2/packs-нет/дефолты cont-147):
+  window wall 11.5s/144 = 79.8ms/ch wall (ramp включён); carver-phases n=326
+  acq=0.00 pack=0.05 carve=1.86 ops=0.00(fuse) apply=0.81 ms/ch, opsApplied=4.74M/326 = 14.5K ops/ch.
+  ДЕКО: mean=5.27ms/ch (run=4.40 — ore-фичи доминируют), deleg=kelp/seagrass.
+- СЛЕДСТВИЕ для b2 (carver apply): payoff РЕГИОНО-ЗАВИСИМ — 0.81ms/ch здесь vs 4.75-4.86
+  (103M ops) на боксе cont-147 (регион @14600, маржины 495-628 vs 326). Прежде чем строить
+  bulk-op apply: перемерить в anchor-зоне @14600/14900 (та же, что cont-147) — если и там
+  ~1ms, lever дешевеет ниже порога; если 4-5ms — строить (uniform-section fast path через
+  public volatile PalettedContainer.data swap + native per-section uniform flags в carveApply).
+- Финальная цель стены (из staged-window curve): wall/ch ≈ busy x 3.3 при cover 18-30%;
+  5ms требует cover->100% + busy <= 10 thread-ms/ch — carver/deco-apply второстепенны
+  против scheduler-latency (Q6).
