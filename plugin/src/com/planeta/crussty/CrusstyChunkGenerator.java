@@ -1108,6 +1108,7 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
      *  round-trip warns "expected: 37, got: 36" on every chunk load. */
     private static Method mGetRawData;
     private static Method mTickingAdd; // Moonrise tickingBlocks.add(short)
+    private static Method mTickingListClear; // Moonrise tickingBlocks.clear() (cont-149)
     private static java.lang.reflect.Field fNonEmpty, fTickingBlock, fTickingFluid, fSpecial;
     private static java.lang.reflect.Field fTickingList, fIsOpaque, fChunkHeightmaps;
     // JDK25 CI JFR (41194161059): Field.getFieldAccessor dispatch inside
@@ -1263,6 +1264,15 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                     mTickingAdd = fTickingList.getType().getMethod("add", short.class);
                 } catch (Throwable tt) {
                     mTickingAdd = null; // ticking-list rebuild then degrades
+                }
+                try {
+                    // cont-149: carve-apply uniform swap must also CLEAR the
+                    // moonrise list for non-ticking sections (the fill path
+                    // starts from an air section whose list is already empty;
+                    // the carve path rewrites sections that may hold entries).
+                    mTickingListClear = fTickingList.getType().getMethod("clear");
+                } catch (Throwable tt) {
+                    mTickingListClear = null;
                 }
                 fNonEmpty.setAccessible(true);
                 fTickingBlock.setAccessible(true);
@@ -1486,6 +1496,22 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 }
                 bulkReady = true;
                 bulkFailReason = null;
+                // cont-149 carve-apply uniform-section swap arm: every primitive
+                // the swap needs must be present (same family the layoutBulk
+                // global/singleton paths use — production-validated).
+                carveSwapOk = bulkReady && fPalData != null && mhPalDataSet != null
+                        && ctorData != null && cfgSingleton != null
+                        && factorySingleton != null && mPalCreate != null
+                        && ctorZeroBit != null && mhNonEmptySet != null
+                        && mhTickingBlockSet != null && mhTickingFluidSet != null
+                        && mhSpecialSet != null && mhTickingListGet != null
+                        && mTickingAdd != null && mTickingListClear != null
+                        && mhBulkStatesGet != null && bulkFieldStates != null
+                        && sectionStatesById != null && matTicking != null
+                        && matFluidTicking != null && matSpecial != null;
+                if (!carveSwapOk) {
+                    LOG.warning("carve uniform-swap machinery incomplete — carver apply keeps the per-op path");
+                }
             } catch (Throwable t) {
                 bulkBroken = true;
                 bulkFailReason = t.getClass().getSimpleName() + ": " + t.getMessage()
@@ -1493,6 +1519,75 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 LOG.warning("bulk section layout unavailable, using per-block path: " + t);
             }
             return bulkReady;
+        }
+    }
+
+    /** cont-149: the JVM-side half of the carve uniform-section swap is armed
+     *  (passed to native as allowUniform — native folds post-carve uniform
+     *  sections into one marker op only when this is true). */
+    static volatile boolean carveSwapOk;
+    /** Set when a runtime swap failure fires — native keep-emitting markers
+     *  is harmless (each failure re-arms nothing), but the flag stops the
+     *  retry storm and surfaces in the log once. */
+    private static volatile boolean carveSwapBroken;
+
+    static boolean carveSwapReady() {
+        return carveSwapOk && !carveSwapBroken;
+    }
+
+    /** cont-149 carve-apply uniform-section swap: replace the section's
+     *  PalettedContainer.data with the single-value Data (what the container
+     *  itself holds for uniform content — palette slot 0 = the state, every
+     *  position maps to it) and write the four section counters + the
+     *  moonrise ticking list. Bit-identical final state vs per-op vanilla
+     *  section.setBlockState writes of the same uniform content (the layout
+     *  bulk swap family is judge-validated on the fill path). */
+    static boolean carveSwapUniform(Object section, short id) {
+        try {
+            Object st = id != 0 ? sectionStatesById[id] : airState;
+            if (st == null || bulkBroken) {
+                return false;
+            }
+            Object pal = hGet(mhBulkStatesGet, bulkFieldStates, section);
+            if (pal == null) {
+                return false;
+            }
+            Object palette = mPalCreate263
+                    ? mPalCreate.invoke(factorySingleton, singletonBits,
+                            java.util.List.of(st))
+                    : mPalCreate.invoke(factorySingleton, singletonBits,
+                            bulkRegistryObj, pal, java.util.List.of(st));
+            Object storage = ctorZeroBit.newInstance(4096);
+            Object nd = ctorData.newInstance(cfgSingleton, storage, palette);
+            hSet(mhPalDataSet, fPalData, pal, nd);
+            short nonEmpty = (short) (id != 0 ? 4096 : 0);
+            short tickB = (short) (id != 0 && matTicking[id] ? 4096 : 0);
+            short tickF = (short) (id != 0 && matFluidTicking[id] ? 4096 : 0);
+            short special = (short) (id != 0 && matSpecial[id] ? 4096 : 0);
+            hSetShort(mhNonEmptySet, fNonEmpty, section, nonEmpty);
+            hSetShort(mhTickingBlockSet, fTickingBlock, section, tickB);
+            hSetShort(mhTickingFluidSet, fTickingFluid, section, tickF);
+            hSetShort(mhSpecialSet, fSpecial, section, special);
+            // moonrise ticking list must match the counters exactly: a
+            // uniform ticking section (full lava) lists ALL 4096 packed
+            // positions; a non-ticking one must be EMPTY (the fill path may
+            // have populated entries before the carve wiped them).
+            Object list = hGet(mhTickingListGet, fTickingList, section);
+            if (mTickingListClear != null) {
+                mTickingListClear.invoke(list);
+            }
+            if (tickB > 0) {
+                for (int k = 0; k < 4096; k++) {
+                    mTickingAdd.invoke(list, (short) k);
+                }
+            }
+            return true;
+        } catch (Throwable t) {
+            if (!carveSwapBroken) {
+                carveSwapBroken = true;
+                LOG.warning("carve uniform swap failed once — lane disabled: " + t);
+            }
+            return false;
         }
     }
 

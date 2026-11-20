@@ -220,9 +220,13 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
                 // cont-143: carve + op/marks fetch in ONE JNI call, thread-local
                 // buffers — byte-identical transport, 2 fewer sessions_lock
                 // acquisitions per carved chunk.
+                // cont-149: allowUniform arms the native uniform-section fold
+                // (post-carve uniform sections arrive as ONE marker op each,
+                // applied via carveSwapUniform instead of up to 4096 set ops).
                 ops = TL_OPS.get();
                 marks = TL_MARKS.get();
-                int packed = ChunkGenNative.carveApply(ctx, cx, cz, SEED, meta, raw, pal, ops, marks);
+                int packed = ChunkGenNative.carveApply(ctx, cx, cz, SEED, meta, raw, pal, ops, marks,
+                        CrusstyChunkGenerator.carveSwapReady());
                 if (packed == Integer.MIN_VALUE) {
                     CarverStats.DECLINED.incrementAndGet();
                     return; // native declined — vanilla semantics lost for this chunk
@@ -270,11 +274,34 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
             // chunk and dominated the carver wall (apply=5.50 of 7.3ms/ch in
             // the carver-phases honest split; carve native = 1.55).
             Object[] statesById = STATES_BY_ID;
+            boolean[] uniDone = null; // cont-149: uniform-swapped sections
             for (int i = 0; i < got; i++) {
                 long op = ops[i];
+                if (op < 0) {
+                    // cont-149 uniform-section marker: i64::MIN | (s << 24) | id
+                    int s = (int) ((op >>> 24) & 0xFFFF);
+                    short uid = (short) (op & 0xFFFF);
+                    if (s >= 0 && s < sections) {
+                        LevelChunkSection sec = chunk.getSection(s);
+                        if (sec != null && CrusstyChunkGenerator.carveSwapUniform(sec, uid)) {
+                            if (uniDone == null) {
+                                uniDone = new boolean[sections];
+                            }
+                            uniDone[s] = true;
+                        }
+                        // swap failure: the section keeps its pre-carve data and
+                        // its per-cell ops were folded — bounded single-section
+                        // loss; carveSwapBroken gates native off from the next
+                        // chunk (full per-op stream resumes).
+                    }
+                    continue;
+                }
                 int idx = (int) (op >>> 16);
                 short id = (short) (op & 0xFFFF);
                 int s = idx >>> 12;
+                if (uniDone != null && uniDone[s]) {
+                    continue; // section already uniform-swapped
+                }
                 int cell = idx & 0xFFF;
                 int sy = cell >> 8;
                 int rem = cell & 0xFF;

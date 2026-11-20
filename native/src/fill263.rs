@@ -673,6 +673,15 @@ impl Gen263 {
     /// Java applies them via the NMS state table. `sf`/`b263` = the surface
     /// + biome engine state for the topMaterial context (None degrades the
     /// fix to keep-dirt).
+    ///
+    /// `allow_uniform` (cont-149): when the JVM's section-swap machinery is
+    /// armed, sections whose post-carve content is UNIFORM (one id over all
+    /// 4096 cells — fully-carved cheese cave sections) and DIFFERENT from
+    /// their pre-carve content are folded into ONE marker op
+    /// (`i64::MIN | (section << 24) | id`) instead of up to 4096 per-cell
+    /// ops; Java swaps the section's PalettedContainer.data in a single
+    /// volatile write + counter set. Byte-identical final state (the swap
+    /// holds what the container itself would store; counters recomputed).
     #[allow(clippy::too_many_arguments)]
     pub fn carve_chunk(
         &self,
@@ -685,6 +694,7 @@ impl Gen263 {
         ops: &mut Vec<i64>,
         sf: Option<&crate::surface263::SurfaceState263>,
         b263: Option<&std::sync::Arc<crate::biome263::BiomeState263>>,
+        allow_uniform: bool,
     ) {
         io.fill(0);
         // cont-96: DEFENSIVE unpack. The Java pack (CarverDriver.populate)
@@ -697,19 +707,36 @@ impl Gen263 {
         // hs_err, no watchdog). OOB palette indices degrade to AIR (0) here —
         // the affected cells skip carving instead of aborting the process.
         let mut oob = 0usize;
+        // pre-carve per-section uniformity: id (uniform), -1 (present but
+        // mixed), -2 (absent section — never foldable: no Java section object
+        // and nothing changed). The uniform marker only fires when the carve
+        // CHANGED the content.
+        let mut pre_uni = [0i32; 24];
         for s in 0..24usize {
             let bits = pack.bits[s];
             if bits < 0 {
-                continue; // absent section — stays air
+                pre_uni[s] = -2; // absent section
+                continue;
             }
             let base = s * 4096;
             if bits == 0 {
                 let id = pack.pal.get(pack.pal_off[s] as usize).copied().unwrap_or(0) as u16;
                 io[base..base + 4096].fill(id);
+                pre_uni[s] = id as i32;
             } else {
                 let ro = pack.raw_off[s] as usize;
                 let po = pack.pal_off[s] as usize;
-                for i in 0..4096usize {
+                let first = {
+                    // decode cell 0 first, then compare the rest against it
+                    // (shift == 0 here: the low word alone holds the value,
+                    // bits <= 32 never crosses the word boundary)
+                    let w0 = pack.raw.get(ro).copied().unwrap_or(0);
+                    let v = (w0 & ((1i64 << bits) - 1)) as usize;
+                    pack.pal.get(po + v).copied().unwrap_or(0)
+                };
+                let mut uni = true;
+                io[base] = first as u16;
+                for i in 1..4096usize {
                     let bit_idx = i * bits as usize;
                     let word = bit_idx / 64;
                     let shift = bit_idx % 64;
@@ -718,6 +745,7 @@ impl Gen263 {
                         (None, _) => {
                             io[base + i] = 0;
                             oob += 1;
+                            uni = false;
                             continue;
                         }
                     };
@@ -727,13 +755,20 @@ impl Gen263 {
                     }
                     let v = (v & ((1i64 << bits) - 1)) as usize;
                     match pack.pal.get(po + v) {
-                        Some(&id) => io[base + i] = id as u16,
+                        Some(&id) => {
+                            io[base + i] = id as u16;
+                            if id as u16 != io[base] {
+                                uni = false;
+                            }
+                        }
                         None => {
                             io[base + i] = 0;
                             oob += 1;
+                            uni = false;
                         }
                     }
                 }
+                pre_uni[s] = if uni { io[base] as i32 } else { -1 };
             }
         }
         if oob > 0 {
@@ -756,6 +791,48 @@ impl Gen263 {
             &top_ids,
         );
         marks.extend(changed_marks);
+        // cont-149 uniform-section fold: post-carve uniform sections that
+        // CHANGED drop their per-cell ops and emit one marker each. The
+        // scan compares every cell against the section's first id.
+        if allow_uniform {
+            let mut uni_done = [false; 24];
+            for s in 0..24usize {
+                if pre_uni[s] == -2 {
+                    continue; // absent section: nothing to fold
+                }
+                let base = s * 4096;
+                let id0 = io[base];
+                if pre_uni[s] == id0 as i32 {
+                    // unchanged content (uniform pre and post, same id) — no
+                    // marker; the section data is already what io describes
+                    continue;
+                }
+                let mut uni = true;
+                for i in 1..4096usize {
+                    if io[base + i] != id0 {
+                        uni = false;
+                        break;
+                    }
+                }
+                if !uni {
+                    continue;
+                }
+                uni_done[s] = true;
+            }
+            if uni_done.iter().any(|b| *b) {
+                ops.retain(|op| {
+                    let idx = (op >> 16) as usize;
+                    let s = idx >> 12;
+                    !(s < 24 && uni_done[s])
+                });
+                for s in 0..24usize {
+                    if uni_done[s] {
+                        let id = io[s * 4096] as i64;
+                        ops.push(i64::MIN | ((s as i64) << 24) | id);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1008,5 +1085,97 @@ mod tests {
     #[inline]
     fn strip_buf_ne(a: &[f32], i: usize, b: &[f32], j: usize) -> bool {
         a[i].to_bits() != b[j].to_bits()
+    }
+}
+
+#[cfg(test)]
+mod carve_uniform_tests {
+    use super::*;
+
+    fn sec_bits(raw_len: usize) -> i32 { 4 }
+
+    /// A synthetic pack: section 10 is mixed stone(1)/dirt(5); everything
+    /// else uniform air. carve must leave the mask empty (seed 0 = no
+    /// carver starts) — the fold then reports nothing; force the fold by
+    /// calling carve_chunk with an empty mask and checking the ops stream
+    /// stays per-cell (regression: no markers without real carving).
+    #[test]
+    fn no_markers_when_mask_empty() {
+        let mut bits = [-1i32; 24];
+        let mut raw_off = [0i32; 24];
+        let mut pal_off = [0i32; 24];
+        let mut pal: Vec<i16> = Vec::new();
+        let mut raw: Vec<i64> = Vec::new();
+        // section 10: bits=4, alternating stone/dirt
+        let s = 10usize;
+        bits[s] = 4;
+        pal_off[s] = pal.len() as i32;
+        pal.push(1); // stone
+        pal.push(5); // dirt
+        raw_off[s] = raw.len() as i32;
+        for i in 0..4096usize {
+            let word = i / 16;
+            let shift = (i % 16) * 4;
+            if shift == 0 {
+                raw.push(0);
+            }
+            let v = if i % 2 == 0 { 0 } else { 1 };
+            let last = raw.len() - 1;
+            raw[last] |= (v as i64) << shift;
+        }
+        let pack = SectionPack { bits: &bits, raw: &raw, raw_off: &raw_off, pal: &pal, pal_off: &pal_off };
+        let env = crate::density::Env::new(0);
+        let g = Gen263::new(0, -64, 384, 63);
+        let mut io = [0u16; OUT_LEN];
+        let mut marks = Vec::new();
+        let mut ops = Vec::new();
+        g.carve_chunk(0, 0, 0, &pack, &mut io, &mut marks, &mut ops, None, None, true);
+        // seed 0: carvers may start (probability 0.15 cave)... accept either
+        // outcome but verify NO negative markers and ops are consistent.
+        for op in &ops {
+            assert!(*op >= 0, "uniform marker emitted with an all-air fold path");
+        }
+    }
+
+    /// Decode-only parity: with a seed that produces no carving the io must
+    /// reproduce the pack exactly and the fold must not alter the ops.
+    #[test]
+    fn decode_matches_pack() {
+        let mut bits = [-1i32; 24];
+        let mut raw_off = [0i32; 24];
+        let mut pal_off = [0i32; 24];
+        let mut pal: Vec<i16> = Vec::new();
+        let mut raw: Vec<i64> = Vec::new();
+        let s = 3usize;
+        bits[s] = 4;
+        pal_off[s] = pal.len() as i32;
+        pal.push(1);
+        pal.push(5);
+        raw_off[s] = raw.len() as i32;
+        for i in 0..4096usize {
+            let shift = (i % 16) * 4;
+            if shift == 0 {
+                raw.push(0);
+            }
+            let v = if i % 2 == 0 { 0 } else { 1 };
+            let last = raw.len() - 1;
+            raw[last] |= (v as i64) << shift;
+        }
+        let pack = SectionPack { bits: &bits, raw: &raw, raw_off: &raw_off, pal: &pal, pal_off: &pal_off };
+        let env = crate::density::Env::new(0);
+        let g = Gen263::new(0, -64, 384, 63);
+        let mut io = [0u16; OUT_LEN];
+        let mut marks = Vec::new();
+        let mut ops = Vec::new();
+        // huge negative seed + empty-carver sanity: use i64::MAX to skew
+        // isStartChunk draws (nextFloat <= 0.15 unlikely for all 289 starts)
+        g.carve_chunk(0, 0, i64::MAX, &pack, &mut io, &mut marks, &mut ops, None, None, true);
+        for i in 0..4096usize {
+            let expect = if i % 2 == 0 { 1u16 } else { 5u16 };
+            assert_eq!(io[3 * 4096 + i], expect, "cell {i}");
+        }
+        for op in &ops {
+            assert!(*op >= 0);
+        }
     }
 }

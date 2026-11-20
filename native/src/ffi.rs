@@ -768,7 +768,9 @@ pub fn carve(
     let sf = st.surface.as_ref();
     let b263 = st.biomes.as_ref();
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        g.carve_chunk(cx, cz, seed, &pack, io, marks_buf, ops_buf, sf, b263);
+        // legacy 3-call path: no uniform fold (the JVM per-op loop there has
+        // no marker handling)
+        g.carve_chunk(cx, cz, seed, &pack, io, marks_buf, ops_buf, sf, b263, false);
     }));
     match res {
         Ok(()) => st.ops.len() as i32,
@@ -795,6 +797,7 @@ pub fn carve_fetch(
     io: &mut [u16; OUT_LEN],
     ops_out: &mut [i64],
     marks_out: &mut [i64],
+    allow_uniform: bool,
 ) -> (i32, i32) {
     const FAIL: i32 = i32::MIN;
     let mut map_guard = match SESSIONS.lock() {
@@ -816,7 +819,7 @@ pub fn carve_fetch(
     let sf = st.surface.as_ref();
     let b263 = st.biomes.as_ref();
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        g.carve_chunk(cx, cz, seed, &pack, io, marks_buf, ops_buf, sf, b263);
+        g.carve_chunk(cx, cz, seed, &pack, io, marks_buf, ops_buf, sf, b263, allow_uniform);
     }));
     match res {
         Ok(()) => {
@@ -1974,6 +1977,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_carveApply
     pal: jni_sys::jshortArray,
     ops: jni_sys::jlongArray,
     marks: jni_sys::jlongArray,
+    allow_uniform: jni_sys::jboolean,
 ) -> jni_sys::jint {
     let tbl = *env;
     let mlen = ((*tbl).v1_1.GetArrayLength)(env, meta as jni_sys::jarray) as usize;
@@ -2003,6 +2007,7 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_carveApply
     let (n, nm) = carve_fetch(
         ctx as i64, cx as i32, cz as i32, seed as i64, bits, raw_slice, raw_off,
         pal_slice, pal_off, &mut io, ops_slice, marks_slice,
+        allow_uniform,
     );
     ((*tbl).v1_1.ReleaseIntArrayElements)(env, meta, mp, 0);
     ((*tbl).v1_1.ReleaseLongArrayElements)(env, raw, rp, 0);

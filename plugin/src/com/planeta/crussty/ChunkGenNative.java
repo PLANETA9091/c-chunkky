@@ -298,10 +298,15 @@ public final class ChunkGenNative {
      * cont-143 carver fuse: carve + op/marks fetch in ONE native call.
      * Returns (opsLen &lt;&lt; 12) | marksLen, or MIN_VALUE when native declined.
      * Byte-identical transport to carve()+carveOps()+carveMarks().
+     * With allowUniform (cont-149) the native folds post-carve UNIFORM
+     * sections into one negative marker op each (i64::MIN | section << 24 |
+     * id) — applied by the JVM via the section data swap (carveSwapUniform)
+     * instead of up to 4096 per-cell ops.
      */
     public static native int carveApply(long ctx, int cx, int cz, long seed,
                                         int[] meta, long[] raw, short[] pal,
-                                        long[] ops, long[] marks);
+                                        long[] ops, long[] marks,
+                                        boolean allowUniform);
 
     private ChunkGenNative() {
     }

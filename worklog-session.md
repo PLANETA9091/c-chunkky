@@ -8083,3 +8083,61 @@ wall x2. Стены окон хуже (92.55 vs 86.1 средн). maxconc=1 пр
 - Финальная цель стены (из staged-window curve): wall/ch ≈ busy x 3.3 при cover 18-30%;
   5ms требует cover->100% + busy <= 10 thread-ms/ch — carver/deco-apply второстепенны
   против scheduler-latency (Q6).
+
+---
+## cont-149 (2026-11-20): b2 measure-first + uniform-section carve fold + стенд восстановлен
+
+### Восстановление стенда
+- sandbox_recover.sh --skip-git: JDK 25.0.5+8 (/home/z/tools), paper 222 (sha f649771a OK),
+  .so 8.6MB, plugin jar ПЕРЕСОБРАН (SRV_DIR=server263; stale 1.21.8-эра jar md5 90e5c3cf
+  ловится по "plugin jar present" — восстановил пересборкой, 4da8c32e после фолда).
+- bukkit.yml БЕЗ worlds:generator = vanilla generation (honest window inside=0!).
+  prof_session/e2e_ci переписывают его; для ручных прогонов — wiring обязателен:
+  printf 'worlds:\n  world:\n    generator: CrusstyGen\n' > server263/bukkit.yml.
+- winpoll.py (harness): poll окна через ОДНО rcon-соединение — bash-полл с rcon.py
+  на каждый тик съедал 280s/окно (rcon connect+auth ~0.7s x 400).
+- ООМ-урок: 4GB cgroup, java + 8x8 окно генерации — Xmx3G убивается ядром тихо
+  (no hs_err); рабочий конфиг замера: -Xms768M -Xmx1536M + 8x8 окна.
+- b2_measure.sh (harness): boot + warmup @14700 + два virgin 8x8 окна (@14600/@14900),
+  honest window + carver-phases на каждое; ОДИН вызов (java не живёт между сообщениями).
+
+### b2 измерение (anchor zone, 8x8, F2/deco/carvers/grid defaults)
+- @14600: e2e=72.15 (gen=9.85, carver=5.62, busy=9.8, cover=13.6%, margin_fills=192,
+  margin_fill_cpu=34.4ms/ch), carve=2.03 apply=2.95 pack=0.12 (global n=392),
+  opsApplied=28.7M/392 = 73.3K ops/ch (!).
+- @14900: e2e=83.16 (gen=8.58, carver=4.63, busy=8.6, cover=10.3%), carve=1.84
+  apply=3.20, opsApplied=48M/588 = 81.6K ops/ch.
+- ВЕРДИКТ по правилу cont-148 (порог 4-5ms): carver window 4.6-5.6ms — левер
+  строим; apply = 72-82K per-cell NMS setBlockState/chunk.
+
+### Uniform-section carve fold (реализовано, armed, замерено)
+- native fill263.carve_chunk: pre/post-carve per-section uniformity; post-uniform
+  CHANGED sections фолдятся в ОДИН marker-op (i64::MIN | s<<24 | id) вместо
+  ~4096 per-cell ops; absent-секции (bits=-1, pre_uni=-2) исключены — тесты
+  поймали ложный фолд absent-секций до деплоя.
+- Java: carveSwapUniform (singleton Data swap = layoutBulk path-1 примитивы,
+  judge-валидированные) + 4 счётчика + moonrise ticking list rebuild (clear +
+  4096 adds для uniform-lava; clear-only для non-ticking — fill-путь не нуждался
+  в clear, carve-путь обязан: секция могла нести entries до вырезания).
+- carveSwapOk probe в initBulk (все примитивы + list.clear); allowUniform
+  джойнтом в carveApply; swap-failure = bounded single-section loss (native
+  возобновляет полный op-стрим со следующего чанка через carveSwapBroken).
+- cargo 94/94 (+2 новых: no_markers_when_mask_empty, decode_matches_pack).
+- ЗАМЕР эффекта (paired, same anchor): @14600 e2e=70.87/carver=5.27 vs 72.15/5.62;
+  @14900 83.88/6.14 vs 83.16/4.63 — В ШУМЕ, opsApplied не упал (28.5M vs 28.7M):
+  в этой области НЕТ полностью-uniform пост-carve секций (аквифер-вода/пол/постель
+  держат смесь). Фолд = корректный + бесплатный для ocean/lava-доминированных
+  областей, но не тот рычаг для anchor.
+
+### Скоуп следующего рычага (b2-full, следующая сессия)
+- Полный section-rewrite: native re-encode ВСЕХ changed секций в global-encoding
+  (globalIdById + matTicking/matFluidTicking/matSpecial битмаски уходят в native
+  одним JNI; native пакует global-state raw 256 longs/секцию + счётчики + ticking
+  позиции), Java = ctorData(cfgGlobal, SimpleBitStorage, globalPalette) swap
+  (layoutBulk path-3 примитивы) + counter set + list rebuild. Оценка: apply
+  2.95 → ~0.5-1.0 (24 swap-а вместо 72K ops), транспорт ops умирает (580KB → 48KB).
+  Риск: bit-parity глобального пака (path-3 уже судейски валидирован на fill).
+
+### База конт-149 (этот бокс, anchor @14600, 8x8): honest 70.9-72.2, busy 9.8-10.0,
+cover 13.6-14.1%, margin_fills=192 @ ~34ms/ch CPU. Стена = scheduler (86% span),
+Q6 — главный фронт до 5ms (cover->100% + busy<=10 — см. cont-148 кривую).
