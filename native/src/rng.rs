@@ -74,7 +74,16 @@ impl LegacyRandom {
     pub fn next_f64(&mut self) -> f64 {
         let hi = self.next(26) as u64;
         let lo = self.next(27) as u64;
-        ((hi << 27) | lo) as f64 * (1.0 / ((1i64 << 53) as f64))
+        // Vanilla BitRandomSource.nextDouble is LOSSY — javap of BOTH
+        // paper-1.21.8-60 and paper-26.3-257 shows the same tail:
+        //   l2f; ldc 1.110223E-16f; fmul; f2d
+        // i.e. the 53-bit long is rounded to f32 BEFORE an f32 multiply,
+        // then widened. Full-precision f64 math diverges in the low mantissa
+        // bits (visible in the reference dump: 12 zero mantissa LSBs).
+        // Reproduce exactly; verified bit-identical vs the real jar
+        // (LegacyProbe.java reference in the session worklog).
+        let l = ((hi << 27) | lo) as i64;
+        ((l as f32) * 1.110223E-16f32) as f64
     }
 
     /// java.util.Random.nextGaussian (stateful polar method — the cached

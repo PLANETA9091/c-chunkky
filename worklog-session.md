@@ -8141,3 +8141,32 @@ wall x2. Стены окон хуже (92.55 vs 86.1 средн). maxconc=1 пр
 ### База конт-149 (этот бокс, anchor @14600, 8x8): honest 70.9-72.2, busy 9.8-10.0,
 cover 13.6-14.1%, margin_fills=192 @ ~34ms/ch CPU. Стена = scheduler (86% span),
 Q6 — главный фронт до 5ms (cover->100% + busy<=10 — см. cont-148 кривую).
+
+## cont-150: lossy LegacyRandom.next_f64 fix (26.3-verified) + 1.21.8 carver session parked
+
+- Сессия стартовала на УСТАРЕВШЕМ локальном base (848b2b6=cont-41) — origin ушёл на 423 коммита
+  вперёд и на MC 26.3 (carver уже в buildTerrain, свой native carver + op-stream apply). Локальная
+  работа по 1.21.8-carver (полный bit-exact порт WorldCarver/Cave/Canyon + judge 0.007% на dptt
+  против vanilla 1.21.8 + RFC-фикс CraftBlockData class-path в плагине) ЗАПАРКЕНА тегом
+  cont143b-local-1218-carver (f23fe9e) — не вливалась, base разъехался.
+- ГЛАВНОЕ: vanilla BitRandomSource.nextDouble — LOSSY. javap paper-1.21.8-60 И paper-26.3-257
+  (свежая выгрузка) показывают одинаковый хвост: l2f; ldc 1.110223E-16f; fmul; f2d — 53-битный
+  long округляется к f32 ДО умножения. У нас LegacyRandom::next_f64 считал полный f64 — расходится
+  в младших битах мантиссы (в reference-дампе видно: 12 нулевых LSB). Потребители next_f64:
+  features_place.rs (сталактиты/сталагмиты/кристаллы ~десятки вызовов) + Marsaglia next_gaussian
+  (clamped_normal) — все чинятся одним фиксом в rng.rs.
+- Валидация: LegacyProbe.java (26.3 jar, JDK25) vs bin/legacyprobe — BIT-IDENTICAL на 4 сидax
+  (f64 + gaussian) + carver re-seed паттерн. cargo 94/94.
+- Оставшиеся находки из 1.21.8-сессии, ПЕРЕНОСИМЫЕ на 26.3 (для следующих сессий):
+  1) clamped_normal FloatProvider отсутствует в carver.rs (26.3 vanilla carver его не использует —
+     vanilla-safe; но Terralith canyon yScale=clamped_normal → при подключении пак-миров не парсится
+     = fail-closed). В 1.21.8-порте реализован + квирк WorldgenRandom: OUTER Marsaglia-кэш
+     (cached second gaussian) ПЕРЕЖИВАЕТ setLargeFeatureSeed re-seeds (один WorldgenRandom на
+     applyCarvers, setSeed делегирует во внутренний LegacyRandomSource) — при добавлении
+     clamped_normal нужен именно persistent-outer-cache (см. carver.rs из тега cont143b-local-1218-carver,
+     WgRandom).
+  2) uniform-carver-list fast path: если ВСЕ биомы источника делят один carver-list, 289 соседних
+     biome-оценок пропускаются целиком (в 1.21.8 экономило ~2-3ms/chunk).
+  3) Плагин-фикс: CraftBlockData lives at org.bukkit.craftbukkit.block.data.CraftBlockData
+     (block.CraftBlockData CNFE — surface-handshake молча падал на серверном пути; в 26.3-плагине
+     проверить тот же класс-путь).
