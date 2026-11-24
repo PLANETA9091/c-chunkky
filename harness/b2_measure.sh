@@ -16,6 +16,17 @@ pgrep -f 'paper-26\.3|paper\.jar' >/dev/null && { echo "server already running";
 # fresh world for deterministic virgin regions
 rm -rf world world_nether world_the_end
 cp "$ROOT/plugin/CrusstyGen.jar" plugins/CrusstyGen.jar
+# cont-151: wire the generator — without bukkit.yml the boot is pure vanilla
+# and every window measures the WRONG engine (honest line would show
+# native=0/carver n=0). Cont-149 numbers were real only because the box's
+# bukkit.yml was left wired by earlier manual sessions; the script must be
+# self-sufficient on a fresh sandbox.
+cat > bukkit.yml <<'EOF'
+worlds:
+  world:
+    generator: CrusstyGen
+EOF
+grep -q "eula=true" eula.txt 2>/dev/null || echo "eula=true" > eula.txt
 rm -f run.in run2.out
 mkfifo run.in
 ( sleep 28800 > run.in ) >/dev/null 2>&1 &
@@ -32,6 +43,7 @@ for i in $(seq 1 120); do
   sleep 2
 done
 grep -q "Done (" run2.out || { echo "BOOT FAILED"; tail -8 run2.out; exit 1; }
+grep -q "providing CrusstyChunkGenerator" run2.out || { echo "WIRING FAILED: generator is VANILLA (no 'providing CrusstyChunkGenerator')"; tail -8 run2.out; exit 1; }
 echo "BOOTED"
 # plugin sanity: bulk/carver lanes alive
 grep -E "bulk=|carver" run2.out | head -4

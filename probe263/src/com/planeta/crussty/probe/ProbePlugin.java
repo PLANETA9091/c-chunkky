@@ -30,7 +30,7 @@ public final class ProbePlugin extends JavaPlugin {
 
     @Override
     public void onEnable() {
-        for (String name : new String[] {"biomedump", "blockdump", "chunkdump", "statdump"}) {
+        for (String name : new String[] {"biomedump", "blockdump", "chunkdump", "statdump", "ydump"}) {
             var cmd = getCommand(name);
             if (cmd != null) {
                 cmd.setExecutor(this);
@@ -114,6 +114,49 @@ public final class ProbePlugin extends JavaPlugin {
                 pw.print(sb); pw.close();
             } catch (Exception e) { sender.sendMessage("statdump failed: " + e); return true; }
             sender.sendMessage("statdump: " + n + " chunks -> " + out);
+            return true;
+        }
+        if (command.getName().equals("ydump")) {
+            // ydump <outfile> — "cx cz y air:.. water:.. lava:.. clay:.. dirt:.. sand:..
+            // gravel:.. grass_block:.. stone:.." per chunk per Y level. The y-profile
+            // localizer for carve A/B residuals (cont-151).
+            String out = args.length >= 1 ? args[0] : "ydump.txt";
+            String[] mats = {"AIR", "WATER", "LAVA", "CLAY", "DIRT", "SAND", "GRAVEL", "GRASS_BLOCK", "STONE", "CAVE_AIR", "COBBLESTONE"};
+            int n = 0;
+            StringBuilder sb = new StringBuilder(1 << 22);
+            for (World w : Bukkit.getWorlds()) {
+                if (!w.getName().equals("world")) continue;
+                for (org.bukkit.Chunk c : w.getLoadedChunks()) {
+                    ChunkSnapshot snap = c.getChunkSnapshot(false, true, false);
+                    int minY = w.getMinHeight();
+                    int height = w.getMaxHeight() - w.getMinHeight();
+                    int[][] hist = new int[height][mats.length];
+                    java.util.Map<String, Integer> idx = new java.util.HashMap<>();
+                    for (int i = 0; i < mats.length; i++) idx.put(mats[i], i);
+                    for (int x = 0; x < 16; x++)
+                        for (int z = 0; z < 16; z++)
+                            for (int y = 0; y < height; y++) {
+                                Integer mi = idx.get(snap.getBlockType(x, minY + y, z).name());
+                                if (mi != null) hist[y][mi]++;
+                            }
+                    for (int y = 0; y < height; y++) {
+                        int sum = 0;
+                        for (int mi = 0; mi < mats.length; mi++) sum += hist[y][mi];
+                        if (sum == 0) continue;
+                        sb.append(c.getX()).append(' ').append(c.getZ()).append(' ').append(minY + y);
+                        for (int mi = 0; mi < mats.length; mi++) {
+                            if (hist[y][mi] != 0) sb.append(' ').append(mats[mi]).append(':').append(hist[y][mi]);
+                        }
+                        sb.append('\n');
+                    }
+                    n++;
+                }
+            }
+            try {
+                PrintWriter pw = new PrintWriter(out, "UTF-8");
+                pw.print(sb); pw.close();
+            } catch (Exception e) { sender.sendMessage("ydump failed: " + e); return true; }
+            sender.sendMessage("ydump: " + n + " chunks -> " + out);
             return true;
         }
         boolean biomeMode = command.getName().equals("biomedump");

@@ -2,7 +2,37 @@
 
 Компактная карточка состояния кампании. Полная хроника — `worklog-session.md`
 (записи cont-XX по датам). Этот файл обновляется при изменении КАРТЫ, не при
-каждом тике. Последнее обновление: cont-144.
+каждом тике. Последнее обновление: cont-151.
+
+## CONT-151 КАРТА (главное)
+
+- **ВАКУУМНЫЕ ab263-ГЕЙТЫ ЗАКРЫТЫ (fix в этом тике)**: bukkit.yml не проводил
+  generator: CrusstyGen — с ретаргета (2026-11-14) пары surface/carvers/biome/
+  port3raw сравнивали ваниль с ванилью (blockdump-дивергенция = полоса orebase).
+  Реальны были только ore-пара и e2e. Теперь: wiring + жёсткий guard
+  "providing CrusstyChunkGenerator" (плечо аварийно без него), genstats в
+  артефакте, env-ORDER фиксед (дефолт CRUS_NATIVE_DECO перетирал выбор пары).
+- **CARVER ACCUMULATION FIX (parity bug, критичный)**: st.ops/st.marks не
+  очищались между чанками; carve_fetch возвращал накопленную длину → каждый
+  чанк получал ops всех предыдущих чанков ctx (радиальный dAIR-градиент,
+  opsApplied 70K/ч = 46x истины). ФИКС: clear() в carve_chunk + регтест.
+  apply: 2.95 → 0.17 ms/ч (истинный стрим ~1.0K ops/ч).
+- **CARVE PHASE MOVE (parity bug, критичный)**: carve переехал из популятора
+  (FEATURES) в ChunkGenerator.generateCaves hook = ванильная фаза TERRAIN
+  (NoiseBasedChunkGenerator.buildTerrain line 428 → CraftBukkit → generateCaves).
+  Кросс-чанк deco-чтения теперь видят post-carve соседей (как ваниль). 8 strict
+  FAIL → 2: CLAY/WATER/SAND/COBBLE/MOSSY/COPPER бит-точны.
+- **ОСТАТОК**: DIRT +649 / GRASS_BLOCK −649 (зеркало, y 52-67, речная полоса) —
+  топматериал-ветка карва; кандидаты: 3D point-biome below-клетки, is_grass/
+  is_dirt составы, hasGrass между сегментами. carvebase-полоса ±91 (DIRT).
+- uniform-carve fold (cont-149) DEFAULT OFF (CRUS_CARVER_FOLD=1 lane): пропускал
+  пер-клеточные высотные апдейты ванили; конт-149 сам замерил его как шум.
+- Новые оракулы/пробы: CarveSubstanceOracle (реальный ванильный аквифер:
+  0/2816 расхождений), CarverMaskProbe (реальные 26.3 carver-классы: маски
+  1049==1049, 0 diff), maskprobe/maskcells/cavestream/carvepurity/substance_probe,
+  harness/{carver_probe,carve_chunkdump_ab}.sh, carvebase-пара.
+- setLargeFeatureSeed(seed+INDEX), Mth.sin(double)=f64*10430.378350470453,
+  Trapezoid/cave draw-order сверены javap-ом — бит-идентичны (cavestream diff=0).
 
 ## CONT-144 КАРТА (главное)
 

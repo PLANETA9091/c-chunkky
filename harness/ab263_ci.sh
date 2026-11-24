@@ -64,17 +64,50 @@ enable-command-block=false
 motd=crussty ab263
 EOF
 
+# WIRE_GEN=1 (default): wire CrusstyGen as the world generator via bukkit.yml
+# before every boot and ASSERT the wiring took ("providing
+# CrusstyChunkGenerator" in run.out). WIRE_GEN=0 = pure-vanilla leg
+# (orebase baseline only).
+#
+# WHY THE GUARD: getDefaultWorldGenerator resolves ONLY via bukkit.yml —
+# without the wiring every leg is pure vanilla Java and the gate passes on
+# boot-order noise. CI runs 43592466070..44892693623 (2026-11-14..11-21,
+# post-retarget) ran surface/carvers/biome/port3raw VACUOUSLY on fresh
+# runners: no "providing" line in the boot console, zero native carver/fill
+# markers, blockdump divergence == the orebase vanilla-vs-vanilla baseline
+# band (118-242 vs 212 lines). e2e_ci.sh had the wiring + a comment citing
+# the same trap observed 2026-10-28; ab263_ci.sh lost it in the 26.3 purge.
+WIRE_GEN="${WIRE_GEN:-1}"
+
 boot_run() { # $1 = dump tag, $2 = extra env
   stop_server
   rm -rf "$SRV/world" "$SRV/world_nether" "$SRV/world_the_end"
   cp "$PLUGIN_JAR" "$SRV/plugins/CrusstyGen.jar"
   cp "$PROBE_JAR" "$SRV/plugins/CrusstyProbe263.jar"
+  grep -q "eula=true" "$SRV/eula.txt" 2>/dev/null || echo "eula=true" > "$SRV/eula.txt"
+  if [ "$WIRE_GEN" = "1" ]; then
+    cat > "$SRV/bukkit.yml" <<EOF
+worlds:
+  world:
+    generator: CrusstyGen
+EOF
+  else
+    printf 'worlds: {}\n' > "$SRV/bukkit.yml"
+  fi
   rm -f "$SRV/run.in"
   mkfifo "$SRV/run.in"
   ( sleep 1800 > "$SRV/run.in" ) >/dev/null 2>&1 &
   (
     cd "$SRV"
-    env $2 CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" \
+    # cont-151 ORDER FIX: the pair env ($2) must come AFTER the defaults —
+    # `env $2 CRUS_NATIVE_DECO=...` applied the default LAST, silently
+    # overriding every pair's deco choice (env applies assignments in order,
+    # last wins). The carvers/port3raw pairs' CRUS_NATIVE_DECO=1 never
+    # reached the JVM: deco=0 → decoAcquire()=0 → carver driver bails
+    # (probe opsApplied=0, uncarved ON-leg, gate FAIL 20 strict). e2e_ci
+    # lanes escaped the same trap only because CI exports their env
+    # ambiently (the default then resolves to the ambient value).
+    env CRUS_NATIVE_DECO="${CRUS_NATIVE_DECO:-0}" $2 \
       setsid "$JAVA_BIN" -Xms2G -Xmx3G \
       -Djava.library.path="$ROOT/native/target/release" \
       -jar paper.jar nogui < run.in > run.out 2>&1 &
@@ -94,11 +127,24 @@ boot_run() { # $1 = dump tag, $2 = extra env
     return 1
   fi
   echo "boot ok ($1)"
+  if [ "$WIRE_GEN" = "1" ] && ! grep -q "providing CrusstyChunkGenerator" "$SRV/run.out"; then
+    echo "WIRING FAILED ($1): world generator is VANILLA — bukkit.yml wiring did not\n    resolve (no 'providing CrusstyChunkGenerator' in run.out). The leg would\n    compare vanilla-vs-vanilla (vacuous gate); aborting instead." >&2
+    stop_server
+    return 1
+  fi
   $RCON "forceload add $RX $RZ $((RX + N * 16 - 1)) $((RZ + N * 16 - 1))" >/dev/null
   sleep 45
   $RCON "statdump $1_stat.txt" >/dev/null
   $RCON "blockdump $1_block.txt" >/dev/null
   $RCON "biomedump $1_biome.txt" >/dev/null
+  # cont-151: gen counters into the artifact — carver-phases (opsApplied/
+  # declined/applyFailed/fuse/uniform swaps) is the anti-vacuum evidence: on
+  # a wired carvers/surface on-leg it must be nonzero, on an unwired boot
+  # the whole line is absent. Vacuous CI gates (2026-11-14..21) would have
+  # been caught by exactly this file being empty.
+  $RCON crusgenstats > "$SRV/$1_genstats.txt" 2>/dev/null || true
+  # cont-151: per-Y material histogram (carve A/B y-profile localizer)
+  $RCON "ydump $1_y.txt" >/dev/null || true
   sleep 2
   stop_server
   # per-leg server log into the artifact: run.out is TRUNCATED by the next
@@ -112,12 +158,23 @@ boot_run() { # $1 = dump tag, $2 = extra env
 mkdir -p "$DUMPS"
 case "$PAIR" in
   surface)
-    boot_run "ab_on"  "CRUS_NATIVE_CARVERS=0"                    || exit 1
+    # cont-151: CRUS_FORCE_NATIVE_SURFACE=1 on the ON leg — the native
+    # surface is OFF by default (cont-147: Java surface is the measured
+    # production winner), so a wired on-leg without the force flag ran the
+    # SAME Java surface as the off-leg (vacuous even with the generator
+    # wired). The flag engages the native MaterialSystem for the A/B.
+    boot_run "ab_on"  "CRUS_NATIVE_CARVERS=0 CRUS_FORCE_NATIVE_SURFACE=1" || exit 1
     boot_run "ab_off" "CRUS_NATIVE_CARVERS=0 CRUS_NO_NATIVE_SURFACE_263=1" || exit 1
     ;;
   carvers)
-    boot_run "ab_on"  "CRUS_NATIVE_CARVERS=1" || exit 1
-    boot_run "ab_off" "CRUS_NATIVE_CARVERS=0" || exit 1
+    # cont-151: CRUS_NATIVE_DECO=1 on BOTH legs — the native carver is
+    # deco=1-only (cont-97: deco=0 + carvers tears the section-pack snapshot;
+    # carver driver never engages at deco=0 → uncarved ON-leg → the gate
+    # correctly failed with 20 strict divergences, probe opsApplied=0).
+    # With deco=1 the deco engine is native on both sides and the pair
+    # isolates the CARVER: native carve+topMaterial vs vanilla NMS carvers.
+    boot_run "ab_on"  "CRUS_NATIVE_DECO=1 CRUS_NATIVE_CARVERS=1" || exit 1
+    boot_run "ab_off" "CRUS_NATIVE_DECO=1 CRUS_NATIVE_CARVERS=0" || exit 1
     ;;
   biome)
     # grid-backed native biome source (CRUS_BIOME_GRID=1) vs the vanilla
@@ -150,6 +207,9 @@ case "$PAIR" in
     # the same magnitude as the ore pair, the strict-ore assumption is wrong
     # (cross-boot chunk-decorate order rewrites border-vein overwrites) and
     # the ore gate needs an epsilon class, not a hook fix.
+    # cont-151: WIRE_GEN=0 keeps BOTH legs pure vanilla (that is the point of
+    # the baseline); every other pair runs wired + asserted.
+    WIRE_GEN=0
     boot_run "ab_on"  "CRUS_NATIVE_CARVERS=0" || exit 1
     boot_run "ab_off" "CRUS_NATIVE_CARVERS=0" || exit 1
     ;;
@@ -162,14 +222,29 @@ case "$PAIR" in
     # only the Java apply path differs. Bit-exactness expectation: statdump
     # material counts equal up to the documented deco-order noise; blockdump
     # diff = 0 or the deco-order class.
-    boot_run "ab_on"  "CRUS_NATIVE_CARVERS=0 CRUS_PORT3_RAW=1" || exit 1
-    boot_run "ab_off" "CRUS_NATIVE_CARVERS=0 CRUS_PORT3_RAW=0" || exit 1
+    # cont-151: CRUS_NATIVE_DECO=1 on both legs — the RAW/per-op apply paths
+    # live in the native DECO driver; at deco=0 both legs were vanilla
+    # (vacuous CI lane, same as surface/carvers/biome).
+    boot_run "ab_on"  "CRUS_NATIVE_DECO=1 CRUS_NATIVE_CARVERS=0 CRUS_PORT3_RAW=1" || exit 1
+    boot_run "ab_off" "CRUS_NATIVE_DECO=1 CRUS_NATIVE_CARVERS=0 CRUS_PORT3_RAW=0" || exit 1
     ;;
-  *) echo "unknown pair: $PAIR (surface|carvers|biome|ore|orebase|port3raw)" >&2; exit 1;;
+  carvebase)
+    # cont-151: the BOOT-ORDER baseline for the carvers pair — two boots of
+    # the OFF config (native deco + native noise/biome, VANILLA carvers) on
+    # a wired world. The deco-order noise band for the surface/fluid
+    # materials (CLAY/DIRT/GRASS_BLOCK/SAND/WATER/COBBLESTONE) that the
+    # carvers pair shows as strict residuals; vanilla-vs-vanilla (orebase)
+    # is bit-equal on those, so the native-deco order is the right judge.
+    boot_run "ab_on"  "CRUS_NATIVE_DECO=1 CRUS_NATIVE_CARVERS=0" || exit 1
+    boot_run "ab_off" "CRUS_NATIVE_DECO=1 CRUS_NATIVE_CARVERS=0" || exit 1
+    ;;
+  *) echo "unknown pair: $PAIR (surface|carvers|biome|ore|orebase|carvebase|port3raw)" >&2; exit 1;;
 esac
 
 cp "$SRV"/ab_on_stat.txt "$SRV"/ab_off_stat.txt "$SRV"/ab_on_block.txt "$SRV"/ab_off_block.txt \
-   "$SRV"/ab_on_biome.txt "$SRV"/ab_off_biome.txt "$DUMPS"/ 2>/dev/null || true
+   "$SRV"/ab_on_biome.txt "$SRV"/ab_off_biome.txt "$SRV"/ab_on_genstats.txt "$SRV"/ab_off_genstats.txt \
+   "$SRV"/ab_on_y.txt "$SRV"/ab_off_y.txt \
+   "$DUMPS"/ 2>/dev/null || true
 
 if [ "$PAIR" = "biome" ]; then
   echo "=== biome exact-parity gate (grid-backed vs vanilla preset) ==="

@@ -8170,3 +8170,99 @@ Q6 — главный фронт до 5ms (cover->100% + busy<=10 — см. cont
   3) Плагин-фикс: CraftBlockData lives at org.bukkit.craftbukkit.block.data.CraftBlockData
      (block.CraftBlockData CNFE — surface-handshake молча падал на серверном пути; в 26.3-плагине
      проверить тот же класс-путь).
+
+## cont-151 (2026-11-24): ВАКУУМНЫЕ ГЕЙТЫ ab263 + ДВА ПАРИТИ-БАГА карвера (аккумуляция ops + фаза пайплайна)
+
+### Ресинк и восстановление
+- Сессия стартовала на свежей песочнице: checkout = origin/main bfe7d6dc (cont-150),
+  CI 44892693623 = SUCCESS, вердикты без долгов. sandbox_recover.sh: JDK 25.0.5+8,
+  paper 222 (sha f649771a), .so 8.6MB, plugin/probe пересобраны. cargo 95/95.
+- bootstrap_server.sh не дотянут при пропуске стадии paper (paper.jar уже был) —
+  eula/plugins/bukkit.yml донастроены вручную; в ab263_ci.sh добавлен eula-guard.
+
+### НАХОДКА #1: ab263-гейты были ВАКУУМНЫМИ с ретаргета (2026-11-14..11-21)
+- bukkit.yml НЕ проводил generator: CrusstyGen — оба плеча каждой пары
+  surface/carvers/biome/port3raw были ЧИСТО ВАНИЛЬНЫМИ (в консолях ранов
+  44892693623 нет ни одного "providing CrusstyChunkGenerator"; blockdump-дивергенция
+  118-242 строк = полоса шума orebase 212). Реальны были только ore-пара (хук
+  живёт в ванильном decorate) и e2e-лейны (там wiring был). CI PASS = сравнение
+  ванили с ванилью.
+- ФИКС: boot_run проводит generator (WIRE_GEN=1) + ЖЁСТКИЙ guard "providing
+  CrusstyChunkGenerator" в run.out, иначе плечо аварийно. orebase = WIRE_GEN=0
+  (чисто-ванильный baseline сохранён). genstats теперь в артефакте (антивакуум).
+- ФИКС env-ORDER: `env $2 CRUS_NATIVE_DECO=...` применял дефолт ПОСЛЕДНИМ —
+  env применяет присвоения по порядку, последнее выигрывает → deco-выбор пар
+  (carvers/port3raw CRUS_NATIVE_DECO=1) молча перетирался в 0. Порядок
+  изменён: дефолт ПЕРЕД $2. e2e-лейны не страдали (у них env экспортируется
+  ambient на уровне CI-степа).
+- surface-пара: на-плечу добавлен CRUS_FORCE_NATIVE_SURFACE=1 (нативная
+  поверхность по умолчанию OFF — без флага пара была вакуумной даже при wiring).
+- carvebase-пара (две загрузки OFF-конфига): полоса boot-order шума нативной деки
+  для surface/fluid материалов: CLAY ±66, DIRT ±91, GRASS ±47, WATER ±10.
+
+### НАХОДКА #2 (PARITY BUG): карвер-ops АККУМУЛИРОВАЛИСЬ между чанками
+- carve_chunk пуш-расширял ctx-stashed st.ops/st.marks БЕЗ очистки; carve_fetch
+  возвращал st.ops.len() (НАКОПЛЕННУЮ длину) → Java применяла ops ВСЕХ предыдущих
+  чанков этого ctx к текущему (ops = чанк-ЛОКАЛЬНЫЕ индексы!). Симптом: первый
+  чанк на ctx чистый, дальше копится мусор → dAIR растёт РАДИАЛЬНО от origin окна
+  (матрица 12x12: +1 в углу → +24.8K на дальнем крае); opsApplied = 70K/ч = ~46x
+  истины; AIR +1.3M / WATER +1.26M / LAVA +145K / OBSIDIAN +21K; 20-34 strict FAIL.
+- Все b2/apply-замеры с cont-138 (opsApplied=73K/ч, apply=2.95ms/ч) мерились на
+  раздутом стриме: истина ~1.0-1.5K ops/ч, apply 0.10-0.17ms/ч.
+- ФИКС: ops.clear()/marks.clear() в начале carve_chunk (все вызывающие пути).
+  Регрессионный тест carve_stream_is_per_call_not_accumulated. cargo 95/95.
+
+### НАХОДКА #3 (PARITY BUG): фаза пайплайна — carve жил в populate (FEATURES),
+ваниль — в buildTerrain (TERRAIN)
+- Симптом post-#2: чистые маски+субстанция (доказано оракулами: CarveSubstanceOracle
+  (реальный ванильный Aquifer на реальном RandomState) vs native Aquifer263 =
+  0/2816 расхождений на двух чанках; CarverMaskProbe (реальные CaveWorldCarver 26.3
+  из paper jar) vs native maskcells = 1049==1049 unique cells, 0 diff), но CLAY
+  -5072 / WATER -1334 / SAND +635 / COBBLE/MOSSY — детерминированно, концентрация
+  в речной полосе (y 61-64) и на днищах аквифер-озёр (y 23-27).
+- Механизм: нативный carve был популятором (populate = FEATURES) — соседи при
+  декорат-чтении были pre-carve (порядок populate), ваниль — post-carve (TERRAIN
+  всех ±8 завершён до любых FEATURES; ChunkPyramid: FEATURES требует TERRAIN@1).
+  Дека (spring_water count=25 height_range uniform → cave-озёрца; disk_clay/
+  disk_grass/disk_sand на OCEAN_FLOOR_WG + matching_fluids) каскадно расходилась.
+- ФИКС: carveNative вызывается из ChunkGenerator.generateCaves (Bukkit-хук, в
+  который CraftBukkit.applyCarvers делегирует ВНУТРИ NoiseBasedChunkGenerator
+  .buildTerrain — ванильная фаза TERRAIN, line 428). CarverDriver больше не
+  популятор. Высотные карты: primeHeightmaps на завершении TERRAIN сканирует
+  УЖЕ вырезанные секции (vanilla ProtoChunk.setBlockState toPrime-priming
+  сходится к тем же значениям) — пер-оп высотные апдейты не нужны.
+- Результат: 8 strict FAIL → 2. CLAY/WATER/SAND/COBBLESTONE/MOSSY/COPPER_ORE
+  = бит-точны. carve=1.90ms/ч, apply=0.17ms/ч (было carve=2.03 apply=2.95 на
+  раздутом стриме), opsApplied=1034/ч.
+
+### ОСТАВШЕЕСЯ (2 strict, следующий тик)
+- DIRT +649 / GRASS_BLOCK -649 (зеркало, y 52-67, речная полоса) — трава↔земля
+  в topMaterial-ветке карва (vanilla applyCarvingMask hasGrass → updateY(1,1,
+  underFluid?y+1:MIN, y) → rule.tryApply). Нативный top_material263 сверен с
+  vanilla MaterialSystem.topMaterial (fix-глубины 1/1, waterHeight=py+1,
+  1x1x1 volume, градиенты из frozen WS_WG — совпадают). Кандидаты: 3D point-biome
+  на below-клетке (correctBiomeManager resolver vs b263 point query), состав
+  top_ids.is_grass/is_dirt (ваниль: GRASS_BLOCK|MYCELIUM и Blocks.DIRT ровно),
+  hasGrass-семантика между сегментами визита. carvebase-полоса для DIRT ±91 —
+  дельта 7x полосы.
+- uniform-carve fold (cont-149) DEFAULT OFF (carveSwapReady требует
+  CRUS_CARVER_FOLD=1): fold пропускает пер-клеточные высотные апдейты ванили,
+  а конт-149 сам замерил его как шум. Код жив (тесты 94/95), lane под флагом.
+
+### Инструменты (новые, в репо/scratch)
+- harness/carver_probe.sh (ON-плечо + counters), harness/carve_chunkdump_ab.sh
+  (chunkdump A/B двух чанков), native/src/bin/{maskprobe,maskcells,cavestream,
+  carvepurity,substance_probe}.rs, oracle263/CarveSubstanceOracle.java (реальный
+  ванильный аквифер), agent-scratch/{CarverMaskProbe,CanyonStreamProbe,
+  CaveStreamProbe}.java (реальные 26.3 carver-классы из paper jar).
+- Выводы-константы: setLargeFeatureSeed(seed+INDEX, sx, sz) подтверждён javap;
+  Mth.sin(double) = f64-умножение на 10430.378350470453 (f64, не f32!);
+  Trapezoid = min + rf1*(w-slope) + rf2*slope; cave draw order:
+  count→x→y→z→hrm→vrm→svrm(нет draw)→floorLevel→room→tunnels.
+
+### Итог тика
+- Гейты честные, карвер бит-точен по маске/субстанции/фазе; 2 strict остатка
+  (DIRT/GRASS ±649) — единственный открытый парити-фронт. Стенд: honest e2e
+  не мерился в этом тике (все руки в паритете карвера); якорь cont-149
+  (70.9-72.2 @14600 8x8) ожидаемо УЛУЧШАЕТСЯ (apply −2.8ms/ч на inflate-фиксе),
+  перемерить в cont-152.

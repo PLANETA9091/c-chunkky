@@ -15,3 +15,6 @@ commands:
   statdump:
     description: dump per-chunk material histograms
     usage: /statdump <outfile>
+  ydump:
+    description: dump per-chunk per-Y material histograms (carve A/B localizer)
+    usage: /ydump <outfile>

@@ -697,6 +697,19 @@ impl Gen263 {
         allow_uniform: bool,
     ) {
         io.fill(0);
+        // cont-151 ACCUMULATION FIX: ops/marks buffers are the CTX-STASHED
+        // Vecs (st.ops/st.marks on the server path) reused across chunks.
+        // carve_chunk previously only pushed/extended into them, and the
+        // JNI layer returned st.ops.len() as the op count — so every chunk
+        // received ALL stale ops of every previous chunk this ctx carved.
+        // The stale ops carry chunk-LOCAL indices: applying them re-carves
+        // the current chunk with other chunks' patterns (ab263 carvers pair
+        // run: AIR +1.3M, WATER +1.26M, opsApplied 70K/ch = ~46x the true
+        // stream; divergence grew radially with generation order — the
+        // first chunk per ctx was clean, later chunks accumulated garbage).
+        // All callers (fuse, legacy 3-call, tests) want PER-CALL streams.
+        ops.clear();
+        marks.clear();
         // cont-96: DEFENSIVE unpack. The Java pack (CarverDriver.populate)
         // snapshots pc.data reflectively; a palette GROWTH racing the snapshot
         // (idFor/resize under vanilla decorate, deco=0) can leave storage
@@ -1177,5 +1190,38 @@ mod carve_uniform_tests {
         for op in &ops {
             assert!(*op >= 0);
         }
+    }
+
+    /// cont-151 regression: the CTX-STASHED ops/marks Vecs (server path) are
+    /// REUSED across chunks; carve_chunk must emit a PER-CALL stream, not
+    /// accumulate. Before the fix, chunk 2 received chunk 1's stale ops
+    /// (chunk-local indices!) — the ab263 carvers pair diverged radially
+    /// with generation order (AIR +1.3M, opsApplied 70K/ch = ~46x truth).
+    #[test]
+    fn carve_stream_is_per_call_not_accumulated() {
+        let mut bits = [0i32; 24]; // all sections uniform stone
+        let mut pal_off = [0i32; 24];
+        let raw_off = [0i32; 24];
+        let pal: Vec<i16> = vec![1]; // stone
+        let raw: Vec<i64> = Vec::new();
+        let pack = SectionPack { bits: &bits, raw: &raw, raw_off: &raw_off, pal: &pal, pal_off: &pal_off };
+        let g = Gen263::new(3257840388504953787, -64, 384, 63);
+
+        // reused buffers, exactly like the server's st.ops/st.marks
+        let mut ops: Vec<i64> = Vec::new();
+        let mut marks: Vec<i64> = Vec::new();
+        let mut io = [0u16; OUT_LEN];
+        g.carve_chunk(1033, 1033, 3257840388504953787, &pack, &mut io, &mut marks, &mut ops, None, None, false);
+        let first_len = ops.len();
+        let first: Vec<i64> = ops.clone();
+        assert!(first_len > 0, "probe chunk must carve");
+
+        // three more chunks on the SAME buffers — the stream must reset
+        g.carve_chunk(1024, 1024, 3257840388504953787, &pack, &mut io, &mut marks, &mut ops, None, None, false);
+        g.carve_chunk(1023, 1023, 3257840388504953787, &pack, &mut io, &mut marks, &mut ops, None, None, false);
+        g.carve_chunk(1033, 1033, 3257840388504953787, &pack, &mut io, &mut marks, &mut ops, None, None, false);
+        assert_eq!(ops.len(), first_len, "op stream must be per-call, not accumulated");
+        assert_eq!(ops, first, "deterministic carve: same chunk => same stream");
+        assert!(marks.len() <= 1024 * 24, "marks also per-call");
     }
 }

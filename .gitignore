@@ -69,3 +69,6 @@ server263/surface263_*.txt
 ab263_out/
 reference/dumps/
 agent-scratch/
+
+# cont-151 diagnostics dumps
+ab263_out_carvers*/

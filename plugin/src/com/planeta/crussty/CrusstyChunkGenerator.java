@@ -311,6 +311,40 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         return !NATIVE_CARVERS;
     }
 
+    /** cont-151: the native carve hook. Vanilla runs generateCarvers INSIDE
+     *  buildTerrain (TERRAIN status); with a custom generator the pipeline
+     *  calls customGenerator.applyCarvers(chunk) -> CraftBukkit ->
+     *  ChunkGenerator.generateCaves — THIS method — at the same phase. The
+     *  carve previously ran as a populator (FEATURES stage): the neighbors'
+     *  TERRAIN-carve state was order-dependent when the deco (disk/spring
+     *  placement) read region terrain, cascading into CLAY -5072 / WATER
+     *  -1334 / DIRT +1864 deltas. At TERRAIN every neighbor's carve is done
+     *  before ANY populate runs (ChunkPyramid: FEATURES requires TERRAIN@1)
+     *  — vanilla-consistent cross-chunk reads. The FINAL heightmaps are
+     *  primed at TERRAIN completion from the carved sections (vanilla
+     *  ProtoChunk.setBlockState's toPrime-priming converges to the same
+     *  values), so no per-op heightmap work is needed here. */
+    @Override
+    public void generateCaves(WorldInfo info, java.util.Random random, int cx, int cz,
+            org.bukkit.generator.ChunkGenerator.ChunkData data) {
+        if (!NATIVE_CARVERS) {
+            return;
+        }
+        try {
+            // CraftChunkData.getHandle() — the wrapped ChunkAccess (linked
+            // mode: writes land in the chunk's live sections).
+            Object chunk = data.getClass().getMethod("getHandle").invoke(data);
+            Class.forName("com.planeta.crussty.CarverDriver")
+                    .getMethod("carveNative",
+                            Class.forName("net.minecraft.world.level.chunk.ChunkAccess"),
+                            int.class, int.class)
+                    .invoke(null, chunk, cx, cz);
+        } catch (Throwable t) {
+            Logger.getLogger("CrusstyGen").warning(
+                    "native carve (generateCaves) failed: " + t);
+        }
+    }
+
     /** The bulk layout's NMS state table (material id -> NMS BlockState) for
      *  the CarverDriver reverse mapping; forces the (idempotent) bulk init. */
     static Object[] bulkStatesById() {
@@ -1532,7 +1566,19 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     private static volatile boolean carveSwapBroken;
 
     static boolean carveSwapReady() {
-        return carveSwapOk && !carveSwapBroken;
+        // cont-151: the uniform-section fold is DEFAULT OFF. The fold replaces
+        // a post-carve uniform section's per-cell ops with ONE marker and the
+        // JVM applies it via a single PalettedContainer.data swap — which
+        // SKIPS the per-cell Heightmap.update that vanilla ProtoChunk
+        // .setBlockState performs for every carved cell. A folded section
+        // therefore leaves the final heightmaps stale for its columns (clay
+        // disk placement, spawn, lighting all read them) — a parity break
+        // the CarverDriver per-op heightmap lane cannot see. Cont-149 also
+        // measured the fold as perf-noise (opsApplied did not drop: no fully
+        // uniform post-carve sections in the anchor region). CRUS_CARVER_FOLD
+        // =1 re-arms the lane for measurements that do not read heightmaps.
+        return carveSwapOk && !carveSwapBroken
+                && "1".equals(System.getenv("CRUS_CARVER_FOLD"));
     }
 
     /** cont-149 carve-apply uniform-section swap: replace the section's

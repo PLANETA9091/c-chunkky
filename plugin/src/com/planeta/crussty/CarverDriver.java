@@ -25,7 +25,7 @@ import java.util.logging.Logger;
  * states), so the apply loop reads STATES_BY_ID directly instead of the
  * air/water/lava-only fast path.
  */
-public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
+public final class CarverDriver {
     private static final Logger LOG = Logger.getLogger("CrusstyGen");
     private static volatile boolean ACTIVE = false;
     private static volatile long SEED;
@@ -35,6 +35,18 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
      *  sessions_lock re-acquisitions contend brutally once apply does real
      *  work). CRUS_CARVER_FUSE=0 restores the legacy 3-call path. */
     private static final boolean CARVER_FUSE = !"0".equals(System.getenv("CRUS_CARVER_FUSE"));
+
+    /** cont-151 PIPELINE MOVE: the carve now runs from the
+     *  ChunkGenerator.generateCaves hook — inside NoiseBasedChunkGenerator
+     *  .buildTerrain (TERRAIN status, the vanilla applyCarvers position:
+     *  customGenerator.applyCarvers(chunk) -> CraftBukkit -> generateCaves)
+     *  — NOT from a populator (populate = FEATURES stage, AFTER the TERRAIN
+     *  heightmap priming; the cross-chunk deco reads then saw neighbors'
+     *  pre-carve terrain while vanilla sees post-carve, cascading into
+     *  spring/disk placement: CLAY -5072 etc.). Heightmaps need NO per-op
+     *  work here: Heightmap.primeHeightmaps at TERRAIN completion scans the
+     *  carved sections (vanilla ProtoChunk.setBlockState's own
+     *  toPrime-priming at carve time converges to the same values).
 
     /** for the CarverStats snapshot (non-vacuity evidence). */
     static boolean fuseActive() {
@@ -68,9 +80,8 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
             }
         }
         SEED = seed;
-        world.getPopulators().add(0, new CarverDriver());
         ACTIVE = true;
-        LOG.info("native carvers active (CRUS_NATIVE_CARVERS=1)");
+        LOG.info("native carvers active (CRUS_NATIVE_CARVERS=1, generateCaves hook)");
     }
 
     public static boolean active() {
@@ -113,9 +124,11 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
         }
     }
 
-    @Override
-    public void populate(org.bukkit.generator.WorldInfo info, java.util.Random random,
-                         int cx, int cz, org.bukkit.generator.LimitedRegion limited) {
+    /** cont-151: the native carve entry — called from the
+     *  ChunkGenerator.generateCaves hook (CrusstyChunkGenerator) with the
+     *  CraftChunkData.getHandle() ChunkAccess. Runs at TERRAIN status inside
+     *  buildTerrain, the exact vanilla applyCarvers phase. */
+    public static void carveNative(ChunkAccess chunk, int cx, int cz) {
         if (!ACTIVE) {
             return;
         }
@@ -130,16 +143,6 @@ public final class CarverDriver extends org.bukkit.generator.BlockPopulator {
         }
         long tp1 = System.nanoTime();
         try {
-            Object handle = limited.getClass().getMethod("getHandle").invoke(limited);
-            // WorldGenRegion IS the region handle (it has no getHandle(); the
-            // old second hop threw NoSuchMethodException on every chunk and the
-            // whole populate silently aborted — carver=0.00 in every window,
-            // CI 41223656202 WARN 'carver driver failed'). The chunk being
-            // populated is the region's CENTER chunk, i.e. (cx, cz) from the
-            // populate args, via LevelReader.getChunk(int,int).
-            ChunkAccess chunk = (ChunkAccess) handle.getClass()
-                    .getMethod("getChunk", int.class, int.class)
-                    .invoke(handle, cx, cz);
             // ---- pack sections ----
             int minSectionY = chunk.getMinSectionY();
             int sections = chunk.getSectionsCount();
