@@ -8266,3 +8266,26 @@ Q6 — главный фронт до 5ms (cover->100% + busy<=10 — см. cont
   не мерился в этом тике (все руки в паритете карвера); якорь cont-149
   (70.9-72.2 @14600 8x8) ожидаемо УЛУЧШАЕТСЯ (apply −2.8ms/ч на inflate-фиксе),
   перемерить в cont-152.
+
+### ВЕРДИКТ CI cont-151 (run 45509436683, cd0739b6): FAILURE — 1 lane, причина = задокументированный остаток
+- native: SUCCESS; plugin: SUCCESS; integration: FAILURE на шаге "A/B carvers"
+  (последующие lane-шаги job'а пропущены).
+- **surface-пара: GATE PASS (bit-equal) НА CI — первый РЕАЛЬНЫЙ проход
+  нативной поверхности на CI** (wiring + CRUS_FORCE_NATIVE_SURFACE=1).
+- carvers-остаток НА CI-боксе (4 ядра, параллельная deco): CLAY +2981,
+  DIRT +450, GRASS_BLOCK −716, GRAVEL −209, COPPER_ORE +49 — тот же класс
+  (deco-order каскад + topMaterial), числа отличаются от 2-ядерной песочницы
+  (CLAY −5072→0 локально после phase move; CI-полоса boot-order для CLAY не
+  измерена — carvebase на CI не успел).
+- e2e-лейны исполнились: par4ore ON e2e=34.03 (carver=4.76ms/ч — нативный
+  карвер теперь виден в honest-окне), par4ore_off e2e=23.16 (carver=0.00 —
+  ванильный carve сидит в gen=; сравнение не чистое).
+- Уточнение фокуса: CRUS_BIOME_GRID=1 на обоих плечах НЕ меняет остаток
+  (DIRT +702 vs +649) — point-biome движок НЕ виновник. TopMatIds сверен
+  (grass = GRASS_BLOCK|MYCELIUM, dirt = Blocks.DIRT ровно). fiddle_distance
+  add-order сверен по байткоду (d7=dy! порядок (z2+y2)+x2 — совпадает).
+- **CONT-152 ПЛАН**: оракул MaterialSystem.topMaterial (реальный rule tree из
+  noise_settings/overworld.json через FillOracle-механику + BiomeManager с
+  preset-резолвером) vs native top_material263 на flip-клетках; carvebase на
+  CI (полоса boot-order 4-ядерного бокса); после закрытия ±~700 — honest e2e
+  перемер (ожидаемое улучшение от inflate-фикса apply 2.95→0.17).
