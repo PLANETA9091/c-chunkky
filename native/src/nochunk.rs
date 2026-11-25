@@ -65,7 +65,7 @@ fn floor_div(a: i32, b: i32) -> i32 {
 }
 
 #[inline]
-fn block_pos_as_long(x: i32, y: i32, z: i32) -> i64 {
+pub(crate) fn block_pos_as_long(x: i32, y: i32, z: i32) -> i64 {
     ((x as i64 & 0x3FF_FFFF) << 38) | (y as i64 & 0xFFF) | ((z as i64 & 0x3FF_FFFF) << 12)
 }
 
@@ -4430,6 +4430,23 @@ impl<'e> ChunkGen<'e> {
     /// Fluid-update marks (packed BlockPos) collected during the last fill.
     pub fn marks(&self) -> &[i64] {
         &self.marks
+    }
+
+    /// The vanilla shouldScheduleFluidUpdate flag from the LAST aquifer eval
+    /// (the carve tail reads it right after aquifer_compute_substance).
+    pub fn sched_flag(&self) -> bool {
+        self.sched
+    }
+
+    /// Append carve fluid marks (packed BlockPos) — drained by the JNI
+    /// fillMarked/fillBeard path together with the fill's own marks.
+    pub fn extend_marks(&mut self, extra: &[i64]) {
+        for &m in extra {
+            if self.marks.len() >= MARK_CAP {
+                break;
+            }
+            self.marks.push(m);
+        }
     }
 
     /// Ship the per-chunk structure beardifier (vanilla Beardifier piece

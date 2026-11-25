@@ -23,6 +23,8 @@ pub const STONE_ID: u16 = 1;
 pub const WATER_ID: u16 = 3;
 pub const LAVA_ID: u16 = 17;
 pub const DIRT_ID: u16 = 5;
+/// bedrock — the whole UNCARVABLE tag in 26.3 (base fill-table id).
+pub const BEDROCK_ID: u16 = 2;
 
 // ---------------------------------------------------------------------------
 // post-fill WORLD_SURFACE_WG heightmap handoff (fill -> carve)

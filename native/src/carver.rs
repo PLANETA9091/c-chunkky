@@ -65,7 +65,12 @@ pub enum HeightProvider {
 pub enum IntProvider {
     Constant(i32),
     Uniform { min: i32, max: i32 },
+    /// BiasedToBottomInt: min + nextInt(nextInt(range+1) + 1) — double nest.
     BiasedToBottom { min: i32, max: i32 },
+    /// VeryBiasedToBottomInt (the vanilla cave "count" provider): min +
+    /// nextInt(nextInt(nextInt(range+1) + 1) + 1) — TRIPLE nest, bit-exact
+    /// with carver263::IProv263::VeryBiasedToBottom (mask-probe verified).
+    VeryBiasedToBottom { min: i32, max: i32 },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -73,6 +78,10 @@ pub enum FloatProvider {
     Constant(f32),
     Uniform { min: f32, max: f32 },
     Trapezoid { min: f32, max: f32, plateau: f32 },
+    /// ClampedNormalFloat: (float) clamp(mean + nextGaussian * dev, min, max)
+    /// — f64 gaussian math, f64 clamp, single f32 cast (same verified formula
+    /// as features_placement::FloatProv::ClampedNormal).
+    ClampedNormal { mean: f32, dev: f32, min: f32, max: f32 },
 }
 
 /// A resolved carver with its biome-list index (order defines RNG seeding).
@@ -85,10 +94,21 @@ pub struct CarverEntry {
 /// World-level carve state: registry + per-biome lists.
 pub struct CarverState {
     pub registry: Vec<CarverEntry>,
-    /// biome name -> list of carver registry indexes (JSON list order)
-    pub per_biome: Vec<(String, Vec<usize>)>,
+    /// biome id ("<ns>:<name>") -> list of carver registry indexes (JSON list
+    /// order). PRESENT keys are explicit biome lists (possibly EMPTY — the
+    /// biome opted out of carving); missing keys fall back to `default`.
+    pub per_biome: std::collections::HashMap<String, Vec<usize>>,
     pub min_y: i32,
     pub gen_depth: i32,
+    /// carve-in-fill gate (JNI carverSetEnabled flips it; the fill tail also
+    /// honors the global CRUS_CARVE_IN_FILL gate).
+    pub enabled: bool,
+    /// vanilla trio registry indexes — the fallback list for biomes without
+    /// an explicit pack JSON (all vanilla biomes list exactly these three).
+    pub default: Vec<usize>,
+    /// source chunk -> biome id memo (the 17x17 window overlaps heavily
+    /// between adjacent center chunks; queries are pure functions).
+    pub biome_memo: std::collections::HashMap<(i32, i32), String>,
 }
 
 fn getf(j: &crate::json::Json, k: &str) -> Option<f64> {
@@ -99,6 +119,10 @@ fn gets<'a>(j: &'a crate::json::Json, k: &str) -> Option<&'a str> {
 }
 
 fn parse_float_provider(j: &crate::json::Json) -> Option<FloatProvider> {
+    // bare number -> ConstantFloat ("yScale": 13)
+    if let Some(v) = j.as_f64() {
+        return Some(FloatProvider::Constant(v as f32));
+    }
     if let Some(v) = getf(j, "value") {
         return Some(FloatProvider::Constant(v as f32));
     }
@@ -114,11 +138,21 @@ fn parse_float_provider(j: &crate::json::Json) -> Option<FloatProvider> {
             max: getf(j, "max")? as f32,
             plateau: getf(j, "plateau")? as f32,
         }),
+        "clamped_normal" => Some(FloatProvider::ClampedNormal {
+            mean: getf(j, "mean")? as f32,
+            dev: getf(j, "deviation")? as f32,
+            min: getf(j, "min")? as f32,
+            max: getf(j, "max")? as f32,
+        }),
         _ => None,
     }
 }
 
 fn parse_int_provider(j: &crate::json::Json) -> Option<IntProvider> {
+    // bare number -> ConstantInt
+    if let Some(v) = j.as_f64() {
+        return Some(IntProvider::Constant(v as i32));
+    }
     if let Some(v) = getf(j, "value") {
         return Some(IntProvider::Constant(v as i32));
     }
@@ -130,7 +164,11 @@ fn parse_int_provider(j: &crate::json::Json) -> Option<IntProvider> {
             max: getf(j, "max_inclusive")? as i32,
         }),
         // 26.3 name; 1.21.8 alias kept
-        "very_biased_to_bottom" | "biased_to_bottom" => Some(IntProvider::BiasedToBottom {
+        "very_biased_to_bottom" => Some(IntProvider::VeryBiasedToBottom {
+            min: getf(j, "min_inclusive")? as i32,
+            max: getf(j, "max_inclusive")? as i32,
+        }),
+        "biased_to_bottom" => Some(IntProvider::BiasedToBottom {
             min: getf(j, "min_inclusive")? as i32,
             max: getf(j, "max_inclusive")? as i32,
         }),
@@ -162,7 +200,7 @@ fn parse_height_provider(j: &crate::json::Json, min_y: i32, height: i32) -> Opti
     }
 }
 
-fn parse_canyon_shape(j: &crate::json::Json) -> Option<CanyonShape> {
+fn parse_canyon_shape(j: &crate::json::Json, root: &crate::json::Json) -> Option<CanyonShape> {
     Some(CanyonShape {
         distance_factor: parse_float_provider(j.get("distance_factor")?)?,
         thickness: parse_float_provider(j.get("thickness")?)?,
@@ -170,92 +208,215 @@ fn parse_canyon_shape(j: &crate::json::Json) -> Option<CanyonShape> {
         horizontal_radius_factor: parse_float_provider(j.get("horizontal_radius_factor")?)?,
         vertical_radius_default_factor: getf(j, "vertical_radius_default_factor")? as f32,
         vertical_radius_center_factor: getf(j, "vertical_radius_center_factor")? as f32,
-        y_scale: parse_float_provider(j.get("y_scale")?)?,
+        // 26.3 field; 1.21.x packs carry the top-level "yScale" (Terralith
+        // canyon/deep_ravine ship shape WITHOUT y_scale + a top-level one).
+        y_scale: j
+            .get("y_scale")
+            .and_then(parse_float_provider)
+            .or_else(|| root.get("yScale").and_then(parse_float_provider))?,
     })
 }
 
 impl CarverState {
     /// Parse the 26.3 carver registry + biome carver lists from assets.
+    ///
+    /// The registry is SEEDED with the three vanilla overworld carvers
+    /// (26.3-verified params — the same values carver263::overworld_carvers
+    /// ships, which the CarverMaskProbe/CaveStreamProbe gates proved
+    /// bit-identical to the real 26.3 carver classes). Pack assets then
+    /// REPLACE entries by full id ("<ns>:<name>") or append new ones
+    /// (Terralith's minecraft:canyon override + terralith:deep_ravine).
+    /// Vanilla cave/cave_extra_underground have no pack JSONs — the seeded
+    /// defaults stand, exactly like the server's registry (packs ship no
+    /// vanilla-namespace cave files; Tectonic ships none at all outside its
+    /// inactive no_carvers overlay).
     pub fn from_assets(assets: &crate::worldgen::Assets, min_y: i32, height: i32) -> Option<CarverState> {
-        let mut registry: Vec<CarverEntry> = Vec::new();
+        let mut registry: Vec<CarverEntry> = vanilla_trio(min_y, height)
+            .into_iter()
+            .map(|(name, kind)| CarverEntry { name: name.to_string(), kind })
+            .collect();
         for path in assets.paths() {
-            let Some(rest) = path.strip_prefix("minecraft/worldgen/carver/") else { continue };
-            let Some(stem) = rest.strip_suffix(".json") else { continue };
-            let bytes = assets.get(path)?;
-            let Ok(text) = std::str::from_utf8(bytes) else { continue };
-            let Ok(j) = crate::json::parse(text) else { continue };
-            let ty = gets(&j, "type")?.strip_prefix("minecraft:")?.to_string();
-            let prob = getf(&j, "probability")? as f32;
-            let yj = j.get("y")?;
-            let y = parse_height_provider(yj, min_y, height)?;
-            let kind = match ty.as_str() {
-                "cave" => CarverKind::Cave {
-                    probability: prob,
-                    y,
-                    count: parse_int_provider(j.get("count")?)?,
-                    thickness: parse_float_provider(j.get("thickness")?)?,
-                    weird_thickness_bias: j.get("weird_thickness_bias").map(|v| matches!(v, crate::json::Json::Bool(true))).unwrap_or(false),
-                    room_vertical_radius_multiplier: parse_float_provider(j.get("room_vertical_radius_multiplier")?)?,
-                    horizontal_radius_multiplier: parse_float_provider(j.get("horizontal_radius_multiplier")?)?,
-                    vertical_radius_multiplier: parse_float_provider(j.get("vertical_radius_multiplier")?)?,
-                    start_vertical_radius_multiplier: j
-                        .get("start_vertical_radius_multiplier")
-                        .and_then(parse_float_provider)
-                        .unwrap_or(FloatProvider::Constant(1.0)),
-                    floor_level: parse_float_provider(j.get("floor_level")?)?,
-                },
-                "canyon" => CarverKind::Canyon {
-                    probability: prob,
-                    y,
-                    vertical_rotation: parse_float_provider(j.get("vertical_rotation")?)?,
-                    shape: parse_canyon_shape(j.get("shape")?)?,
-                },
-                _ => continue,
-            };
-            registry.push(CarverEntry { name: format!("minecraft:{stem}"), kind });
-        }
-        if registry.is_empty() {
-            return None;
-        }
-        // biome carvers lists (26.3: flat "carvers": [...])
-        let mut per_biome = Vec::new();
-        for path in assets.paths() {
-            let Some(rest) = path.strip_prefix("minecraft/worldgen/biome/") else { continue };
-            let Some(stem) = rest.strip_suffix(".json") else { continue };
+            // configured_carver (the real 26.3 path, all namespaces) + the
+            // legacy "carver" alias the old dptt merged set shipped.
+            let Some((ns, stem)) = strip_carver_path(path) else { continue };
             let bytes = match assets.get(path) {
                 Some(b) => b,
                 None => continue,
             };
             let Ok(text) = std::str::from_utf8(bytes) else { continue };
             let Ok(j) = crate::json::parse(text) else { continue };
-            let Some(crate::json::Json::Arr(list)) = j.get("carvers") else { continue };
+            let Some(kind) = parse_carver_kind(&j, min_y, height) else { continue };
+            let name = format!("{ns}:{stem}");
+            if let Some(slot) = registry.iter_mut().find(|e| e.name == name) {
+                *slot = CarverEntry { name, kind }; // pack override (Terralith canyon)
+            } else {
+                registry.push(CarverEntry { name, kind }); // new id (terralith:deep_ravine)
+            }
+        }
+        // default list = the vanilla trio in biome-JSON order (cave,
+        // cave_extra_underground, canyon — the registry head order)
+        let default: Vec<usize> = ["minecraft:cave", "minecraft:cave_extra_underground", "minecraft:canyon"]
+            .iter()
+            .filter_map(|n| registry.iter().position(|e| e.name == *n))
+            .collect();
+        // biome carvers lists: 26.3 map {"air": [...]} AND the legacy flat
+        // array ([...] — Terralith ships flat arrays). A biome JSON WITHOUT a
+        // carvers field falls through to the default trio.
+        let mut per_biome: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+        for path in assets.paths() {
+            let Some(rest) = path.strip_suffix(".json") else { continue };
+            let Some((ns, stem)) = rest
+                .split_once("/worldgen/biome/")
+                .map(|(ns, f)| (ns.to_string(), f.to_string()))
+            else {
+                continue;
+            };
+            let bytes = match assets.get(path) {
+                Some(b) => b,
+                None => continue,
+            };
+            let Ok(text) = std::str::from_utf8(bytes) else { continue };
+            let Ok(j) = crate::json::parse(text) else { continue };
+            let list = match j.get("carvers") {
+                Some(crate::json::Json::Arr(list)) => list,
+                Some(crate::json::Json::Obj(_)) => match j.get("carvers").and_then(|c| c.get("air")) {
+                    Some(crate::json::Json::Arr(list)) => list,
+                    _ => continue, // carvers map without "air" — no air carvers
+                },
+                _ => continue, // no carvers field — default trio stands
+            };
             let mut idxs = Vec::new();
             for c in list {
                 if let crate::json::Json::Str(name) = c {
-                    let name = if name.contains(':') { name.clone() } else { format!("minecraft:{name}") };
+                    let name = if name.contains(':') {
+                        name.clone()
+                    } else {
+                        format!("minecraft:{name}")
+                    };
                     if let Some(i) = registry.iter().position(|e| e.name == name) {
                         idxs.push(i);
                     }
                 }
             }
-            per_biome.push((format!("minecraft:{stem}"), idxs));
+            per_biome.insert(format!("{ns}:{stem}"), idxs);
         }
+        let enabled = std::env::var("CRUS_CARVE_IN_FILL").as_deref() == Ok("1");
         Some(CarverState {
             registry,
             per_biome,
             min_y,
             gen_depth: height,
+            enabled,
+            default,
+            biome_memo: std::collections::HashMap::new(),
         })
     }
 
     fn carvers_for_biome(&self, biome_name: &str) -> &[usize] {
-        static EMPTY: [usize; 0] = [];
-        self.per_biome
-            .iter()
-            .find(|(n, _)| n == biome_name)
-            .map(|(_, v)| v.as_slice())
-            .unwrap_or(&EMPTY)
+        match self.per_biome.get(biome_name) {
+            Some(v) => v, // explicit list (possibly EMPTY — biome opted out)
+            None => &self.default, // vanilla/unlisted biome — the trio
+        }
     }
+}
+
+/// "<ns>/worldgen/configured_carver/<name>.json" (or the legacy
+/// "<ns>/worldgen/carver/...") -> Some((ns, name)); None otherwise.
+fn strip_carver_path(path: &str) -> Option<(String, String)> {
+    let rest = path.strip_suffix(".json")?;
+    let (ns, stem) = rest
+        .split_once("/worldgen/configured_carver/")
+        .or_else(|| rest.split_once("/worldgen/carver/"))?;
+    Some((ns.to_string(), stem.to_string()))
+}
+
+/// One configured_carver JSON -> CarverKind (26.3 record fields; unknown
+/// fields like aquifers_enabled/lava_level/replaceable are 1.21.x leftovers
+/// that do not participate in the 26.3 mask+apply pipeline and are ignored).
+/// Carver fields live under "config" (the configured_carver JSON shape); a
+/// flat config-without-wrapper form is tolerated for probe fixtures.
+fn parse_carver_kind(j: &crate::json::Json, min_y: i32, height: i32) -> Option<CarverKind> {
+    let ty = gets(j, "type")?.strip_prefix("minecraft:")?.to_string();
+    let cfg = j.get("config").unwrap_or(j);
+    let prob = getf(cfg, "probability")? as f32;
+    let yj = cfg.get("y")?;
+    let y = parse_height_provider(yj, min_y, height)?;
+    match ty.as_str() {
+        "cave" => Some(CarverKind::Cave {
+            probability: prob,
+            y,
+            count: parse_int_provider(cfg.get("count")?)?,
+            thickness: parse_float_provider(cfg.get("thickness")?)?,
+            weird_thickness_bias: cfg
+                .get("weird_thickness_bias")
+                .map(|v| matches!(v, crate::json::Json::Bool(true)))
+                .unwrap_or(false),
+            room_vertical_radius_multiplier: parse_float_provider(cfg.get("room_vertical_radius_multiplier")?)?,
+            horizontal_radius_multiplier: parse_float_provider(cfg.get("horizontal_radius_multiplier")?)?,
+            vertical_radius_multiplier: parse_float_provider(cfg.get("vertical_radius_multiplier")?)?,
+            start_vertical_radius_multiplier: cfg
+                .get("start_vertical_radius_multiplier")
+                .and_then(parse_float_provider)
+                .unwrap_or(FloatProvider::Constant(1.0)),
+            floor_level: parse_float_provider(cfg.get("floor_level")?)?,
+        }),
+        "canyon" => Some(CarverKind::Canyon {
+            probability: prob,
+            y,
+            vertical_rotation: parse_float_provider(cfg.get("vertical_rotation")?)?,
+            shape: parse_canyon_shape(cfg.get("shape")?, cfg)?,
+        }),
+        _ => None,
+    }
+}
+
+/// The three vanilla overworld carvers (biome-JSON order) — 26.3-verified
+/// parameters, expressed in the legacy provider types. Mirrors
+/// carver263::overworld_carvers() bit-for-bit (same probes verify both).
+pub fn vanilla_trio(min_y: i32, _height: i32) -> Vec<(&'static str, CarverKind)> {
+    let cave = CarverKind::Cave {
+        probability: 0.15,
+        y: HeightProvider::Uniform { min: min_y + 8, max: 180 },
+        count: IntProvider::VeryBiasedToBottom { min: 0, max: 14 },
+        thickness: FloatProvider::Trapezoid { min: 0.0, max: 3.0, plateau: 1.0 },
+        weird_thickness_bias: true,
+        room_vertical_radius_multiplier: FloatProvider::Uniform { min: 0.1, max: 0.9 },
+        horizontal_radius_multiplier: FloatProvider::Uniform { min: 0.7, max: 1.4 },
+        vertical_radius_multiplier: FloatProvider::Uniform { min: 0.8, max: 1.3 },
+        start_vertical_radius_multiplier: FloatProvider::Constant(1.0),
+        floor_level: FloatProvider::Uniform { min: -1.0, max: -0.4 },
+    };
+    let cave_extra = CarverKind::Cave {
+        probability: 0.07,
+        y: HeightProvider::Uniform { min: min_y + 8, max: 47 },
+        count: IntProvider::VeryBiasedToBottom { min: 0, max: 14 },
+        thickness: FloatProvider::Trapezoid { min: 0.0, max: 3.0, plateau: 1.0 },
+        weird_thickness_bias: true,
+        room_vertical_radius_multiplier: FloatProvider::Uniform { min: 0.1, max: 0.9 },
+        horizontal_radius_multiplier: FloatProvider::Uniform { min: 0.7, max: 1.4 },
+        vertical_radius_multiplier: FloatProvider::Uniform { min: 0.8, max: 1.3 },
+        start_vertical_radius_multiplier: FloatProvider::Constant(1.0),
+        floor_level: FloatProvider::Uniform { min: -1.0, max: -0.4 },
+    };
+    let canyon = CarverKind::Canyon {
+        probability: 0.01,
+        y: HeightProvider::Uniform { min: 10, max: 67 },
+        vertical_rotation: FloatProvider::Uniform { min: -0.125, max: 0.125 },
+        shape: CanyonShape {
+            distance_factor: FloatProvider::Uniform { min: 0.75, max: 1.0 },
+            thickness: FloatProvider::Trapezoid { min: 0.0, max: 6.0, plateau: 2.0 },
+            width_smoothness: 3,
+            horizontal_radius_factor: FloatProvider::Uniform { min: 0.75, max: 1.0 },
+            vertical_radius_default_factor: 1.0,
+            vertical_radius_center_factor: 0.0,
+            y_scale: FloatProvider::Constant(3.0),
+        },
+    };
+    vec![
+        ("minecraft:cave", cave),
+        ("minecraft:cave_extra_underground", cave_extra),
+        ("minecraft:canyon", canyon),
+    ]
 }
 
 // --- provider sampling (exact vanilla formulas) -----------------------------
@@ -281,6 +442,13 @@ impl IntProvider {
                 let inner = r.next_int_bound(range);
                 min + r.next_int_bound(inner + 1)
             }
+            // VeryBiasedToBottomInt: min + nextInt(nextInt(nextInt(range+1)+1)+1)
+            // (carver263::IProv263::VeryBiasedToBottom, probe-verified)
+            IntProvider::VeryBiasedToBottom { min, max } => {
+                let a = r.next_int_bound(max - min + 1);
+                let b = r.next_int_bound(a + 1);
+                min + r.next_int_bound(b + 1)
+            }
         }
     }
 }
@@ -298,6 +466,19 @@ impl FloatProvider {
                 let plateau_start = (range - plateau) / 2.0;
                 let plateau_end = range - plateau_start;
                 min + r.next_f32() * plateau_end + r.next_f32() * plateau_start
+            }
+            // ClampedNormalFloat: (float) clamp(mean + nextGaussian*dev, min, max)
+            // — f64 gaussian + f64 clamp, single f32 cast
+            FloatProvider::ClampedNormal { mean, dev, min, max } => {
+                let v = (mean as f64) + r.next_gaussian() * (dev as f64);
+                let c = if v < min as f64 {
+                    min as f64
+                } else if v > max as f64 {
+                    max as f64
+                } else {
+                    v
+                };
+                c as f32
             }
         }
     }
@@ -352,10 +533,11 @@ pub fn carve_chunk<F, G>(
     cx: i32,
     cz: i32,
     out: &mut [u16],
-    biome_at_source: F,
+    mut biome_at_source: F,
     mut aquifer_substance: G,
 ) where
-    F: Fn(i32, i32) -> Option<String>,
+    // FnMut: the ffi tail memoizes source-chunk biomes across carves
+    F: FnMut(i32, i32) -> Option<String>,
     G: FnMut(i32, i32, i32) -> Option<u16>,
 {
     let min_y = ctx.state.min_y;
@@ -751,4 +933,195 @@ fn carve_ellipsoid_canyon<S>(
 fn _unused(_e: &Env) {
     let _ = Mode::Direct;
     let _ = Pt { x: 0, y: 0, z: 0 };
+}
+
+// ---------------------------------------------------------------- tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::json::parse;
+
+    /// Terralith's minecraft:canyon override (real pack bytes, format-aware
+    /// fields: top-level yScale, 1.21.x lava_level/replaceable leftovers).
+    const TERRALITH_CANYON: &str = r##"{
+        "type": "minecraft:canyon",
+        "config": {
+            "probability": 0.003,
+            "y": {"type": "minecraft:uniform", "min_inclusive": {"absolute": -20}, "max_inclusive": {"absolute": 70}},
+            "yScale": {"type": "minecraft:clamped_normal", "min": 2.5, "max": 13.5, "mean": 3.5, "deviation": 2.5},
+            "lava_level": {"above_bottom": 8},
+            "replaceable": "#minecraft:overworld_carver_replaceables",
+            "vertical_rotation": {"type": "minecraft:uniform", "min_inclusive": -0.2, "max_exclusive": 0.2},
+            "shape": {
+                "distance_factor": {"type": "minecraft:uniform", "min_inclusive": 0.75, "max_exclusive": 1.25},
+                "thickness": {"type": "minecraft:trapezoid", "min": 0, "max": 8, "plateau": 2},
+                "width_smoothness": 2,
+                "horizontal_radius_factor": {"type": "minecraft:uniform", "min_inclusive": 0.75, "max_exclusive": 1},
+                "vertical_radius_default_factor": 1,
+                "vertical_radius_center_factor": 0
+            }
+        }
+    }"##;
+
+    /// Terralith deep_ravine — bare-number yScale (legacy ConstantFloat).
+    const DEEP_RAVINE: &str = r##"{
+        "type": "minecraft:canyon",
+        "config": {
+            "aquifers_enabled": true,
+            "lava_level": {"above_bottom": 8},
+            "probability": 0,
+            "replaceable": "#minecraft:overworld_carver_replaceables",
+            "shape": {
+                "distance_factor": {"type": "minecraft:uniform", "min_inclusive": 0.75, "max_exclusive": 1.25},
+                "thickness": {"type": "minecraft:trapezoid", "max": 12, "min": 5, "plateau": 2},
+                "width_smoothness": 3,
+                "horizontal_radius_factor": {"type": "minecraft:uniform", "min_inclusive": 0.75, "max_exclusive": 1},
+                "vertical_radius_center_factor": 0,
+                "vertical_radius_default_factor": 1
+            },
+            "vertical_rotation": {"type": "minecraft:uniform", "min_inclusive": -1, "max_exclusive": 1},
+            "y": {"type": "minecraft:uniform", "min_inclusive": {"absolute": -30}, "max_inclusive": {"absolute": 70}},
+            "yScale": 13
+        }
+    }"##;
+
+    fn assets_with() -> crate::worldgen::Assets {
+        let mut a = crate::worldgen::Assets::new();
+        a.insert(
+            // the real pack path: Terralith overrides the VANILLA-namespace
+            // carver (data/minecraft/worldgen/configured_carver/canyon.json)
+            "minecraft/worldgen/configured_carver/canyon.json",
+            TERRALITH_CANYON.as_bytes().to_vec(),
+        );
+        a.insert(
+            "terralith/worldgen/configured_carver/deep_ravine.json",
+            DEEP_RAVINE.as_bytes().to_vec(),
+        );
+        a.insert(
+            "terralith/worldgen/biome/alpha_islands.json",
+            br#"{"carvers": ["minecraft:cave", "minecraft:cave_extra_underground"]}"#.to_vec(),
+        );
+        a.insert(
+            "terralith/worldgen/biome/vanilla_style.json",
+            br#"{"carvers": {"air": ["minecraft:cave", "minecraft:cave_extra_underground", "minecraft:canyon"]}}"#.to_vec(),
+        );
+        a
+    }
+
+    #[test]
+    fn vanilla_registry_seeded_without_assets() {
+        let st = CarverState::from_assets(&crate::worldgen::Assets::new(), -64, 384)
+            .expect("trio registry always present");
+        assert_eq!(st.registry.len(), 3);
+        assert_eq!(st.registry[0].name, "minecraft:cave");
+        assert_eq!(st.registry[1].name, "minecraft:cave_extra_underground");
+        assert_eq!(st.registry[2].name, "minecraft:canyon");
+        assert_eq!(st.default, vec![0, 1, 2]);
+        assert!(st.per_biome.is_empty());
+        // unlisted biome falls back to the trio
+        assert_eq!(st.carvers_for_biome("minecraft:plains"), &[0, 1, 2]);
+    }
+
+    #[test]
+    fn pack_override_and_new_entries() {
+        let st = CarverState::from_assets(&assets_with(), -64, 384).expect("registry");
+        assert_eq!(st.registry.len(), 4, "canyon replaced, deep_ravine appended");
+        let can = match &st.registry[2].kind {
+            CarverKind::Canyon {
+                probability,
+                y,
+                vertical_rotation,
+                shape,
+            } => (probability, y, vertical_rotation, shape),
+            other => panic!("expected canyon, got {other:?}"),
+        };
+        assert!((can.0 - 0.003).abs() < 1e-6);
+        match can.1 {
+            HeightProvider::Uniform { min, max } => {
+                assert_eq!((*min, *max), (-20, 70));
+            }
+        }
+        match can.3.thickness {
+            FloatProvider::Trapezoid { min, max, plateau } => {
+                assert_eq!((min, max, plateau), (0.0, 8.0, 2.0));
+            }
+            other => panic!("expected trapezoid thickness, got {other:?}"),
+        }
+        assert_eq!(can.3.width_smoothness, 2);
+        match can.3.y_scale {
+            FloatProvider::ClampedNormal { mean, dev, min, max } => {
+                assert_eq!((mean, dev, min, max), (3.5, 2.5, 2.5, 13.5));
+            }
+            other => panic!("expected clamped_normal yScale, got {other:?}"),
+        }
+        match can.2 {
+            FloatProvider::Uniform { min, max } => assert_eq!((*min, *max), (-0.2, 0.2)),
+            other => panic!("expected uniform vertical_rotation, got {other:?}"),
+        }
+        // deep_ravine: bare-number yScale -> Constant(13)
+        let dr = match &st.registry[3].kind {
+            CarverKind::Canyon { probability, shape, .. } => (probability, shape),
+            other => panic!("expected canyon, got {other:?}"),
+        };
+        assert!(*dr.0 == 0.0);
+        match dr.1.y_scale {
+            FloatProvider::Constant(v) => assert_eq!(v, 13.0),
+            other => panic!("expected constant yScale, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn biome_lists_flat_and_map() {
+        let st = CarverState::from_assets(&assets_with(), -64, 384).expect("registry");
+        // alpha_islands opts out of the canyon (flat legacy array)
+        assert_eq!(st.carvers_for_biome("terralith:alpha_islands"), &[0, 1]);
+        // map {"air": [...]} format resolves all three
+        assert_eq!(st.carvers_for_biome("terralith:vanilla_style"), &[0, 1, 2]);
+        // biome JSON without a carvers field -> default trio
+        assert_eq!(st.carvers_for_biome("terralith:unlisted"), &[0, 1, 2]);
+    }
+
+    #[test]
+    fn very_biased_to_bottom_matches_carver263() {
+        // triple-nest parity with carver263::IProv263::VeryBiasedToBottom
+        let mut a = LegacyRandom::new(42);
+        let mut b = LegacyRandom::new(42);
+        for _ in 0..64 {
+            let lo = 0i32;
+            let hi = 14i32;
+            let want = {
+                let x = b.next_int_bound(hi - lo + 1);
+                let y = b.next_int_bound(x + 1);
+                lo + b.next_int_bound(y + 1)
+            };
+            let got = IntProvider::VeryBiasedToBottom { min: lo, max: hi }.sample(&mut a);
+            assert_eq!(got, want);
+            assert!((0..=14).contains(&got));
+        }
+    }
+
+    #[test]
+    fn clamped_normal_formula() {
+        // (float) clamp(mean + nextGaussian * dev, min, max) — f64 path
+        let mut r = LegacyRandom::new(7);
+        let mut r2 = LegacyRandom::new(7);
+        for _ in 0..32 {
+            let g = r2.next_gaussian();
+            let want = {
+                let v = 3.5f64 + g * 2.5f64;
+                let c = v.clamp(2.5f64, 13.5f64);
+                c as f32
+            };
+            let got = FloatProvider::ClampedNormal { mean: 3.5, dev: 2.5, min: 2.5, max: 13.5 }
+                .sample(&mut r);
+            assert_eq!(got, want);
+        }
+    }
+
+    #[test]
+    fn parse_rejects_unknown_types() {
+        let j = parse(r#"{"type": "minecraft:emergent", "config": {"probability": 1.0}}"#).unwrap();
+        assert!(parse_carver_kind(&j, -64, 384).is_none());
+    }
 }

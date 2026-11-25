@@ -311,6 +311,28 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
         return !NATIVE_CARVERS;
     }
 
+    /** cont-152 carve-in-fill lane (CRUS_CARVE_IN_FILL=1): the native carve
+     *  runs IN-PROCESS at the end of the fill JNI call (vanilla applyCarvers
+     *  position — post-surface, pre-TERRAIN-complete). The generateCaves
+     *  hook returns without the CarverDriver pack round trip: no deco-pool
+     *  ctx wait, no section pack, no op stream — the carved content is
+     *  already in the fill buffer and the fluid marks ride the fillBeard
+     *  marks drain. CarverDriver stays the fallback lane (CARVE_IN_FILL=0). */
+    private static final boolean CARVE_IN_FILL;
+    static {
+        boolean f = false;
+        try {
+            f = "1".equals(System.getenv("CRUS_CARVE_IN_FILL"));
+        } catch (Throwable ignored) {
+        }
+        CARVE_IN_FILL = f;
+    }
+
+    /** carve-in-fill active (env or the runtime JNI gate). */
+    static boolean carveInFill() {
+        return CARVE_IN_FILL;
+    }
+
     /** cont-151: the native carve hook. Vanilla runs generateCarvers INSIDE
      *  buildTerrain (TERRAIN status); with a custom generator the pipeline
      *  calls customGenerator.applyCarvers(chunk) -> CraftBukkit ->
@@ -327,7 +349,9 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     @Override
     public void generateCaves(WorldInfo info, java.util.Random random, int cx, int cz,
             org.bukkit.generator.ChunkGenerator.ChunkData data) {
-        if (!NATIVE_CARVERS) {
+        if (!NATIVE_CARVERS || CARVE_IN_FILL) {
+            // CARVE_IN_FILL: the carve already happened inside the fill JNI
+            // call — nothing to do at the generateCaves hook.
             return;
         }
         try {
@@ -557,7 +581,13 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 if (pack.getName().startsWith("disabled_")) {
                     continue;
                 }
-                if (pack.isFile() && pack.getName().endsWith(".zip")) {
+                // cont-152: ".dpz" = a datapack zip the VANILLA server must NOT
+                // see (26.3 cannot parse the 1.21.x pack registries — the auto-
+                // enable "loading it automatically" kills the boot with 1000+
+                // registry errors). The native engine reads them here; the
+                // server ignores unknown extensions entirely.
+                if (pack.isFile() && (pack.getName().endsWith(".zip")
+                        || pack.getName().endsWith(".dpz"))) {
                     try (java.util.zip.ZipFile zf = new java.util.zip.ZipFile(pack)) {
                         java.util.List<? extends java.util.zip.ZipEntry> entries =
                                 java.util.Collections.list(zf.entries());
@@ -667,7 +697,10 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
     }
 
     /** "data/<ns>/worldgen/<...>.json" (or the overworld dimension override)
-     *  -> "<ns>/worldgen/<...>.json"; null for irrelevant entries. */
+     *  -> "<ns>/worldgen/<...>.json"; null for irrelevant entries.
+     *  cont-152: + configured_carver/*.json (the native carve registry —
+     *  Terralith's canyon override + terralith:deep_ravine) and tags/block/**
+     *  (block-tag predicates referenced by pack features/surface rules). */
     private static String packRel(String entry) {
         if (!entry.startsWith("data/") || !entry.endsWith(".json")) {
             return null;
@@ -679,6 +712,8 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                 || rel.contains("/worldgen/biome/")
                 || rel.contains("/worldgen/configured_feature/")
                 || rel.contains("/worldgen/placed_feature/")
+                || rel.contains("/worldgen/configured_carver/")
+                || rel.contains("/tags/block/")
                 || rel.endsWith("/dimension/overworld.json");
         return keep ? rel : null;
     }
@@ -873,13 +908,25 @@ public final class CrusstyChunkGenerator extends ChunkGenerator {
                         "deco marker registration failed (window deco counters stay empty): " + t);
             }
             if (NATIVE_CARVERS && "world_the_end".equals(w.getName()) == false) {
-                try {
-                    Class<?> cd = Class.forName("com.planeta.crussty.CarverDriver");
-                    cd.getMethod("setup", org.bukkit.World.class, long.class)
-                            .invoke(null, w, seed);
-                } catch (Throwable t) {
-                    Logger.getLogger("CrusstyGen").warning(
-                            "native carvers setup failed (vanilla carvers stay): " + t);
+                if (CARVE_IN_FILL) {
+                    // cont-152: arm the native carve-in-fill tail (global
+                    // gate — covers lazily-created pool ctxs; the ctxs also
+                    // carry enabled=true from CRUS_CARVE_IN_FILL at build).
+                    try {
+                        ChunkGenNative.carverSetEnabled(0L, true);
+                    } catch (Throwable t) {
+                        Logger.getLogger("CrusstyGen").warning(
+                                "carverSetEnabled failed (legacy lane stays): " + t);
+                    }
+                } else {
+                    try {
+                        Class<?> cd = Class.forName("com.planeta.crussty.CarverDriver");
+                        cd.getMethod("setup", org.bukkit.World.class, long.class)
+                                .invoke(null, w, seed);
+                    } catch (Throwable t) {
+                        Logger.getLogger("CrusstyGen").warning(
+                                "native carvers setup failed (vanilla carvers stay): " + t);
+                    }
                 }
             }
             // cont-136 CRUS_LIGHT_DIVERT: register the light-divert populator

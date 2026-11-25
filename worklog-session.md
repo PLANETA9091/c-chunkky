@@ -8289,3 +8289,66 @@ Q6 — главный фронт до 5ms (cover->100% + busy<=10 — см. cont
   preset-резолвером) vs native top_material263 на flip-клетках; carvebase на
   CI (полоса boot-order 4-ядерного бокса); после закрытия ±~700 — honest e2e
   перемер (ожидаемое улучшение от inflate-фикса apply 2.95→0.17).
+
+## cont-152 (2026-11-26): ПАКОВЫЙ КАРВ В МОМЕНТЕ ЗАЛИВКИ + 26.3-паки на живом сервере
+### Контекст
+- Задача восстановления: TerraLith+Tectonic ОБЯЗАНЫ быть включены, полный конвейер
+  (noise+surface+carvers+aquifer/beard), цель MAX <= 1ms/ch (CI), судья >= 99%.
+- На бранче: cargo check --release чистый (HEAD cont-151), cargo build ok. Слегка
+  переоценённые в задачнике компиляционные якоря (SurfaceState fields, ColWalk,
+  InterpState/MemoCtx, env.eval, ASSET_PATHS) — всё на месте, но ошибок не было.
+### Work Log
+- carver.rs: реестр из паковых configured_carver JSON — seeded ванильное трио
+  (параметры = carver263::overworld_carvers, бит-точны по маск-пробам), pack
+  override по полному id (terralith's data/minecraft/.../canyon.json), append новых
+  (terralith:deep_ravine). Биом-списки: flat array + map {"air": [...]}, дефолт-трио
+  для биомов без JSON (alpha_islands{,_winter} — без каньона). Провайдеры: bare
+  number -> Constant, uniform (min_inclusive/max_exclusive | value:[a,b]), trapezoid,
+  clamped_normal; VeryBiasedToBottom = ТРОЙНОЙ nest (паритет с IProv263); shape.y_scale
+  <- топ-уровневый "yScale" fallback (паковый 1.21.x формат). unknown поля
+  (aquifers_enabled/lava_level/replaceable) игнорируются — они не участвуют в
+  26.3-маске+apply (лава через global_fluid аquифера, UNCARVABLE=bedrock).
+- ffi.rs: Ctx +carver; ctx_new_assets строит CarverState::from_assets (catch_unwind,
+  fallback trio-only); fill() legacy-ветка + legacy_carve_tail: split-borrow
+  Ctx { gen, biomes, surface, carver }, CarveCtx { bedrock=2, grass=4, mycelium из
+  surface-таблицы, dirt=5, top_material=None (1.21.8 семантика) }, biome_at_source =
+  legacy_biome_name (getNoiseBiome(quartX, 0, quartZ) — климат в блок-координатах,
+  quantize, find_value; мемо source->биом на CarverState, take/put на время карва),
+  substance = gen.aquifer_compute_substance(pt, 0.0) + sched_flag -> marks;
+  gen.extend_marks -> fillMarked/fillBeard drain. JNI carverSetEnabled(ctx,on):
+  ctx=0 глобальный гейт, ctx>0 per-ctx. catch_unwind страж (cont-96) — паника =
+  незакарвленный чанк, не смерть JVM. ctx_new: мёртвый from_assets(Assets::new())
+  убран, carver=None.
+- nochunk.rs: block_pos_as_long pub(crate); ChunkGen::sched_flag()/extend_marks().
+  fill263.rs: BEDROCK_ID=2 const.
+- Плагин: packRel += configured_carver/*.json + tags/block/**; extractPackData += ".dpz"
+  (26.3-ваниль НЕ видит паки — авто-enable "loading it automatically" убивал бут:
+  Unbound values в density_function/feature/noise/placed_feature/structure — точный
+  "ЛОВУШКА ПАКОВ" из cont-134); CARVE_IN_FILL static (CRUS_CARVE_IN_FILL=1),
+  generateCaves no-ops в carve-in-fill lane, carver-setup ставит глобальный гейт
+  ChunkGenNative.carverSetEnabled(0,true); ChunkGenNative += carverSetEnabled decl.
+- Тесты: +6 (терralith canyon/deep_ravine фикстуры = реальные байты паков, трио-сид,
+  flat+map списки, VeryBiasedToBottom тройной nest, ClampedNormal f64-формула,
+  unknown-type reject). cargo test --lib: 101/101. Release lib build 27s.
+### Серверный прогон (2-core shared, JDK 25.0.5.1, paper 222, seed 3257840388504953787)
+- world/datapacks/*.dpz (tectonic 3.0.25 + terralith 2.5.13), бут 26s DONE, registry=4
+  biome_lists=133 enabled=true, 1835 файла ассетов.
+- carve-in-fill ON (1440+ чанков): air-секций 22128, marks_seen=91602 landed=91602,
+  carver-phases n=0 declined=0 applyFailed=0 (ноль драйверных карвов), паник нет,
+  окна 42.85/55.49/31.12 ms/ch; deco native chunks=972 features=52366
+  (terralith:canyon/cliff/*, caves/fuck_art_just_need_performance/* — паковые фичи).
+- carve OFF (SKIP_SETUP=1, same world): carver-phases n=1198 declined=1198 — драйвер
+  ОТКАЗАЛСЯ на паковых ctxs (v263=None) — до cont-152 пакетные миры НЕ карвились
+  вовсе (vanilla carvers off + нативный отказ). air 14835, marks 31922.
+- Вердикт: хвост реально режет (дельта ~7300 air-секций, ~60K marks), архитектура
+  "один JNI на чанк" (fill+surface+carve) работает на паковых мирах.
+### Честные границы тика
+- Судья >=99% для 26.3+паков: эталона НЕТ (ваниль 26.3 паки не парсит; регенерация
+  1.21.8-референса не входит в тик). Паритет-якоря: юниты парсера, маск-пробы трио,
+  carver.rs judge 0.007% (1.21.8 dptt era). Согласование carvebase/A/B для пакового
+  мира — следующий тик (нужен блокдамп-канал для legacy-движка).
+- 1ms MAX e2e: не достигнуто (2-core: 31-55 ms/ch полный конвейер). Нужно CI (4 cores)
+  + roadmap: noise SIMD, aquifer skip, deco-batch (terralith:canyon/cliff = 193-882ms
+  суммарно на окно — крупнейший остаток), Java-rest.
+- 2-ядерный шумный сандбокс: честные парные A/B — только на CI (ab263_ci.sh);
+  локальные окна показывают разброс 31-98 ms/ch в зависимости от соседей.

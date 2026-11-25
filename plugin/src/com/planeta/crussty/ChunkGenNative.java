@@ -246,6 +246,11 @@ public final class ChunkGenNative {
 
     public static native int fillMarked(long ctx, int chunkX, int chunkZ, short[] out, long[] marks);
 
+    /** carverSetEnabled(ctx, enabled) — flips the native carve-in-fill gate.
+     *  ctx = 0: the GLOBAL gate (all current + future ctxs); ctx > 0: that
+     *  ctx's CarverState only. The tail fires when either source is on. */
+    public static native void carverSetEnabled(long ctx, boolean enabled);
+
     /**
      * fillBeard(ctx, cx, cz, short[] out, long[] marks, int[] beard) -> int.
      * Atomic set_beard + fillMarked: `beard` is the plugin-serialized vanilla

@@ -2,7 +2,59 @@
 
 Компактная карточка состояния кампании. Полная хроника — `worklog-session.md`
 (записи cont-XX по датам). Этот файл обновляется при изменении КАРТЫ, не при
-каждом тике. Последнее обновление: cont-151.
+каждом тике. Последнее обновление: cont-152.
+
+## CONT-152 КАРТА (главное)
+
+- **ПАКОВЫЙ КАРВ В МОМЕНТЕ ЗАЛИВКИ (carve-in-fill, ЗАДАЧА ВОССТАНОВЛЕНА)**:
+  legacy-движок паковых миров получает хвост carver::carve_chunk ВНУТРИ fill()
+  (ffi.rs legacy_carve_tail, split-borrow Ctx { gen, biomes, surface, carver })
+  — ванильная позиция applyCarvers (после noise+surface, до завершения
+  TERRAIN). Ноль section-pack раундтрипов, ноль ops-стримов, ноль ожиданий
+  deco-пула: вырезанное уже в буфере заливки, жидкостные marks идут через
+  fillMarked/fillBeard drain. Страж паники (cont-96 протокол) деградирует к
+  незакарвленному чанку, а не к смерти JVM.
+- **26.3-ПАКОВЫЙ ПУТЬ ЖИВОЙ НА ЖИВОМ СЕРВЕРЕ**: world/datapacks/*.zip
+  переименовываются в *.dpz — ваниль 26.3 НЕ видит их (реестр 1.21.x паков
+  убивает бут: 1000+ "Unbound values"), плагин читает .dpz напрямую
+  (extractPackData: +".dpz"). Бут 26s, 1835 файлов ассетов, registry=4
+  biome_lists=133 enabled=true.
+- **РЕЕСТР КАРВЕРОВ ИЗ ПАКОВ (carver.rs)**: seeded ванильное трио
+  (26.3-верифицированные параметры = carver263::overworld_carvers) + pack
+  overrides по полному id (terralith's minecraft:canyon: probability 0.003,
+  y uniform -20..70, yScale clamped_normal 3.5±2.5 [2.5..13.5], thickness
+  trapezoid 0..8 plateau 2, width_smoothness 2; терralith:deep_ravine
+  добавлен — probability 0, yScale Constant 13). Биом-списки: flat array И
+  map {"air":[...]}; биом без JSON -> дефолт-трио; alpha_islands{,_winter}
+  без каньона (2-список). Provider JSON: bare number -> Constant, uniform
+  (min_inclusive/max_exclusive + value:[a,b]), trapezoid, clamped_normal;
+  IntProvider::VeryBiasedToBottom = ТРОЙНОЙ nest (бит-точен с
+  IProv263::VeryBiasedToBottom). Формат configured_carver "config":{...} +
+  legacy flat; shape.y_scale <- топ-уровневый "yScale" fallback.
+- **БИОМ-ТОЧКА КАРВА**: getNoiseBiome(quartX, 0, quartZ) -> климат-DFs в
+  блок-координатах источника, quantize, RTree find_value (legacy_biome_name:
+  InterpState/MemoCtx/env.eval). Мемо source->биом на CarverState (окно
+  17x17 переиспользуется между центрами). aquifer_compute_substance(pt, 0.0)
+  — штатный ванильный substance (global_fluid лавовая линия внутри) +
+  sched_flag -> marks.
+- **JNI**: carverSetEnabled(ctx, enabled): ctx=0 -> глобальный гейт (покрывает
+  ленивые pool-ctxs), ctx>0 -> per-ctx CarverState.enabled. Плагин ставит
+  глобальный на carver-setup при CRUS_CARVE_IN_FILL=1; ctx enabled=true уже
+  ставится на билде. generateCaves no-ops в carve-in-fill lane (CarverDriver
+  = fallback lane при CARVE_IN_FILL=0).
+- **A/B ВАЛИДАЦИЯ (local 2-core, seed 3257840388504953787, 3 окна 12x12)**:
+  carve-in-fill ON: air-секций 22128, marks 91602 (91602 landed), carver-phases
+  n=0 (ноль драйверных карвов), panics=0, окна 31.1-55.5 ms/ch (шумный
+  сандбокс). OFF (CRUS_CARVE_IN_FILL=0): carver-phases n=1198 **declined=1198**
+  (драйвер отказался — v263 отсутствует у паковых ctxs: до cont-152 пакетные
+  миры НЕ карвились вообще), air 14835, marks 31922. Дельта ~7300 воздушных
+  секций + ~60K marks = хвост реально режет.
+- **Честное ограничение**: судья >=99% для 26.3+паков недостижим в текущем
+  стендe — ваниль 26.3 паки не грузит (реестр), эталона нет. Якоря паритета:
+  юнит-тесты парсера (терralith canyon/deep_ravine фикстуры, 101/101), маск-
+  пробы carver263 (трио), judge 0.007% era carver.rs (1.21.8 dptt). 1ms MAX
+  e2e — не в этом тике: полный конвейер (fill+surface+carve+deco+light) на
+  2-cores = 31-55 ms/ch; нужен CI (4 cores) + roadmap SIMI/deco-batch.
 
 ## CONT-151 КАРТА (главное)
 

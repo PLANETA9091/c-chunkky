@@ -18,7 +18,7 @@ pub struct Ctx {
     gen: ChunkGen<'static>,
     /// 26.3 engine (df263 router + aquifer 26.3 + beardifier 26.3). Some =
     /// the ctx runs the 26.3 fill path (overworld-signature ctxs); None =
-    /// legacy 1.21.8 engine (nether/end, probe harnesses).
+    /// legacy 1.21.8 engine (pack worlds, probe harnesses).
     pub v263: Option<Gen263State>,
     /// Native multi_noise biome source (pack dimension override). None =
     /// keep the vanilla Java biome path (embedded-vanilla ctx has no
@@ -30,6 +30,12 @@ pub struct Ctx {
     /// Native features engine (stage F). None until the pack assets carry a
     /// data-driven dimension (embedded-vanilla ctx keeps vanilla decorations).
     pub deco: Option<crate::features_master::DecoCtx>,
+    /// Native carve state (pack-world legacy engine): registry + per-biome
+    /// lists parsed from the pack configured_carver JSONs. The fill()
+    /// LEGACY tail runs carver::carve_chunk in-process when enabled —
+    /// vanilla applyCarvers order (post-surface), no section-pack round
+    /// trip. None on the v263 path (the 26.3 carver lives in fill263).
+    pub carver: Option<crate::carver::CarverState>,
 }
 
 /// 26.3 per-ctx mutable state (marks buffer + last beard list + carve ops).
@@ -377,11 +383,10 @@ pub fn ctx_new(seed: i64, min_y: i32, height: i32, sea_level: i32) -> i64 {
     env.wg.sea_level = sea_level as i64;
     let env: &'static DEnv = Box::leak(env);
     let gen = ChunkGen::new(env);
-    let carvers = crate::carver::CarverState::from_assets(&crate::worldgen::Assets::new(), env.wg.min_y as i32, env.wg.height as i32);
     let mut map = sessions_lock();
     map.get_or_insert_with(HashMap::new).insert(
         id,
-        Ctx { gen, v263, biomes: None, surface: None, deco },
+        Ctx { gen, v263, biomes: None, surface: None, deco, carver: None },
     );
     id
 }
@@ -407,9 +412,36 @@ pub fn ctx_new_assets(
         let surface = biomes
             .as_ref()
             .and_then(|b| build_surface_state(&assets, b.env, Some(b)));
-        (ChunkGen::new(env), biomes, surface, crate::features_master::build_deco_ctx(&assets))
+        // Native carve state: the vanilla trio seeded registry + the pack
+        // configured_carver overrides (Terralith canyon) + per-biome lists.
+        // enabled = CRUS_CARVE_IN_FILL at build; the JNI carverSetEnabled
+        // flips it per ctx (or globally with ctx=0).
+        let carver = std::panic::catch_unwind(|| {
+            crate::carver::CarverState::from_assets(
+                &assets,
+                env.wg.min_y as i32,
+                env.wg.height as i32,
+            )
+        })
+        .unwrap_or_else(|_| {
+            log_warn("carver: asset parse panicked — vanilla trio only");
+            crate::carver::CarverState::from_assets(
+                &crate::worldgen::Assets::new(),
+                env.wg.min_y as i32,
+                env.wg.height as i32,
+            )
+        });
+        if let Some(cv) = carver.as_ref() {
+            log_warn(&format!(
+                "carver: registry={} biome_lists={} enabled={} (pack carvers wired into fill)",
+                cv.registry.len(),
+                cv.per_biome.len(),
+                cv.enabled
+            ));
+        }
+        (ChunkGen::new(env), biomes, surface, crate::features_master::build_deco_ctx(&assets), carver)
     });
-    let (gen, biomes, surface, deco) = match result {
+    let (gen, biomes, surface, deco, carver) = match result {
         Ok(v) => v,
         Err(p) => {
             let msg = if let Some(s) = p.downcast_ref::<String>() {
@@ -425,7 +457,7 @@ pub fn ctx_new_assets(
     let mut map = sessions_lock();
     map.get_or_insert_with(HashMap::new).insert(
         id,
-        Ctx { gen, v263: None, biomes, surface, deco },
+        Ctx { gen, v263: None, biomes, surface, deco, carver },
     );
     Ok(id)
 }
@@ -700,6 +732,149 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
     }
     ctx.gen.fill(cx, cz, out);
     surface_tail(ctx, cx, cz, out);
+    if ctx.carver.is_some() {
+        // cont-96 protocol: a panic unwinding across the extern "system"
+        // boundary ABORTS the JVM — every JNI-reachable body is guarded. A
+        // carve panic degrades to an uncarved chunk (vanilla-consistent fill)
+        // and names the site once in run.out.
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            legacy_carve_tail(ctx, cx, cz, out);
+        }));
+        if res.is_err() {
+            static CARVE_PANIC: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !CARVE_PANIC.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log_warn("carve-in-fill tail panicked (fill stays uncarved; further panics silenced)");
+            }
+        }
+    }
+}
+
+/// Global carve-in-fill gate (JNI carverSetEnabled(0, on) flips it). The
+/// per-ctx CarverState.enabled (env CRUS_CARVE_IN_FILL at ctx build) ORs
+/// in — either source enables the legacy fill tail.
+static CARVE_IN_FILL_GLOBAL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Legacy-engine carve tail (pack worlds): the vanilla applyCarvers stage
+/// runs IN-PROCESS at the end of fill — after the noise+surface write, the
+/// exact vanilla TERRAIN position (26.3 buildTerrain: fillFromNoise →
+/// surface → generateCarvers). No section pack, no op stream, no deco-pool
+/// ctx wait: the carved content is already in `out` when the JNI returns,
+/// and the fluid marks ride the same fillMarked/fillBeard drain.
+/// Split borrow Ctx { gen, biomes, surface, carver } — the aquifer substance
+/// needs &mut gen (its caches), the biome point query needs biomes, the
+/// carve state + memo live in carver.
+fn legacy_carve_tail(ctx: &mut Ctx, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
+    let Some(cv) = ctx.carver.as_ref() else {
+        return;
+    };
+    if !cv.enabled && !CARVE_IN_FILL_GLOBAL.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    // mycelium id from the legacy surface state table (grass-family flag; a
+    // no-op while top_material is None, kept for the future 26.3 wiring)
+    let mycelium = ctx.surface.as_ref().and_then(|sf| {
+        sf.cfg
+            .states
+            .iter()
+            .enumerate()
+            .find(|(_, name)| name.split('[').next() == Some("minecraft:mycelium"))
+            .and_then(|(i, _)| sf.cfg.ids.get(i).copied())
+    });
+    let Ctx {
+        gen,
+        biomes,
+        surface: _,
+        carver,
+        ..
+    } = ctx;
+    let Some(cv) = carver.as_mut() else {
+        return;
+    };
+    let seed = gen.env.seed;
+    // vanilla 1.21.8 carveBlock: below the lava line -> LAVA, else the
+    // aquifer substance at d=0.0 (aquifer_compute_substance covers the
+    // global_fluid lava line internally, same as the 26.3 apply path).
+    let bedrock = crate::fill263::BEDROCK_ID;
+    let grass = 4u16; // grass_block — the base fill-table id
+    let dirt = crate::fill263::DIRT_ID;
+    let mut marks: Vec<i64> = Vec::new();
+    // biome point query with the cross-chunk memo (take/put: CarveCtx holds
+    // &cv for the whole carve)
+    let mut memo = std::mem::take(&mut cv.biome_memo);
+    let mut biome_of = |sx: i32, sz: i32| -> Option<String> {
+        if let Some(name) = memo.get(&(sx, sz)) {
+            return Some(name.clone());
+        }
+        let bs = biomes.as_ref()?;
+        let name = legacy_biome_name(bs, sx, sz)?;
+        memo.insert((sx, sz), name.clone());
+        Some(name)
+    };
+    let mut substance = |x: i32, y: i32, z: i32| -> Option<u16> {
+        let st = gen.aquifer_compute_substance(crate::density::Pt { x, y, z }, 0.0);
+        if let Some(b) = st {
+            if (b == crate::nochunk::WATER || b == crate::nochunk::LAVA) && gen.sched_flag() {
+                marks.push(crate::nochunk::block_pos_as_long(x, y, z));
+            }
+        }
+        st
+    };
+    {
+        let mut carve_ctx = crate::carver::CarveCtx {
+            state: cv,
+            seed,
+            bedrock: Some(bedrock),
+            grass: Some(grass),
+            mycelium,
+            dirt,
+            top_material: None, // 1.21.8 semantics: no 26.3 topMaterial call here
+        };
+        crate::carver::carve_chunk(&mut carve_ctx, cx, cz, out, &mut biome_of, &mut substance);
+    } // CarveCtx dropped: the &cv reborrow ends here
+    cv.biome_memo = memo;
+    gen.extend_marks(&marks);
+}
+
+/// Legacy biome point query (the carver biome_at_source): the six climate
+/// router fields at the SOURCE chunk's block origin, quart y=0 (vanilla
+/// applyCarvers: getNoiseBiome(quartX, 0, quartZ) -> climate at block y 0),
+/// quantized ((long)(f*10000f)), then the preset RTree find_value.
+fn legacy_biome_name(bs: &BiomeState, sx: i32, sz: i32) -> Option<String> {
+    let compiled = &bs.compiled;
+    let height = bs.env.wg.height as i32;
+    let interp = crate::density::InterpState::new(
+        compiled.interp_slots,
+        4,
+        ((height / 8).max(1)) as usize,
+    );
+    let mut memo = crate::density::MemoCtx::new(compiled.arena.len())
+        .with_cols(compiled.col_count as usize);
+    let pt = crate::density::Pt {
+        x: sx * 16,
+        y: 0,
+        z: sz * 16,
+    };
+    let mut values = [0i64; 7];
+    for (fi, slot) in values.iter_mut().enumerate() {
+        if fi == 6 {
+            break; // offset: every preset entry carries 0
+        }
+        memo.next_serial();
+        let v = bs.env.eval(
+            compiled,
+            bs.climate.idx[fi],
+            pt,
+            crate::density::Mode::Direct,
+            &interp,
+            Some(&memo),
+        );
+        *slot = crate::biomes::quantize_pub(v);
+    }
+    let leaf = bs.src.find_value(&values);
+    let idx = bs.src.entries.get(leaf)?.biome_idx as usize;
+    bs.src.biome_names.get(idx).cloned()
 }
 
 /// Native vanilla-parity getBaseHeight (iterateNoiseColumn, 1-cell walk).
@@ -1059,6 +1234,30 @@ pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_fillBeard(
         }
     }
     fill_jni(env, ctx, cx, cz, out, marks)
+}
+
+/// carverSetEnabled(long ctx, boolean enabled) — flips the carve-in-fill
+/// gate. ctx = 0 flips the GLOBAL gate (all current + future ctxs, covers
+/// lazily-created pool ctxs); ctx > 0 flips that ctx's CarverState.enabled
+/// only (A/B lanes). The tail fires when EITHER source is on.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_planeta_crussty_ChunkGenNative_carverSetEnabled(
+    _env: *mut jni_sys::JNIEnv,
+    _class: jni_sys::jclass,
+    ctx: jni_sys::jlong,
+    enabled: jni_sys::jboolean,
+) {
+    let on: bool = enabled;
+    if ctx == 0 {
+        CARVE_IN_FILL_GLOBAL.store(on, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+    let mut map = sessions_lock();
+    if let Some(c) = map.as_mut().and_then(|m| m.get_mut(&(ctx as i64))) {
+        if let Some(cv) = c.carver.as_mut() {
+            cv.enabled = on;
+        }
+    }
 }
 
 /// baseHeight(long ctx, int x, int z, int mode) -> int
