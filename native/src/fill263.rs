@@ -1227,3 +1227,40 @@ mod carve_uniform_tests {
         assert!(marks.len() <= 1024 * 24, "marks also per-call");
     }
 }
+
+#[cfg(test)]
+mod carve_tail_tests {
+    use super::*;
+
+    /// cont-152 ground truth: the in-fill carve tail must CHANGE the buffer.
+    /// Fill one chunk (vanilla 26.3, no packs), snapshot, apply_carvers,
+    /// diff. changed=0 would mean the tail is a no-op (mask/substance bug).
+    #[test]
+    fn apply_carvers_changes_filled_buffer() {
+        let seed: i64 = 3257840388504953787;
+        let g = crate::fill263::Gen263::new(seed, -64, 384, 63);
+        let mut out = [0u16; OUT_LEN];
+        let mut marks: Vec<i64> = Vec::new();
+        g.fill_chunk(0, 0, &[], &mut out, &mut marks);
+        let fill_marks = marks.len();
+        let pre = out;
+        let mut ops: Vec<i64> = Vec::new();
+        let top_ids = crate::surface263::TopMatIds::build(None);
+        let carve_marks = g.apply_carvers(0, 0, seed, &mut out, &mut ops, None, None, None, &top_ids);
+        let changed = pre
+            .iter()
+            .zip(out.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        println!(
+            "carve-tail probe: fill_marks={fill_marks} carve_marks={} ops={} changed_cells={changed}",
+            carve_marks.len(),
+            ops.len()
+        );
+        assert!(changed > 0, "carve tail made NO buffer changes — no-op!");
+        // vanilla-scale sanity: a carved overworld chunk changes hundreds+
+        // of cells (CarverDriver honest ops ~722/ch; chunk-dependent —
+        // carve marks are sparse, only fluid-adjacent cells)
+        assert!(changed > 100, "carve tail changed only {changed} cells — too few");
+    }
+}

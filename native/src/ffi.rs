@@ -714,6 +714,7 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
             beard,
             surface,
             biomes,
+            ops,
             ..
         } = st;
         let beard_list = std::mem::take(beard);
@@ -728,6 +729,48 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
             marks,
         );
         *beard = beard_list;
+        // cont-152 v263 carve-in-fill: the 26.3 applyCarvers tail IN-PROCESS —
+        // the exact vanilla buildTerrain order (fillFromNoise -> surface ->
+        // generateCarvers -> applyCarvingMask) in ONE JNI call. The content
+        // converges with the CarverDriver lane (same apply_carvers, same WG
+        // heightmap handoff); the ops stream vanishes (mutations land in the
+        // fill buffer the Java layout() writes), only the fluid marks remain
+        // and ride the fillMarked/fillBeard drain.
+        if carve_in_fill_env() || CARVE_IN_FILL_GLOBAL.load(std::sync::atomic::Ordering::Relaxed) {
+            static V263_TAIL_ARMED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !V263_TAIL_ARMED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log_warn(&format!(
+                    "v263 carve-in-fill tail ACTIVE (env={} global={} cx={cx} cz={cz})",
+                    carve_in_fill_env(),
+                    CARVE_IN_FILL_GLOBAL.load(std::sync::atomic::Ordering::Relaxed)
+                ));
+            }
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ops.clear();
+                let top_ids = crate::surface263::TopMatIds::build(surface.as_ref());
+                let wg = crate::fill263::take_wg_heightmap(cx, cz);
+                let carve_marks = g.apply_carvers(
+                    cx,
+                    cz,
+                    g.seed,
+                    out,
+                    ops,
+                    surface.as_ref(),
+                    biomes.as_ref(),
+                    wg.as_deref(),
+                    &top_ids,
+                );
+                marks.extend(carve_marks);
+            }));
+            if res.is_err() {
+                static V263_CARVE_PANIC: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !V263_CARVE_PANIC.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    log_warn("v263 carve-in-fill tail panicked (fill stays uncarved; further panics silenced)");
+                }
+            }
+        }
         return;
     }
     ctx.gen.fill(cx, cz, out);
@@ -755,6 +798,13 @@ pub fn fill(id: i64, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
 /// in — either source enables the legacy fill tail.
 static CARVE_IN_FILL_GLOBAL: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// CRUS_CARVE_IN_FILL env default, read once (the v263 tail has no per-ctx
+/// carver state — the env + the global gate cover it).
+fn carve_in_fill_env() -> bool {
+    static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENV.get_or_init(|| std::env::var("CRUS_CARVE_IN_FILL").as_deref() == Ok("1"))
+}
 
 /// Legacy-engine carve tail (pack worlds): the vanilla applyCarvers stage
 /// runs IN-PROCESS at the end of fill — after the noise+surface write, the

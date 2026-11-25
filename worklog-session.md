@@ -8352,3 +8352,24 @@ Q6 — главный фронт до 5ms (cover->100% + busy<=10 — см. cont
   суммарно на окно — крупнейший остаток), Java-rest.
 - 2-ядерный шумный сандбокс: честные парные A/B — только на CI (ab263_ci.sh);
   локальные окна показывают разброс 31-98 ms/ch в зависимости от соседей.
+
+### cont-152 addendum: v263 carve-in-fill (ванильные миры) — тот же тик
+- ffi.rs fill() v263-ветка: тот же хвост — g.apply_carvers(cx, cz, g.seed, out,
+  st.ops (сброшены — мутации прямо в буфере заливки), sf, b263,
+  take_wg_heightmap(cx, cz), TopMatIds::build) -> marks extend. Гейт:
+  carve_in_fill_env() || CARVE_IN_FILL_GLOBAL; страж паники + first-fire лог
+  "v263 carve-in-fill tail ACTIVE (env=... global=...)".
+- Серверная валидация (v263, без паков, seed 3257840388504953787):
+  хвост активирован (env=true global=false), ноль паник, carver-phases n=0
+  (драйвер не запускался), marks_seen=82266 (хвостовые fluid-marks в дренаже).
+- Юнит-проба (cargo test carve_tail): fill(0,0) -> apply_carvers => 421
+  changed cells (буфер реально меняется; carve-marks спарсены — только
+  флюидные клетки). 102/102.
+- Замечание по метрикам секций: air/mixed счётчики слабо чувствительны к
+  карву (изменённые клетки концентрируются в уже-mixed секциях сырных пещер) —
+  честный блок-паритет v263-хвоста vs CarverDriver = ab263 chunkdump A/B на CI
+  (следующий тик; транспорт идентичен — тот же apply_carvers, тот же seed).
+- Lane-матрица локальных прогонов: CarverDriver+deco-pool (n=1191,
+  carve=3.56ms/ч, opsApplied=859917, declined=0); carve-in-fill (n=0 — ноль
+  JNI-раундтрипов); без deco-pool CarverDriver молча отказывается (ctx=0,
+  deco=1-only ограничение cont-95).
