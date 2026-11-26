@@ -2000,6 +2000,11 @@ fn noise_batch_n<const N: usize>(
     if N == 8 {
         let v = n.get_value_batch8(narrow_ref(x), narrow_ref(y), narrow_ref(z));
         out.copy_from_slice(&v);
+    } else if N == 16 && crate::noise::f32noise_enabled() {
+        // cont-153 f32x16 slice kernel (task STEP 4). NOT bit-exact vs f64 —
+        // sanctioned; parity gated by the filldump A/B block-diff (>=99%).
+        let v = n.get_value_batch16_f32(narrow_ref(x), narrow_ref(y), narrow_ref(z));
+        out.copy_from_slice(&v);
     } else {
         let v = n.get_value_batch(narrow_ref(x), narrow_ref(y), narrow_ref(z));
         out.copy_from_slice(&v);
@@ -2082,6 +2087,32 @@ fn blended_batch_n<const N: usize>(
             )
         };
         out.copy_from_slice(&v);
+    } else if N == 16 {
+        // cont-153: two 8-lane halves through the production batch8 paths.
+        for half in 0..2 {
+            let mut bx8 = [0i32; 8];
+            let mut by8 = [0i32; 8];
+            let mut bz8 = [0i32; 8];
+            for l in 0..8 {
+                bx8[l] = bx[half * 8 + l];
+                by8[l] = by[half * 8 + l];
+                bz8[l] = bz[half * 8 + l];
+            }
+            let v = if crate::noise::avx2_available()
+                && lanes_uniform_i32(&bx8, &bz8)
+                && slice_colpath_enabled()
+            {
+                blended[instance].compute_batch8_col(
+                    bx8[0],
+                    &by8,
+                    bz8[0],
+                    blended[instance].col_base,
+                )
+            } else {
+                blended[instance].compute_batch8(&bx8, &by8, &bz8)
+            };
+            out[half * 8..half * 8 + 8].copy_from_slice(&v);
+        }
     } else {
         let v = if crate::noise::avx2_available() && lanes_uniform_i32(bx, bz) {
             blended[instance].compute_batch_col(

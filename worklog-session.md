@@ -8373,3 +8373,12 @@ Q6 — главный фронт до 5ms (cover->100% + busy<=10 — см. cont
   carve=3.56ms/ч, opsApplied=859917, declined=0); carve-in-fill (n=0 — ноль
   JNI-раундтрипов); без deco-pool CarverDriver молча отказывается (ctx=0,
   deco=1-only ограничение cont-95).
+
+## cont-153 (2026-11-27, восстановленный сандбокс)
+
+- Восстановление: репозиторий переклонирован (PLANETA9091/c-chunkky -> /home/z/my-project/c-faster), JDK 25.0.5.1+2 (Temurin) развёрнут, rustc 1.100 (rustup). cargo check --release прошёл с первого раза (0 ошибок), плагин пересобран из исходников.
+- STEP 2 (проводка) верифицирован по исходникам: fill_jni -> fill -> legacy_carve_tail (fillMarked/fillBeard идут через тот же хвост), packRel-whitelist полный (configured_carver + tags/block + dimension/overworld), carverSetEnabled(0,bool) глобальный гейт на месте.
+- E2E-цикл (scripts/run_e2e_v2.sh, свежий мир, паки .dpz, carve-in-fill, 3 окна 12x12, регион 2000,2000): 56.3/65.7/37.4 ms/ch (базлайн без флагов на том же боксе: 47.9/61.4/31.1). carver-phases n=0 (fuse=true), marks 60795/60795, honest window не вооружён (армирование не найдено в Java-статсах — todo).
+- Детерминированные ядра на продакшн-сиде (vbench, сид кампании, idle 2-core): fill p50 5.43ms (f64 lanes 8). Раскладка: normalnoise 2.29ms/fill (427K batch8-calls/64 fills), blended dispatch 1.05ms/fill, cellfill 0.04, material 0.11. Первый чанк в окне 1.4-1.6s = ctx build (нужен prewarm 200 чанков перед окном).
+- cont-153 f32x16-ядро (задача STEP 4 "noise f32 -> SIMD"): реализовано (ImprovedNoise noise_5_batch16_f32_avx512, PerlinNoise/NormalNoise get_value_batch16_f32, N=16 lane-путь в eval_plane_batched/slice_slot0/blended_batch_n, калибровка расширяется CRUS_LANES=16). ВЕРДИКТ: НЕ УСКОРЯЕТ на Xeon — f32micro 17.38 ns/sample vs f64x8 16.77; vbench fill +1.2ms; октавный проход bound по per-lane cell_grads/gradient-gather, не по векторной арифметике. Дефолт остаётся 8/4 (try16=false), код под CRUS_LANES=16 сохранён (на CI с AVX-512 gather может выиграть).
+- Следующие рычаги (отсортированы): (1) prewarm перед тайм-окнами + армирование honest window; (2) NormalNoise: column-collapse x-измерения perlin на плоскости (x константен per plane -> lattice x-частичные суммы кэшируются, -40..60% шума); (3) blended minmax col-memo для 16-lane групп; (4) deco: расширить S1 batch lane на run-top offenders (terralith cliff grass_upper/lower 0.56ms/ch каждый, freeze_top_layer 0.49); (5) paper-side: lightdivert diverted=956, но skipped_status=0 — копать status-chain (stagnation ~8ms/ch).

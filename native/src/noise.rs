@@ -4235,3 +4235,236 @@ mod simd_tests {
         }
     }
 }
+
+// ============================================================================
+// f32x16 slice-noise kernels (cont-153, task STEP 4: "noise kernel strictly
+// f32 -> SIMD(AVX2/512)"). NOT bit-exact vs the f64 reference — sanctioned.
+// Parity is validated by the filldump A/B block-diff gate (>=99% required).
+// Escape hatch: CRUS_F32NOISE=0 forces the f64 paths everywhere.
+// ============================================================================
+
+/// Process-global f32-noise gate. Default ON; CRUS_F32NOISE=0 restores f64.
+pub fn f32noise_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("CRUS_F32NOISE").ok().as_deref() != Some("0"))
+}
+
+#[cfg(target_arch = "x86_64")]
+impl ImprovedNoise {
+    /// f32x16 AVX-512 port of noise_5_batch_avx512 (y_scale == 0 lane —
+    /// the NormalNoise slice path never passes a smear scale).
+    #[target_feature(enable = "avx512f")]
+    pub unsafe fn noise_5_batch16_f32_avx512(
+        &self,
+        xin: &[f32; 16],
+        yin: &[f32; 16],
+        zin: &[f32; 16],
+    ) -> [f32; 16] {
+        use std::arch::x86_64::*;
+        let xo = self.xo as f32;
+        let yo = self.yo as f32;
+        let zo = self.zo as f32;
+        let mut xi = [0i32; 16];
+        let mut yi = [0i32; 16];
+        let mut zi = [0i32; 16];
+        let mut dx = [0f32; 16];
+        let mut dy = [0f32; 16];
+        let mut dz = [0f32; 16];
+        for l in 0..16 {
+            let x = xin[l] + xo;
+            let y = yin[l] + yo;
+            let z = zin[l] + zo;
+            let a = mth_floor(x as f64) as i32;
+            let b = mth_floor(y as f64) as i32;
+            let c = mth_floor(z as f64) as i32;
+            xi[l] = a;
+            yi[l] = b;
+            zi[l] = c;
+            dx[l] = x - a as f32;
+            dy[l] = y - b as f32;
+            dz[l] = z - c as f32;
+        }
+
+        let dxv = _mm512_loadu_ps(dx.as_ptr());
+        let dyv = _mm512_loadu_ps(dy.as_ptr());
+        let dzv = _mm512_loadu_ps(dz.as_ptr());
+        // smoothstep: t*t*t*(t*(t*6-15)+10) — same op order as the f64 core
+        let smooth = |t: __m512| -> __m512 {
+            let t2 = _mm512_mul_ps(t, t);
+            let t3 = _mm512_mul_ps(t2, t);
+            let a = _mm512_mul_ps(t, _mm512_set1_ps(6.0));
+            let b = _mm512_sub_ps(a, _mm512_set1_ps(15.0));
+            let c = _mm512_mul_ps(b, t);
+            let d = _mm512_add_ps(c, _mm512_set1_ps(10.0));
+            _mm512_mul_ps(t3, d)
+        };
+        let fx = smooth(dxv);
+        let fy = smooth(dyv);
+        let fz = smooth(dzv);
+
+        let mut grad = [[0u8; 8]; 16];
+        grad[0] = self.cell_grads(xi[0], yi[0], zi[0]);
+        for l in 1..16 {
+            grad[l] = if xi[l] == xi[l - 1] && yi[l] == yi[l - 1] && zi[l] == zi[l - 1] {
+                grad[l - 1]
+            } else {
+                self.cell_grads(xi[l], yi[l], zi[l])
+            };
+        }
+
+        let one = _mm512_set1_ps(1.0);
+        let mut vc = [_mm512_setzero_ps(); 8];
+        for c in 0..8 {
+            let mut gxs = [0i32; 16];
+            let mut gys = [0i32; 16];
+            let mut gzs = [0i32; 16];
+            for l in 0..16 {
+                let gv = &GRADIENT[(grad[l][c] & 15) as usize];
+                gxs[l] = gv[0];
+                gys[l] = gv[1];
+                gzs[l] = gv[2];
+            }
+            let gx = _mm512_cvtepi32_ps(_mm512_loadu_si512(gxs.as_ptr() as *const __m512i));
+            let gy = _mm512_cvtepi32_ps(_mm512_loadu_si512(gys.as_ptr() as *const __m512i));
+            let gz = _mm512_cvtepi32_ps(_mm512_loadu_si512(gzs.as_ptr() as *const __m512i));
+            let xv = if c & 1 != 0 { _mm512_sub_ps(dxv, one) } else { dxv };
+            let yv = if c & 2 != 0 { _mm512_sub_ps(dyv, one) } else { dyv };
+            let zv = if c & 4 != 0 { _mm512_sub_ps(dzv, one) } else { dzv };
+            let t0 = _mm512_mul_ps(gx, xv);
+            let t1 = _mm512_mul_ps(gy, yv);
+            let t2 = _mm512_mul_ps(gz, zv);
+            vc[c] = _mm512_add_ps(_mm512_add_ps(t0, t1), t2);
+        }
+
+        // Mth.lerp3: a + t*(b-a)
+        let lp = |t: __m512, a: __m512, b: __m512| -> __m512 {
+            _mm512_add_ps(a, _mm512_mul_ps(t, _mm512_sub_ps(b, a)))
+        };
+        let r0 = lp(fx, vc[0], vc[1]);
+        let r1 = lp(fx, vc[2], vc[3]);
+        let r01 = lp(fy, r0, r1);
+        let r2 = lp(fx, vc[4], vc[5]);
+        let r3 = lp(fx, vc[6], vc[7]);
+        let r23 = lp(fy, r2, r3);
+        let res = lp(fz, r01, r23);
+        let mut out = [0f32; 16];
+        _mm512_storeu_ps(out.as_mut_ptr(), res);
+        out
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+impl PerlinNoise {
+    /// f32x16 octave loop (mirror of get_value_batch8): wrap stays f64-exact,
+    /// the per-level ImprovedNoise sample runs in f32x16 AVX-512, octave
+    /// accumulation stays f64-exact. y_scale is always 0 on this path.
+    pub fn get_value_batch16_f32(&self, x: &[f64; 16], y: &[f64; 16], z: &[f64; 16]) -> [f64; 16] {
+        let mut d = [0f64; 16];
+        let mut input_factor = self.lowest_freq_input_factor;
+        let mut value_factor = self.lowest_freq_value_factor;
+        for i in 0..self.noise_levels.len() {
+            if let Some(nl) = &self.noise_levels[i] {
+                let mut wx = [0f32; 16];
+                let mut wy = [0f32; 16];
+                let mut wz = [0f32; 16];
+                for l in 0..16 {
+                    wx[l] = wrap(x[l] * input_factor) as f32;
+                    wy[l] = wrap(y[l] * input_factor) as f32;
+                    wz[l] = wrap(z[l] * input_factor) as f32;
+                }
+                let v = unsafe { nl.noise_5_batch16_f32_avx512(&wx, &wy, &wz) };
+                let amp = self.amplitudes[i];
+                for l in 0..16 {
+                    d[l] += amp * (v[l] as f64) * value_factor;
+                }
+            }
+            input_factor *= 2.0;
+            value_factor /= 2.0;
+        }
+        d
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+impl NormalNoise {
+    /// f32x16 NormalNoise: first + second * 1.0181268882175227, f64 combine.
+    /// Non-AVX512 fallback: 2x exact f64 batch8 halves.
+    pub fn get_value_batch16_f32(&self, x: &[f64; 16], y: &[f64; 16], z: &[f64; 16]) -> [f64; 16] {
+        if !std::arch::is_x86_feature_detected!("avx512f") {
+            let mut out = [0f64; 16];
+            let (xa, xb) = split16(x);
+            let (ya, yb) = split16(y);
+            let (za, zb) = split16(z);
+            let va = self.get_value_batch8(xa, ya, za);
+            let vb = self.get_value_batch8(xb, yb, zb);
+            out[..8].copy_from_slice(&va);
+            out[8..].copy_from_slice(&vb);
+            return out;
+        }
+        let mut x1 = [0f32; 16];
+        let mut y1 = [0f32; 16];
+        let mut z1 = [0f32; 16];
+        let mut x2 = [0f32; 16];
+        let mut y2 = [0f32; 16];
+        let mut z2 = [0f32; 16];
+        for l in 0..16 {
+            x1[l] = x[l] as f32;
+            y1[l] = y[l] as f32;
+            z1[l] = z[l] as f32;
+            x2[l] = (x[l] * 1.0181268882175227) as f32;
+            y2[l] = (y[l] * 1.0181268882175227) as f32;
+            z2[l] = (z[l] * 1.0181268882175227) as f32;
+        }
+        let a = unsafe { self.first.get_value_batch16_f32_avx512_raw(&x1, &y1, &z1) };
+        let b = unsafe { self.second.get_value_batch16_f32_avx512_raw(&x2, &y2, &z2) };
+        let mut out = [0f64; 16];
+        for l in 0..16 {
+            out[l] = (a[l] as f64 + b[l] as f64) * self.value_factor;
+        }
+        out
+    }
+}
+
+fn split16<T>(a: &[T; 16]) -> (&[T; 8], &[T; 8]) {
+    unsafe { (&*(a.as_ptr() as *const [T; 8]), &*(a.as_ptr().add(8) as *const [T; 8])) }
+}
+
+#[cfg(target_arch = "x86_64")]
+impl PerlinNoise {
+    /// raw f32x16: converts to f64 lane results via get_value_batch16_f32.
+    #[inline]
+    unsafe fn get_value_batch16_f32_avx512_raw(&self, x: &[f32; 16], y: &[f32; 16], z: &[f32; 16]) -> [f32; 16] {
+        let mut d = [0f32; 16];
+        let mut input_factor = self.lowest_freq_input_factor;
+        let mut value_factor = self.lowest_freq_value_factor;
+        let mut any = false;
+        for i in 0..self.noise_levels.len() {
+            if let Some(nl) = &self.noise_levels[i] {
+                // f32 octave scaling + wrap (f32 path contract)
+                let mut wx = [0f32; 16];
+                let mut wy = [0f32; 16];
+                let mut wz = [0f32; 16];
+                let inf32 = input_factor as f32;
+                let vf32 = value_factor as f32;
+                let amp = self.amplitudes[i] as f32 * vf32;
+                for l in 0..16 {
+                    wx[l] = wrap((x[l] * inf32) as f64) as f32;
+                    wy[l] = wrap((y[l] * inf32) as f64) as f32;
+                    wz[l] = wrap((z[l] * inf32) as f64) as f32;
+                }
+                let v = nl.noise_5_batch16_f32_avx512(&wx, &wy, &wz);
+                for l in 0..16 {
+                    d[l] += amp * v[l];
+                }
+                any = true;
+            }
+            input_factor *= 2.0;
+            value_factor /= 2.0;
+        }
+        if !any {
+            // mirrors the f64 path returning zeros for all-zero amplitudes
+            d = [0.0f32; 16];
+        }
+        d
+    }
+}

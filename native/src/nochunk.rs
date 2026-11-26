@@ -939,7 +939,11 @@ impl<'e> ChunkGen<'e> {
     /// calibration costs a few ms once per process and is bit-neutral
     /// (all widths are lane-identical to the scalar eval).
     fn pick_slice_lanes(env: &Env, compiled: &Compiled) -> usize {
-        if std::env::var("CRUS_LANES").ok().and_then(|v| v.parse::<usize>().ok()) == Some(8) {
+        let forced = std::env::var("CRUS_LANES").ok().and_then(|v| v.parse::<usize>().ok());
+        if forced == Some(16) {
+            return 16;
+        }
+        if forced == Some(8) {
             return 8;
         }
         if std::env::var("CRUS_LANES").ok().and_then(|v| v.parse::<usize>().ok()) == Some(4) {
@@ -978,18 +982,34 @@ impl<'e> ChunkGen<'e> {
         // neighbours and can pick the wrong width. Min over interleaved
         // rounds is the noise-free estimate per variant (same pattern as
         // probe_avx512_width).
+        // cont-153 verdict: the f32x16 kernel measured NEUTRAL-to-SLOWER on
+        // Xeon (f32micro: 17.38 vs 16.77 ns/sample; vbench fill +1.2ms) — the
+        // octave walk is per-lane cell_grads/gradient-gather bound, not
+        // vector-arithmetic bound. 16 stays an explicit CRUS_LANES=16 option.
+        let try16 = false;
         let _ = time(4, &mut out, &mut sink);
         let _ = time(8, &mut out, &mut sink);
-        let (mut best4, mut best8) = (f64::MAX, f64::MAX);
+        let _ = if try16 { time(16, &mut out, &mut sink) } else { 0.0 };
+        let (mut best4, mut best8, mut best16) = (f64::MAX, f64::MAX, f64::MAX);
         for _ in 0..3 {
             best4 = best4.min(time(4, &mut out, &mut sink));
             best8 = best8.min(time(8, &mut out, &mut sink));
+            if try16 {
+                best16 = best16.min(time(16, &mut out, &mut sink));
+            }
         }
         let d4 = best4;
         let d8 = best8;
-        let pick = if d8 < d4 * 0.97 { 8 } else { 4 };
+        let d16 = best16;
+        let pick = if try16 && d16 < d8.min(d4) * 0.97 {
+            16
+        } else if d8 < d4 * 0.97 {
+            8
+        } else {
+            4
+        };
         if std::env::var("CRUS_DEBUG_LANES").is_ok() {
-            eprintln!("[crussty] slice lanes calibration: 4={d4:.0}ns 8={d8:.0}ns -> {pick} (sink={sink})");
+            eprintln!("[crussty] slice lanes calibration: 4={d4:.0}ns 8={d8:.0}ns 16={d16:.0}ns -> {pick} (sink={sink})");
         }
         pick
     }
@@ -2143,6 +2163,21 @@ impl<'e> ChunkGen<'e> {
         for (sx, px) in [(0usize, cell_x * cw as i32), (1usize, cell_x * cw as i32 + cw as i32)] {
             let mut slot0 = vec![0f64; total];
             match self.slice_lanes {
+                16 => Self::slice_slot0::<16>(
+                    self.env,
+                    &self.compiled,
+                    child0,
+                    &interp,
+                    px,
+                    cell_z,
+                    cw as i32,
+                    ch as i32,
+                    ny1,
+                    self.cell_noise_min_y,
+                    0,
+                    total,
+                    &mut slot0,
+                ),
                 8 => Self::slice_slot0::<8>(
                     self.env,
                     &self.compiled,
@@ -4661,6 +4696,10 @@ impl<'e> ChunkGen<'e> {
         let cols = cell_count_y + 1;
         let y_total = cell_count_y + 1;
         match lanes {
+            16 => Self::eval_plane_batched::<16>(
+                env, compiled, children, corner_x, first_cell_z, cell_count_xz,
+                cell_noise_min_y, cw, ch, cols, y_total, &interp, out,
+            ),
             8 => Self::eval_plane_batched::<8>(
                 env, compiled, children, corner_x, first_cell_z, cell_count_xz,
                 cell_noise_min_y, cw, ch, cols, y_total, &interp, out,
