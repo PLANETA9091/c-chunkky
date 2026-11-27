@@ -303,6 +303,35 @@ fn give_permits(n: usize) {
     }
 }
 
+// Legacy-engine adaptive slice threading: mirrors fill263::fill_threads —
+// CRUS_FILL_THREADS unset (=0) means AUTO: solo fills take cores.min(4)
+// internal threads, concurrent fills divide the cores (never oversubscribe a
+// saturated Paper worker pool). Once concurrency has been SEEN, solo fills
+// stay serial (a worker may re-pair at any moment; plane-thread spawn
+// costs more than it saves in that regime).
+static LEGACY_ACTIVE_FILLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+static LEGACY_CONCURRENT_SEEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn legacy_fill_threads(slice_threads: usize) -> usize {
+    if slice_threads >= 1 {
+        return slice_threads.min(16);
+    }
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let active = LEGACY_ACTIVE_FILLS.load(std::sync::atomic::Ordering::Relaxed);
+    if active > 1 {
+        LEGACY_CONCURRENT_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
+        (cores / active).max(1).min(4)
+    } else if LEGACY_CONCURRENT_SEEN.load(std::sync::atomic::Ordering::Relaxed) {
+        1
+    } else {
+        cores.min(4).max(1)
+    }
+}
+
 pub struct ChunkGen<'e> {
     /// vanilla shouldScheduleFluidUpdate for the last aquifer eval.
     sched: bool,
@@ -433,6 +462,9 @@ pub struct ChunkGen<'e> {
     slice_threads: usize,
     /// calibrated batch width for slice corner evaluation (4 or 8)
     slice_lanes: usize,
+    /// per-fill effective slice threads (adaptive: cores / active fills;
+    /// 0 = serial). Set at fill() entry, mirrors fill263::fill_threads.
+    live_threads: usize,
     /// cross-fill corner-column cache shared with thread clones (world-keyed
     /// per (x,z): all-slot corner values, see ColCacheInner)
     col_cache: std::sync::Arc<std::sync::Mutex<ColCacheInner>>,
@@ -1038,7 +1070,7 @@ impl<'e> ChunkGen<'e> {
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .filter(|&n| n >= 1)
-                .unwrap_or(1)
+                .unwrap_or(0)
                 .min(16),
             slice_lanes,
             col_cache: std::sync::Arc::new(std::sync::Mutex::new(ColCacheInner::new(
@@ -1050,6 +1082,7 @@ impl<'e> ChunkGen<'e> {
             col_scratch: Vec::new(),
             col_hits: 0,
             col_misses: 0,
+            live_threads: 0,
         }
     }
 
@@ -1882,6 +1915,7 @@ impl<'e> ChunkGen<'e> {
             col_scratch: Vec::new(),
             col_hits: 0,
             col_misses: 0,
+            live_threads: 0,
         }
     }
 
@@ -1922,7 +1956,7 @@ impl<'e> ChunkGen<'e> {
         let cnmy = self.cell_noise_min_y;
         let plane_slots = self.interp_children.len();
         let plane_len = plane_slots * (ccx + 1) * (ccy + 1);
-        let slice_threads_cap = self.slice_threads.min(ccx);
+        let slice_threads_cap = self.live_threads.min(ccx);
         let nthr = slice_threads_cap;
         let lanes = self.slice_lanes;
 
@@ -1934,7 +1968,7 @@ impl<'e> ChunkGen<'e> {
         // off and the classic in-graph plane path runs.
         if self.prefetch.is_none()
             && self.prefetch_enabled
-            && self.slice_threads > 1
+            && self.live_threads > 1
             && self.cell_count_xz > 0
             && !self.skip_slice
         {
@@ -2234,6 +2268,9 @@ impl<'e> ChunkGen<'e> {
     }
 
     pub fn fill(&mut self, cx: i32, cz: i32, out: &mut [u16; OUT_LEN]) {
+        // adaptive slice threading (CRUS_FILL_THREADS=0/unset = auto)
+        let _active = LEGACY_ACTIVE_FILLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        self.live_threads = legacy_fill_threads(self.slice_threads);
         // Gap-adaptive prefetch gate: measure the inter-fill gap (Java-side
         // layout/beard/SURFACE time). Plane work (~0.33ms per plane serial)
         // is only worth prefetching when there is room to hide it; with a
@@ -2251,6 +2288,7 @@ impl<'e> ChunkGen<'e> {
         self.fill_inner(cx, cz, out);
         self.last_fill_end = Some(std::time::Instant::now());
         jni_prof_accum(&jni_before, &self.prof, jni_t0.elapsed().as_nanos() as u64);
+        LEGACY_ACTIVE_FILLS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Native replica of vanilla NoiseBasedChunkGenerator.getBaseHeight
@@ -2529,7 +2567,7 @@ impl<'e> ChunkGen<'e> {
         // per-thread generator clones. Bit-identical: cells are pure
         // functions of the corner planes; per-thread aquifer/memo/marks state
         // is fresh or shared-immutable; out writes are disjoint per strip.
-        if self.slice_threads > 1 && self.cell_count_xz > 0 && !self.skip_slice && !self.skip_cellfill
+        if self.live_threads > 1 && self.cell_count_xz > 0 && !self.skip_slice && !self.skip_cellfill
         {
             self.fill_parallel(cx, cz, out, &mut p);
             self.prof = p;

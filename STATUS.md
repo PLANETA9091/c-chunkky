@@ -288,3 +288,31 @@ JAVA_HOME=/home/z/tools/jdk-25.0.5+8 SRV_DIR=$PWD/server \
   меняется между сборками, canonical = committed jar.
 - N=12 локально захлёбывается в statdump (446МБ trace + 2 ядра) —
   локальные пары только N=8.
+
+## CONT-154 (2026-11-27, sandbox #2 rebuild)
+
+- **БАТЧИНГ СПЛАЙНОВ** (density.rs Spline batch arm): per-lane scalar
+  spline_apply (mem=None) заменён групповой оценкой value-узлов через
+  продакшн lane-ядра (eval_batch per group, свежий serial на группу);
+  f32-мультипоинт арифметика — точная реплика. packcolbench стриминг:
+  11.98 -> 8.04 ms/chunk (−33% fill), бит-паритет filldump 0/29960,
+  lib-тесты 102/102, df263/fill263 goldens OK. planbio серверно
+  138.76 -> 69.82-94ms, deco run 4.02 -> 3.71ms.
+- **Столбцовый кэш углов**: реализован (глобальный, CRUS_COL_CACHE,
+  дефолт OFF) — потолок хитов при row-major порядке Paper 6-7% (5.6%
+  наблюдение), overhead миссов ≈ выигрышу. Не включать.
+- **Адаптивные slice-потоки**: CRUS_FILL_THREADS=0/unset = auto по
+  образцу fill263 (cores/active_fills, concurrency-seen -> serial).
+  Оффлайн solo: 7.57 vs 8.15 ms/ch (−7%); в проде почти всегда serial
+  (2+ воркера).
+- **Калибровка lanes**: try16=true — f32x16 участвует в автопика
+  (filldump A/B: 0 diff). row4-статистика в jni_prof: fallback-строки
+  (19%) = 72% material-времени (aquifer per-block на mixed-строках) —
+  следующий крупный рычаг.
+- **margin_fills=256/12x12-окно — структурные** (после дрена;
+  ~1.8 fill/чанк окна, 58% CPU спана). ramp ~350ms + deco_tail 400-600ms —
+  константы окна. Locация окна двигает e2e сильнее флагов (37-72 ms/ch).
+- Следующие рычаги: (1) material fallback — батч-4 aquifer для
+  mixed-строк; (2) blend col 2.05ms/ch (723ns/pt, ~24 октавы — inherent);
+  (3) deco ops: ore_tuff/lush_caves_clay до 1.7-2.5ms/вызов —
+  поисковые циклы по секциям; (4) deco-batch JNI ops (upcalls 576/ч).
