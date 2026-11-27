@@ -15,6 +15,15 @@ cplug-sdk = { path = "cplug-sdk" }
 [profile.release]
 lto = "fat"
 codegen-units = 1
+# cont-156 local-iteration profile: the fat-LTO tail is 20+ min on the 2-core
+# sandbox and cannot survive the tool-call cap; relfast builds in ~4 min with
+# incremental resume. CI keeps --release (fat LTO) as the production profile;
+# local A/B legs always share the same .so so relative verdicts hold.
+[profile.relfast]
+inherits = "release"
+lto = "off"
+codegen-units = 16
+incremental = true
 # cont-96: panic=abort REMOVED. With abort, every Rust panic inside a JNI
 # call KILLED the JVM instantly — no hs_err, no unwind, no catch_unwind
 # (the abort fires before the guard runs): the cont-93 catch_unwind guards

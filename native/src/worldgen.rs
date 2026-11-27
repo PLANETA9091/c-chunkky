@@ -606,6 +606,53 @@ impl WorldGen {
                 router_indices.insert(k.clone(), loader.build_value(v));
             }
         }
+        // 4b-2) pack worlds: 1.21.9-shaped packs ship the aquifer surface as
+        // the density function "minecraft:overworld/noise_router/
+        // preliminary_surface_level" (find_top_surface over the pack's
+        // initial density). Vanilla 1.21.9 semantics would evaluate this DF
+        // (cell_height comes from the DF: tectonic 8) — measured 100%-divergent
+        // vs the shipped 1.21.8-style scan (world cell_height 4 for packs,
+        // 433/433 columns, probe_packprelim.sh) and only ~5% faster per fill
+        // wall, so the binding stays OPT-IN: CRUS_PACK_PRELIM=1 binds it
+        // (re-anchor pack goldens first), default = legacy scan.
+        // The internal router key keeps "surface_level" unbound so the
+        // aquifer263 26.3-fluid algorithm is untouched for pack worlds.
+        // Vanilla 26.3 worlds carry aquifers.surface_level and never enter
+        // this branch. Verify mode: CRUS_PACK_PRELIM_VERIFY=1.
+        if !router_indices.contains_key("surface_level")
+            && std::env::var("CRUS_PACK_PRELIM").map_or(false, |v| v == "1")
+        {
+            const PACK_PRELIM_KEY: &str = "pack_preliminary_surface_level";
+            const PACK_PRELIM_DF: &str =
+                "minecraft:overworld/noise_router/preliminary_surface_level";
+            const PACK_PRELIM_PATH: &str =
+                "minecraft/worldgen/density_function/overworld/noise_router/preliminary_surface_level.json";
+            if let Some(&idx) = router_indices.get("preliminary_surface_level") {
+                router_indices.insert(PACK_PRELIM_KEY.to_string(), idx);
+            } else if assets.get(PACK_PRELIM_PATH).is_some() {
+                // resolve in a throwaway loader first: a pack may ship a DF
+                // whose transitive refs are incomplete; never fail the load
+                // for the speedup path (scan stays).
+                let probe_ok = {
+                    let mut probe = Loader {
+                        noise_params: &noise_params,
+                        arena: Vec::new(),
+                        roots: HashMap::new(),
+                        building: Vec::new(),
+                        type_counts: BTreeMap::new(),
+                        assets,
+                    };
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        probe.build_value(&Json::Str(PACK_PRELIM_DF.to_string()))
+                    }))
+                    .is_ok()
+                };
+                if probe_ok {
+                    let idx = loader.build_value(&Json::Str(PACK_PRELIM_DF.to_string()));
+                    router_indices.insert(PACK_PRELIM_KEY.to_string(), idx);
+                }
+            }
+        }
         // 1.21.8-only router fields absent in 26.3 — neutral stubs keep the
         // nochunk wiring compiling; the consumers gate on their presence.
         for stub in [

@@ -8435,3 +8435,44 @@ Q6 — главный фронт до 5ms (cover->100% + busy<=10 — см. cont
 - **AQ-ПРОФИЛЬ (filldump CRUS_AQDBG, 3000,3000)**: subst_calls=2128 (hits 1855, sv0 104, notsame 1576 = 74%), fluid_calls=259 × ~17µs профилировано, **97% внутри preliminary_surface_level** (top-down скан initial_density, 48 шагов cell-grid). СКАН ПРЕЛИМА = главный остаток material (~60-70%). СЛЕДУЮЩИЙ РЫЧАГ: (а) column-hoisted eval скана (col-init/col-walk по y-цепочке), (б) surface_level DF-биндинг для 26.3-паков: tectonic несёт preliminary_surface_level в роутере (26.3-имя), код ищет только "surface_level"; плагиновый мерж = terralith (1.21.x-shape, без ключа) wins → пока скан. Латентный баг кэша: put(i32::MAX) декодится как -1 (level+65 wrap) — MAX-результаты портятся на хите; не трогал (в golden-чанках не проявляется).
 - **WT3 (worker-threads = nproc+1)**: SMT-заполнение латентных волн chunk-системы — honest e2e 36.99 → **32.76/32.91 (медиана 32.8, −11%)**, fill p50 13.2 → 10.6-10.7ms, cover 37%. Дефолт в e2e_honest_window.sh (CRUS_WORKER_THREADS=-1 → auto). FT3 (3 fill-потока) — хуже (36.3), откат к FT2.
 - Ряд honest-окон этого бокса (2-core shared, шумный): 71.55 (WT2/FT1) / 36.23, 42.77, 36.99 (WT2/FT2) / 32.76, 32.91 (WT3/FT2).
+
+## cont-156 (2026-11-28, сандбокс #4, восстановление из recovery + рычаг prelim)
+
+- Восстановление: репо цело (HEAD b21f5bc5 cont-155, дерево чистое), тулчейн
+  tools/{cargo 1.100, jdk-25.0.5+8/25.0.5.1+2}, paper.jar на месте. nohup-билды
+  НЕ переживают границу сообщений сандбокса — переход на форграунд-вызовы.
+- **[profile.relfast]** (lto=off, cg=16, incremental): fat-LTO хвост на 2 ядрах
+  = 20+ мин без возобновления; relfast ~4 мин. Локальные A/B-ноги всегда на
+  одном .so; продакшн = CI --release. Локальный якорь: honest e2e 38.52
+  (relfast; прод .so cont-155 = 32.8, надбавка ~+17% от отсутствия LTO).
+- **PACK-PRELIM DF-БИНДИНГ (opt-in, CRUS_PACK_PRELIM=1)**: 1.21.9-паки несут
+  aquifer-поверхность как DF "minecraft:overworld/noise_router/
+  preliminary_surface_level" (find_top_surface). Плагиновый мерж оставляет
+  noise_settings терralith (1.21.x-shape, без ключа) → движок падал в
+  1.21.8-скан. Привязка под ВНУТРЕННИМ ключом "pack_preliminary_surface_level"
+  (surface_level остаётся несвязанным — aquifer263 26.3-флюидный алгоритм не
+  трогается). ВАЛИДАЦИЯ probe_packprelim.sh: 433/433 колонок ДИВЕРГЕНТНЫ
+  (DF cell_height=8 из JSON пакa vs скан с cell_height мира=4 для паков) и
+  всего ~5% быстрее по wall fill → это СМЕНА СЕМАНТИКИ (ваниль-1.21.9-точная),
+  не бит-равное ускорение. Дефолт = легаси-скан; биндинг = opt-in lane для
+  будущего ре-анкоринга паковых голденов. Verify-режим CRUS_PACK_PRELIM_VERIFY=1
+  (счётчики PACK_PRELIM_TOTAL/DIVERGE в filldump aqdbg).
+- **Скан отрефакторен** (prelim_scan_uncached + floor_df_at) — кододвижение,
+  бит-нейтрально: 5/5 паковых чанков + ваниль-чанк BYTE-EQUAL против чистого
+  b21f5bc5 (base-worktree, relfast). ВАЖНО: MAX-«порча» кэша prelim
+  (put(i32::MAX) декодится как -1 на хите) — ЧАСТЬ ЗААНКОРЕНОГО ПОВЕДЕНИЯ:
+  фикс кодировки дивергирует блоки (проверено), откатан, закоммичен как NOTE.
+- **Замеры скана (filldump CRUS_PROFILE=1 CRUS_AQDBG=1, @3000,3000, паки)**:
+  prelim_scans=214/ч, steps=15408 (72/скан), prelim_ns=4.71ms/ч = 96% substance
+  (subst 2128, hits 1855), fluid_ms=4.90. row4 taken 7756/8288, fb=532.
+  Скан = главный остаток material; направлений три: (а) консервативный
+  band-skip (min-аргументы с y-насыщением: у terralith-slide ветка = -0.078125
+  для y>=292 и column-константа в [-40,250) — предикат ложен без эвала arg2),
+  (б) batch 4→8/16 (dispatch-хвост), (в) DF-lane после ре-анкоринга.
+- Честные окна (relfast, WT3/FT2, паки, 3000,3000): 38.52 / ~38.5 / ~38.5;
+  deco run-top: freeze_top_layer=316.73ms(324), cliff_grass 79.25x2,
+  spring_water/lava+glow_lichen+patch_grass по 40.76; planbio=40.78ms/окно;
+  upcalls=189027/окно; deco_tail=529ms; ramp=364ms; margin_fill_cpu=40.7;
+  cover=40.4%; row4 1245.70ms taken 8.2M/9.08M.
+- Следующие: (1) deco S1/batch для run-top (freeze_top_layer первый),
+  (2) prelim band-skip, (3) cover/status-chain paper-side.

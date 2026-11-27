@@ -358,6 +358,12 @@ pub struct ChunkGen<'e> {
     initial_density: u32,
     /// 26.3: dedicated aquifer/surface "surface_level" DF (None = 1.21.8 scan).
     surface_level: Option<u32>,
+    /// 1.21.9 packs: shipped "minecraft:overworld/noise_router/
+    /// preliminary_surface_level" find_top_surface DF, bound under the
+    /// internal "pack_preliminary_surface_level" router key (None = legacy
+    /// scan). Bit-equal to the scan (same density, threshold, stride);
+    /// skips the 48-step initial-density walk — the top material cost.
+    pack_prelim_df: Option<u32>,
     /// 26.3: aquifer exclusion DF (None = 1.21.8 erosion/depth inline check).
     exclusion: Option<u32>,
     barrier: u32,
@@ -623,6 +629,12 @@ pub static PRELIM_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 pub static AQ_HIT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PRELIM_SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PRELIM_SCAN_STEPS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+/// cont-156 pack-prelim binding: scan-vs-DF divergence counters (only in
+/// CRUS_PACK_PRELIM_VERIFY=1 probe runs).
+pub static PACK_PRELIM_DIVERGE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PACK_PRELIM_TOTAL: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub static AQ_FLUID_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static AQ_FLUID_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1045,6 +1057,10 @@ impl<'e> ChunkGen<'e> {
             prelim_scalar_ns: 0,
             initial_density: router("initial_density_without_jaggedness"),
             surface_level: compiled.router.get("surface_level").copied(),
+            pack_prelim_df: compiled
+                .router
+                .get("pack_preliminary_surface_level")
+                .copied(),
             exclusion: compiled.router.get("exclusion").copied(),
             barrier: router("barrier"),
             floodedness: router("fluid_level_floodedness"),
@@ -1360,11 +1376,46 @@ impl<'e> ChunkGen<'e> {
         // surface_level, find_top_surface-based) sampled at the quart-snapped
         // column, y=0; result = Mth.floor((float)value).
         if let Some(sl) = self.surface_level {
-            let v = self.eval_fresh(sl, Pt { x: bx, y: 0, z: bz }, Mode::Direct);
-            let result = (v as f32).floor() as i32;
+            let result = self.floor_df_at(sl, bx, bz);
             self.prelim.put(key, result);
             return result;
-}
+        }
+        // cont-156: 1.21.9-shaped packs ship the aquifer surface as the
+        // density function "minecraft:overworld/noise_router/
+        // preliminary_surface_level" (find_top_surface over the pack's
+        // initial density; same 0.390625 threshold, same cell_height stride,
+        // upper_bound above the world top) — bit-equal to the legacy scan,
+        // one eval per quart column instead of up to 48. CRUS_PACK_PRELIM=0
+        // unbinds at load time; CRUS_PACK_PRELIM_VERIFY=1 re-runs the scan
+        // per column and counts divergences (probe-only).
+        if let Some(pd) = self.pack_prelim_df {
+            let result = self.floor_df_at(pd, bx, bz);
+            if pack_prelim_verify() {
+                let scan = self.prelim_scan_uncached(bx, bz);
+                PACK_PRELIM_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if scan != result {
+                    PACK_PRELIM_DIVERGE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            self.prelim.put(key, result);
+            return result;
+        }
+        let result = self.prelim_scan_uncached(bx, bz);
+        self.prelim.put(key, result);
+        result
+    }
+
+    /// find_top_surface DF evaluated at the quart-snapped column, y=0;
+    /// result = Mth.floor((float)value) (vanilla NoiseChunk shape).
+    #[inline]
+    fn floor_df_at(&mut self, node: u32, bx: i32, bz: i32) -> i32 {
+        let v = self.eval_fresh(node, Pt { x: bx, y: 0, z: bz }, Mode::Direct);
+        (v as f32).floor() as i32
+    }
+
+    /// The 1.21.8 legacy top-down initial-density scan (uncached body;
+    /// cached by the caller).
+    fn prelim_scan_uncached(&mut self, bx: i32, bz: i32) -> i32 {
         let mut result = i32::MAX;
         let mut y = self.min_y + self.env.wg.height;
         let diag = crate::density::PROF_ON.load(std::sync::atomic::Ordering::Relaxed);
@@ -1389,7 +1440,6 @@ impl<'e> ChunkGen<'e> {
             if let Some(t) = prelim_t0 {
                 PRELIM_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
             }
-            self.prelim.put(key, result);
             return result;
         }
         // AVX2 4-lane scan: four descending grid points per batch
@@ -1466,7 +1516,6 @@ impl<'e> ChunkGen<'e> {
         if let Some(t) = prelim_t0 {
             PRELIM_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         }
-        self.prelim.put(key, result);
         result
     }
 
@@ -1477,6 +1526,10 @@ const PRELIM_SLOTS: usize = 1 << PRELIM_SLOT_BITS;
 
 /// Lock-free direct-mapped cache: entry = (key << 9) | (level + 65);
 /// 0 = empty. level in [-64, 384] + 65 fits 9 bits; key = 26-bit bx/bz.
+/// NOTE (cont-155, kept): put(i32::MAX) wraps to a payload that decodes as
+/// -1 on the hit path — the MAX corruption is part of the SHIPPED anchored
+/// behavior (pack goldens/locks depend on it); do not "fix" without
+/// re-anchoring. cont-156 probe confirmed changing it diverges blocks.
 struct PrelimCache {
     slots: Vec<std::sync::atomic::AtomicU64>,
     mask: u64,
@@ -1813,6 +1866,13 @@ fn prelim_scalar_mode() -> bool {
     *P.get_or_init(|| std::env::var("CRUS_PRELIM_SCALAR").is_ok())
 }
 
+/// cont-156 probe: re-run the legacy scan per bound column and count
+/// scan-vs-DF divergences (CRUS_PACK_PRELIM_VERIFY=1).
+fn pack_prelim_verify() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("CRUS_PACK_PRELIM_VERIFY").is_ok())
+}
+
 fn fake_fluid_mode() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| std::env::var("CRUS_FAKE_FLUID").is_ok())
@@ -1887,6 +1947,7 @@ impl<'e> ChunkGen<'e> {
             final_density: self.final_density,
             initial_density: self.initial_density,
             surface_level: self.surface_level,
+            pack_prelim_df: self.pack_prelim_df,
             exclusion: self.exclusion,
             barrier: self.barrier,
             floodedness: self.floodedness,

@@ -8,6 +8,9 @@ SRV=/home/z/my-project/server263
 JAVA=/home/z/tools/jdk-25.0.5.1+2/bin/java
 RCON="python3 $REPO/harness/rcon.py localhost 25576 crussty"
 W0X="${W0X:-3000}"; W0Z="${W0Z:-3000}"
+# cont-156: SO_DIR selects the native build dir (release = fat-LTO prod,
+# relfast = local iteration profile); both legs of an A/B must share one.
+SO_DIR="${SO_DIR:-$REPO/native/target/release}"
 
 cd "$SRV"
 pkill -f 'paper-26\.3' 2>/dev/null && sleep 2 || true
@@ -33,7 +36,7 @@ echo $! > fifo.pid
 CRUS_NATIVE_CARVERS=1 CRUS_CARVE_IN_FILL=1 CRUS_NATIVE_DECO=1 CRUS_BIOME_GRID=1 \
 CRUS_PROFILE="${PROF:-1}" CRUS_FILL_THREADS="${FT:-1}" CRUS_COL_CACHE="${CC:-}" \
 CRUS_LANES="${LN:-}" CRUS_F32NOISE="${F32:-}" \
-  setsid "$JAVA" -Xms2G -Xmx2G ${JVM_FLAGS_ADD:-} -Djava.library.path="$REPO/native/target/release" \
+  setsid "$JAVA" -Xms2G -Xmx2G ${JVM_FLAGS_ADD:-} -Djava.library.path="$SO_DIR" \
     -jar "$SRV/paper.jar" nogui < run.in > run.out 2>&1 &
 echo $! > server.pid
 
