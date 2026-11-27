@@ -8382,3 +8382,45 @@ Q6 — главный фронт до 5ms (cover->100% + busy<=10 — см. cont
 - Детерминированные ядра на продакшн-сиде (vbench, сид кампании, idle 2-core): fill p50 5.43ms (f64 lanes 8). Раскладка: normalnoise 2.29ms/fill (427K batch8-calls/64 fills), blended dispatch 1.05ms/fill, cellfill 0.04, material 0.11. Первый чанк в окне 1.4-1.6s = ctx build (нужен prewarm 200 чанков перед окном).
 - cont-153 f32x16-ядро (задача STEP 4 "noise f32 -> SIMD"): реализовано (ImprovedNoise noise_5_batch16_f32_avx512, PerlinNoise/NormalNoise get_value_batch16_f32, N=16 lane-путь в eval_plane_batched/slice_slot0/blended_batch_n, калибровка расширяется CRUS_LANES=16). ВЕРДИКТ: НЕ УСКОРЯЕТ на Xeon — f32micro 17.38 ns/sample vs f64x8 16.77; vbench fill +1.2ms; октавный проход bound по per-lane cell_grads/gradient-gather, не по векторной арифметике. Дефолт остаётся 8/4 (try16=false), код под CRUS_LANES=16 сохранён (на CI с AVX-512 gather может выиграть).
 - Следующие рычаги (отсортированы): (1) prewarm перед тайм-окнами + армирование honest window; (2) NormalNoise: column-collapse x-измерения perlin на плоскости (x константен per plane -> lattice x-частичные суммы кэшируются, -40..60% шума); (3) blended minmax col-memo для 16-lane групп; (4) deco: расширить S1 batch lane на run-top offenders (terralith cliff grass_upper/lower 0.56ms/ch каждый, freeze_top_layer 0.49); (5) paper-side: lightdivert diverted=956, но skipped_status=0 — копать status-chain (stagnation ~8ms/ch).
+
+## cont-154 (2026-11-27, восстановленный сандбокс #2)
+
+- **БАТЧИНГ МУЛЬТИТОЧЕЧНЫХ СПЛАЙНОВ (главный тик)**: Spline-ветка
+  eval_batch_recurse в density.rs — старый путь звал spline_apply НА ЛАН
+  с mem=None: каждый лан скалярно переоценивал value-узлы сегментов
+  (вложенные сплайны — рекурсивно скалярно). Замер h6: 278ms/40 чанков —
+  крупнейшая статья pack-fill. Новый путь: сегмент на лан (копия поиска
+  vanilla findIntervalStart), группировка ланов по узлам, ОДИН eval_batch
+  (публичный — свежий serial на группу, штампы не пересекаются) на
+  ДИСТИКТ-узел через продакшн lane-ядра, точная реплика f32-мультипоинт
+  арифметики на лан. Бит-паритет: filldump diff 0/29960. packcolbench
+  (стриминг-спираль через ffi::fill, паки tectonic+terralith):
+  **11.98 -> 8.04 ms/chunk (−33% fill)**; spline_pt 278->63ms/40ch.
+  planbio на сервере 138.76 -> 69.82ms (двоечка), deco run 4.02 -> 3.87.
+- **Столбцовый кэш углов (ColCache)**: глобальный процесс-кэш колонн
+  (seed^arena^x^z -> [slot][y]), env CRUS_COL_CACHE (дефолт OFF=0),
+  короткие критические секции (lookup/insert) — eval без лока. Вердикт:
+  НЕ ВКЛЮЧАТЬ — Paper-порядок филлов row-major (x-внутри ряда), потолок
+  хитов 6-7% (наблюдение 5.6% серверно, 22% на спираль-бенче) —
+  overhead миссов съедает выигрыш. Код сохранён для бенчей.
+- **Калибровка lanes**: try16=true — f32x16 ядро участвует в
+  автокалибровке (pick_slice_lanes: min из 4/8/16, порог 0.97);
+  filldump A/B lanes8 vs lanes16: 0 diff (100.000%). На Xeon
+  калибровка по-прежнему чаще выбирает 4/8 (даунклок AVX-512); на EPYC
+  CI выбор автоматический. SLICE_LANES surfaced в jni_prof.
+- **Диагностика**: jni_prof += row4=NNms taken=N/N (MT_ROW4 счётчики).
+  Оффлайн pack-стриминг (CRUS_PROFILE=1, 100 ч): wall=6.37 slice=2.91
+  cellfill=0.42 material=2.58 (row4 taken 1061529/1306288 = 81%,
+  fallback-строки = 72% material-времени → aquifer per-block на
+  mixed-строках). h6-топ после сплайн-фикса: blend 82ms/40ch (2.05ms/ch,
+  723ns/pt — кол-путь активен, ~24 октавных прохода inherent),
+  continentalness 17.3ms (0.43ms/ch), cheese/megacave 14.1ms.
+- **margin_fills=256 на 12x12 окно — СТРУКТУРНЫЕ** (после полного дрена
+  стабильно 256-265 = ~1.8 fill на чанк окна; не backlog). Честное окно:
+  ramp 350ms + deco_tail 400-600ms — константы окна. cover=28-36%.
+- **CRUS_FILL_THREADS A/B (paired, локация 3500,3500)**: FT1 69.4 vs FT2
+  72.1 ms/ch (тяжёлая локация ≈ паритет, FT2 выигрывает на лёгких).
+  Локация окна двигает e2e сильнее любого флага (mushroom/dripstone vs
+  plains: 37-72 ms/ch).
+- Тесты: lib 102/102, fill263golden OK, df263golden 432 points OK,
+  abeval 2.54us/corner (без регрессий). Коммит ccea20c запушен.

@@ -659,7 +659,7 @@ pub fn jni_prof_snapshot() -> String {
     let n = JP_FILLS.load(Relaxed).max(1) as f64;
     let f = |a: &std::sync::atomic::AtomicU64| a.load(Relaxed) as f64 / n / 1e6;
     format!(
-        "jni_prof[fills={} wall={:.2}ms slice={:.2} cellfill={:.2} material={:.2} select={:.2} par_planes={:.2} par_strips={:.2} colh={} colm={} lanes={}]",
+        "jni_prof[fills={} wall={:.2}ms slice={:.2} cellfill={:.2} material={:.2} select={:.2} par_planes={:.2} par_strips={:.2} colh={} colm={} lanes={} row4={:.2}ms taken={}/{}]",
         JP_FILLS.load(Relaxed),
         f(&JP_WALL_NS),
         f(&JP_SLICE_NS),
@@ -671,6 +671,9 @@ pub fn jni_prof_snapshot() -> String {
         JP_COL_HITS.load(Relaxed),
         JP_COL_MISSES.load(Relaxed),
         SLICE_LANES.load(Relaxed),
+        MT_ROW4_NS.load(Relaxed) as f64 / 1e6,
+        MT_ROW4_TAKEN.load(Relaxed),
+        MT_ROW4_ROWS.load(Relaxed),
     )
 }
 
