@@ -1120,6 +1120,22 @@ public final class DecoDriver extends BlockPopulator {
         return verdict | ((y + 4096) << 3);
     }
 
+    /**
+     * cont-157: ONE JNI crossing for the native freeze_top_layer 16x16 pass.
+     * Loops the SAME freezeChecks per column (row-major: index i -> column
+     * (x0 + i&15, z0 + i>>4)) — identical writes, DecoStats counters, order
+     * and verdicts as the per-column upcall lane; only the crossing count
+     * changes (1 batch call instead of 256). The native side falls back to
+     * the per-column lane when this method is absent (older jar).
+     */
+    public int[] freezeChecksBatch(int x0, int z0) {
+        int[] out = new int[256];
+        for (int i = 0; i < 256; i++) {
+            out[i] = freezeChecks(x0 + (i & 15), z0 + (i >> 4));
+        }
+        return out;
+    }
+
     public boolean stateIs(int x, int y, int z, String[] names) {
         DecoStats.UP_STATE_IS.incrementAndGet();
         BlockState st = reg().getBlockState(new BlockPos(x, y, z));

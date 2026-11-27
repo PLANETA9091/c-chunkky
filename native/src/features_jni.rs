@@ -174,6 +174,10 @@ struct BridgeMids {
     /// degrades the feature to bailing-with-zero-ops at place time (no RNG
     /// consumed — safe), every other feature keeps running.
     freeze_checks: jni_sys::jmethodID,
+    /// cont-157 SOFT resolve: batched 16x16 freeze verdicts (one JNI crossing
+    /// per freeze run instead of 256). Older jars without freezeChecksBatch
+    /// fall back to the per-column freeze_checks loop (bit-identical).
+    freeze_checks_batch: jni_sys::jmethodID,
 }
 
 pub struct JniLevel<'a> {
@@ -200,6 +204,48 @@ impl<'a> JniLevel<'a> {
     #[inline]
     fn noup(&self) -> bool {
         self.no_upcall
+    }
+
+    /// cont-157: ONE JNI crossing for the 16x16 freeze pass. Java loops the
+    /// SAME freezeChecks per column (same writes, same DecoStats counters,
+    /// same order) and returns the 256 packed verdicts. None = old jar /
+    /// upcalls disabled / exception — the trait fallback runs per-column.
+    fn freeze_checks_batch_impl(&self, ox: i32, oz: i32) -> Option<[i32; 256]> {
+        if self.noup() || self.mids.freeze_checks_batch.is_null() {
+            return None;
+        }
+        let tbl = unsafe { *self.env };
+        unsafe {
+            let ivals = [Self::val_i(ox), Self::val_i(oz)];
+            let r = ((*tbl).v1_1.CallObjectMethodA)(
+                self.env,
+                self.obj,
+                self.mids.freeze_checks_batch,
+                ivals.as_ptr(),
+            );
+            if r.is_null() || ((*tbl).v1_2.ExceptionCheck)(self.env) {
+                if !r.is_null() {
+                    ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+                }
+                ((*tbl).v1_1.ExceptionClear)(self.env);
+                return None;
+            }
+            let p = ((*tbl).v1_1.GetIntArrayElements)(self.env, r as jni_sys::jintArray, std::ptr::null_mut());
+            if p.is_null() {
+                ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+                return None;
+            }
+            let mut out = [0i32; 256];
+            std::ptr::copy_nonoverlapping(p, out.as_mut_ptr(), 256);
+            ((*tbl).v1_1.ReleaseIntArrayElements)(
+                self.env,
+                r as jni_sys::jintArray,
+                p,
+                jni_sys::JNI_ABORT,
+            );
+            ((*tbl).v1_1.DeleteLocalRef)(self.env, r as jni_sys::jobject);
+            Some(out)
+        }
     }
 }
 
@@ -270,6 +316,7 @@ impl<'a> JniLevel<'a> {
                             deco_heightmaps: mid("decoHeightmaps", "(II)[I"),
                             tag_members: mid("tagMembers", "(Ljava/lang/String;)[Ljava/lang/String;"),
                             freeze_checks: mid("freezeChecks", "(II)I"),
+                            freeze_checks_batch: mid("freezeChecksBatch", "(II)[I"),
                         };
                         let ok = [
                             mids.is_air,
@@ -718,6 +765,18 @@ impl<'a> DecoLevelExt for JniLevel<'a> {
             }
             Some(r)
         }
+    }
+
+    /// cont-157 DecoLevelExt override: batch-first, exact per-column fallback.
+    fn freeze_checks_chunk(&self, ox: i32, oz: i32) -> Option<[i32; 256]> {
+        if let Some(v) = self.freeze_checks_batch_impl(ox, oz) {
+            return Some(v);
+        }
+        let mut out = [0i32; 256];
+        for (i, v) in out.iter_mut().enumerate() {
+            *v = self.freeze_checks(ox + ((i & 15) as i32), oz + ((i >> 4) as i32))?;
+        }
+        Some(out)
     }
 
     /// Debug upcall: block registry key at pos (trace-only).

@@ -589,6 +589,19 @@ pub trait DecoLevelExt: DecoLevel {
     fn freeze_checks(&self, _x: i32, _z: i32) -> Option<i32> {
         None
     }
+    /// cont-157: batched 16x16 column verdicts anchored at (ox, oz), row-major
+    /// (dz outer, dx inner: index i -> column (ox + i&15, oz + i>>4)). The
+    /// per-column lane costs 256 JNI crossings per freeze run — the top deco
+    /// run item. Default = the exact per-column loop (old jars / mocks);
+    /// the JNI bridge overrides with ONE freezeChecksBatch crossing. Same
+    /// verdicts in the same order -> bit-identical ops on every level.
+    fn freeze_checks_chunk(&self, ox: i32, oz: i32) -> Option<[i32; 256]> {
+        let mut out = [0i32; 256];
+        for (i, v) in out.iter_mut().enumerate() {
+            *v = self.freeze_checks(ox + ((i & 15) as i32), oz + ((i >> 4) as i32))?;
+        }
+        Some(out)
+    }
     /// The EnvScan column fastpath backend (ChunkLevel only — the snapshot
     /// palette + the overlay column index). Default None = generic loop.
     fn env_col_scan(&self) -> Option<&dyn EnvColScan> {

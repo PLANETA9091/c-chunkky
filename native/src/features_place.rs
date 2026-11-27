@@ -4023,39 +4023,46 @@ fn place_freeze_top_layer(ctx: &PlaceCtx, origin: BlockPos, ops: &mut Vec<DecoOp
     // pre-flight: a bridge without the freezeChecks mid (older jar / upcalls
     // disabled) bails with ZERO ops — no RNG in this feature, so bailing
     // cannot desync any stream; the judge-visible behavior degrades to
-    // "no ice/snow" rather than a wrong write.
+    // "no ice/snow" rather than a wrong write. The pre-flight Java call also
+    // performs the origin column's live-region writes — the old lane's first
+    // loop iteration then re-evaluates that SAME column post-write (its
+    // verdict differs from a cold column); the batch lane replicates the
+    // exact call sequence (preflight + all 256 loop verdicts).
     if level.freeze_checks(origin.x, origin.z).is_none() {
         return false;
     }
-    for dz in 0..16 {
-        for dx in 0..16 {
-            let x = origin.x + dx;
-            let z = origin.z + dz;
-            let Some(packed) = level.freeze_checks(x, z) else {
-                return false; // JNI failure mid-pass (see pre-flight note)
-            };
-            let y = (packed >> 3) - 4096;
-            let verdict = (packed & 7) as u8;
-            if verdict & 1 != 0 {
-                ctx.emit(ops, BlockPos::new(x, y - 1, z), "minecraft:ice", 0);
+    // cont-157: ONE batched JNI crossing for the whole 16x16 pass (Java
+    // loops the same freezeChecks per column — same writes, counters, order,
+    // verdicts). Old jars without freezeChecksBatch fall back inside
+    // freeze_checks_chunk to the exact per-column loop.
+    let Some(verdicts) = level.freeze_checks_chunk(origin.x, origin.z) else {
+        return false; // batch failure — the old lane bailed mid-pass too
+    };
+    for i in 0..256usize {
+        let x = origin.x + ((i & 15) as i32);
+        let z = origin.z + ((i >> 4) as i32);
+        let packed = verdicts[i];
+        let y = (packed >> 3) - 4096;
+        let verdict = (packed & 7) as u8;
+        if verdict & 1 != 0 {
+            ctx.emit(ops, BlockPos::new(x, y - 1, z), "minecraft:ice", 0);
+        }
+        if verdict & 2 != 0 {
+            ctx.emit(ops, BlockPos::new(x, y, z), "minecraft:snow", 0);
+        }
+        if verdict & 4 != 0 {
+            // vanilla: belowState.setValue(SnowyBlock.SNOWY, true) — every
+            // other property preserved. The only vanilla SNOWY blocks are
+            // grass_block and mycelium (snowy is their sole property), so
+            // the rewritten string is one of the two pre-indexed states.
+            let below = BlockPos::new(x, y - 1, z);
+            let cur = level.state_full(below);
+            let next = crate::features_json::state_set_prop(&cur, "snowy", "true");
+            if next != cur && ctx.state_index.contains_key(&next) {
+                ctx.emit(ops, below, &next, 0);
             }
-            if verdict & 2 != 0 {
-                ctx.emit(ops, BlockPos::new(x, y, z), "minecraft:snow", 0);
-            }
-            if verdict & 4 != 0 {
-                // vanilla: belowState.setValue(SnowyBlock.SNOWY, true) — every
-                // other property preserved. The only vanilla SNOWY blocks are
-                // grass_block and mycelium (snowy is their sole property), so
-                // the rewritten string is one of the two pre-indexed states.
-                let below = BlockPos::new(x, y - 1, z);
-                let cur = level.state_full(below);
-                let next = crate::features_json::state_set_prop(&cur, "snowy", "true");
-                if next != cur && ctx.state_index.contains_key(&next) {
-                    ctx.emit(ops, below, &next, 0);
-                }
-                // next == cur (unknown/full state) or un-indexed -> skip the
-                // op rather than write table state #0
-            }
+            // next == cur (unknown/full state) or un-indexed -> skip the
+            // op rather than write table state #0
         }
     }
     true

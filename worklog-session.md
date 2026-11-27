@@ -8476,3 +8476,23 @@ Q6 — главный фронт до 5ms (cover->100% + busy<=10 — см. cont
   cover=40.4%; row4 1245.70ms taken 8.2M/9.08M.
 - Следующие: (1) deco S1/batch для run-top (freeze_top_layer первый),
   (2) prelim band-skip, (3) cover/status-chain paper-side.
+
+## cont-157 (2026-11-28, freeze_top_layer batched JNI crossing)
+
+- **FREEZE-BATCH**: native freeze_top_layer платил 257 JNI-переходов на ран
+  (preflight + 256 колонок, ~83K/окно, 316.73ms(324) в run-top). Новый
+  DecoDriver.freezeChecksBatch(x0,z0) (Java "(II)[I") лупит ТОТ ЖЕ freezeChecks
+  на колонку (те же записи, DecoStats.UP_FREEZE, порядок, вердикты) — 1
+  переход. Rust: DecoLevelExt::freeze_checks_chunk (дефолт = точный
+  пер-колоночный фолбэк для старых jar) + JniLevel batch-оверрайд (soft-resolve
+  mid, "(II)[I"); place_freeze_top_layer = preflight + batch(256) — бит-та же
+  последовательность вызовов (preflight-записи origin-колонки + повторный
+  loop-вердикт, как в старом лейне). Lib 102/102.
+- A/B @3000,3000 (relfast .so, WT3/FT2, шумный бокс): честный e2e PERCOL
+  40.02/39.54 vs BATCH 46.03(выброс)/38.15 — дельта ниже шума бокса. Прямая
+  статья: freeze_top_layer 316.73 (базлайн) → 194.13 (BATCH) vs 224.16
+  (PERCOL, другая нога) — −13..−39% на статье, upcalls=189K без изменений
+  (Java-работа та же, исчезли только переходы). ПРИНЯТ: структурный выигрыш,
+  фолбэк сохраняет совместимость; e2e-эффект ~<1ms/ch на этом боксе.
+- Следующие: prelim band-skip (скан 4.71ms/ч = 96% substance — главный
+  филловый остаток), cover/status-chain paper-side.
