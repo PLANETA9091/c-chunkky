@@ -27,7 +27,7 @@ JAVA_BIN="${JAVA_BIN:-${JAVA_HOME:-}/bin/java}"
 RCON="python3 harness/rcon.py localhost $PORT crussty"
 PLUGIN_JAR="$ROOT/plugin/CrusstyGen.jar"
 PROBE_JAR="$ROOT/probe263/CrusstyProbe263.jar"
-SO="$ROOT/native/target/release/libcrussty_chunkgen.so"
+SO="${SO_DIR:-$ROOT/native/target/release}/libcrussty_chunkgen.so"
 
 [ -f "$PLUGIN_JAR" ] || { echo "missing $PLUGIN_JAR (build the plugin first)" >&2; exit 1; }
 [ -f "$PROBE_JAR" ] || { echo "missing $PROBE_JAR (build probe263 first)" >&2; exit 1; }

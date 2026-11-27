@@ -8496,3 +8496,36 @@ Q6 — главный фронт до 5ms (cover->100% + busy<=10 — см. cont
   фолбэк сохраняет совместимость; e2e-эффект ~<1ms/ch на этом боксе.
 - Следующие: prelim band-skip (скан 4.71ms/ч = 96% substance — главный
   филловый остаток), cover/status-chain paper-side.
+
+## cont-157 addendum: carvers-гейт FAIL — корневая локализация (не регресс cont-156/157)
+
+- CI carvers A/B (ваниль vs натив, 26.3, packs=none, @16384 N=8) падает с
+  cont-155 и раньше (ранны b21f5bc5/f71f27bb/551f7131 = FAILURE, шаг
+  "A/B carvers"; local reproduce: GATE FAIL 7 материалов: CLAY +3627,
+  STONE −3824, GRASS_BLOCK −904, WATER +567, DIRT +303, SAND −107, GRAVEL +67
+  ≈ 0.47% блоков региона). Локально SO_DIR-relfast (SO override добавлен в
+  ab263_ci.sh), probe263/CrusstyProbe263.jar пересобран.
+- БИСЕКЦИЯ по ab263_out y-дампам (пер-чанк-пер-y материальные счётчики):
+  3078 дивергентных (чанк,y) клеток; worst chunks 1024/1026, 1023/1026,
+  1032/1022, 1022/1025, 1024/1022, 1023/1024; worst y = 70-77 (поверхность,
+  речная полоса) И y 22-24 (ГЛУБИНА!).
+- Два паттерна: (1) CLAY +117 / STONE −117 на y 22-24 — натив красит CLAY
+  через topMaterial на dirt-below-grass ГЛУБОКО (ваниль там не красит —
+  keep-dirt); (2) CLAY −103 / DIRT +100 на y 61-64 (1024,1022) — ваниль
+  красит clay, натив keep-dirt. Оба = БАНДЛАНДС/CLAY-банды ветка
+  top_material263 (bandlands 192-таблица + surface_noise) — семпл банды
+  дивергирует от ванильного SurfaceSystem.topMaterial(26.3).
+- Ванильная опора (декомпилировано из server-26.3.jar, /tmp/c263/out):
+  NoiseBasedChunkGenerator.applyCarvingMask — hasGrass по pre-carve
+  state (GRASS_BLOCK/MYCELIUM), после carve: helperPos=below, если DIRT →
+  surfaceSystem().topMaterial(materialRule, ..., helperPos, !fluid.isEmpty())
+  (каскад через повторные чтения при спуске). Натив fill263::apply_carvers
+  реплицирует порядок/гварды бит-в-бит (сверено). Биом-сэмпл topMaterial =
+  point_biomes 3D (корректен). БИТ-РАВЕНСТВО ЛОМАЕТСЯ В БАНДЛАНДС-СЭМПЛИНГЕ
+  topMaterial263 — next: сверить Walk263 band-ветку (surface_noise +
+  bandlands-таблицу) с ванильным SurfaceRules/mSurfaceSystem 26.3
+  (декомпиль net/minecraft/world/level/levelgen/surface/System из
+  META-INF/versions/26.3/server-26.3.jar, cfr в /tmp/cfr.jar).
+- Это НЕ регресс cont-156/157 (запечатано: 5/5 паковых + ваниль-чанк
+  byte-equal против чистого b21f5bc5). Гейт инварианта честен: фикс
+  бандландс-семпла = главный паритет-долг кампании.
