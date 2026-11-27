@@ -36,7 +36,7 @@ fi
 ls -la world/datapacks/
 
 # 3) chunk-system worker threads = logical cores (cont-103 pin)
-WT="${CRUS_WORKER_THREADS:-$(nproc)}"
+WT="${CRUS_WORKER_THREADS:-$(( $(nproc) + 1 ))}"
 PGEN_YML=config/paper-global.yml
 if [ -f "$PGEN_YML" ]; then
   sed -i -E "s/^([[:space:]]*)worker-threads:.*$/\1worker-threads: ${WT}/" "$PGEN_YML"

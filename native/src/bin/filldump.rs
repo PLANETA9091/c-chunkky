@@ -130,6 +130,11 @@ fn main() {
             crussty_chunkgen::nochunk::PRELIM_NS.load(Relaxed) as f64 / 1e6
         );
         eprintln!(
+            "[aqdbg] prelim_scans={} prelim_steps={}",
+            crussty_chunkgen::nochunk::PRELIM_SCANS.load(Relaxed),
+            crussty_chunkgen::nochunk::PRELIM_SCAN_STEPS.load(Relaxed)
+        );
+        eprintln!(
             "[aqdbg] row4_rows={} taken={} fb={} fb_ms={:.2}",
             crussty_chunkgen::nochunk::MT_ROW4_ROWS.load(Relaxed),
             crussty_chunkgen::nochunk::MT_ROW4_TAKEN.load(Relaxed),
