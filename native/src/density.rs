@@ -2569,9 +2569,115 @@ impl Env {
                 } else {
                     None
                 };
+                // ---- batched multipoint spline --------------------------------
+                // The old path called spline_apply PER LANE with mem=None: every
+                // lane re-evaluated the segment-endpoint value nodes scalarly
+                // (nested splines recursively scalar too) — measured 278ms/40ch,
+                // the single biggest fill cost on the pack router. The batched
+                // path groups lanes by their spline segment, evaluates each
+                // DISTINCT value node ONCE per group through the production
+                // lane kernels (public eval_batch: fresh serial per group so
+                // stamps never collide across groups), and replays the exact
+                // f32 multipoint arithmetic per lane. Bit-exact: the batch
+                // kernels are lane-identical to the scalar evals, the segment
+                // search copies spline_apply's comparisons verbatim, and the
+                // interpolation ops keep spline_apply's order.
+                let n = points.len();
+                let last = n - 1;
+                // per-lane segment start (vanilla findIntervalStart)
+                let mut seg = [0i64; N];
+                for l in 0..N {
+                    let mut lo: usize = 0;
+                    let mut hi: usize = n;
+                    while lo < hi {
+                        let mid = (lo + hi) / 2;
+                        if f[l] < points[mid].0 {
+                            hi = mid;
+                        } else {
+                            lo = mid + 1;
+                        }
+                    }
+                    seg[l] = lo as i64 - 1;
+                }
+                // per-lane point values: pv[l] = [left|single, right]
+                let mut pv = [[0f32; 2]; N];
+                // groups: (node, [(lane, slot)]) — merged per node
+                let mut gnode: Vec<u32> = Vec::with_capacity(2 * N);
+                let mut glanes: Vec<Vec<(usize, usize)>> = Vec::with_capacity(2 * N);
+                for l in 0..N {
+                    let s = seg[l];
+                    let mut want = |j: usize, slot: usize| {
+                        match &points[j].1 {
+                            SplineValueW::Const(k) => pv[l][slot] = *k,
+                            SplineValueW::Node(nd) => {
+                                if let Some(g) =
+                                    gnode.iter().position(|&x| x == *nd)
+                                {
+                                    glanes[g].push((l, slot));
+                                } else {
+                                    gnode.push(*nd);
+                                    glanes.push(vec![(l, slot)]);
+                                }
+                            }
+                        }
+                    };
+                    if s < 0 {
+                        want(0, 0);
+                    } else if s as usize == last {
+                        want(last, 0);
+                    } else {
+                        let i = s as usize;
+                        want(i, 0);
+                        want(i + 1, 1);
+                    }
+                }
+                for (g, &nd) in gnode.iter().enumerate() {
+                    let lanes = &glanes[g];
+                    let mut pts2 = [pts[0]; N];
+                    for &(l, _slot) in lanes {
+                        pts2[l] = pts[l];
+                    }
+                    // public eval_batch: bumps the memo serial so this group's
+                    // subtree stamps can't collide with other groups'
+                    let vals = self.eval_batch(c, nd, &pts2, mode, interp, memo);
+                    for &(l, slot) in lanes {
+                        pv[l][slot] = vals[l] as f32;
+                    }
+                }
                 let mut out = [0f64; N];
                 for l in 0..N {
-                    out[l] = spline_apply(self, c, points, f[l], pts[l], mode, interp, None) as f64;
+                    let s = seg[l];
+                    if s < 0 {
+                        let v = pv[l][0];
+                        let der = points[0].2;
+                        out[l] = (if der == 0.0 {
+                            v
+                        } else {
+                            v + der * (f[l] - points[0].0)
+                        }) as f64;
+                    } else if s as usize == last {
+                        let v = pv[l][0];
+                        let der = points[last].2;
+                        out[l] = (if der == 0.0 {
+                            v
+                        } else {
+                            v + der * (f[l] - points[last].0)
+                        }) as f64;
+                    } else {
+                        let i = s as usize;
+                        let f1 = points[i].0;
+                        let f2 = points[i + 1].0;
+                        let f3 = (f[l] - f1) / (f2 - f1);
+                        let f4d = points[i].2;
+                        let f5 = points[i + 1].2;
+                        let f6 = pv[l][0];
+                        let f7 = pv[l][1];
+                        let f8 = f4d * (f2 - f1) - (f7 - f6);
+                        let f9 = -f5 * (f2 - f1) + (f7 - f6);
+                        let l0 = f6 + f3 * (f7 - f6);
+                        let l1 = f8 + f3 * (f9 - f8);
+                        out[l] = (l0 + f3 * (1.0f32 - f3) * l1) as f64;
+                    }
                 }
                 if let Some(t0) = sp_t {
                     H6_SPLINE_PT_NS.fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);

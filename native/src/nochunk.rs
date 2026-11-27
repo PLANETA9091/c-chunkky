@@ -433,6 +433,14 @@ pub struct ChunkGen<'e> {
     slice_threads: usize,
     /// calibrated batch width for slice corner evaluation (4 or 8)
     slice_lanes: usize,
+    /// cross-fill corner-column cache shared with thread clones (world-keyed
+    /// per (x,z): all-slot corner values, see ColCacheInner)
+    col_cache: std::sync::Arc<std::sync::Mutex<ColCacheInner>>,
+    /// column-eval scratch buffer (nslots * (cell_count_y+1) f64)
+    col_scratch: Vec<f64>,
+    /// cumulative cache counters (Prof merge reads them per fill)
+    col_hits: u64,
+    col_misses: u64,
     /// Fast-path resolve of the vein_toggle node: when the router root is a
     /// bare Noise node, the 4 z-neighborhood blocks of an all-solid row can
     /// sample it through one AVX2 batch (lane-identical arithmetic,
@@ -470,6 +478,81 @@ struct OreVeinInterp {
     r_const: f64,
 }
 
+// ---- cross-fill corner-column cache ---------------------------------------
+// A "column" is the (world_x, world_z) plane column of corner values for ALL
+// interpolation slots: [slot][y], y in 0..=cell_count_y. Corner values are
+// pure functions of the world point (seed + assets), so any chunk fill that
+// touches the same corner column can reuse a neighbor's evaluation: x-adjacent
+// fills share full planes (5 columns/plane), z-adjacent share 1 column per
+// plane, diagonal share the plane-row corners. Under the Paper chunk system's
+// spiral/row fill order this reuses 20-100% of the corner work that
+// fill_slice would otherwise redo from scratch.
+struct ColCacheInner {
+    map: std::collections::HashMap<i64, Vec<f64>>,
+    fifo: std::collections::VecDeque<i64>,
+    cap: usize,
+}
+
+impl ColCacheInner {
+    fn new(cap: usize) -> Self {
+        ColCacheInner {
+            map: std::collections::HashMap::with_capacity(cap + 8),
+            fifo: std::collections::VecDeque::with_capacity(cap + 8),
+            cap,
+        }
+    }
+    #[inline]
+    fn get(&self, k: i64) -> Option<&Vec<f64>> {
+        self.map.get(&k)
+    }
+    fn put(&mut self, k: i64, v: Vec<f64>) {
+        if self.cap == 0 {
+            return;
+        }
+        if self.map.insert(k, v).is_none() {
+            self.fifo.push_back(k);
+            while self.fifo.len() > self.cap {
+                if let Some(old) = self.fifo.pop_front() {
+                    self.map.remove(&old);
+                }
+            }
+        }
+    }
+}
+
+/// Global cross-ctx corner-column cache. Paper's chunk workers fill DIFFERENT
+/// chunks concurrently, each on its own ctx clone — per-ctx caches lose the
+/// adjacency (observed 6% hit rate vs 22% single-threaded). One process-wide
+/// cache keyed by (seed, arena, x, z) lets every fill stream (both workers +
+/// margin fills of the same world) reuse every neighbor's columns.
+static COL_CACHE: std::sync::Mutex<Option<ColCacheInner>> = std::sync::Mutex::new(None);
+
+#[inline]
+fn global_col_key(seed: i64, arena: usize, x: i32, z: i32) -> i64 {
+    // 64-bit mix: seed ^ arena distinguishes worlds/trees; x,z packed below.
+    let h = (seed as u64).rotate_left(21) ^ (arena as u64).rotate_left(43);
+    let h = h ^ ((x as u32 as u64) << 32);
+    (h ^ (z as u32 as u64)) as i64
+}
+
+/// Lane width picked by the calibration (diagnostic: surfaced in jni_prof).
+pub static SLICE_LANES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn col_cache_locked() -> std::sync::MutexGuard<'static, Option<ColCacheInner>> {
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let cap = *CAP.get_or_init(|| {
+        std::env::var("CRUS_COL_CACHE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0)
+    });
+    let mut g = COL_CACHE.lock().expect("col cache poisoned");
+    if g.is_none() && cap > 0 {
+        *g = Some(ColCacheInner::new(cap));
+    }
+    g
+}
+
 #[derive(Default, Debug, Clone, Copy)]
 pub struct Prof {
     pub enabled: bool,
@@ -486,6 +569,9 @@ pub struct Prof {
     pub par_planes_ns: u64,
     pub par_strips_ns: u64,
     pub par_merge_ns: u64,
+    // cross-fill corner-column cache (fill_slice)
+    pub col_hits: u64,
+    pub col_misses: u64,
 }
 
 // Aquifer slow-path counters (CRUS_DIAG=1): localize the parallel material
@@ -526,6 +612,8 @@ pub static JP_MATERIAL_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 pub static JP_SELECT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static JP_PAR_PLANES_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static JP_PAR_STRIPS_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static JP_COL_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static JP_COL_MISSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // cont-142 material micro-profiler (timers run when gen.prof.enabled, i.e.
 // CRUS_PROFILE=1): split the material walk into the material_row4 fast path
@@ -546,6 +634,23 @@ fn jni_prof_accum(before: &Prof, after: &Prof, wall_ns: u64) {
     JP_SELECT_NS.fetch_add(after.select_ns - before.select_ns, Relaxed);
     JP_PAR_PLANES_NS.fetch_add(after.par_planes_ns - before.par_planes_ns, Relaxed);
     JP_PAR_STRIPS_NS.fetch_add(after.par_strips_ns - before.par_strips_ns, Relaxed);
+    JP_COL_HITS.fetch_add(after.col_hits.saturating_sub(before.col_hits), Relaxed);
+    JP_COL_MISSES.fetch_add(after.col_misses.saturating_sub(before.col_misses), Relaxed);
+}
+
+/// Zero the global JNI prof accumulators (benches call after warmup).
+pub fn reset_jni_prof() {
+    use std::sync::atomic::Ordering::Relaxed;
+    JP_FILLS.store(0, Relaxed);
+    JP_WALL_NS.store(0, Relaxed);
+    JP_SLICE_NS.store(0, Relaxed);
+    JP_CELLFILL_NS.store(0, Relaxed);
+    JP_MATERIAL_NS.store(0, Relaxed);
+    JP_SELECT_NS.store(0, Relaxed);
+    JP_PAR_PLANES_NS.store(0, Relaxed);
+    JP_PAR_STRIPS_NS.store(0, Relaxed);
+    JP_COL_HITS.store(0, Relaxed);
+    JP_COL_MISSES.store(0, Relaxed);
 }
 
 /// Compact one-line snapshot for the plugin stats command.
@@ -554,7 +659,7 @@ pub fn jni_prof_snapshot() -> String {
     let n = JP_FILLS.load(Relaxed).max(1) as f64;
     let f = |a: &std::sync::atomic::AtomicU64| a.load(Relaxed) as f64 / n / 1e6;
     format!(
-        "jni_prof[fills={} wall={:.2}ms slice={:.2} cellfill={:.2} material={:.2} select={:.2} par_planes={:.2} par_strips={:.2}]",
+        "jni_prof[fills={} wall={:.2}ms slice={:.2} cellfill={:.2} material={:.2} select={:.2} par_planes={:.2} par_strips={:.2} colh={} colm={} lanes={}]",
         JP_FILLS.load(Relaxed),
         f(&JP_WALL_NS),
         f(&JP_SLICE_NS),
@@ -563,6 +668,9 @@ pub fn jni_prof_snapshot() -> String {
         f(&JP_SELECT_NS),
         f(&JP_PAR_PLANES_NS),
         f(&JP_PAR_STRIPS_NS),
+        JP_COL_HITS.load(Relaxed),
+        JP_COL_MISSES.load(Relaxed),
+        SLICE_LANES.load(Relaxed),
     )
 }
 
@@ -930,6 +1038,15 @@ impl<'e> ChunkGen<'e> {
                 .unwrap_or(1)
                 .min(16),
             slice_lanes,
+            col_cache: std::sync::Arc::new(std::sync::Mutex::new(ColCacheInner::new(
+                std::env::var("CRUS_COL_CACHE")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(640),
+            ))),
+            col_scratch: Vec::new(),
+            col_hits: 0,
+            col_misses: 0,
         }
     }
 
@@ -941,12 +1058,15 @@ impl<'e> ChunkGen<'e> {
     fn pick_slice_lanes(env: &Env, compiled: &Compiled) -> usize {
         let forced = std::env::var("CRUS_LANES").ok().and_then(|v| v.parse::<usize>().ok());
         if forced == Some(16) {
+            SLICE_LANES.store(16, std::sync::atomic::Ordering::Relaxed);
             return 16;
         }
         if forced == Some(8) {
+            SLICE_LANES.store(8, std::sync::atomic::Ordering::Relaxed);
             return 8;
         }
         if std::env::var("CRUS_LANES").ok().and_then(|v| v.parse::<usize>().ok()) == Some(4) {
+            SLICE_LANES.store(4, std::sync::atomic::Ordering::Relaxed);
             return 4;
         }
         let children = compiled.interp_children.clone();
@@ -986,7 +1106,7 @@ impl<'e> ChunkGen<'e> {
         // Xeon (f32micro: 17.38 vs 16.77 ns/sample; vbench fill +1.2ms) — the
         // octave walk is per-lane cell_grads/gradient-gather bound, not
         // vector-arithmetic bound. 16 stays an explicit CRUS_LANES=16 option.
-        let try16 = false;
+        let try16 = true;
         let _ = time(4, &mut out, &mut sink);
         let _ = time(8, &mut out, &mut sink);
         let _ = if try16 { time(16, &mut out, &mut sink) } else { 0.0 };
@@ -1008,6 +1128,7 @@ impl<'e> ChunkGen<'e> {
         } else {
             4
         };
+        SLICE_LANES.store(pick as u32, std::sync::atomic::Ordering::Relaxed);
         if std::env::var("CRUS_DEBUG_LANES").is_ok() {
             eprintln!("[crussty] slice lanes calibration: 4={d4:.0}ns 8={d8:.0}ns 16={d16:.0}ns -> {pick} (sink={sink})");
         }
@@ -1754,6 +1875,10 @@ impl<'e> ChunkGen<'e> {
             no_ore: self.no_ore,
             slice_threads: self.slice_threads,
             slice_lanes: self.slice_lanes,
+            col_cache: std::sync::Arc::clone(&self.col_cache),
+            col_scratch: Vec::new(),
+            col_hits: 0,
+            col_misses: 0,
         }
     }
 
@@ -2599,6 +2724,8 @@ impl<'e> ChunkGen<'e> {
         p.blocks_subst_neg = self.prof.blocks_subst_neg;
         p.blocks_ore_reached = self.prof.blocks_ore_reached;
         p.blocks_aquifer_air = self.prof.blocks_aquifer_air;
+        p.col_hits = self.col_hits;
+        p.col_misses = self.col_misses;
         self.prof = p;
     }
 
@@ -3317,8 +3444,6 @@ impl<'e> ChunkGen<'e> {
     /// evaluated at the (x, y, z) corner (Mode::Slice — child direct).
     pub fn fill_slice(&mut self, start_cell_x: i32, first_cell_z: i32, is_first: bool) {
         let corner_x = start_cell_x * self.cell_width as i32;
-        let cw = self.cell_width as i32;
-        let ch = self.cell_height as i32;
         let nz = self.cell_count_xz as usize + 1;
         let ny = self.cell_count_y as usize + 1;
         let nslots = self.interp_children.len();
@@ -3346,24 +3471,22 @@ impl<'e> ChunkGen<'e> {
         // per-WKind probe). Bit-exact: plane values are pure functions of
         // the corner points; this is the CI-judged production eval path
         // (eval4/8 lane-identical arithmetic + eval4_matches_scalar_eval).
+        //
+        // Column-cache layer: corner values are pure WORLD functions, so a
+        // column (x, z) computed by ANY neighboring fill is reusable here
+        // bit-exactly. Evaluation happens per column (eval_col_into — the
+        // same lane kernels as eval_plane_batched, single column); a fresh
+        // BatchMemo per call keeps Cache2d/FlatCache column dedup alive for
+        // the whole plane (world-keyed entries, serial-checked stamps).
         let plane_len = nslots * total;
         let mut buf = std::mem::take(&mut self.plane_scratch);
         buf.clear();
         buf.resize(plane_len, 0.0);
-        Self::eval_plane_into_pub(
-            self.env,
-            &self.compiled,
-            &self.interp_children,
-            corner_x,
-            first_cell_z,
-            self.cell_count_xz as usize,
-            self.cell_count_y as usize,
-            self.cell_noise_min_y,
-            cw,
-            ch,
-            self.slice_lanes,
-            &mut buf,
-        );
+        match self.slice_lanes {
+            16 => self.fill_slice_cached::<16>(corner_x, first_cell_z, is_first, &mut buf),
+            8 => self.fill_slice_cached::<8>(corner_x, first_cell_z, is_first, &mut buf),
+            _ => self.fill_slice_cached::<4>(corner_x, first_cell_z, is_first, &mut buf),
+        }
         // scatter into interp slices (layout [slot][z][y] matches exactly)
         for slot in 0..nslots {
             let slot_id = slot as u16;
@@ -3391,6 +3514,187 @@ impl<'e> ChunkGen<'e> {
                         println!("PLANE x={} z={} y={} s0={:016x} s1={:016x}", start_cell_x, z, y, v0.to_bits(), v1.to_bits());
                     }
                 }
+            }
+        }
+    }
+
+    /// Column-cached plane fill: one (x, z) column of corner values at a
+    /// time, all slots. Hit = memcpy from the shared cache; miss = the
+    /// production lane kernels (eval_col_into, bit-identical to the plane
+    /// path's per-column work). `buf` layout [slot][z][y], same as before.
+    fn fill_slice_cached<const G: usize>(
+        &mut self,
+        corner_x: i32,
+        first_cell_z: i32,
+        is_first: bool,
+        buf: &mut [f64],
+    ) {
+        let cw = self.cell_width as i32;
+        let ch = self.cell_height as i32;
+        let nz = self.cell_count_xz as usize + 1;
+        let ny = self.cell_count_y as usize + 1;
+        let nslots = self.interp_children.len();
+        let col_len = nslots * ny;
+        let mut colbuf = std::mem::take(&mut self.col_scratch);
+        if colbuf.len() != col_len {
+            colbuf.clear();
+            colbuf.resize(col_len, 0.0);
+        }
+        // fresh memo per plane (same lifetime as eval_plane_batched had per
+        // plane; its Cache2d col entries are world-keyed so they still dedup
+        // across the plane's 5 columns AND across columns of the same fill)
+        let mut memo = crate::density::BatchMemo::<G>::new(self.compiled.arena.len())
+            .with_cols(self.compiled.col_count as usize);
+        let interp = crate::density::InterpState::new(
+            self.compiled.interp_slots,
+            self.cell_count_xz,
+            self.cell_count_y,
+        );
+        let mut hits = 0u64;
+        let mut misses = 0u64;
+        let key_base = global_col_key(
+            self.env.seed,
+            std::sync::Arc::as_ptr(&self.compiled) as usize,
+            corner_x,
+            0,
+        );
+        for i in 0..nz {
+            let corner_z = (first_cell_z + i as i32) * cw;
+            let k = key_base ^ (corner_z as i64);
+            // short critical sections ONLY (lookup / insert) — never hold the
+            // lock across eval_col_into or two workers would serialize.
+            let hit = {
+                let cache = col_cache_locked();
+                cache
+                    .as_ref()
+                    .and_then(|c| c.get(k))
+                    .filter(|v| v.len() == col_len)
+                    .map(|v| {
+                        for slot in 0..nslots {
+                            let dst = &mut buf[slot * nz * ny + i * ny..][..ny];
+                            dst.copy_from_slice(&v[slot * ny..(slot + 1) * ny]);
+                        }
+                    })
+                    .is_some()
+            };
+            if hit {
+                hits += 1;
+                continue;
+            }
+            misses += 1;
+            Self::eval_col_into(
+                self.env,
+                &self.compiled,
+                &self.interp_children,
+                corner_x,
+                first_cell_z + i as i32,
+                self.cell_count_y,
+                self.cell_noise_min_y,
+                cw,
+                ch,
+                &interp,
+                &memo,
+                &mut colbuf,
+            );
+            {
+                let mut cache = col_cache_locked();
+                if let Some(c) = cache.as_mut() {
+                    c.put(k, colbuf.clone());
+                }
+            }
+            for slot in 0..nslots {
+                let dst = &mut buf[slot * nz * ny + i * ny..][..ny];
+                dst.copy_from_slice(&colbuf[slot * ny..(slot + 1) * ny]);
+            }
+        }
+        self.col_scratch = colbuf;
+        self.col_hits += hits;
+        self.col_misses += misses;
+        // scatter buf into the interp slice (same semantics as the monolithic
+        // scatter in fill_slice)
+        for slot in 0..nslots {
+            let slot_id = slot as u16;
+            for i in 0..nz {
+                for y in 0..ny {
+                    let v = buf[slot * nz * ny + i * ny + y];
+                    if is_first {
+                        self.interp.slice0_set(slot_id, i, y, v);
+                    } else {
+                        self.interp.slice1_set(slot_id, i, y, v);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Single-column corner evaluation: the per-column loop body of
+    /// eval_plane_batched (identical point layout, y-group batching, slot
+    /// order and const-range shortcuts). `out` = [slot][y].
+    fn eval_col_into<const G: usize>(
+        env: &crate::density::Env,
+        compiled: &std::sync::Arc<crate::density::Compiled>,
+        children: &[u32],
+        corner_x: i32,
+        cell_z: i32,
+        cell_count_y: usize,
+        cell_noise_min_y: i32,
+        cw: i32,
+        ch: i32,
+        interp: &crate::density::InterpState,
+        memo: &crate::density::BatchMemo<G>,
+        out: &mut [f64],
+    ) {
+        let cols = cell_count_y + 1;
+        let y_batch = cols & !(G - 1);
+        let corner_z = cell_z * cw;
+        let mut y = 0usize;
+        while y < y_batch {
+            let mut pts = [crate::density::Pt { x: 0, y: 0, z: 0 }; G];
+            for (k, pt) in pts.iter_mut().enumerate() {
+                *pt = crate::density::Pt {
+                    x: corner_x,
+                    y: (y + k) as i32 * ch + cell_noise_min_y * ch,
+                    z: corner_z,
+                };
+            }
+            for (slot, &child) in children.iter().enumerate() {
+                let fy = if yconst_off() { f64::NAN } else { pts[0].y as f64 };
+                let group_c = if let Some((lo, hi, c)) =
+                    compiled.interp_slot_y_const.get(slot).and_then(|m| *m)
+                {
+                    if fy >= hi {
+                        Some(c)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+                .or_else(|| {
+                    match compiled.node_y_upper_const.get(child as usize).and_then(|m| *m) {
+                        Some((y0, crate::density::YUpperConst::Val(v))) if fy >= y0 => Some(v),
+                        _ => None,
+                    }
+                });
+                if let Some(c) = group_c {
+                    let base = slot * cols + y;
+                    out[base..base + G].fill(c);
+                    continue;
+                }
+                let v = env.eval_batch::<G>(compiled, child, &pts, crate::density::Mode::Slice, interp, memo);
+                out[slot * cols + y..][..G].copy_from_slice(&v);
+            }
+            y += G;
+        }
+        for y in y_batch..cols {
+            let corner_y = (y as i32 + cell_noise_min_y) * ch;
+            let pt = crate::density::Pt { x: corner_x, y: corner_y, z: corner_z };
+            for (slot, &child) in children.iter().enumerate() {
+                let v = match slot_corner_const(compiled, slot, child, corner_y) {
+                    Some(c) => c,
+                    None => env.eval(compiled, child, pt, crate::density::Mode::Slice, interp, None),
+                };
+                out[slot * cols + y] = v;
             }
         }
     }
