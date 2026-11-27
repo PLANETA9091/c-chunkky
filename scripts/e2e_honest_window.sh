@@ -20,7 +20,7 @@ mkdir -p world/datapacks
 cp -f "$REPO/server_datapacks/01_tectonic.zip" world/datapacks/01_tectonic.dpz
 cp -f "$REPO/server_datapacks/02_terralith.zip" world/datapacks/02_terralith.dpz
 
-WT="$(nproc)"
+WT="${CRUS_WORKER_THREADS:-$(( $(nproc) + 1 ))}"
 PGEN_YML=config/paper-global.yml
 [ -f "$PGEN_YML" ] && sed -i -E "s/^([[:space:]]*)worker-threads:.*$/\1worker-threads: ${WT}/" "$PGEN_YML"
 
@@ -33,7 +33,7 @@ echo $! > fifo.pid
 CRUS_NATIVE_CARVERS=1 CRUS_CARVE_IN_FILL=1 CRUS_NATIVE_DECO=1 CRUS_BIOME_GRID=1 \
 CRUS_PROFILE="${PROF:-1}" CRUS_FILL_THREADS="${FT:-1}" CRUS_COL_CACHE="${CC:-}" \
 CRUS_LANES="${LN:-}" CRUS_F32NOISE="${F32:-}" \
-  setsid "$JAVA" -Xms2G -Xmx3G -Djava.library.path="$REPO/native/target/release" \
+  setsid "$JAVA" -Xms2G -Xmx2G ${JVM_FLAGS_ADD:-} -Djava.library.path="$REPO/native/target/release" \
     -jar "$SRV/paper.jar" nogui < run.in > run.out 2>&1 &
 echo $! > server.pid
 

@@ -42,6 +42,9 @@ const REG: &[(u16, &str)] = &[
 ];
 
 fn main() {
+    if std::env::var("CRUS_PROFILE").as_deref() == Ok("1") {
+        crussty_chunkgen::density::PROF_ON.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let args: Vec<String> = std::env::args().collect();
     let mut roots = Vec::new();
     let mut pos = Vec::new();
@@ -109,5 +112,30 @@ fn main() {
         }
     }
     std::fs::write(&outfile, s).expect("write");
+    if std::env::var("CRUS_AQDBG").as_deref() == Ok("1") {
+        use std::sync::atomic::Ordering::Relaxed;
+        eprintln!(
+            "[aqdbg] subst_calls={} hits={} sv0={} notsame={} scans={} scan_ms={:.2}",
+            crussty_chunkgen::nochunk::AQ_SUBSTANCE_CALLS.load(Relaxed),
+            crussty_chunkgen::nochunk::AQ_SUMMARY_HITS.load(Relaxed),
+            crussty_chunkgen::nochunk::AQ_SV0.load(Relaxed),
+            crussty_chunkgen::nochunk::AQ_NOTSAME.load(Relaxed),
+            crussty_chunkgen::nochunk::AQ_SUMMARY_MISS.load(Relaxed),
+            crussty_chunkgen::nochunk::AQ_SCAN_NS.load(Relaxed) as f64 / 1e6
+        );
+        eprintln!(
+            "[aqdbg] fluid_calls={} fluid_ms={:.2} prelim_ns={:.2}ms",
+            crussty_chunkgen::nochunk::AQ_FLUID_CALLS.load(Relaxed),
+            crussty_chunkgen::nochunk::AQ_FLUID_NS.load(Relaxed) as f64 / 1e6,
+            crussty_chunkgen::nochunk::PRELIM_NS.load(Relaxed) as f64 / 1e6
+        );
+        eprintln!(
+            "[aqdbg] row4_rows={} taken={} fb={} fb_ms={:.2}",
+            crussty_chunkgen::nochunk::MT_ROW4_ROWS.load(Relaxed),
+            crussty_chunkgen::nochunk::MT_ROW4_TAKEN.load(Relaxed),
+            crussty_chunkgen::nochunk::MT_FB_ROWS.load(Relaxed),
+            crussty_chunkgen::nochunk::MT_ROW4_NS.load(Relaxed) as f64 / 1e6
+        );
+    }
     eprintln!("wrote {outfile}");
 }

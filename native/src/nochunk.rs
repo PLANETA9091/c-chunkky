@@ -616,6 +616,8 @@ pub static AQ_SUMMARY_HITS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub static AQ_SUMMARY_MISS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+pub static AQ_SV0: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static AQ_NOTSAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static AQ_SCAN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PRELIM_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static AQ_HIT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -654,6 +656,18 @@ pub static MT_ROW4_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 pub static MT_ROW4_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static MT_ROW4_TAKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static MT_FB_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// cont-155 mixed-row fast path mode (CRUS_MIXROW): 0=off, 1=full, 2=neg-only.
+fn mixrow_mode() -> u8 {
+    static V: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *V.get_or_init(|| match std::env::var("CRUS_MIXROW").as_deref() {
+        Ok("0") => 0u8,
+        Ok("2") => 2u8,
+        Ok("3") => 3u8,
+        Ok("4") => 4u8,
+        _ => 1u8,
+    })
+}
 
 /// Accumulate one fill's phase deltas into the global JNI prof.
 fn jni_prof_accum(before: &Prof, after: &Prof, wall_ns: u64) {
@@ -1051,7 +1065,7 @@ impl<'e> ChunkGen<'e> {
             pipeline_forced,
             interp,
             cell_cache: vec![0.0; cell_width * cell_height * cell_width],
-            prelim: std::sync::Arc::new(PrelimCache::new()),
+            prelim: global_prelim(),
             plane_cache_x: i64::MIN,
             plane_cache_z: i32::MIN,
             plane_cache: Vec::new(),
@@ -1466,6 +1480,24 @@ const PRELIM_SLOTS: usize = 1 << PRELIM_SLOT_BITS;
 struct PrelimCache {
     slots: Vec<std::sync::atomic::AtomicU64>,
     mask: u64,
+}
+
+/// cont-155: the preliminary-surface cache is PROCESS-GLOBAL (shared by
+/// every ctx in the pool and every fill thread). Values are pure per
+/// quart column (immutable world constants), so sharing is bit-neutral;
+/// the ctx pool alternates ctxs across streaming chunks, and a per-ctx
+/// cache lost the ±1-chunk ring overlap between consecutive fills.
+fn global_prelim() -> std::sync::Arc<PrelimCache> {
+    static G: std::sync::OnceLock<std::sync::Arc<PrelimCache>> = std::sync::OnceLock::new();
+    G.get_or_init(|| {
+        std::sync::Arc::new(PrelimCache {
+            slots: (0..PRELIM_SLOTS * 4)
+                .map(|_| std::sync::atomic::AtomicU64::new(0))
+                .collect(),
+            mask: (PRELIM_SLOTS * 4 - 1) as u64,
+        })
+    })
+    .clone()
 }
 
 impl PrelimCache {
@@ -3915,7 +3947,262 @@ impl<'e> ChunkGen<'e> {
             return true;
         }
         if s0 > 0.0 || s1 > 0.0 || s2 > 0.0 || s3 > 0.0 {
-            return false;
+            // cont-155 MIXED-SIGN ROW: some lanes solid (>0: aquifer None,
+            // ore rule), some air/fluid (<=0: aquifer decides). Vanilla walks
+            // per block; the per-block costs (aquifer summary hit + ore vein)
+            // dominate the material budget on these rows (4.4us/row measured).
+            // Fast path conditions, per lane class:
+            //  - >0 lanes: vanilla aquifer early-returns None (sched=false),
+            //    then the ore rule — batched here exactly like the all-pos
+            //    row above (toggle row4 + pre-gate restricted to pos lanes).
+            //  - <=0 lanes: when every neg lane's base cell summary is
+            //    cached, "same" and the row shares ONE fluid status, the
+            //    vanilla verdict is status.at(y) with shouldScheduleFluidUpdate
+            //    provably false (fluid updates only fire at status boundaries
+            //    / the water-over-lava line — both excluded below).
+            // Side effects: sched=false for the whole row; no marks pushed.
+            // Any unresolved condition (uncached/mixed cell, water-over-lava,
+            // bh mode) falls back to the exact per-block path.
+            if self.bh_mode {
+                return false;
+            }
+            let base_i = (((self.cell_height as i32 - 1 - iy) as usize) * cw
+                + ix as usize)
+                * cw;
+            let mut neg_mask = 0u8;
+            for iz in 0..4usize {
+                if self.cell_cache[base_i + iz] <= 0.0 {
+                    neg_mask |= 1u8 << iz;
+                }
+            }
+            debug_assert!(neg_mask != 0);
+            // CRUS_MIXROW bisect: 0=off, 1=full, 2=neg-only/pos-per-block,
+            // 3=full without the all-die pre-gate shortcut, 4=full without
+            // ore_finish batching (pos lanes via the full vein path).
+            match mixrow_mode() {
+                0 => return false,
+                2 => {
+                    // neg lanes via the same uniform-summary verdict; pos
+                    // lanes via the exact per-block material rule.
+                    if self.bh_mode {
+                        return false;
+                    }
+                    let bi2 = (((self.cell_height as i32 - 1 - iy) as usize)
+                        * cw
+                        + ix as usize)
+                        * cw;
+                    let mut nm2 = 0u8;
+                    for iz in 0..4usize {
+                        if self.cell_cache[bi2 + iz] <= 0.0 {
+                            nm2 |= 1u8 << iz;
+                        }
+                    }
+                    if nm2 == 0 || nm2 == 0xF {
+                        return false;
+                    }
+                    let gx = floor_div(block_x - 5, 16);
+                    let gy = floor_div(block_y + 1, 12);
+                    let lava_line =
+                        aquifer_at(self.global_fluid(block_y), block_y) == LAVA;
+                    let mut neg_status: Option<FluidStatus> = None;
+                    if !lava_line {
+                        let mut gz_prev = i32::MIN;
+                        for iz in 0..4usize {
+                            if nm2 & (1u8 << iz) == 0 {
+                                continue;
+                            }
+                            let gz = floor_div((block_z0 + iz as i32) - 5, 16);
+                            if gz != gz_prev {
+                                gz_prev = gz;
+                                let base = self.aquifer.index(gx, gy, gz);
+                                let sv =
+                                    self.aquifer.summary[base].0.load(Ordering::Relaxed);
+                                if sv == 0 {
+                                    return false;
+                                }
+                                let (same, s) = unpack_summary(sv);
+                                if !same {
+                                    return false;
+                                }
+                                match neg_status {
+                                    None => neg_status = Some(s),
+                                    Some(prev) if prev == s => {}
+                                    Some(_) => return false,
+                                }
+                            }
+                        }
+                    }
+                    let neg_block = if lava_line {
+                        LAVA
+                    } else {
+                        match neg_status {
+                            Some(s) => aquifer_at(s, block_y),
+                            None => return false,
+                        }
+                    };
+                    if neg_block == WATER
+                        && aquifer_at(self.global_fluid(block_y - 1), block_y - 1)
+                            == LAVA
+                    {
+                        return false;
+                    }
+                    self.sched = false;
+                    for iz in 0..4usize {
+                        let out_idx = base_out + (iz * 16);
+                        if nm2 & (1u8 << iz) != 0 {
+                            out[out_idx] = neg_block;
+                        } else {
+                            let block_z = block_z0 + iz as i32;
+                            let block = self.material_from_substance(
+                                block_x,
+                                block_y,
+                                block_z,
+                                self.cell_cache[bi2 + iz],
+                            );
+                            if block != AIR {
+                                out[out_idx] = block;
+                            }
+                        }
+                    }
+                    return true;
+                }
+                _ => {}
+            }
+            let gx = floor_div(block_x - 5, 16);
+            let gy = floor_div(block_y + 1, 12);
+            // vanilla order for <=0 lanes: the global-fluid lava line wins
+            // BEFORE any aquifer/summary consult (createFluidPicker early
+            // return in NoiseBasedAquifer.computeSubstance).
+            let neg_block = if aquifer_at(self.global_fluid(block_y), block_y) == LAVA {
+                LAVA
+            } else {
+                let mut neg_status: Option<FluidStatus> = None;
+                let mut gz_prev = i32::MIN;
+                for iz in 0..4usize {
+                    if neg_mask & (1u8 << iz) == 0 {
+                        continue;
+                    }
+                    let gz = floor_div((block_z0 + iz as i32) - 5, 16);
+                    if gz != gz_prev {
+                        gz_prev = gz;
+                        let base = self.aquifer.index(gx, gy, gz);
+                        let sv = self.aquifer.summary[base].0.load(Ordering::Relaxed);
+                        if sv == 0 {
+                            return false; // uncached — per-block path populates
+                        }
+                        let (same, s) = unpack_summary(sv);
+                        if !same {
+                            return false;
+                        }
+                        match neg_status {
+                            None => neg_status = Some(s),
+                            Some(prev) if prev == s => {}
+                            Some(_) => return false, // mixed statuses across neg lanes
+                        }
+                    }
+                }
+                match neg_status {
+                    Some(s) => aquifer_at(s, block_y),
+                    None => return false,
+                }
+            };
+            if neg_block == WATER
+                && aquifer_at(self.global_fluid(block_y - 1), block_y - 1) == LAVA
+            {
+                // y == -54 water-above-lava: per-block scan_two_smallest
+                return false;
+            }
+            self.sched = false;
+            // pos lanes: ore path (mirrors the all-pos branch above)
+            let ore_skip = !self.ore_veins_enabled
+                || self.no_ore
+                || block_y > 50
+                || block_y < -60;
+            let ds: [Option<f64>; 4] = if ore_skip {
+                [None; 4]
+            } else {
+                self.ore_toggle_row4(block_x, block_y, block_z0)
+            };
+            if !ore_skip && mixrow_mode() != 3 {
+                // cont-35 pre-gate restricted to pos lanes: when every pos
+                // lane dies the vanilla ore_finish kill branch, they are all
+                // STONE (neg lanes keep their aquifer block).
+                let mut all_die = true;
+                for l in 0..4 {
+                    if neg_mask & (1u8 << l) != 0 {
+                        continue;
+                    }
+                    if let Some(d) = unsafe { *ds.as_ptr().add(l) } {
+                        let (ty_min_y, ty_max_y) =
+                            if d > 0.0 { (0i32, 50i32) } else { (-60i32, -8i32) };
+                        let i1 = ty_max_y - block_y;
+                        let i2 = block_y - ty_min_y;
+                        if i2 < 0 || i1 < 0 {
+                            continue;
+                        }
+                        let min_edge = i1.min(i2);
+                        let d1 = mth_clamped_map(min_edge as f64, 0.0, 20.0, -0.2, 0.0);
+                        if d.abs() + d1 < (0.4f32 as f64) {
+                            all_die = false;
+                            break;
+                        }
+                    } else {
+                        // None lane goes through ore_row_block (full vein
+                        // path) — treat as live for gating purposes.
+                        all_die = false;
+                        break;
+                    }
+                }
+                if all_die {
+                    for iz in 0..4usize {
+                        let out_idx = base_out + (iz * 16);
+                        if neg_mask & (1u8 << iz) != 0 {
+                            out[out_idx] = neg_block;
+                        } else {
+                            out[out_idx] = STONE;
+                        }
+                    }
+                    return true;
+                }
+            }
+            let row_frac = if self.ore_interp.is_some() {
+                let cw = self.cell_width as i32;
+                let ch = self.cell_height as i32;
+                let x0 = floor_div(block_x, cw) * cw;
+                let y0 = floor_div(block_y, ch) * ch;
+                Some((
+                    (block_x - x0) as f64 * (1.0f64 / cw as f64),
+                    (block_y - y0) as f64 * (1.0f64 / ch as f64),
+                    1.0f64 / cw as f64,
+                ))
+            } else {
+                None
+            };
+            for iz in 0..4usize {
+                let out_idx = base_out + (iz * 16);
+                if neg_mask & (1u8 << iz) != 0 {
+                    out[out_idx] = neg_block;
+                } else {
+                    let block_z = block_z0 + iz as i32;
+                    let block = match unsafe { *ds.as_ptr().add(iz) } {
+                        Some(d) if mixrow_mode() != 4 => {
+                            let pt = Pt { x: block_x, y: block_y, z: block_z };
+                            let (fx, fy, fz) = match row_frac {
+                                Some((dx, dy, dz_step)) => {
+                                    (dx, dy, iz as f64 * dz_step)
+                                }
+                                None => (0.0, 0.0, 0.0),
+                            };
+                            self.ore_finish(pt, d, fx, fy, fz).unwrap_or(STONE)
+                        }
+                        _ => self.ore_row_block(block_x, block_y, block_z),
+                    };
+                    if block != AIR {
+                        out[out_idx] = block;
+                    }
+                }
+            }
+            return true;
         }
         let global = self.global_fluid(block_y);
         let g_at = aquifer_at(global, block_y);
@@ -4111,6 +4398,11 @@ impl<'e> ChunkGen<'e> {
                 };
             return Some(block);
             }
+            if hit_t0.is_some() {
+                AQ_NOTSAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        } else if hit_t0.is_some() {
+            AQ_SV0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Single-pass scan in the exact vanilla order (i10 outer, i11 middle,
@@ -4134,8 +4426,18 @@ impl<'e> ChunkGen<'e> {
         }
         let stride_z = self.aquifer.grid_size_x as usize;
         let stride_y = stride_z * self.aquifer.grid_size_z as usize;
+        // cont-155: when the base cell's summary already recorded a
+        // non-uniform neighborhood, the all-same status resolution is
+        // SKIPPED (its only product — the (true, first) verdict — is already
+        // known false, and it is the expensive part: up to 12
+        // compute_aquifer_fluid calls, each pulling preliminary surface
+        // levels over a ±1-chunk ring). The race winners' statuses resolve
+        // lazily via aquifer_status below (grid-memoized, byte-identical
+        // values to what the eager path would have stored — the fluid
+        // status of a cell is a pure function of its source position).
+        let known_notsame = sv != 0 && !unpack_summary(sv).0;
+        let mut all_same = !known_notsame;
         let mut first: FluidStatus = (0, 0);
-        let mut all_same = true;
         let mut i6 = i64::MAX;
         let mut i7 = i64::MAX;
         let mut i8 = i64::MAX;
