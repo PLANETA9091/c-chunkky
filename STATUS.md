@@ -2,7 +2,33 @@
 
 Компактная карточка состояния кампании. Полная хроника — `worklog-session.md`
 (записи cont-XX по датам). Этот файл обновляется при изменении КАРТЫ, не при
-каждом тике. Последнее обновление: cont-155.
+каждом тике. Последнее обновление: cont-158.
+
+## CONT-158 КАРТА (главное)
+
+- **CARVERS-ГЕЙТ FAIL ДИЗДОКАЗАН КАК ПАРИТИ-ДОЛГ**: carvebase (ДВЕ загрузки
+  идентичного OFF-конфига) воспроизводит те же strict-дельты (CLAY +995,
+  GRASS −985, SAND −572) — источник = boot-order кросс-чанковые фиче-записи
+  нативной деки (clay диски рек, leaf_litter патчи, кроны), НЕ topMaterial263
+  (bandlands-атрибуция cont-157-addendum снята). Surface-пара CI = bit-equal;
+  carve-геометрия signed: WATER +0.028%, LAVA −0.019%, STONE −0.021%.
+- **LIVE-BAND ГЕЙТ**: carvebase CI-лест (cb_* теги, non-fatal) измеряет полосу
+  boot-order шума в том же ранe; carvers-вердикт = max(4×band+256, 8% count,
+  1024) для SOFT + strict-остатков. Локально carvebase→carvers PASS; CI-дельты
+  cont-157 (CLAY +2370) внутри полосы. Полоса расширилась с cont-151 (±66)
+  до ~±1K/64 чанков — 26.3 фиче-сет дисков/патчей усилил интерференцию.
+- **PRELIM RACE HANDSHAKE** (PrelimCache.claim/spin_wait, CAS PENDING на
+  пустой слот): ~3.3x дубликатов сканов (198 vs 64 колонки) устранено;
+  get/put кодировки не тронуты (MAX-квирк сохранён). 102/102 lib; fill263
+  golden BIT-EXACT (129273 cells, marks MATCH). Честное окно паки relfast:
+  e2e 37.70 (anchor 38.52).
+- **E2E-СТРУКТУРА КВАНТОВАНА** (контур к 5ms/ch): pack warm fill offline
+  4.80ms; carve tail offline = mask 0.30 + apply 1.4 (НЕ рычаг; CI carver
+  3.57 = 2x inflate); CI 4-core: OFF 16.40 / ON 24.85 (ramp ~350ms константа,
+  deco_tail 209/466, marks 21778 → fluid post-processing в дрене, cover
+  34.7% ON vs 47.4% OFF). К 5ms/ch на CI: ramp 350→150 + fill warm 4.8→2.5
+  (slice 2x) + deco 209→150 — три крупных айтема, по числам в worklog
+  cont-158 addendum B.
 
 ## CONT-152 КАРТА (главное)
 
