@@ -1369,8 +1369,18 @@ impl<'e> ChunkGen<'e> {
         let bx = (x >> 2) << 2;
         let bz = (z >> 2) << 2;
         let key = ((bx as u64 & 0x3FF_FFFF) << 26) | (bz as u64 & 0x3FF_FFFF);
-        if let Some(v) = self.prelim.get(key) {
-            return v;
+        // cont-158: race handshake — one thread computes per quart column,
+        // the racing sibling waits for its put instead of duplicating the
+        // full scan (~3.3x duplicate scans measured).
+        match self.prelim.claim(key) {
+            PrelimClaim::Ready(v) => return v,
+            PrelimClaim::ReadySoon => {
+                if let Some(v) = self.prelim.spin_wait(key) {
+                    return v;
+                }
+                // sibling stalled/dead — scan ourselves (bit-identical)
+            }
+            PrelimClaim::Mine => {}
         }
         // MC 26.3: the preliminary surface is a dedicated DF tree (aquifers.
         // surface_level, find_top_surface-based) sampled at the quart-snapped
@@ -1564,11 +1574,91 @@ impl PrelimCache {
     }
 
     #[inline]
+    fn idx(&self, key: u64) -> usize {
+        ((key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 24) & self.mask) as usize
+    }
+
+    /// cont-158: PENDING marker — the low 9 bits all-ones. Real entries encode
+    /// (level+65) & 0x1FF; the i32::MAX quirk encodes 0x100 (cont-155 NOTE),
+    /// real levels stay < 0x1FF for every world y range in play (level <= 445
+    /// for y <= 380). If a world ever produced field 0x1FF it would decode as
+    /// 446 — the marker only ever occupies EMPTY slots and a waiter treats
+    /// 0x1FF as "still pending", so the worst case is a re-scan, never a
+    /// wrong value.
+    const PENDING_FIELD: u64 = 0x1FF;
+
+    /// Race handshake (cont-158): two fill threads racing on the same quart
+    /// column both miss and both scan (~3.3x duplicate scans measured: 214
+    /// scans/ch over 64 columns). One thread CASes the EMPTY slot to PENDING
+    /// and scans; the loser spins briefly for the winner's put instead of
+    /// burning a duplicate scan. The marker never overwrites a valid value,
+    /// a dead scanner self-heals (bounded spin -> scan anyway — values are
+    /// pure, any writer's put is identical).
+    #[inline]
+    fn claim(&self, key: u64) -> PrelimClaim {
+        use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+        let idx = self.idx(key);
+        let e = self.slots[idx].load(Relaxed);
+        if e != 0 && (e >> 9) == key && (e & 0x1FF) != Self::PENDING_FIELD {
+            return PrelimClaim::Ready(((e & 0x1FF) as i32) - 65);
+        }
+        if e == 0 {
+            let pending = (key << 9) | Self::PENDING_FIELD;
+            return match self.slots[idx].compare_exchange(
+                0,
+                pending,
+                Relaxed,
+                Relaxed,
+            ) {
+                Ok(_) => PrelimClaim::Mine,
+                Err(cur) => self.classify(cur, key),
+            };
+        }
+        self.classify(e, key)
+    }
+
+    #[inline]
+    fn classify(&self, e: u64, key: u64) -> PrelimClaim {
+        if e == 0 {
+            return PrelimClaim::Mine; // evict path — same semantics as today
+        }
+        if (e >> 9) == key {
+            if (e & 0x1FF) == Self::PENDING_FIELD {
+                PrelimClaim::ReadySoon
+            } else {
+                PrelimClaim::Ready(((e & 0x1FF) as i32) - 65)
+            }
+        } else {
+            PrelimClaim::Mine // other key occupies — evict (today's semantics)
+        }
+    }
+
+    /// Bounded wait for the sibling scanner's put (cont-158). Returns None on
+    /// timeout — the caller scans itself (duplicate, bit-identical).
+    #[inline]
+    fn spin_wait(&self, key: u64) -> Option<i32> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let idx = self.idx(key);
+        for i in 0..40_000u32 {
+            let e = self.slots[idx].load(Relaxed);
+            if e != 0 && (e >> 9) == key && (e & 0x1FF) != Self::PENDING_FIELD {
+                return Some(((e & 0x1FF) as i32) - 65);
+            }
+            if i % 256 == 255 {
+                std::hint::spin_loop();
+            }
+        }
+        None
+    }
+
+    #[inline]
     fn get(&self, key: u64) -> Option<i32> {
         use std::sync::atomic::Ordering::Relaxed;
-        let idx = (key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 24) & self.mask;
-        let e = self.slots[idx as usize].load(Relaxed);
-        if e != 0 && (e >> 9) == key {
+        let e = self.slots[self.idx(key)].load(Relaxed);
+        if e != 0
+            && (e >> 9) == key
+            && (e & 0x1FF) != Self::PENDING_FIELD
+        {
             Some(((e & 0x1FF) as i32) - 65)
         } else {
             None
@@ -1578,10 +1668,18 @@ impl PrelimCache {
     #[inline]
     fn put(&self, key: u64, level: i32) {
         use std::sync::atomic::Ordering::Relaxed;
-        let idx = (key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 24) & self.mask;
         let e = (key << 9) | (level + 65) as u64;
-        self.slots[idx as usize].store(e, Relaxed);
+        self.slots[self.idx(key)].store(e, Relaxed);
     }
+}
+
+enum PrelimClaim {
+    /// a valid value is cached
+    Ready(i32),
+    /// a sibling is scanning this key — spin briefly
+    ReadySoon,
+    /// we own the computation (empty slot claimed, or evict path)
+    Mine,
 }
 
 /// Persistent plane-evaluation worker: ONE long-lived thread per main

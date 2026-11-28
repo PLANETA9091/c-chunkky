@@ -8569,3 +8569,27 @@ Q6 — главный фронт до 5ms (cover->100% + busy<=10 — см. cont
   carve-геометрия ~0.03% + deco-order класс в толерансе).
 - e2e-рычаги (не трогались этим тиком): prelim band-skip (скан 4.71ms/ч = 96%
   substance), deco run-top batch (cliff_grass/springs), paper-side ramp/cover.
+
+## cont-158 addendum B: e2e-структура квантована (сандбокс #5, relfast)
+
+- Prelim race handshake (nochunk.rs PrelimCache.claim/spin_wait): CAS PENDING
+  на пустой слот, соперник ждёт put (bounded 40K), self-heal перепиской;
+  get/put кодировки не тронуты (MAX-квирк сохранён). 102/102 lib, fill263
+  golden BIT-EXACT (129273 cells, marks MATCH). Честное окно @3000,3000 паки
+  relfast: e2e 37.70 (anchor 38.52, шум бокса ±15%).
+- Оффлайн-профили (сандбокс #5): pack-lane warm fill p50 4.80ms (dpperf
+  n=128); vanilla server_fill 2.30; phases legacy material 7.02. Prelim scan
+  оффлайн = 4.27ms/fill COLD (198 сканов × 72 шага), сервер = amortized ~0.9
+  (глобальный кэш 64K перекрывает окно; дубликаты = гонки филлов — handshake).
+- CARVE TAIL (benchcarve, новый бин): mask pass 0.30ms/ch (2052 bits @1028),
+  apply_carvers 1.19-1.43ms/ch — НЕ рычаг (CI carver=3.57 = 2x inflate).
+- COL_CACHE на pack-lane: 4.88 → 4.79 (−2%, шум) — оф по умолчанию остаётся.
+- CI 4-core honest e2e (прошлый ран 1adb0429, референс): OFF-плечо 16.40
+  (span 2362, ramp 354, native 10.88, deco_tail 209, cover 47%), ON-плечо
+  24.85 (span 3579, ramp 349, carver 3.57, deco_tail 466, cover 34.7%).
+  ON−OFF = +8.45: carver 514ms + deco 257ms + ~450ms (marks 21778 → fluid
+  post-processing в дрене окна + cover-деградация).
+- Структура 5ms/ch на CI (= 720ms span): ramp 350→~150, fill 400×10.2/4 =
+  1020→~300 (warm 4.8→2.5 = slice 2x), deco 209→150. Каждое — крупный айтем.
+- Скрипт scripts/e2e_honest_window.sh: SRV теперь SRV_DIR-переопределяемый.
+- Новый бин native/src/bin/benchcarve.rs (mask/apply сплит-таймер).

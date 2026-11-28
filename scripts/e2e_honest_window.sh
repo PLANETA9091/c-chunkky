@@ -4,7 +4,7 @@
 # arm the honest window, forceload the measured 12x12 and snapshot stats.
 set -uo pipefail
 REPO=/home/z/my-project/c-faster
-SRV=/home/z/my-project/server263
+SRV="${SRV_DIR:-/home/z/my-project/server263}"
 JAVA=/home/z/tools/jdk-25.0.5.1+2/bin/java
 RCON="python3 $REPO/harness/rcon.py localhost 25576 crussty"
 W0X="${W0X:-3000}"; W0Z="${W0Z:-3000}"
