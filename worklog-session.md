@@ -8529,3 +8529,43 @@ Q6 — главный фронт до 5ms (cover->100% + busy<=10 — см. cont
 - Это НЕ регресс cont-156/157 (запечатано: 5/5 паковых + ваниль-чанк
   byte-equal против чистого b21f5bc5). Гейт инварианта честен: фикс
   бандландс-семпла = главный паритет-долг кампании.
+
+## cont-158 (2026-11-28, сандбокс #5): carvers-гейт FAIL = boot-order deco noise (диздоказ bandlands-атрибуции) + live-band гейт
+
+### Контекст
+- Восстановление сандбокса #5: клон HEAD e6db1707 (cont-157), paper.jar 26.3 b222
+  (sha256 f649771a... совпал), JDK 25.0.5.1 (tools/jdk25 + /home/z/tools symlink),
+  cargo registry пересоздан (битый кэш давал "failed to find jni-sys v0.4.1 in
+  path source"; rm -rf registry + fetch — сборка relfast 48.6s).
+
+### ДИЗДОКАЗАТЕЛЬСТВО addendum cont-157 (bandlands-атрибуция)
+- Локальный carvebase (ДВЕ загрузки ИДЕНТИЧНОГО OFF-конфига, 26.3, @16384 N=8,
+  relfast): STRICT-отказ ТОГО ЖЕ КЛАССА: CLAY +995, GRASS −985, SAND −572,
+  DIRT −405, GRAVEL +176. cont-157-addendum локализовал дельты в topMaterial263
+  (bandlands-сэмпл) — НЕВЕРНО: идентичные конфиги воспроизводят те же дельты
+  ⇒ источник = boot-order кросс-чанковые фиче-записи нативной деки (clay
+  диски рек, leaf_litter патчи, кроны деревьев), не парити карва.
+- Подтверждение: surface-пара CI 46068320259 = bit-equal PASS (движок surface
+  и topMaterial263 точны); signed carve-материалы в carvers-паре: WATER +0.028%,
+  LAVA −0.019%, STONE −0.021% — геометрия карва совпадает; CLAY/GRASS/SAND
+  дельты = фиче-класс (disk_clay/clay_pool — фиче-материалы).
+- Полоса шума расширилась с cont-151 (CLAY ±66) до ~±1K/64 чанка: 26.3 фиче-сет
+  дисков/патчей усилил кросс-чанковую интерференцию.
+
+### ФИКС ГЕЙТА (harness/ab263_ci.sh + ci.yml)
+- carvebase-пара: теги cb_*, вердикт non-fatal (она ИЗМЕРЯЕТ полосу), CI-лест
+  carvebase добавлен ПЕРЕД carvers + в артефакты (ab263_carvebase.log).
+- carvers-вердикт: live-band tolerance на материал = max(4×|d_cb|+256,
+  8% count, 1024) для SOFT-класса (DIRT/GRASS/WATER) и strict-остатков;
+  честность: реальный карв-репаинт брейк (hasGrass-колонка целиком) = >>10%
+  материала И каскад на STONE/AIR (те остаются 0.1%-класс) — не пройдёт.
+- Локальная валидация: carvebase → carvers PASS (band-теги в вердикте);
+  CI-дельты cont-157 (CLAY +2370...) — все внутри полосы.
+- ab263_ci.sh boot_run: java.library.path теперь dirname($SO) (SO_DIR честно
+  влиял только на existence-check — relfast-ноги падали в release).
+
+### Следующие
+- CI push → гейт зелёный → judge ≥99% якорь для 26.3 (surface bit-equal +
+  carve-геометрия ~0.03% + deco-order класс в толерансе).
+- e2e-рычаги (не трогались этим тиком): prelim band-skip (скан 4.71ms/ч = 96%
+  substance), deco run-top batch (cliff_grass/springs), paper-side ramp/cover.

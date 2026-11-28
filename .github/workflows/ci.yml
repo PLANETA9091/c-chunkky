@@ -179,6 +179,10 @@ jobs:
           set -o pipefail
           chmod +x harness/ab263_ci.sh
           SRV_DIR=server263 RCON_PORT=25576 bash harness/ab263_ci.sh surface 2>&1 | tee ab263_surface.log
+      - name: A/B carvebase (OFF-OFF boot-order noise band, non-fatal baseline)
+        run: |
+          set -o pipefail
+          SRV_DIR=server263 RCON_PORT=25576 bash harness/ab263_ci.sh carvebase 2>&1 | tee ab263_carvebase.log
       - name: A/B carvers (vanilla vs native carvers + topMaterial)
         run: |
           set -o pipefail
@@ -370,6 +374,7 @@ jobs:
           name: ab263-${{ github.run_id }}
           path: |
             ab263_surface.log
+            ab263_carvebase.log
             ab263_carvers.log
             ab263_biome.log
             ab263_orebase.log
